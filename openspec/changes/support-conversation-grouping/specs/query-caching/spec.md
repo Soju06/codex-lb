@@ -93,3 +93,18 @@ could cause one conversation to be counted more than once in a bucket.
   different models and one log for `conv-b`
 - **WHEN** the dashboard conversation trend aggregate is calculated
 - **THEN** that bucket's conversation count is `2`
+
+### Requirement: Conversation collection URLs preserve trailing-slash behavior
+
+`GET /api/conversations` and `GET /api/conversations/` MUST both serve the
+conversation collection response with identical filtering, pagination, and
+default-window behavior. The detail route MUST require a non-empty detail
+segment so the trailing-slash collection URL cannot be interpreted as an
+empty conversation ID and return a detail not-found response.
+
+#### Scenario: Trailing-slash collection URL lists conversations
+
+- **GIVEN** the conversation collection is requested with a trailing slash
+- **WHEN** the API handles `GET /api/conversations/`
+- **THEN** it returns the same collection envelope as `GET /api/conversations`
+- **AND** it does not invoke detail lookup for an empty conversation ID

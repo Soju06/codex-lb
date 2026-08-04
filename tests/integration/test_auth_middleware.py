@@ -199,6 +199,38 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_quota_planner_cancel.json()["error"]["code"] == "read_only_access"
 
 
+async def _assert_guest_archive_read_denied(client: AsyncClient) -> None:
+    blocked_archive = await client.get("/api/conversation-archive/files")
+    assert blocked_archive.status_code == 403
+    assert blocked_archive.json()["error"]["code"] == "admin_access_required"
+
+    blocked_archive_records = await client.get(
+        "/api/conversation-archive/records",
+        params={"requestId": "guest-hidden"},
+    )
+    assert blocked_archive_records.status_code == 403
+    blocked_archive_payload = blocked_archive_records.json()
+    assert blocked_archive_payload["error"]["code"] == "admin_access_required"
+    assert not {"records", "payload", "headers"} & blocked_archive_payload.keys()
+
+
+@pytest.mark.asyncio
+async def test_conversation_archive_routes_remain_available_to_admin(async_client):
+    files = await async_client.get("/api/conversation-archive/files")
+    assert files.status_code == 200
+    assert isinstance(files.json(), list)
+
+    records = await async_client.get(
+        "/api/conversation-archive/records",
+        params={"requestId": "admin-fixture"},
+    )
+    assert records.status_code == 200
+    payload = records.json()
+    assert payload["records"] == []
+    assert payload["total"] == 0
+    assert payload["hasMore"] is False
+
+
 @pytest.mark.asyncio
 async def test_session_branch_allows_without_password_and_blocks_without_session(async_client):
     public_mode = await async_client.get("/api/settings")
@@ -553,6 +585,7 @@ async def test_passwordless_guest_access_allows_remote_reads_and_blocks_writes(a
             assert session_payload["guestPasswordRequired"] is False
 
             await _assert_guest_write_denied(remote_client)
+            await _assert_guest_archive_read_denied(remote_client)
 
             passwordless_login = await remote_client.post("/api/dashboard-auth/guest/login", json={})
             assert passwordless_login.status_code == 200
@@ -671,6 +704,7 @@ async def test_guest_password_login_allows_remote_reads_and_blocks_writes(app_in
             assert refresh_payload["guestPasswordRequired"] is True
 
             await _assert_guest_write_denied(remote_client)
+            await _assert_guest_archive_read_denied(remote_client)
 
             totp_setup = await remote_client.post("/api/dashboard-auth/totp/setup/start", json={})
             assert totp_setup.status_code == 401

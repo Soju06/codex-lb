@@ -252,6 +252,20 @@ async def require_dashboard_write_access(request: Request) -> DashboardPrincipal
     return principal
 
 
+def ensure_dashboard_admin_access(principal: DashboardPrincipal) -> None:
+    if principal.role != DashboardRole.ADMIN:
+        raise DashboardPermissionError(
+            "Admin dashboard access is required to view sensitive data",
+            code="admin_access_required",
+        )
+
+
+async def require_dashboard_admin_access(request: Request) -> DashboardPrincipal:
+    principal = await validate_dashboard_session(request)
+    ensure_dashboard_admin_access(principal)
+    return principal
+
+
 def get_dashboard_request_auth_mode() -> DashboardAuthMode:
     from app.core.config.settings import get_settings
 

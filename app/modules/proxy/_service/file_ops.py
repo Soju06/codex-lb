@@ -247,7 +247,10 @@ class _FileOpsMixin:
         proxy = cast(_FileOpsServiceProtocol, self)
         del headers
 
-        file_ids = extract_input_file_ids(payload.input)
+        input_value = payload.input
+        if isinstance(payload, ResponsesCompactRequest):
+            input_value = payload.to_payload().get("input")
+        file_ids = extract_input_file_ids(input_value)
         if not file_ids:
             return None
 

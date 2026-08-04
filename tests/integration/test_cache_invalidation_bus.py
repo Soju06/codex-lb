@@ -8,6 +8,7 @@ directly for determinism (no sleeps).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -160,6 +161,60 @@ async def test_remote_pause_stops_stale_bridge_session_reuse(db_setup, poller_sl
 
     await local_poller._poll_once()
     assert _http_bridge_session_account_active(stale_session) is False
+
+
+@pytest.mark.asyncio
+async def test_failed_prime_recovery_stops_stale_bridge_session_reuse(db_setup, poller_slot, monkeypatch) -> None:
+    """A failed startup version read must not let the first recovered poll
+    acknowledge a later peer pause without refreshing the warmed routing state."""
+    account_id = "acct-bus-prime-recovery"
+    await _insert_account(account_id)
+
+    # A namespace row already exists before this replica starts, but its
+    # baseline read fails transiently.
+    remote_poller = CacheInvalidationPoller(SessionLocal)
+    assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+    flaky_versions = _FlakySessionFactory(failures=1)
+    local_poller = CacheInvalidationPoller(flaky_versions)
+    routing_cache = RoutingAvailabilityCache(SessionLocal)
+    monkeypatch.setattr("app.modules.proxy.account_cache._routing_availability_cache", routing_cache)
+    set_cache_invalidation_poller(local_poller)
+
+    callback_calls = 0
+
+    async def refresh_routing_snapshot() -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        await routing_cache.refresh_from_db()
+
+    local_poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, refresh_routing_snapshot)
+
+    with pytest.raises(RuntimeError, match="baseline version read did not complete"):
+        await local_poller.prime()
+
+    # Startup continues and warms an ACTIVE snapshot after the failed prime.
+    await routing_cache.refresh_from_db()
+    stale_session = _fake_bridge_session(_make_account(account_id, AccountStatus.ACTIVE))
+    assert _http_bridge_session_account_active(stale_session) is True
+
+    # A peer pauses the account and advances the version before this replica's
+    # first successful background read.
+    await _set_account_status(account_id, AccountStatus.PAUSED)
+    assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+
+    parked = asyncio.Event()
+
+    async def park_background_loop() -> None:
+        await parked.wait()
+
+    monkeypatch.setattr(local_poller, "_run", park_background_loop)
+    await local_poller.start()
+    try:
+        await local_poller._poll_once()
+        assert callback_calls == 1
+        assert _http_bridge_session_account_active(stale_session) is False
+    finally:
+        await local_poller.stop()
 
 
 @pytest.mark.asyncio
@@ -606,6 +661,29 @@ async def test_initialize_failure_leaves_poller_uninitialized(db_setup) -> None:
         await poller.initialize()
     assert poller._poll_initialized is False
     assert poller._known_versions == {}
+
+
+@pytest.mark.asyncio
+async def test_prime_retry_after_failure_remains_baseline_only(db_setup) -> None:
+    """Retrying prime before background start records a baseline without
+    callbacks; conservative recovery begins only when background polling starts."""
+    remote_poller = CacheInvalidationPoller(SessionLocal)
+    assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+    expected_version = await _namespace_version(NAMESPACE_ACCOUNT_ROUTING)
+    assert expected_version is not None
+
+    calls: list[str] = []
+    poller = CacheInvalidationPoller(_FlakySessionFactory(failures=1))
+    poller.on_invalidation(NAMESPACE_ACCOUNT_ROUTING, lambda: calls.append("routing"))
+
+    with pytest.raises(RuntimeError, match="baseline version read did not complete"):
+        await poller.prime()
+    await poller.prime()
+
+    assert calls == []
+    assert await remote_poller.bump(NAMESPACE_ACCOUNT_ROUTING) is True
+    await poller._poll_once()
+    assert calls == ["routing"]
 
 
 @pytest.mark.asyncio

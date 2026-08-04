@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
+from app.core.config.settings import get_settings
 
 if TYPE_CHECKING:
     from app.core.runtime_logging import LogConfig
@@ -99,6 +100,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     timeout_keep_alive = _parse_server_timeout_keep_alive(args.timeout_keep_alive)
     ws_max_size = _parse_server_ws_max_size(args.ws_max_size)
     os.environ["PORT"] = str(port)
+    workers = get_settings().workers_per_instance
 
     _load_uvicorn().run(
         "app.main:app",
@@ -108,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         ssl_keyfile=args.ssl_keyfile,
         timeout_keep_alive=timeout_keep_alive,
         ws_max_size=ws_max_size,
+        workers=workers,
         proxy_headers=False,
         log_config=_build_log_config(),
     )

@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from collections import deque
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -11,6 +12,7 @@ import anyio
 import pytest
 
 from app.core.crypto import TokenEncryptor
+from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_HTTP,
     _REQUEST_TRANSPORT_WEBSOCKET,
@@ -400,3 +402,52 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "status": "error",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_attributes_request_state_api_key(monkeypatch):
+    """Bridge failure fan-out passes api_key=None at the session level; each
+    pending request's log row must still be attributed to that request's own
+    authenticated key (request_state.api_key)."""
+    service = _DummyWebSocketService()
+    monkeypatch.setattr(websocket_mixin_module, "_record_upstream_transport_decision", lambda **_labels: None)
+
+    request_key = ApiKeyData(
+        id="key_bridge_pending",
+        name="bridge-key",
+        key_prefix="sk-bridge",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        last_used_at=None,
+    )
+    request_state = _WebSocketRequestState(
+        request_id="ws_bridge_pending_key",
+        request_log_id="resp_bridge_pending_key_log",
+        response_id="resp_bridge_pending_key",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        api_key=request_key,
+        started_at=time.monotonic(),
+        transport=_REQUEST_TRANSPORT_HTTP,
+        upstream_transport=_REQUEST_TRANSPORT_WEBSOCKET,
+    )
+
+    await service._fail_pending_websocket_requests(
+        account_id_value="acc_bridge",
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="Upstream websocket closed before response.completed",
+        api_key=None,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert len(service.request_log_calls) == 1
+    assert service.request_log_calls[0]["api_key"] is request_key

@@ -200,7 +200,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "rate(codex_lb_requests_total{namespace=\"$namespace\",status=~\"5..\"}[5m]) / rate(codex_lb_requests_total{namespace=\"$namespace\"}[5m])",
+          "expr": "(sum(rate(codex_lb_requests_total{namespace=\"$namespace\",job=~\"$job\",status=~\"5..\"}[5m])) or vector(0)) / sum(rate(codex_lb_requests_total{namespace=\"$namespace\",job=~\"$job\"}[5m]))",
           "legendFormat": "Error Rate",
           "refId": "A"
         }

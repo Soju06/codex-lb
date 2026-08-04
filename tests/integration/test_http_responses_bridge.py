@@ -30,7 +30,7 @@ from app.core.utils.request_id import (
     set_request_scope_id,
 )
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, DashboardSettings
+from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
@@ -3895,8 +3895,8 @@ async def test_v1_responses_http_bridge_reconnect_fails_when_reader_cancel_times
     blocking_reader = asyncio.create_task(blocking_reader_task())
     bridge_session.upstream_reader = blocking_reader
 
-    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label):
-        del task, timeout_seconds, label
+    async def fake_await_cancelled_task(task, *, timeout_seconds=1.0, label, cleanup_tasks=None):
+        del task, timeout_seconds, label, cleanup_tasks
         return False
 
     monkeypatch.setattr(proxy_module, "_await_cancelled_task", fake_await_cancelled_task)
@@ -7941,6 +7941,74 @@ async def test_v1_responses_http_bridge_reuses_derived_prompt_cache_key_when_cli
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_terminal_release_admits_second_session_before_idle_ttl(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    app_settings = _make_app_settings(enabled=True, codex_idle_ttl_seconds=900.0).model_copy(
+        update={
+            "proxy_account_stream_limit": 1,
+            "proxy_account_stream_recovery_reserve": 0,
+        }
+    )
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=app_settings,
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_idle_release",
+        "http-bridge-idle-release@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    upstreams = deque([_FakeBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()])
+
+    async def fake_select_account_with_budget(*_args: object, **_kwargs: object) -> AccountSelection:
+        lease = await service._load_balancer.acquire_account_lease(account.id, kind="stream")
+        if lease is None:
+            return AccountSelection(
+                account=None,
+                error_message="Account stream capacity is exhausted; wait for active streams to finish.",
+                error_code="account_stream_cap",
+            )
+        return AccountSelection(account=account, error_message=None, lease=lease)
+
+    async def fake_ensure_fresh_with_budget(
+        _self: object,
+        target: Account,
+        **_kwargs: object,
+    ) -> Account:
+        return target
+
+    async def fake_connect_responses_websocket(*_args: object, **_kwargs: object) -> _FakeBridgeUpstreamWebSocket:
+        return upstreams.popleft()
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": "release the idle stream lease",
+    }
+    first = await async_client.post("/v1/responses", json=payload, headers={"session_id": "idle-release-a"})
+    assert first.status_code == 200
+    assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+
+    second = await async_client.post("/v1/responses", json=payload, headers={"session_id": "idle-release-b"})
+    assert second.status_code == 200
+    assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
+    assert not upstreams
+    assert len(service._http_bridge_sessions) == 2
+    assert all(not session.closed for session in service._http_bridge_sessions.values())
+    assert all(session.idle_ttl_seconds >= 900.0 for session in service._http_bridge_sessions.values())
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_prefers_session_header_for_isolation(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -10969,6 +11037,141 @@ async def test_v1_responses_http_bridge_stream_failure_remains_valid_sse(
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_upstream_failure_attributes_api_key_in_request_log(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    """An authenticated bridge request that fails through the session failure
+    fan-out (upstream send failure) must persist its request-log error row
+    with the request's api_key_id — the fan-out has no session-level key."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_key_attribution",
+        "http-bridge-key-attribution@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _FakeBridgeUpstreamWebSocket()
+    failing_upstream = _FailingSendThenCloseUpstreamWebSocket()
+
+    response = await async_client.put("/api/settings", json={"apiKeyAuthEnabled": True})
+    assert response.status_code == 200
+    response = await async_client.post("/api/api-keys/", json={"name": "bridge-key-attribution"})
+    assert response.status_code == 200
+    api_key_id = response.json()["id"]
+    api_key_token = response.json()["key"]
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    auth_headers = {"Authorization": f"Bearer {api_key_token}"}
+    first = await async_client.post(
+        "/v1/responses",
+        headers=auth_headers,
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "bridge-key-attribution",
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    service = get_proxy_service_for_app(app_instance)
+    async with service._http_bridge_lock:
+        session = next(iter(service._http_bridge_sessions.values()))
+        await _replace_http_bridge_upstream_reader(
+            service,
+            session,
+            cast(proxy_module.UpstreamWebSocket, failing_upstream),
+        )
+
+    second = await async_client.post(
+        "/v1/responses",
+        headers=auth_headers,
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "bridge-key-attribution",
+            "previous_response_id": first_body["id"],
+        },
+    )
+    assert second.status_code == 502
+
+    # The failure fan-out schedules the log write from detached cleanup, which
+    # can register after a single drain call returns, so poll until it lands.
+    rows: list[RequestLog] = []
+    deadline = time.monotonic() + _TEST_SYNC_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        assert await service.drain_persistence_tasks(timeout_seconds=10)
+        async with SessionLocal() as session:
+            rows = list((await session.execute(select(RequestLog).where(RequestLog.status == "error"))).scalars().all())
+        if rows:
+            break
+        await asyncio.sleep(0.05)
+    assert len(rows) == 1
+    assert rows[0].account_id == account_id
+    assert rows[0].api_key_id == api_key_id
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_surfaces_upstream_error_event_as_http_400(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -11524,6 +11727,112 @@ async def test_v1_responses_http_bridge_ambiguous_send_failure_does_not_restart_
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "stream_incomplete"
     assert connect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacement(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    app_settings = _make_app_settings(enabled=True)
+    app_settings.sse_keepalive_interval_seconds = 0.01
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=app_settings,
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    monkeypatch.setattr(proxy_module, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_module, "_STREAM_KEEPALIVE_MAX_COUNT", 1)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_reader_handoff",
+        "http-bridge-reader-handoff@example.com",
+    )
+    account = await _get_account(account_id)
+    upstreams = [_SilentUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+        **_kwargs,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+            preferred_account_id,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    service = get_proxy_service_for_app(app_instance)
+    record_retry_circuit_failure = AsyncMock(wraps=service._record_http_bridge_retry_circuit_failure)
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_retry_circuit_failure)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "recover-reader-handoff",
+            "prompt_cache_key": "reader-handoff-key",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
+    assert upstreams[0].closed is True
+    record_retry_circuit_failure.assert_not_awaited()
 
 
 @pytest.mark.asyncio

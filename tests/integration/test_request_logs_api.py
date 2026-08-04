@@ -4,6 +4,8 @@ from datetime import timedelta
 
 import pytest
 
+from app.core.auth.dashboard_access import guest_principal
+from app.core.auth.dependencies import validate_dashboard_session
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ModelSource, RequestLog
@@ -247,6 +249,156 @@ async def test_request_logs_api_returns_useragent_fields(async_client, db_setup)
     assert older["useragent"] is None
     assert older["useragentGroup"] is None
     assert older["clientIp"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_redacts_sensitive_metadata_for_guest_and_preserves_admin(
+    app_instance,
+    async_client,
+    db_setup,
+):
+    del db_setup
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_guest_visible",
+            archive_request_id="archive_guest_hidden",
+            conversation_id="conversation_guest_hidden",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=20,
+            latency_ms=250,
+            status="success",
+            error_code=None,
+            useragent="codex-cli/1.2.3 runtime/node",
+            useragent_group="codex-cli",
+            client_ip="203.0.113.17",
+        )
+
+    app_instance.dependency_overrides[validate_dashboard_session] = guest_principal
+    try:
+        guest_response = await async_client.get("/api/request-logs?limit=1")
+    finally:
+        app_instance.dependency_overrides.pop(validate_dashboard_session, None)
+
+    assert guest_response.status_code == 200
+    guest_entry = guest_response.json()["requests"][0]
+    assert guest_entry["requestId"] == "req_guest_visible"
+    assert guest_entry["archiveRequestId"] is None
+    assert guest_entry["conversationId"] is None
+    assert guest_entry["useragent"] is None
+    assert guest_entry["clientIp"] is None
+    assert guest_entry["useragentGroup"] == "codex-cli"
+    assert guest_entry["model"] == "gpt-5.1"
+    assert guest_entry["status"] == "ok"
+    assert guest_entry["tokens"] == 120
+    assert guest_entry["latencyMs"] == 250
+
+    admin_response = await async_client.get("/api/request-logs?limit=1")
+    assert admin_response.status_code == 200
+    admin_entry = admin_response.json()["requests"][0]
+    assert admin_entry["archiveRequestId"] == "archive_guest_hidden"
+    assert admin_entry["conversationId"] == "conversation_guest_hidden"
+    assert admin_entry["useragent"] == "codex-cli/1.2.3 runtime/node"
+    assert admin_entry["clientIp"] == "203.0.113.17"
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_excludes_client_ip_from_guest_search_and_preserves_admin_search(
+    app_instance,
+    async_client,
+    db_setup,
+    monkeypatch,
+):
+    from app.modules.request_logs import repository as logs_repository_module
+
+    del db_setup
+    monkeypatch.setattr(logs_repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    logs_repository_module._clear_recent_count_cache()
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_ip_search_target",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=20,
+            latency_ms=250,
+            status="success",
+            error_code=None,
+            client_ip="203.0.113.17",
+        )
+
+    try:
+        app_instance.dependency_overrides[validate_dashboard_session] = guest_principal
+        try:
+            guest_response = await async_client.get("/api/request-logs?search=203.0.113")
+        finally:
+            app_instance.dependency_overrides.pop(validate_dashboard_session, None)
+
+        assert guest_response.status_code == 200
+        assert guest_response.json()["requests"] == []
+        assert guest_response.json()["total"] == 0
+
+        admin_response = await async_client.get("/api/request-logs?search=203.0.113")
+        assert admin_response.status_code == 200
+        assert [entry["requestId"] for entry in admin_response.json()["requests"]] == [
+            "req_ip_search_target",
+        ]
+        assert admin_response.json()["total"] == 1
+    finally:
+        logs_repository_module._clear_recent_count_cache()
+
+
+@pytest.mark.asyncio
+async def test_request_logs_api_rejects_guest_conversation_filter_and_preserves_admin_aggregates(
+    app_instance,
+    async_client,
+    db_setup,
+):
+    del db_setup
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_conversation_filter_target",
+            conversation_id="conversation-filter-target",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=20,
+            latency_ms=250,
+            status="success",
+            error_code=None,
+            cost_usd=4.25,
+        )
+
+    app_instance.dependency_overrides[validate_dashboard_session] = guest_principal
+    try:
+        guest_response = await async_client.get(
+            "/api/request-logs",
+            params={"conversation_id": "conversation-filter-target"},
+        )
+    finally:
+        app_instance.dependency_overrides.pop(validate_dashboard_session, None)
+
+    assert guest_response.status_code == 403
+    assert guest_response.json()["error"]["code"] == "admin_access_required"
+
+    admin_response = await async_client.get(
+        "/api/request-logs",
+        params={"conversation_id": "conversation-filter-target"},
+    )
+    assert admin_response.status_code == 200
+    admin_payload = admin_response.json()
+    assert [entry["requestId"] for entry in admin_payload["requests"]] == [
+        "req_conversation_filter_target",
+    ]
+    assert admin_payload["total"] == 1
+    assert admin_payload["conversation"] == {
+        "requestCount": 1,
+        "aggregatedCostUsd": 4.25,
+    }
 
 
 @pytest.mark.asyncio

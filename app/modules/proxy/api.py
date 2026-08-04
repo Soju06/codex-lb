@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
@@ -44,6 +45,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import (
+    CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     CodexControlRequestPrivacyPolicy,
     CodexControlResponse,
     ProxyResponseError,
@@ -81,7 +83,11 @@ from app.core.exceptions import (
     ProxyRateLimitError,
     ProxyUpstreamError,
 )
-from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, bridge_public_contract_error_total
+from app.core.metrics.prometheus import (
+    PROMETHEUS_AVAILABLE,
+    bridge_public_contract_error_total,
+    stream_keepalive_sent_total,
+)
 from app.core.middleware.multipart_content_encoding import raise_for_unsupported_multipart_content_encoding
 from app.core.multipart import (
     IMAGE_EDITS_MULTIPART_POLICY,
@@ -125,6 +131,7 @@ from app.core.openai.requests import (
     ResponsesRequest,
     extract_input_file_ids,
     normalize_tool_type,
+    responses_request_has_explicit_prompt_cache_controls,
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.request_locality import (
@@ -301,6 +308,14 @@ _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
 )
 _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
 _SOURCE_LIMITED_STREAM_BUFFER_BYTES = 16 * 1024 * 1024
+_PROMPT_CACHE_MODE_HEADER = "X-Codex-LB-Prompt-Cache-Mode"
+_SUBSCRIPTION_IMPLICIT_PROMPT_CACHE_MODE = "subscription-implicit"
+
+
+def _mark_subscription_prompt_cache_fallback(response: Response, payload: ResponsesRequest) -> Response:
+    if response.status_code < 400 and responses_request_has_explicit_prompt_cache_controls(payload):
+        response.headers[_PROMPT_CACHE_MODE_HEADER] = _SUBSCRIPTION_IMPLICIT_PROMPT_CACHE_MODE
+    return response
 
 
 class _V1ResetCreditFreshCredentials:
@@ -719,6 +734,11 @@ _CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
     }
 )
 
+# A hard HTTP-bridge circuit is opened only after an ambiguous upstream turn
+# failure. The caller must not immediately replay that turn, but it should
+# also not have to guess when a new attempt is safe. Advertise a short,
+# bounded retry interval on the one-shot 503 response.
+
 
 def _codex_control_downstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if key.lower() in _CODEX_CONTROL_RESPONSE_HEADERS}
@@ -1053,7 +1073,7 @@ async def responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
 
-    return await _stream_responses(
+    response = await _stream_responses(
         request,
         responses_payload,
         context,
@@ -1068,6 +1088,7 @@ async def responses(
         enforce_openai_sdk_contract=openai_sdk_request,
         native_codex_heartbeat=native_codex_heartbeat,
     )
+    return _mark_subscription_prompt_cache_fallback(response, responses_payload)
 
 
 @router.get("/opportunistic/admission")
@@ -1106,6 +1127,7 @@ async def responses_websocket(
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
         synthesized_turn_state=turn_state if client_turn_state is None else None,
+        capability_header_values=tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER)),
     )
 
 
@@ -1179,7 +1201,7 @@ async def v1_responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
     if responses_payload.stream:
-        return await _stream_responses(
+        response = await _stream_responses(
             request,
             responses_payload,
             context,
@@ -1189,16 +1211,18 @@ async def v1_responses(
             prefer_http_bridge=True,
             prohibit_fast_mode=prohibit_fast_mode,
         )
-    return await _collect_responses(
-        request,
-        responses_payload,
-        context,
-        api_key,
-        codex_session_affinity=False,
-        openai_cache_affinity=True,
-        prefer_http_bridge=True,
-        prohibit_fast_mode=prohibit_fast_mode,
-    )
+    else:
+        response = await _collect_responses(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            prefer_http_bridge=True,
+            prohibit_fast_mode=prohibit_fast_mode,
+        )
+    return _mark_subscription_prompt_cache_fallback(response, responses_payload)
 
 
 @internal_router.post(
@@ -1410,6 +1434,7 @@ async def v1_responses_websocket(
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
         synthesized_turn_state=turn_state if client_turn_state is None else None,
+        capability_header_values=tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER)),
     )
 
 
@@ -3868,6 +3893,7 @@ async def v1_chat_completions(
             inject_sse_keepalives(
                 chat_stream,
                 get_settings().sse_keepalive_interval_seconds,
+                on_keepalive=lambda: _record_stream_keepalive("chat_completions"),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **rate_limit_headers},
@@ -4950,6 +4976,8 @@ async def _stream_responses(
         finally:
             if owns_reservation:
                 await _release_reservation(reservation)
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = _CapacityStartupReadyEvent()
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -4970,6 +4998,8 @@ async def _stream_responses(
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            capacity_startup_wait_event=capacity_wait_event,
+            capacity_startup_ready_event=capacity_ready_event,
         )
     else:
         stream = context.service.stream_responses(
@@ -4984,8 +5014,6 @@ async def _stream_responses(
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
-    capacity_wait_event = asyncio.Event()
-    capacity_ready_event = _CapacityStartupReadyEvent()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
@@ -5031,6 +5059,7 @@ async def _stream_responses(
             stream,
             get_settings().sse_keepalive_interval_seconds,
             keepalive_frame=keepalive_frame,
+            on_keepalive=lambda: _record_stream_keepalive("responses"),
         ),
         media_type="text/event-stream",
         headers={
@@ -6084,6 +6113,11 @@ async def _prepend_initial_sse_heartbeat(
         yield line
 
 
+def _record_stream_keepalive(surface: str) -> None:
+    if PROMETHEUS_AVAILABLE and stream_keepalive_sent_total is not None:
+        stream_keepalive_sent_total.labels(surface=surface).inc()
+
+
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
     async for line in _stream_response_error_events(stream, owns_reservation=False, reservation=None):
         yield line
@@ -6107,7 +6141,15 @@ async def _stream_response_error_events(
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error
-        yield format_sse_event(
+        retry_hint = ""
+        if exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
+            # Preserve the HTTP Retry-After signal when a streaming response
+            # has already started and the exception must be represented as an
+            # SSE event.  The SSE retry field is milliseconds, while the
+            # exception stores seconds.  Clients that do not implement the
+            # directive safely ignore the extra comment line.
+            retry_hint = f"retry: {max(1, math.ceil(exc.retry_after_seconds * 1000))}\n"
+        yield retry_hint + format_sse_event(
             response_failed_event(
                 error.code if error and error.code else "upstream_error",
                 error.message if error and error.message else "Upstream error",
@@ -6126,11 +6168,14 @@ def _stream_startup_error_response(
     if isinstance(error, ProxyResponseError):
         envelope = _parse_error_envelope(error.payload)
         status_code, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+        startup_headers = dict(headers)
+        if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
+            startup_headers.setdefault("Retry-After", str(error.retry_after_seconds))
         return _logged_error_json_response(
             request,
             status_code,
             envelope.model_dump(mode="json", exclude_none=True),
-            headers=headers,
+            headers=startup_headers,
         )
     status_code, envelope = _mask_previous_response_not_found_error(error)
     return _logged_error_json_response(

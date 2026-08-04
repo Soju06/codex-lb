@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
 
 const ISO = "2026-01-01T12:00:00+00:00";
@@ -56,6 +57,11 @@ describe("RecentRequestsTable", () => {
   beforeEach(() => {
     toastSuccess.mockReset();
     toastError.mockReset();
+    useAuthStore.setState({
+      role: "admin",
+      permissions: ["read", "write"],
+      canWrite: true,
+    });
   });
 
   afterEach(() => {
@@ -278,6 +284,67 @@ describe("RecentRequestsTable", () => {
   it("renders empty state", () => {
     render(<RecentRequestsTable {...PAGINATION_PROPS} total={0} accounts={[]} requests={[]} />);
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
+  });
+
+  it("hides identifying metadata and archive controls from guests", () => {
+    useAuthStore.setState({
+      role: "guest",
+      permissions: ["read"],
+      canWrite: false,
+    });
+
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: null,
+            planType: null,
+            apiKeyName: null,
+            apiKeyId: null,
+            requestId: "req-guest",
+            archiveRequestId: null,
+            conversationId: null,
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            useragent: null,
+            useragentGroup: "codex-cli",
+            clientIp: null,
+            status: "ok",
+            errorCode: null,
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 120,
+            inputTokens: 100,
+            outputTokens: 20,
+            outputTokensRaw: 20,
+            latencyFirstTokenMs: 50,
+            latencyQueueMs: null,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0.01,
+            costBreakdown: null,
+            latencyMs: 250,
+          },
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+
+    expect(within(dialog).getByText("req-guest")).toBeInTheDocument();
+    expect(within(dialog).getByText("gpt-5.1")).toBeInTheDocument();
+    expect(within(dialog).queryByText("User Agent")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Client IP")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("Conversation ID")).not.toBeInTheDocument();
+    expect(within(dialog).queryByTestId("request-archive-panel")).not.toBeInTheDocument();
   });
 
   it("shows warmup marker only for warmup rows", () => {

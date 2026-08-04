@@ -212,9 +212,8 @@ describe("DonutChart", () => {
       />,
     );
 
-    expect(screen.getByTestId("donut-legend-list")).toHaveStyle({
-      maxHeight: "calc(5 * 1.75rem)",
-    });
+    // jsdom 30 simplifies calc() during serialization; authored: calc(5 * 1.75rem)
+    expect(screen.getByTestId("donut-legend-list").style.maxHeight).toBe("calc(8.75rem)");
   });
 
   it("scrolls the hovered pie item into view in the legend list", async () => {

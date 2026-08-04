@@ -188,6 +188,72 @@ def test_postgres_engine_kwargs_use_fixed_timeout_and_recycle_constants(monkeypa
     assert kwargs["pool_recycle"] == session_module._POSTGRES_POOL_RECYCLE_SECONDS == 1800
 
 
+def test_postgres_engine_factory_rejects_undeclared_role() -> None:
+    with pytest.raises(TypeError, match="must be declared"):
+        session_module._create_postgres_async_engine(
+            "postgresql+asyncpg://u:p@h/db",
+            role=cast(Any, "undeclared"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_postgres_creation_paths_cover_every_budgeted_engine_role_once(monkeypatch) -> None:
+    database_url = "postgresql+asyncpg://u:p@h/db"
+    created_roles: list[session_module._PostgresPooledEngineRole] = []
+    original_factory = session_module._create_postgres_async_engine
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=database_url,
+            database_pool_size=3,
+            database_max_overflow=2,
+        ),
+    )
+    monkeypatch.delenv("CODEX_LB_TEST_DATABASE_URL", raising=False)
+
+    def recording_factory(
+        url: str,
+        *,
+        role: session_module._PostgresPooledEngineRole,
+    ) -> session_module.AsyncEngine:
+        created_roles.append(role)
+        return original_factory(url, role=role)
+
+    monkeypatch.setattr(session_module, "_create_postgres_async_engine", recording_factory)
+    main_engine = session_module._create_main_engine(database_url)
+    try:
+        session_module.init_background_db(database_url)
+
+        assert tuple(created_roles) == session_module._POSTGRES_POOLED_ENGINE_ROLES
+        assert session_module._POSTGRES_POOLED_ENGINES_PER_WORKER == len(created_roles) == 2
+    finally:
+        await main_engine.dispose()
+        if session_module._background_engine is not None:
+            await session_module._background_engine.dispose()
+        session_module._background_engine = None
+        session_module._background_session_factory = None
+
+
+@pytest.mark.asyncio
+async def test_postgres_test_engines_keep_declared_roles_but_disable_pooling(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_TEST_DATABASE_URL", "1")
+    engines = [
+        session_module._create_postgres_async_engine(
+            "postgresql+asyncpg://u:p@h/db",
+            role=role,
+        )
+        for role in session_module._POSTGRES_POOLED_ENGINE_ROLES
+    ]
+
+    try:
+        assert all(isinstance(engine.pool, NullPool) for engine in engines)
+    finally:
+        for engine in engines:
+            await engine.dispose()
+
+
 def test_postgres_engine_kwargs_use_nullpool_under_test_db_url(monkeypatch) -> None:
     """The CODEX_LB_TEST_DATABASE_URL escape hatch keeps NullPool semantics —
     pool_pre_ping/recycle are irrelevant when each session opens a fresh

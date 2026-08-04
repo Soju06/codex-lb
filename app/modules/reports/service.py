@@ -97,8 +97,6 @@ class ReportsService:
             useragent_group,
         )
 
-        day_count = max((end_at.date() - start_at.date()).days, 1)
-
         model_total = sum(m.cost_usd for m in by_model)
         useragent_total = sum(u.cost_usd for u in by_useragent)
         comparison = ReportComparison(
@@ -120,8 +118,8 @@ class ReportsService:
                 total_errors=summary.total_errors,
                 active_accounts=summary.active_accounts,
                 total_conversations=summary.conversation_count,
-                avg_cost_per_day=round(summary.total_cost_usd / day_count, 4),
-                avg_requests_per_day=round(summary.total_requests / day_count, 2),
+                avg_cost_per_day=round(summary.total_cost_usd / window_days, 4),
+                avg_requests_per_day=round(summary.total_requests / window_days, 2),
             ),
             comparison=comparison,
             daily=daily,

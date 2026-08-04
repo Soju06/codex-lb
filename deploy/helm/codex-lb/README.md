@@ -261,13 +261,23 @@ networkPolicy:
 
 ## Connection Pool Sizing
 
-Each pod keeps its own SQLAlchemy pool.
+Normative contracts: [database backends](../../../openspec/specs/database-backends/)
+and [deployment installation](../../../openspec/specs/deployment-installation/).
+
+Each supported pod runs one application worker with two independent SQLAlchemy
+pools: one for request-path work and one for background tasks.
 
 ```
-total_connections = (databasePoolSize + databaseMaxOverflow) × replicas
+total_connections = (databasePoolSize + databaseMaxOverflow) × 2 pools × 1 worker × replicas
 ```
 
-Keep this within your PostgreSQL `max_connections` budget or place PgBouncer in front of the database.
+Keep this within your PostgreSQL `max_connections` budget, including capacity
+for migrations and administrative clients, or place PgBouncer in front of the
+database.
+
+The owned `app.cli` launcher explicitly pins Uvicorn to one worker, so
+`WEB_CONCURRENCY` does not multiply pools. Custom Uvicorn/Gunicorn multi-worker
+launchers are unsupported; scale through replicas or the HPA.
 
 ## Production Workload
 
@@ -344,23 +354,29 @@ A static ring is incompatible with autoscaling and must list exactly the Statefu
 
 ### Connection Pool Budget
 
-Each pod maintains its own SQLAlchemy connection pool. The total connections across all replicas must fit within PostgreSQL's `max_connections`:
+Each supported pod maintains one worker with two independent SQLAlchemy
+connection pools: the request pool and the background-task pool. The total
+connections across all replicas must leave room within PostgreSQL's
+`max_connections` for reserved slots, migrations, and operations:
 
 ```
-(databasePoolSize + databaseMaxOverflow) × maxReplicas ≤ PostgreSQL max_connections
+(databasePoolSize + databaseMaxOverflow) × 2 × 1 × maxReplicas ≤ PostgreSQL max_connections - reserve
 ```
 
 **Example for `values-prod.yaml`:**
 
 ```yaml
 config:
-  databasePoolSize: 3
-  databaseMaxOverflow: 2
+  databasePoolSize: 1
+  databaseMaxOverflow: 1
 autoscaling:
   maxReplicas: 20
 ```
 
-Calculation: `(3 + 2) × 20 = 100` connections, which fits within PostgreSQL's default `max_connections=100`.
+Calculation: `(1 + 1) × 2 × 20 = 80` application connections. This fits
+within PostgreSQL's default `max_connections=100` while reserving 20
+raw server slots: three default superuser-reserved slots, two simultaneous
+migrator connections, and fifteen further operational connections.
 
 **Tuning:**
 

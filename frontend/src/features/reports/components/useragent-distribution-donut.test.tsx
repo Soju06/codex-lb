@@ -98,9 +98,8 @@ describe("UseragentDistributionDonut", () => {
       />,
     );
 
-    expect(screen.getByTestId("useragent-distribution-legend-list")).toHaveStyle({
-      maxHeight: "calc(4 * 2rem)",
-    });
+    // jsdom 30 simplifies calc() during serialization; authored: calc(4 * 2rem)
+    expect(screen.getByTestId("useragent-distribution-legend-list").style.maxHeight).toBe("calc(8rem)");
     expect(screen.getByTestId("useragent-distribution-legend-4")).toBeInTheDocument();
   });
 
@@ -177,8 +176,9 @@ describe("UseragentDistributionDonut", () => {
 
     expect(smallRequestLegendValue).toBeDefined();
     expect(largeRequestLegendValue).toBeDefined();
-    expect(smallRequestLegendValue).toHaveStyle({ minWidth: "4ch" });
-    expect(largeRequestLegendValue).toHaveStyle({ minWidth: "4ch" });
+    // jsdom 30's getComputedStyle converts lengths to px, so assert the raw inline style
+    expect(smallRequestLegendValue?.style.minWidth).toBe("4ch");
+    expect(largeRequestLegendValue?.style.minWidth).toBe("4ch");
   });
 
   it("defaults to cost mode without rendering a donut tooltip", () => {

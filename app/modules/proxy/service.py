@@ -64,10 +64,10 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
-    PREVIOUS_RESPONSE_STALE_CODE as PREVIOUS_RESPONSE_STALE_CODE,
+    PREVIOUS_RESPONSE_NOT_FOUND_CODE as PREVIOUS_RESPONSE_NOT_FOUND_CODE,
 )
 from app.core.errors import (
-    PREVIOUS_RESPONSE_STALE_MESSAGE as PREVIOUS_RESPONSE_STALE_MESSAGE,
+    PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
 from app.core.errors import (
     OpenAIErrorEnvelope,
@@ -140,7 +140,13 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _await_cancelled_task as _await_cancelled_task,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _build_http_bridge_prewarm_text as _build_http_bridge_prewarm_text,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _cancel_and_track_cancelled_task as _cancel_and_track_cancelled_task,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_active_owner as _durable_bridge_lookup_active_owner,
@@ -313,6 +319,10 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _trim_http_bridge_previous_response_input_items as _trim_http_bridge_previous_response_input_items,
+)
+from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTPBridgeRetryCircuitMixin,
+    _initialize_http_bridge_retry_circuit,
 )
 from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
 from app.modules.proxy._service.observability import _hash_identifier_or_none as _hash_identifier_or_none
@@ -703,6 +713,7 @@ from app.modules.proxy.affinity import (
 from app.modules.proxy.affinity import (
     _sticky_key_for_responses_request as _sticky_key_for_responses_request,
 )
+from app.modules.proxy.capability_routing import CapabilityRouter
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeLookup as DurableBridgeLookup,
 )
@@ -741,9 +752,6 @@ from app.modules.proxy.work_admission import WorkAdmissionController
 
 logger = logging.getLogger(__name__)
 
-
-_TASK_CANCEL_TIMEOUT_SECONDS = 1.0
-_TaskResultT = TypeVar("_TaskResultT")
 _ResponsesPayloadT = TypeVar("_ResponsesPayloadT", ResponsesRequest, ResponsesCompactRequest)
 _DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON = "Idle downstream websocket timeout"
 _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
@@ -782,23 +790,6 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 _STREAM_KEEPALIVE_MAX_COUNT = 6
 
 
-async def _await_cancelled_task(
-    task: asyncio.Task[_TaskResultT],
-    *,
-    timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
-    label: str,
-) -> bool:
-    task.cancel()
-    try:
-        await asyncio.wait_for(task, timeout=timeout_seconds)
-    except asyncio.CancelledError:
-        return True
-    except TimeoutError:
-        logger.warning("Timed out waiting for %s cancellation", label)
-        return False
-    return True
-
-
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _REQUEST_TRANSPORT_HTTP = "http"
@@ -813,6 +804,7 @@ _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
         *PERMANENT_FAILURE_CODES.keys(),
     }
 )
+
 _TRANSIENT_RETRY_CODES = frozenset(
     {
         "overloaded_error",
@@ -923,6 +915,7 @@ class ProxyService(
     _CompactMixin,
     _StreamingMixin,
     _WebSocketMixin,
+    _HTTPBridgeRetryCircuitMixin,
     _HTTPBridgeMixin,
 ):
     def __init__(
@@ -934,11 +927,13 @@ class ProxyService(
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
         self._load_balancer = LoadBalancer(repo_factory)
+        self._capability_router = CapabilityRouter(repo_factory)
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
+        _initialize_http_bridge_retry_circuit(self)
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
@@ -1306,6 +1301,7 @@ class ProxyService(
             pending_request_ids: list[str] | None = None
             pending_request_ages_seconds: list[float] | None = None
             should_retire_stuck_session = False
+            stale_pending_requests_to_fail: list[_WebSocketRequestState] = []
             if bridge_session is not None:
                 now = time.monotonic()
                 async with bridge_session.pending_lock:
@@ -1315,25 +1311,46 @@ class ProxyService(
                 pending_request_ids = [state.request_log_id or state.request_id for state in pending_states]
                 pending_request_ages_seconds = [max(0.0, now - state.started_at) for state in pending_states]
                 threshold_seconds = float(
-                    getattr(
-                        get_settings(),
-                        "http_responses_session_bridge_stuck_gate_retire_after_seconds",
-                        300.0,
+                    getattr(get_settings(), "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
+                )
+                stale_pending_requests_to_fail, should_retire_stuck_session = (
+                    self._classify_http_bridge_stale_gate_holders(
+                        pending_states,
+                        now=now,
+                        threshold_seconds=threshold_seconds,
+                        session_closed=bridge_session.closed,
                     )
                 )
-                # Leading telemetry records latency without assigning a response
-                # or releasing this gate; only response-created proves progress.
-                should_retire_stuck_session = any(
-                    state.transport == _REQUEST_TRANSPORT_HTTP
-                    and not state.skip_request_log
-                    and state.response_create_gate_acquired
-                    and state.awaiting_response_created
-                    and not state.downstream_visible
-                    and state.latency_response_created_ms is None
-                    and state.response_event_count == 0
-                    and max(0.0, now - state.started_at) >= threshold_seconds
-                    for state in pending_states
-                )
+                if not should_retire_stuck_session and any(
+                    max(0.0, now - state.started_at) >= threshold_seconds for state in pending_states
+                ):
+                    # A gate waiter starved past the stuck threshold without the
+                    # watchdog firing: dump every pending state's verdict inputs
+                    # so the blocking condition is identifiable from prod logs.
+                    logger.warning(
+                        "http_bridge_stuck_watchdog_skipped session_closed=%s candidates=%s states=%s",
+                        bridge_session.closed,
+                        len(stale_pending_requests_to_fail),
+                        "; ".join(
+                            (
+                                f"id={state.request_log_id or state.request_id}"
+                                f" transport={state.transport}"
+                                f" skip_log={state.skip_request_log}"
+                                f" draining={state.draining_until_terminal}"
+                                f" prev_resp={state.previous_response_id is not None}"
+                                f" hard_anchor={state.hard_continuity_anchor}"
+                                f" gate_acq={state.response_create_gate_acquired}"
+                                f" awaiting={state.awaiting_response_created}"
+                                f" resp_id={state.response_id is not None}"
+                                f" events={state.response_event_count}"
+                                f" created_ms={state.latency_response_created_ms}"
+                                f" dsvis={state.downstream_visible}"
+                                f" age={max(0.0, now - state.started_at):.0f}"
+                                f" gate_wait_age={max(0.0, now - state.response_create_gate_wait_started_at) if state.response_create_gate_wait_started_at is not None else None}"  # noqa: E501
+                            )
+                            for state in pending_states
+                        ),
+                    )
             _log_http_bridge_startup_wait_timeout(
                 stage="response_create_gate",
                 timeout_seconds=timeout_seconds,
@@ -1346,7 +1363,13 @@ class ProxyService(
                 pending_request_ids=pending_request_ids,
                 pending_request_ages_seconds=pending_request_ages_seconds,
             )
-            if bridge_session is not None and should_retire_stuck_session:
+            if bridge_session is not None and stale_pending_requests_to_fail:
+                await self._fail_stale_http_bridge_pending_requests(
+                    bridge_session,
+                    stale_pending_requests_to_fail,
+                    detail="response_create_gate_timeout_stuck_pending",
+                )
+            elif bridge_session is not None and should_retire_stuck_session:
                 _record_http_bridge_stuck_retire(
                     reason="response_create_gate_timeout_stuck_pending",
                     session=bridge_session,
@@ -1407,10 +1430,16 @@ class ProxyService(
                 require_unambiguous_account=affinity_policy.require_unambiguous_account,
                 sticky_max_age_seconds=affinity_policy.max_age_seconds,
             )
+        required_capability_kwargs = {}
+        if kwargs.get("require_security_work_authorized") is True:
+            required_capability_kwargs["require_security_work_authorized"] = kwargs.pop(
+                "require_security_work_authorized"
+            )
         return await _call_with_supported_optional_kwargs(
             self._select_account_with_budget,
             deadline,
             optional_kwargs=kwargs,
+            **required_capability_kwargs,
         )
 
     @asynccontextmanager
@@ -2106,7 +2135,15 @@ _MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES = (
     "no tool output found for function call call_",
     "no tool output found for custom tool call call_",
     "no tool output found for apply patch call call_",
+    "no tool output found for tool search call call_",
 )
+
+
+def _is_missing_tool_output_message(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized = " ".join(message.lower().split())
+    return normalized.startswith(_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES)
 
 
 def _is_missing_tool_output_error(
@@ -2115,10 +2152,9 @@ def _is_missing_tool_output_error(
     param: str | None,
     message: str | None,
 ) -> bool:
-    if code != "invalid_request_error" or param != "input" or message is None:
+    if code != "invalid_request_error" or param != "input":
         return False
-    normalized = " ".join(message.lower().split())
-    return normalized.startswith(_MISSING_TOOL_OUTPUT_MESSAGE_PREFIXES)
+    return _is_missing_tool_output_message(message)
 
 
 def _is_previous_response_not_found_error(

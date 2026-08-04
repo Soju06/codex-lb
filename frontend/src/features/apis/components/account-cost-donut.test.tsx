@@ -93,9 +93,8 @@ describe("AccountCostDonut", () => {
 			<AccountCostDonut accountCosts={usage.accountCosts} totalCostUsd={usage.totalCostUsd} />,
 		);
 
-		expect(screen.getByTestId("account-cost-legend-list")).toHaveStyle({
-			maxHeight: "calc(5 * 1.75rem + 4 * 0rem)",
-		});
+		// jsdom 30 simplifies calc() during serialization; authored: calc(5 * 1.75rem + 4 * 0rem)
+		expect(screen.getByTestId("account-cost-legend-list").style.maxHeight).toBe("calc(8.75rem)");
 		expect(screen.getByTestId("account-cost-legend-5")).toBeInTheDocument();
 	});
 

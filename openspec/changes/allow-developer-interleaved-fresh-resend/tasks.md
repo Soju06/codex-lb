@@ -10,6 +10,8 @@
 - [x] 1.8 Preserve only the canonical account-neutral developer instruction adjacent to a Lite tool bundle.
 - [x] 1.9 Prove the canonical position against the original input: the stored prefix must begin with a valid
       bundle and the developer message must be its original immediate successor.
+- [x] 1.10 Bound historical interleaving to a pending window that holds exactly one outstanding call and
+      consumes at most one developer message, and reject parallel and duplicate shapes.
 
 ## 2. Regression coverage
 
@@ -21,6 +23,10 @@
 - [x] 2.6 Cover canonical Lite-prefix acceptance plus nonadjacent and response-owned rejections.
 - [x] 2.7 Reject a bundle that does not start the stored prefix and a developer message made adjacent only by
       projection, at both the classifier and `/v1/responses` paths.
+- [x] 2.8 Classify historical-interleave fixtures through the production ID-preserving projection, and cover
+      the response-owned rejection at the historical position.
+- [x] 2.9 Reject parallel-batch and duplicate historical developer interleaves while keeping sequential
+      single-call windows accepted.
 
 ## 3. Validation
 

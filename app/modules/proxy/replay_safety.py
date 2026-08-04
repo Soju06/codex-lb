@@ -452,6 +452,11 @@ def _direct_tool_call_prefix_state(
 ) -> tuple[deque[tuple[str, str]], set[str]] | None:
     pending_calls: deque[tuple[str, str]] = deque()
     seen_call_ids: set[str] = set()
+    # A pending window opens when ``pending_calls`` becomes non-empty and closes when it
+    # drains. Historical interleaving is proven only for a window that never held more than
+    # one outstanding call and never consumed more than one developer message.
+    pending_window_developer_seen = False
+    pending_window_held_parallel_calls = False
     for index, item in enumerate(input_items):
         if not isinstance(item, dict):
             return None
@@ -469,9 +474,16 @@ def _direct_tool_call_prefix_state(
             occupies_canonical_lite_position = (
                 canonical_lite_developer_index is not None and index == canonical_lite_developer_index
             )
-            if developer_message_is_transparent and (
-                occupies_canonical_lite_position or (pending_calls and allow_historical_developer_interleave)
-            ):
+            if developer_message_is_transparent and occupies_canonical_lite_position:
+                continue
+            historical_interleave_is_bounded = (
+                allow_historical_developer_interleave
+                and len(pending_calls) == 1
+                and not pending_window_held_parallel_calls
+                and not pending_window_developer_seen
+            )
+            if developer_message_is_transparent and historical_interleave_is_bounded:
+                pending_window_developer_seen = True
                 continue
             return None
         if item_type in _TOOL_CALL_TYPES:
@@ -482,6 +494,13 @@ def _direct_tool_call_prefix_state(
                 return None
             seen_call_ids.add(call_id)
             pending_calls.append((item_type, call_id))
+            if len(pending_calls) > 1:
+                # A window that already spent its interleaved developer message must not
+                # become parallel afterwards, otherwise a batch is admitted by ordering the
+                # developer message before the second call.
+                if pending_window_developer_seen:
+                    return None
+                pending_window_held_parallel_calls = True
             continue
         call_type = _TOOL_CALL_TYPE_BY_OUTPUT_TYPE.get(item_type or "")
         if call_type is not None:
@@ -493,6 +512,9 @@ def _direct_tool_call_prefix_state(
             if pending_calls[0] != (call_type, call_id):
                 return None
             pending_calls.popleft()
+            if not pending_calls:
+                pending_window_developer_seen = False
+                pending_window_held_parallel_calls = False
             continue
         if pending_calls and (
             (item_type in (None, "message") and item.get("role") in _ACCOUNT_NEUTRAL_MESSAGE_ROLES)

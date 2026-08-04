@@ -73,6 +73,22 @@ top-level `instructions` remain outside this requirement.
 - **WHEN** the matching output is missing or has another call ID or type
 - **THEN** exact manifest proof fails
 
+#### Scenario: Historical developer interleaving is bounded to one call and one message
+
+- **GIVEN** a fingerprint-verified stored prefix opens a pending direct-call window
+- **WHEN** that window holds more than one outstanding call at any point before the developer message
+- **OR** a further call opens in that window after it has consumed a developer message
+- **OR** a second developer message appears while the same window is still open
+- **THEN** exact manifest proof fails
+- **AND** a later window that holds exactly one outstanding call may still interleave one developer message
+
+#### Scenario: Fresh developer suffix bounds are measured on the projected input
+
+- **GIVEN** account-neutral replay classification projects the full resend
+- **WHEN** the projection omits reasoning or completed bookkeeping items from the fresh suffix
+- **THEN** the fresh developer suffix and terminality bounds are evaluated on the projected positions
+- **AND** the accepted width is limited to shapes whose projected suffix satisfies those bounds
+
 #### Scenario: Bounded fresh custom-tool developer interleave is transparent
 
 - **GIVEN** the fingerprint-verified stored prefix is followed by a fresh suffix

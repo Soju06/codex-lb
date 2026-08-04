@@ -729,7 +729,6 @@ def test_full_resend_tool_loop_manifest_tolerates_fresh_developer_interleave_aft
         },
         {
             "type": "message",
-            "id": "msg_old_control",
             "role": "developer",
             "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
             "content": [{"type": "input_text", "text": "historical control message"}],
@@ -770,6 +769,7 @@ def test_full_resend_tool_loop_manifest_tolerates_fresh_developer_interleave_aft
     projection = project_responses_input_for_account_neutral_fresh_replay(
         [*stored_input, *suffix],
         stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
     )
     assert projection is not None
     assert (
@@ -779,6 +779,68 @@ def test_full_resend_tool_loop_manifest_tolerates_fresh_developer_interleave_aft
             pending_tool_calls={"call_current": "custom_tool_call"},
         )
         is True
+    )
+
+
+def test_full_resend_tool_loop_manifest_rejects_response_owned_historical_developer() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_old",
+            "call_id": "call_old",
+            "name": "shell",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+        },
+        {
+            "type": "message",
+            "id": "msg_old_control",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+            "content": [{"type": "input_text", "text": "historical control message"}],
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "ctco_old",
+            "call_id": "call_old",
+            "output": "/workspace",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_current",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "ctco_current",
+            "call_id": "call_current",
+            "output": "/workspace",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is False
     )
 
 
@@ -1166,6 +1228,148 @@ def test_full_resend_exact_manifest_only_allows_historical_developer_interleavin
     )
 
 
+@pytest.mark.parametrize(
+    "stored_prefix_tail",
+    [
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "message", "role": "developer", "content": "historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+            ],
+            id="parallel-batch-around-interleaved-developer",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "message", "role": "developer", "content": "historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+            ],
+            id="developer-inside-window-that-held-parallel-calls",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "message", "role": "developer", "content": "first historical control message"},
+                {"type": "message", "role": "developer", "content": "second historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+            ],
+            id="duplicate-interleaved-developer-messages",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "message", "role": "developer", "content": "historical control message"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+            ],
+            id="parallel-call-opened-after-interleaved-developer",
+        ),
+    ],
+)
+def test_full_resend_exact_manifest_rejects_unbounded_historical_developer_interleave(
+    stored_prefix_tail: list[JsonValue],
+) -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}, *stored_prefix_tail]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "git status --short",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "",
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_prefix_tail",
+    [
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "message", "role": "developer", "content": "first historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "message", "role": "developer", "content": "second historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+            ],
+            id="sequential-single-call-windows",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+                {"type": "custom_tool_call", "call_id": "call_third", "name": "shell", "input": "git status"},
+                {"type": "message", "role": "developer", "content": "historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_third", "output": ""},
+            ],
+            id="clean-window-after-drained-parallel-window",
+        ),
+    ],
+)
+def test_full_resend_exact_manifest_accepts_bounded_historical_developer_windows(
+    stored_prefix_tail: list[JsonValue],
+) -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}, *stored_prefix_tail]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "git status --short",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "",
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is True
+    )
+
+
 def test_full_resend_exact_manifest_accepts_canonical_lite_prefix_developer_without_pending_call() -> None:
     stored_input: list[JsonValue] = [
         {
@@ -1428,6 +1632,7 @@ def test_full_resend_retained_output_tolerates_fresh_developer_after_user() -> N
     projection = project_responses_input_for_account_neutral_fresh_replay(
         [*stored_input, *suffix],
         stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
     )
     assert projection is not None
     assert (
@@ -1526,6 +1731,7 @@ def test_full_resend_retained_output_rejects_unverified_stored_developer_without
     assert not responses_input_suffix_retains_prior_output(
         projection.input_items,
         stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
     )
 
 

@@ -18627,14 +18627,17 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         }
         historical_input.insert(0, responses_lite_tools)
     if unsafe_replay_input == "response_owned_stored_developer":
-        historical_input.append(
+        # Immediately after the Responses-Lite bundle, so the canonical position holds and the
+        # response-owned ID is the only remaining rejection cause.
+        historical_input.insert(
+            1,
             {
                 "type": "message",
                 "id": "msg_stored_response_owned",
                 "role": "developer",
                 "internal_chat_message_metadata_passthrough": owner_metadata,
                 "content": [{"type": "input_text", "text": "stored response-owned control"}],
-            }
+            },
         )
     if unsafe_replay_input == "file":
         historical_input.append(
@@ -18671,6 +18674,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         "id": "msg_owner",
         "role": "assistant",
         "status": "completed",
+        "phase": "final_answer",
         "content": [{"type": "output_text", "text": "old answer"}],
         "internal_chat_message_metadata_passthrough": owner_metadata,
     }
@@ -18942,6 +18946,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             "type": "message",
             "role": "assistant",
             "status": "completed",
+            "phase": "final_answer",
             "content": [{"type": "output_text", "text": "old answer"}],
             "internal_chat_message_metadata_passthrough": owner_metadata,
         },

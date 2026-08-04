@@ -18,6 +18,9 @@ an upstream acknowledgement timeout.
 - Keep the observed unphased, non-response-owned historical `developer`
   message transparent only while proving an exact durable pending-tool
   manifest from inline Responses-Lite input.
+- Bound that historical transparency to a pending window that holds exactly one
+  outstanding call and consumes at most one developer message, so parallel
+  batches and duplicate developer messages stay fail-closed.
 - Allow a fresh developer message after retained output only when the latest
   retained assistant message is `final_answer`, exactly one explicit user
   message follows it, and the developer message is terminal.

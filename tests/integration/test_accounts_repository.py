@@ -258,38 +258,3 @@ async def test_upsert_account_slot_adds_third_label_only_workspace_for_same_emai
         ("triton_workspace", "Triton"),
         ("atlas_workspace", "Atlas"),
     ]
-
-
-@pytest.mark.asyncio
-async def test_oauth_identity_candidates_include_limited_accounts_and_exclude_hard_blocked(db_setup):
-    del db_setup
-    shared_chatgpt_id = "chatgpt_oauth_live_candidates"
-    statuses = {
-        "active": AccountStatus.ACTIVE,
-        "rate_limited": AccountStatus.RATE_LIMITED,
-        "quota_exceeded": AccountStatus.QUOTA_EXCEEDED,
-        "paused": AccountStatus.PAUSED,
-        "reauth_required": AccountStatus.REAUTH_REQUIRED,
-        "deactivated": AccountStatus.DEACTIVATED,
-    }
-
-    async with SessionLocal() as session:
-        accounts = []
-        for name, status in statuses.items():
-            account = _account(
-                f"oauth_{name}",
-                chatgpt_account_id=shared_chatgpt_id,
-                email=f"{name}@example.com",
-            )
-            account.status = status
-            accounts.append(account)
-        session.add_all(accounts)
-        await session.commit()
-
-        candidates = await AccountsRepository(session).list_eligible_by_chatgpt_account_id(shared_chatgpt_id)
-
-    assert [candidate.id for candidate in candidates] == [
-        "oauth_active",
-        "oauth_quota_exceeded",
-        "oauth_rate_limited",
-    ]

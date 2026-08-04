@@ -935,6 +935,7 @@ async def codex_realtime_calls(
     context: ProxyContext = Depends(get_proxy_context),
 ) -> Response:
     caller_scope = await resolve_realtime_caller_scope(
+        request,
         request.headers.get("authorization"),
         request.headers.get("chatgpt-account-id"),
         api_key_validator=validate_required_proxy_api_key_authorization,
@@ -6291,11 +6292,12 @@ async def _resolve_realtime_caller_websocket_request(
 ) -> tuple[RealtimeCallerScope | None, JSONResponse | None]:
     try:
         caller_scope = await resolve_realtime_caller_scope(
+            websocket,
             websocket.headers.get("authorization"),
             websocket.headers.get("chatgpt-account-id"),
             api_key_validator=validate_required_proxy_api_key_authorization,
         )
-    except (ProxyAuthError, ProxyRateLimitError, ProxyUpstreamError) as exc:
+    except ProxyAuthError as exc:
         return None, JSONResponse(
             status_code=exc.status_code,
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),

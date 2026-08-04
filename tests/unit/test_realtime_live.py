@@ -897,7 +897,7 @@ async def test_oauth_live_sideband_carries_policy_scope_and_logs_null_api_key() 
 
     service = _ProxyService(account, lease, live_websocket_connector=fake_connect_live_websocket)
     caller_scope = RealtimeCallerScope.for_oauth(
-        principal_id="caller-account",
+        affinity_scope_material="oauth-local:caller-account",
         allowed_account_ids={"account-a"},
     )
 
@@ -921,7 +921,7 @@ async def test_oauth_live_sideband_carries_policy_scope_and_logs_null_api_key() 
 async def test_oauth_live_sideband_rejects_owner_removed_from_current_policy_before_selection() -> None:
     service = _ProxyService(SimpleNamespace(id="account-a"), None)
     caller_scope = RealtimeCallerScope.for_oauth(
-        principal_id="caller-account",
+        affinity_scope_material="oauth-local:caller-account",
         allowed_account_ids={"account-b"},
     )
 

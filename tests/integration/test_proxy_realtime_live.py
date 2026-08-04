@@ -9,14 +9,17 @@ from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from starlette.testclient import WebSocketDenialResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 from uvicorn.protocols.utils import get_client_addr, get_path_with_query_string
 
+import app.core.auth.dependencies as auth_dependencies
 import app.core.clients.proxy_websocket as proxy_websocket_module
 import app.modules.proxy.api as proxy_api_module
+import app.modules.proxy.realtime_auth as realtime_auth_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.auth.dependencies import validate_required_proxy_api_key_authorization
@@ -26,7 +29,7 @@ from app.core.clients.proxy import (
     ProxyResponseError,
 )
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage
-from app.core.exceptions import ProxyAuthError, ProxyRateLimitError, ProxyUpstreamError
+from app.core.exceptions import ProxyAuthError
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.db.models import RequestLog
 from app.db.session import SessionLocal
@@ -223,13 +226,63 @@ def test_realtime_sideband_websocket_aliases_route_to_shared_service(
     assert "quicksilver" not in access_messages[0]
 
 
+def test_realtime_sideband_oauth_uses_local_keyless_scope(
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_scopes: list[RealtimeCallerScope] = []
+    allowed_account_id = "allowed-local-account"
+
+    async def load_policy() -> frozenset[str]:
+        return frozenset({allowed_account_id})
+
+    async def fake_proxy_live(
+        self,
+        websocket,
+        call_id,
+        headers,
+        query_params,
+        *,
+        protocol,
+        caller_scope,
+        client_ip=None,
+    ) -> None:
+        del self, call_id, headers, query_params, protocol, client_ip
+        captured_scopes.append(caller_scope)
+        await websocket.accept()
+        await websocket.send_text("ready")
+        await websocket.close(code=1000)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "proxy_realtime_live_websocket", fake_proxy_live)
+    monkeypatch.setattr(realtime_auth_module, "_active_oauth_live_allowed_account_ids", load_policy)
+
+    with TestClient(
+        app_instance,
+        base_url="http://localhost",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        with client.websocket_connect(
+            "ws://localhost/v1/live/rtc_local_oauth",
+            headers={
+                "Authorization": "Bearer oauth-token",
+                "chatgpt-account-id": "workspace-caller",
+            },
+        ) as websocket:
+            assert websocket.receive_text() == "ready"
+
+    assert len(captured_scopes) == 1
+    scope = captured_scopes[0]
+    assert scope.kind == "oauth"
+    assert scope.api_key is None
+    assert scope.allowed_account_ids == frozenset({allowed_account_id})
+    assert scope.affinity_scope_material.startswith("oauth-local:")
+
+
 @pytest.mark.parametrize(
     ("error", "expected_status", "expected_code"),
     [
         (ProxyAuthError("invalid caller"), 401, "invalid_api_key"),
         (OAuthLiveNotEnabledError(), 403, "oauth_live_not_enabled"),
-        (ProxyRateLimitError("validation limited"), 429, "rate_limit_exceeded"),
-        (ProxyUpstreamError("validation unavailable"), 503, "upstream_error"),
     ],
 )
 def test_realtime_sideband_serializes_typed_caller_denials(
@@ -291,16 +344,6 @@ async def test_realtime_call_create_oauth_scope_selects_only_allowed_account(
     async_client,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    caller = await async_client.post(
-        "/api/accounts/import",
-        files={
-            "auth_json": (
-                "caller.json",
-                json.dumps(_auth_json("workspace-caller", "caller@example.com")),
-                "application/json",
-            )
-        },
-    )
     allowed = await async_client.post(
         "/api/accounts/import",
         files={
@@ -311,17 +354,13 @@ async def test_realtime_call_create_oauth_scope_selects_only_allowed_account(
             )
         },
     )
-    assert caller.status_code == 200
     assert allowed.status_code == 200
-    caller_account_id = caller.json()["accountId"]
     allowed_account_id = allowed.json()["accountId"]
-    scope = RealtimeCallerScope.for_oauth(
-        principal_id=caller_account_id,
-        allowed_account_ids={allowed_account_id},
+    policy = await async_client.put(
+        "/api/oauth-live-policy",
+        json={"isActive": True, "allowedAccountIds": [allowed_account_id]},
     )
-
-    async def resolve_scope(*_args: object, **_kwargs: object) -> RealtimeCallerScope:
-        return scope
+    assert policy.status_code == 200
 
     upstream_account_ids: list[str | None] = []
 
@@ -333,7 +372,10 @@ async def test_realtime_call_create_oauth_scope_selects_only_allowed_account(
             headers={"location": "/v1/realtime/calls/rtc_oauth_allowed"},
         )
 
-    monkeypatch.setattr(proxy_api_module, "resolve_realtime_caller_scope", resolve_scope)
+    async def reject_usage_validation(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Live admission must not call the OpenAI usage endpoint")
+
+    monkeypatch.setattr(auth_dependencies, "fetch_usage", reject_usage_validation)
     monkeypatch.setattr(proxy_module, "core_codex_control_request", create_call)
     service = get_proxy_service_for_app(async_client._transport.app)
     original_write_request_log = service._write_request_log
@@ -372,6 +414,35 @@ async def test_realtime_call_create_oauth_scope_selects_only_allowed_account(
             raise AssertionError("OAuth realtime call-create request log was not persisted")
         await asyncio.sleep(0.01)
     assert persisted.api_key_id is None
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_create_rejects_remote_oauth_before_account_selection(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_selection(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("remote OAuth must be denied before account selection")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", fail_selection)
+    app = async_client._transport.app
+    transport = ASGITransport(app=app, client=("203.0.113.10", 50000))
+    async with AsyncClient(transport=transport, base_url="http://lb.example") as remote_client:
+        response = await remote_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"offer",
+            headers={
+                "Authorization": "Bearer oauth-token",
+                "chatgpt-account-id": "workspace-caller",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"] == {
+        "code": "invalid_api_key",
+        "message": "Proxy authentication must be configured before remote access is allowed",
+        "type": "authentication_error",
+    }
 
 
 @pytest.mark.parametrize(

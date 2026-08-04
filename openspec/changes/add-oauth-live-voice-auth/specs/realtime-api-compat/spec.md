@@ -2,7 +2,7 @@
 
 ### Requirement: Call creation binds the final account under an authenticated caller scope
 
-`POST /backend-api/codex/realtime/calls` SHALL require either a registered Proxy API Key or a verified OAuth principal. A `sk-clb-` bearer SHALL use strict Key validation. OAuth SHALL require an active global policy with at least one currently active allowed Account. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, the proxy MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the authenticated caller, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, SDP, attestation value, or frame body. Key callers retain `SHA256(api_key.id + NUL + call_id)`. OAuth callers use the same digest formula with `oauth:{principal_id}` as scope material. Private call-creation diagnostics MUST redact internal account identifiers and suppress exception details.
+`POST /backend-api/codex/realtime/calls` SHALL require either a registered Proxy API Key or a locally admitted keyless OAuth caller. A `sk-clb-` bearer SHALL use strict Key validation. Every other bearer SHALL pass the ordinary zero-key proxy origin contract before policy lookup: global API-key authentication is disabled, and the connection is loopback or its raw socket peer belongs to the existing explicit unauthenticated CIDR allowlist. Keyless OAuth SHALL require a normalized `chatgpt-account-id` and an active global policy with at least one currently active allowed Account. After a successful upstream response with a root-relative or absolute `Location` whose parsed path is exactly `/v1/realtime/calls/{call_id}`, where `{call_id}` is a bounded ASCII `rtc_...` or canonical UUID, the proxy MUST bind the call immutably to the final ChatGPT account that completed the request. Relative paths without the leading `/`, unrelated path prefixes, abbreviated `/live/...` or `/realtime/calls/...` paths, and paths with extra segments are unsupported. The binding MUST be scoped to the caller, MUST persist across replicas as only a bounded digest in a reserved non-user-forgeable namespace, MUST expire after a fixed interval, and MUST NOT persist the raw call id, API key, OAuth token, account header, SDP, attestation value, or frame body. Key callers retain `SHA256(api_key.id + NUL + call_id)`. Keyless callers use `oauth-local:HMAC-SHA256(K, bearer + NUL + normalized-account-id)` as scope material, where `K` is purpose-separated from the existing persistent encryption key. Private call-creation diagnostics MUST redact internal account identifiers and suppress exception details.
 
 #### Scenario: initial or replacement account creates the call
 
@@ -24,12 +24,18 @@
 - **THEN** the proxy rejects the request before selecting or contacting an upstream account
 - **AND** it does not create an anonymous ownership namespace
 
-#### Scenario: verified OAuth principal creates a call
+#### Scenario: local keyless OAuth caller creates a call
 
-- **GIVEN** verified OAuth credentials and an active global policy with eligible serving Accounts
+- **GIVEN** global API-key authentication is disabled, the request passes the existing zero-key origin guard, and the global policy has eligible serving Accounts
 - **WHEN** call creation succeeds
-- **THEN** the final serving Account binds under the OAuth principal
+- **THEN** the final serving Account binds under the credential-pair HMAC scope
 - **AND** request logging uses nullable API-key attribution
+
+#### Scenario: remote OAuth caller is outside the zero-key boundary
+
+- **WHEN** a non-Key bearer arrives from a connection that fails the existing zero-key origin guard, or while global API-key authentication is enabled
+- **THEN** the route returns `401 invalid_api_key` before policy lookup or account selection
+- **AND** projected loopback, Host, and forwarded-header hints do not override the preserved raw-socket and trusted-proxy checks
 
 #### Scenario: registered Key remains compatible with Codex conversations
 
@@ -68,7 +74,7 @@
 
 ### Requirement: Every sideband route uses the exact bound owner without refresh or failover
 
-The proxy SHALL expose `WS /backend-api/codex/{call_id}`, `WS /v1/live/{call_id}`, and `WS /v1/realtime?call_id={call_id}` to registered Proxy API Keys and verified OAuth principals. All three routes SHALL use the same caller resolver as call creation. All adapters MUST use one bounded call-id normalizer, current caller policy check, exact-owner selection, fresh owner load, reattach stream lease, relay, and connector service. OAuth sideband SHALL resolve ownership with `principal_id` and confirm that the immutable owner remains in the current global allowed set. Current-app and v3 ingress MUST reject any downstream `call_id` query parameter before entering the live service or connector and MUST NOT reconcile it with the path id. Current-app and v3 ingress MUST connect upstream to `/v1/live/{call_id}`. Legacy ingress MUST consume exactly one downstream `call_id` and append its normalized value once after remaining ordered query pairs to `/v1/realtime`.
+The proxy SHALL expose `WS /backend-api/codex/{call_id}`, `WS /v1/live/{call_id}`, and `WS /v1/realtime?call_id={call_id}` to registered Proxy API Keys and locally admitted keyless OAuth callers. All three routes SHALL use the same caller resolver and zero-key origin guard as call creation. All adapters MUST use one bounded call-id normalizer, current caller policy check, exact-owner selection, fresh owner load, reattach stream lease, relay, and connector service. Keyless sideband SHALL recompute the credential-pair HMAC and confirm that the immutable owner remains in the current global allowed set. Current-app and v3 ingress MUST reject any downstream `call_id` query parameter before entering the live service or connector and MUST NOT reconcile it with the path id. Current-app and v3 ingress MUST connect upstream to `/v1/live/{call_id}`. Legacy ingress MUST consume exactly one downstream `call_id` and append its normalized value once after remaining ordered query pairs to `/v1/realtime`.
 
 #### Scenario: returned Location joins through every supported ingress
 
@@ -95,6 +101,12 @@ The proxy SHALL expose `WS /backend-api/codex/{call_id}`, `WS /v1/live/{call_id}
 - **WHEN** another caller knows the call id, the owner leaves the caller's current allowed scope, or the owner is missing, paused, deleted, capped, or unavailable
 - **THEN** attachment fails closed without revealing or substituting the owner
 - **AND** it neither refreshes credentials nor selects another account
+
+#### Scenario: keyless credential changes during a call
+
+- **WHEN** sideband supplies a different bearer or normalized `chatgpt-account-id` from call creation
+- **THEN** it resolves a different ownership digest and returns the credential-safe not-found response
+- **AND** the client creates a new call after OAuth credential rotation
 
 #### Scenario: refreshed call owner attaches with current identity
 
@@ -144,7 +156,7 @@ Documentation SHALL present two complete Codex client profiles. The built-in OAu
 - **WHEN** an operator follows the built-in OAuth profile or the registered-Key profile
 - **THEN** ordinary conversations use the selected provider contract
 - **AND** call creation and sideband both route through codex-lb
-- **AND** the OAuth Live policy controls only verified OAuth callers
+- **AND** the OAuth Live policy controls only callers admitted through the existing zero-key origin boundary
 
 ## RENAMED Requirements
 

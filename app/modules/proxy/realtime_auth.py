@@ -1,16 +1,29 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from typing import Literal
 
-from app.core.auth.dependencies import validate_required_proxy_api_key_authorization
+from starlette.requests import HTTPConnection
+
+from app.core.auth import clean_account_identity_part
+from app.core.auth.dependencies import (
+    validate_proxy_api_key_authorization,
+    validate_required_proxy_api_key_authorization,
+)
+from app.core.crypto import get_or_create_key
 from app.core.exceptions import ProxyAuthError
 from app.db.session import get_background_session
 from app.modules.api_keys.service import ApiKeyData
 
 RealtimeCallerKind = Literal["api_key", "oauth"]
 ApiKeyValidator = Callable[[str | None], Awaitable[ApiKeyData]]
+KeylessOriginValidator = Callable[[HTTPConnection], Awaitable[None]]
+AffinityMaterialBuilder = Callable[[str, str], str]
+
+_OAUTH_LIVE_AFFINITY_DOMAIN = b"codex-lb/oauth-live-affinity/v1"
 
 
 class OAuthLiveNotEnabledError(ProxyAuthError):
@@ -25,7 +38,6 @@ class RealtimeCallerScope:
     kind: RealtimeCallerKind
     affinity_scope_material: str
     api_key: ApiKeyData | None
-    oauth_principal_id: str | None
     allowed_account_ids: frozenset[str] | None
 
     @classmethod
@@ -34,7 +46,6 @@ class RealtimeCallerScope:
             kind="api_key",
             affinity_scope_material=api_key.id,
             api_key=api_key,
-            oauth_principal_id=None,
             allowed_account_ids=None,
         )
 
@@ -42,7 +53,7 @@ class RealtimeCallerScope:
     def for_oauth(
         cls,
         *,
-        principal_id: str,
+        affinity_scope_material: str,
         allowed_account_ids: Collection[str],
     ) -> RealtimeCallerScope:
         allowed = frozenset(allowed_account_ids)
@@ -50,9 +61,8 @@ class RealtimeCallerScope:
             raise OAuthLiveNotEnabledError()
         return cls(
             kind="oauth",
-            affinity_scope_material=f"oauth:{principal_id}",
+            affinity_scope_material=affinity_scope_material,
             api_key=None,
-            oauth_principal_id=principal_id,
             allowed_account_ids=allowed,
         )
 
@@ -85,21 +95,47 @@ async def _active_oauth_live_allowed_account_ids() -> frozenset[str]:
         return await OAuthLivePolicyRepository(session).get_active_allowed_account_ids()
 
 
+async def _validate_keyless_origin(connection: HTTPConnection) -> None:
+    # Reuse the ordinary proxy's zero-key admission contract. Passing no bearer
+    # makes global API-key mode fail closed; disabled mode still enforces the
+    # existing loopback/proxy-chain/raw-socket allowlist checks.
+    await validate_proxy_api_key_authorization(None, request=connection)
+
+
+def _oauth_live_affinity_scope_material(access_token: str, chatgpt_account_id: str) -> str:
+    # Derive a purpose-specific HMAC key from the existing persistent encryption
+    # key. Replicas that can decrypt the same account store therefore derive the
+    # same affinity material without adding another secret or setting.
+    root_key = get_or_create_key()
+    affinity_key = hmac.digest(root_key, _OAUTH_LIVE_AFFINITY_DOMAIN, hashlib.sha256)
+    credential_pair = f"{access_token}\0{chatgpt_account_id}".encode()
+    digest = hmac.new(affinity_key, credential_pair, hashlib.sha256).hexdigest()
+    return f"oauth-local:{digest}"
+
+
 async def resolve_realtime_caller_scope(
+    connection: HTTPConnection,
     authorization: str | None,
     chatgpt_account_id: str | None,
     *,
     api_key_validator: ApiKeyValidator = validate_required_proxy_api_key_authorization,
+    keyless_origin_validator: KeylessOriginValidator = _validate_keyless_origin,
+    affinity_material_builder: AffinityMaterialBuilder = _oauth_live_affinity_scope_material,
 ) -> RealtimeCallerScope:
     token = _extract_bearer_token(authorization)
     if token is not None and token.startswith("sk-clb-"):
         return RealtimeCallerScope.for_api_key(await api_key_validator(authorization))
 
-    from app.core.auth.codex_oauth_identity import resolve_verified_codex_oauth_identity
+    await keyless_origin_validator(connection)
+    if token is None:
+        raise ProxyAuthError("Missing ChatGPT token in Authorization header")
 
-    identity = await resolve_verified_codex_oauth_identity(authorization, chatgpt_account_id)
+    normalized_account_id = clean_account_identity_part(chatgpt_account_id)
+    if normalized_account_id is None:
+        raise ProxyAuthError("Missing chatgpt-account-id header")
+
     allowed_account_ids = await _active_oauth_live_allowed_account_ids()
     return RealtimeCallerScope.for_oauth(
-        principal_id=identity.principal_id,
+        affinity_scope_material=affinity_material_builder(token, normalized_account_id),
         allowed_account_ids=allowed_account_ids,
     )

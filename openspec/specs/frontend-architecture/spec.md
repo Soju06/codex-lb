@@ -2393,7 +2393,7 @@ The Settings page SHALL expose one Live Voice card with a global OAuth enable sw
 - **GIVEN** one or more selectable upstream Accounts
 - **WHEN** a dashboard writer enables OAuth Live, selects Accounts, and saves
 - **THEN** the app replaces the global policy atomically
-- **AND** every verified OAuth principal uses that pool for subsequent call creation
+- **AND** every locally admitted keyless OAuth caller uses that pool for subsequent call creation
 
 #### Scenario: Operator revokes global access
 

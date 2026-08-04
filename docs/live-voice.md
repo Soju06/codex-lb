@@ -10,15 +10,17 @@ codex-lb keeps Live Voice call creation and its control sideband on the same ups
 The same private routes accept two caller types:
 
 - Registered [proxy API keys](api-keys.md) keep their existing account assignments, limits, attribution, and affinity behavior.
-- Official Codex OAuth credentials use the global policy under **Settings → Live Voice**. Every verified OAuth principal shares the configured upstream account pool.
+- Official Codex OAuth credentials use the global policy under **Settings → Live Voice** after passing the ordinary zero-key proxy origin check.
 
-An OAuth caller can remain independent from the imported upstream accounts. codex-lb validates its bearer and `chatgpt-account-id` against OpenAI, derives a stable principal for call ownership, and selects the serving account only from the global pool. The policy starts disabled and requires at least one selected upstream account before activation.
+The OAuth lane is available when global proxy API-key authentication is disabled and the request comes from loopback or an existing explicitly allowed raw socket CIDR. Loopback needs no CIDR configuration. Other remote clients use registered Proxy API Keys.
+
+codex-lb derives an opaque caller scope locally from the bearer and normalized `chatgpt-account-id`. It does not call OpenAI usage to authenticate Live requests. The network boundary grants keyless access; the credential pair separates call ownership between admitted clients.
 
 ## Built-in OpenAI provider (OAuth)
 
 Use this profile when Codex must retain the built-in `openai` provider. It keeps official ChatGPT OAuth for conversations and Live Voice and requires no Codex-LB API Key in the client.
 
-Enable **Settings → Live Voice → OAuth Live access**, select the upstream Accounts allowed to carry these calls, and route both Live Voice legs to codex-lb:
+Enable **Settings → Live Voice → OAuth Live access**, select the upstream Accounts allowed to carry these calls, keep global proxy API-key authentication disabled, and route both Live Voice legs to codex-lb:
 
 ```toml
 model_provider = "openai"
@@ -61,17 +63,20 @@ The current client appends `/realtime/calls` to the WebRTC base and `/realtime?i
 - `WS /v1/live/{call_id}`
 - `WS /v1/realtime?call_id={call_id}`
 
-After call creation succeeds, codex-lb binds the returned call id to the final serving account under the authenticated caller scope. Every sideband form reloads that exact owner and confirms the current caller policy still allows it. Policy revocation, owner removal, unavailable accounts, and ownership mismatch all fail closed.
+After call creation succeeds, codex-lb binds the returned call id to the final serving account under the caller scope. Every sideband form recomputes that scope, reloads the exact owner, and confirms the current policy still allows it.
+
+OAuth bearer rotation or encryption-key rotation changes the caller scope. A sideband using changed credentials receives the credential-safe not-found response and the client creates a new call.
 
 ## Privacy and request history
 
-Ownership records contain a caller-scoped digest and the owning account reference. Credentials, raw call ids, SDP, attestation values, realtime frames, audio, and transcripts stay out of persistence and request payload traces. OAuth Live request logs use nullable API-key attribution.
+Ownership records contain a caller-scoped digest and the owning account reference. Credentials, account headers, raw call ids, SDP, attestation values, realtime frames, audio, and transcripts stay out of persistence and request payload traces. OAuth Live request logs use nullable API-key attribution.
 
 ## Failure behavior
 
-- `401 invalid_api_key`: caller authentication failed.
+- `401 invalid_api_key`: caller authentication or zero-key origin admission failed.
 - `403 oauth_live_not_enabled`: the global OAuth Live policy is inactive or has no active eligible account.
 - `400 invalid_realtime_call_id`: the sideband supplied an invalid call id.
+- `404 realtime_call_not_found`: ownership is missing or the credential pair changed.
 - `503 realtime_call_binding_failed`: a successful upstream call could not be bound safely.
 
-*Specs: [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat) · [account-identity](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-identity) · [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*
+*Specs: [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat) · [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*

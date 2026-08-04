@@ -1747,13 +1747,13 @@ def test_realtime_call_affinity_key_preserves_registered_key_digest_bytes() -> N
     )
 
 
-def test_realtime_call_affinity_key_scopes_oauth_by_principal() -> None:
+def test_realtime_call_affinity_key_scopes_oauth_by_credential_digest() -> None:
     scope_a = RealtimeCallerScope.for_oauth(
-        principal_id="caller-a",
+        affinity_scope_material="oauth-local:caller-a",
         allowed_account_ids={"upstream-a"},
     )
     scope_b = RealtimeCallerScope.for_oauth(
-        principal_id="caller-b",
+        affinity_scope_material="oauth-local:caller-b",
         allowed_account_ids={"upstream-a"},
     )
 

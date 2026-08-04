@@ -2,42 +2,52 @@
 
 Live Voice has two authenticated legs: HTTP call creation and a control sideband WebSocket. The serving upstream account must remain identical across both legs. Official Codex supplies one ChatGPT OAuth bearer plus `chatgpt-account-id`; Key-based clients supply a registered Codex-LB Proxy API Key.
 
+Ordinary proxy traffic already has a zero-key admission contract. When global API-key authentication is disabled, requests are accepted only from loopback or an explicitly configured raw-socket peer CIDR. Proxy-header projection preserves the raw peer and resolves trusted proxy chains fail closed.
+
 ## Goals
 
 - Preserve `model_provider = "openai"` and official OAuth.
-- Preserve the existing registered-Key Codex profile and all Key authorization semantics.
-- Support OAuth callers that have no corresponding imported Account row.
-- Apply one operator-managed upstream pool to every verified OAuth caller.
-- Preserve Key behavior and exact affinity input.
-- Keep ownership immutable, private, bounded, and fail closed.
+- Reuse the ordinary proxy's existing zero-key network boundary.
+- Preserve the registered-Key Codex profile and every Key authorization semantic.
+- Apply one operator-managed upstream pool to admitted keyless Live callers.
+- Preserve exact-owner affinity across call creation and sideband.
+- Add no setting, secret, or caller-registration entity.
 
 ## Decisions
 
 ### Classify bearer before authorization
 
-`sk-clb-` bearers use strict Proxy Key validation. Other bearers require `chatgpt-account-id` and enter OAuth verification. Both call-create and all three sideband routes share this resolver.
+`sk-clb-` bearers use strict Proxy Key validation. Other bearers require `chatgpt-account-id` and enter the keyless OAuth lane. Both call-create and all three sideband routes share this resolver.
 
-### Separate caller identity from serving accounts
+### Reuse zero-key origin admission
 
-The OAuth resolver validates the supplied credential pair against the upstream usage endpoint. Every caller with a stable verified `chatgpt_user_id` or `sub` receives `principal:{stable_seat_claim}` whether or not an imported Account matches. A matching imported Account remains optional `caller_account_id` metadata for usage and route integration. Credentials without a stable claim fall back to one unambiguous imported Account id. External callers follow the configured default upstream proxy route when routing is enabled.
+The keyless lane calls the same proxy authorization dependency with no Proxy Key. Global API-key mode therefore fails closed. Disabled mode retains the existing loopback, trusted-proxy consensus, raw-socket capture, and `proxy_unauthenticated_client_cidrs` checks.
 
-The typed result contains `principal_id`, optional `caller_account_id` for usage integration, normalized ChatGPT account id, verified usage payload, and route. Raw credentials remain absent from logs and persistence. OAuth Live accepts independent verified principals through its global policy, while `/api/codex/usage` requires an eligible imported `caller_account_id` before exposing aggregate local pool usage.
+The network boundary supplies trust. The OAuth credential pair supplies call ownership and separation between admitted clients.
 
-Identity validation admits at most 32 distinct in-flight credential pairs per process. Same-pair callers share one task. The final departing waiter cancels unfinished work, and cancelling work retains its admission slot until the task drains.
+### Derive credential-safe affinity locally
+
+A purpose-specific HMAC key is derived from the existing persistent encryption key. The caller scope is:
+
+`oauth-local:HMAC-SHA256(derived-key, bearer + NUL + normalized-chatgpt-account-id)`
+
+Only this digest participates in the existing call-owner digest. Raw bearers, account headers, call ids, SDP, attestation values, frames, audio, and transcripts remain outside persistence and diagnostics. Replicas sharing the existing encryption key derive the same scope without another setting.
+
+A refreshed bearer produces a new caller scope. A sideband using a different bearer cannot attach an older call; the client creates a new call after credential rotation. This preserves possession-based ownership without an upstream identity request.
 
 ### Use one global policy
 
 `oauth_live_global_policy` contains singleton id `1`, active state, and timestamps. `oauth_live_global_policy_accounts` links it to imported serving Accounts. Dashboard writes replace the complete set transactionally. Active policy writes require a non-empty known set; runtime lookup filters to currently active Accounts.
 
-All verified OAuth principals share this pool. Each principal still receives isolated affinity material, so one principal cannot attach another principal's call after learning its call id.
+Every admitted keyless caller shares this pool. Each credential pair receives isolated affinity material, so learning another call id does not grant sideband attachment.
 
-### Keep Key and OAuth lanes compatible
+### Keep Key and keyless lanes compatible
 
-Key callers keep `api_key.id` affinity, assignments, limits, reservations, last-used updates, and request-log attribution. Their Codex profile continues to use `requires_openai_auth = true` for app-visible ChatGPT capabilities and `env_key` for the registered Codex-LB bearer. OAuth callers use `oauth:{principal_id}`, select within the global pool, and write request logs with `api_key_id = NULL`.
+Key callers keep `api_key.id` affinity, assignments, limits, reservations, last-used updates, and request-log attribution. Keyless callers select within the global pool and write request logs with `api_key_id = NULL`.
 
 ### Keep the Settings job singular
 
-The Live Voice card answers one operator question: which upstream Accounts may serve verified OAuth Live calls? It exposes one global enable switch, one explicit account multi-select, and one save action. Caller inputs and caller-to-account matching are absent from the UI. The compact selector keeps selected unavailable Accounts visible so operators can identify and remove stale assignments while other unavailable Accounts remain excluded.
+The Live Voice card answers one operator question: which upstream Accounts may serve locally admitted keyless Live calls? It exposes one global enable switch, one explicit account multi-select, and one save action. The compact selector keeps selected unavailable Accounts visible so operators can identify and remove stale assignments while other unavailable Accounts remain excluded.
 
 ## Migration and rollback
 
@@ -45,7 +55,7 @@ One revision creates the global singleton policy table and its allowed-account r
 
 ## Risks
 
-- OAuth validation adds an upstream usage call on cache miss; bounded caching and singleflight limit fan-out.
-- External principals require a stable verified seat claim, preserving cross-refresh ownership.
+- Every process admitted by the existing zero-key network boundary can use the configured OAuth Live pool, matching ordinary zero-key proxy access.
+- Bearer rotation changes affinity and requires a new Live call.
+- Incorrect trusted-proxy configuration can alter locality decisions, so the existing raw-peer and forwarded-header regression suite remains part of acceptance.
 - Experimental client route keys can drift, so each bundled Codex upgrade requires call-create, sideband, and audible Live E2E acceptance.
-- Client profiles can appear healthy while only one product path works, so acceptance covers normal conversation and audible Live Voice for both OAuth and registered-Key modes.

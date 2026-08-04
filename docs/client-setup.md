@@ -295,4 +295,4 @@ print(response.choices[0].message.content)
 
 ---
 
-*Specs: [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [chat-completions-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/chat-completions-compat) · [model-catalog-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-catalog-compat) · [runtime-portability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/runtime-portability)*
+*Specs: [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [chat-completions-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/chat-completions-compat) · [model-catalog-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-catalog-compat) · [runtime-portability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/runtime-portability) · [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat)*

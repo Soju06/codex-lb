@@ -6,15 +6,18 @@ import json
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import generate_unique_account_id
 from app.core.cache.invalidation import (
     NAMESPACE_SETTINGS,
     NAMESPACE_UPSTREAM_ROUTE,
+    CacheInvalidationPoller,
     get_cache_invalidation_poller,
 )
 from app.core.config.settings import get_settings
-from app.core.upstream_proxy.cache import get_upstream_route_cache
+from app.core.upstream_proxy.cache import UpstreamRouteCache, get_upstream_route_cache
 from app.db.models import CacheInvalidation
 from app.db.session import SessionLocal
 
@@ -82,6 +85,56 @@ def _seed_dummy_entry() -> None:
     cache = get_upstream_route_cache()
     cache.store_route("seeded-account", None, generation=cache.generation)
     assert cache.get("seeded-account") is not None
+
+
+class _FailFirstVersionSessionFactory:
+    def __init__(self) -> None:
+        self._failed = False
+
+    def __call__(self) -> AsyncSession:
+        if not self._failed:
+            self._failed = True
+            raise OperationalError("stmt", {}, Exception("peer-version read failed"))
+        return SessionLocal()
+
+
+async def test_failed_prime_recovery_clears_warm_route_cache(db_setup, route_cache_ttl, monkeypatch) -> None:
+    """A route-cache bump landing after a failed startup prime must clear a warm
+    resolver outcome on the first successful background version read."""
+    remote_poller = CacheInvalidationPoller(SessionLocal)
+    assert await remote_poller.bump(NAMESPACE_UPSTREAM_ROUTE) is True
+
+    route_cache = UpstreamRouteCache()
+    callback_calls = 0
+
+    def clear_route_cache() -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        route_cache.clear()
+
+    local_poller = CacheInvalidationPoller(_FailFirstVersionSessionFactory())
+    local_poller.on_invalidation(NAMESPACE_UPSTREAM_ROUTE, clear_route_cache)
+
+    with pytest.raises(RuntimeError, match="baseline version read did not complete"):
+        await local_poller.prime()
+    route_cache.store_route("seeded-account", None, generation=route_cache.generation)
+    assert route_cache.get("seeded-account") is not None
+
+    assert await remote_poller.bump(NAMESPACE_UPSTREAM_ROUTE) is True
+
+    parked = asyncio.Event()
+
+    async def park_background_loop() -> None:
+        await parked.wait()
+
+    monkeypatch.setattr(local_poller, "_run", park_background_loop)
+    await local_poller.start()
+    try:
+        await local_poller._poll_once()
+        assert callback_calls == 1
+        assert route_cache.get("seeded-account") is None
+    finally:
+        await local_poller.stop()
 
 
 async def test_binding_upsert_clears_cache_and_bumps_namespace(async_client, route_cache_ttl) -> None:

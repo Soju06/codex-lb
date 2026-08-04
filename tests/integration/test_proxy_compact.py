@@ -16,6 +16,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
+from app.core.openai.requests import ResponsesCompactRequest
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -343,6 +344,72 @@ async def test_proxy_compact_success(async_client, monkeypatch):
     assert response.headers.get("x-codex-credits-has-credits") == "true"
     assert response.headers.get("x-codex-credits-unlimited") == "false"
     assert response.headers.get("x-codex-credits-balance") == "12.50"
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_ignores_file_pin_from_trimmed_optional_history(async_client, monkeypatch):
+    for raw_account_id, email in (
+        ("acc_compact_trim_file_owner", "compact-trim-file-owner@example.com"),
+        ("acc_compact_trim_selected", "compact-trim-selected@example.com"),
+    ):
+        auth_json = _make_auth_json(raw_account_id, email)
+        response = await async_client.post(
+            "/api/accounts/import",
+            files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+        )
+        assert response.status_code == 200
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    async with SessionLocal() as session:
+        accounts = (await session.execute(select(Account).order_by(Account.id))).scalars().all()
+    file_owner = next(account for account in accounts if account.chatgpt_account_id == "acc_compact_trim_file_owner")
+    selected_account = next(
+        account for account in accounts if account.chatgpt_account_id == "acc_compact_trim_selected"
+    )
+    await service._pin_file_account("file_compact_trimmed_optional", file_owner.id)
+
+    seen: dict[str, object] = {}
+
+    async def fake_select_account(self, deadline, **kwargs):
+        del self, deadline
+        seen["preferred_account_id"] = kwargs.get("preferred_account_id")
+        return proxy_module.AccountSelection(account=selected_account, error_message=None)
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token
+        seen["upstream_account_id"] = account_id
+        seen["upstream_payload"] = payload
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget_compatible", fake_select_account)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": "stable prelude"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "x" * 500_000},
+                        {"type": "input_file", "file_id": "file_compact_trimmed_optional"},
+                    ],
+                },
+                {"role": "user", "content": "continue after compaction"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["preferred_account_id"] is None
+    assert seen["upstream_account_id"] == "acc_compact_trim_selected"
+    upstream_payload = cast(ResponsesCompactRequest, seen["upstream_payload"]).to_payload()
+    assert "file_compact_trimmed_optional" not in json.dumps(upstream_payload)
 
 
 @pytest.mark.asyncio

@@ -1660,12 +1660,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.upstream_control.reconnect_requested = True
                 session.upstream_control.retire_after_drain = True
                 detached = True
-        request_state.event_queue = None
-        # event_queue is nulled unconditionally because by the time
-        # _detach is called from the finally block in
-        # _stream_http_bridge_session_events, the terminal event has
-        # already been delivered via _pop_terminal_websocket_request_state.
-        # A late-arriving event on a nulled queue is a no-op.
+            # Queue revocation and pending ownership use the same lock. A
+            # completed handler that wins first keeps its local queue reference;
+            # a detach that wins first leaves no queue for that handler to claim.
+            request_state.event_queue = None
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             return False

@@ -747,6 +747,12 @@ class _RequestLogFailureMetadata:
     bridge_stage: str | None = None
 
 
+@dataclass(slots=True)
+class _HTTPBridgeCompletedDeliveryScope:
+    active: bool = False
+    terminal_enqueued: bool = False
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -905,6 +911,7 @@ class _WebSocketRequestState:
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
+    completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
     account_capacity_waiting: bool = False
     account_capacity_wait_suppress_keepalive: bool = False
     account_capacity_wait_reason: str | None = None

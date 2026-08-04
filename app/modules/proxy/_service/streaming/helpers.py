@@ -786,6 +786,32 @@ async def _select_account_with_budget_for_stream(proxy: Any, deadline: float, **
     return await selector(deadline, **kwargs)
 
 
+def _is_account_neutral_request_rejection(
+    *,
+    code: str,
+    http_status: int | None,
+    message: str | None,
+) -> bool:
+    """Return whether upstream rejected the request payload, not the account.
+
+    A payload-shape rejection reproduces identically on every account, so it
+    must never mutate one account's health: otherwise a single client looping
+    on a self-inconsistent conversation drives its serving accounts into
+    ``error_count`` backoff and starves unrelated tenants.
+
+    Keep this set narrow. Not every upstream ``invalid_request_error`` is
+    account neutral -- the model-entitlement rejection matched by
+    ``_is_account_model_unsupported_error`` is genuinely account scoped -- so
+    membership is decided by the specific classified message, never by the
+    ``invalid_request_error`` code alone.
+    """
+    if code != "invalid_request_error":
+        return False
+    if http_status is not None and http_status != 400:
+        return False
+    return bool(_facade()._is_missing_tool_output_message(message))
+
+
 async def _handle_stream_error(
     proxy: Any,
     account: Account,
@@ -802,6 +828,18 @@ async def _handle_stream_error(
         phase="first_event",
     )
     if _facade()._is_account_neutral_error_code(code):
+        return classified
+    if _is_account_neutral_request_rejection(
+        code=code,
+        http_status=http_status,
+        message=error.get("message"),
+    ):
+        _facade().logger.info(
+            "Skipped account error penalty for account-neutral request rejection account_id=%s request_id=%s code=%s",
+            "<redacted>" if privacy_policy.redacts_sensitive_details else account.id,
+            get_request_id(),
+            code,
+        )
         return classified
     if classified["failure_class"] == "rate_limit":
         await proxy._load_balancer.mark_rate_limit(account, error)

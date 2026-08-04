@@ -29,6 +29,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketMessage, UpstreamWebSocketTransportError
 from app.core.errors import response_failed_event
+from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event_payload
 from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
@@ -121,6 +122,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
     _event_type_from_payload,
+    _HTTPBridgeCompletedDeliveryScope,
     _HTTPBridgeSession,
     _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
@@ -1024,11 +1026,37 @@ class _HTTPBridgeUpstreamEventsMixin:
         session: "_HTTPBridgeSession",
         text: str,
     ) -> None:
-        original_text = text
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
         event = parse_sse_event_payload(payload)
         event_type = _event_type_from_payload(event, payload)
+        completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
+        try:
+            await self._process_parsed_http_bridge_upstream_event(
+                session,
+                text=text,
+                event_block=event_block,
+                payload=payload,
+                event=event,
+                event_type=event_type,
+                completed_delivery_scope=completed_delivery_scope,
+            )
+        finally:
+            if completed_delivery_scope is not None:
+                completed_delivery_scope.active = False
+
+    async def _process_parsed_http_bridge_upstream_event(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        text: str,
+        event_block: str,
+        payload: dict[str, JsonValue] | None,
+        event: OpenAIEvent | None,
+        event_type: str | None,
+        completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None,
+    ) -> None:
+        original_text = text
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
@@ -1060,6 +1088,8 @@ class _HTTPBridgeUpstreamEventsMixin:
             event=event,
         )
 
+        completed_event_queue: asyncio.Queue[str | None] | None = None
+        completed_event_queue_claimed = False
         async with session.pending_lock:
             matched_request_state = None
             created_request_state = None
@@ -1246,6 +1276,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                 has_other_pending_requests = any(
                     pending_request is not terminal_request_state for pending_request in session.pending_requests
                 )
+                if (
+                    event_type == "response.completed"
+                    and terminal_request_state is not None
+                    and terminal_request_state not in session.pending_requests
+                ):
+                    completed_event_queue = terminal_request_state.event_queue
+                    completed_event_queue_claimed = True
+                    if completed_event_queue is not None and completed_delivery_scope is not None:
+                        completed_delivery_scope.active = True
+                        terminal_request_state.completed_delivery_scope = completed_delivery_scope
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
@@ -1985,24 +2025,36 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if retried:
                         return
 
-        if (
-            matched_request_state is not None
-            and matched_request_state.event_queue is not None
-            and not suppress_downstream_event
-        ):
+        matched_event_queue = (
+            completed_event_queue
+            if completed_event_queue_claimed and matched_request_state is terminal_request_state
+            else matched_request_state.event_queue
+            if matched_request_state is not None
+            else None
+        )
+        if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
             for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state):
-                await matched_request_state.event_queue.put(deferred_text)
-            await matched_request_state.event_queue.put(event_block)
+                await matched_event_queue.put(deferred_text)
+            await matched_event_queue.put(event_block)
 
         if terminal_request_state is None:
             return
 
-        if terminal_request_state is not matched_request_state and terminal_request_state.event_queue is not None:
+        terminal_event_queue = (
+            completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
+        )
+        if terminal_request_state is not matched_request_state and terminal_event_queue is not None:
             for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state):
-                await terminal_request_state.event_queue.put(deferred_text)
-            await terminal_request_state.event_queue.put(event_block)
-        if terminal_request_state.event_queue is not None:
-            await terminal_request_state.event_queue.put(None)
+                await terminal_event_queue.put(deferred_text)
+            await terminal_event_queue.put(event_block)
+        if terminal_event_queue is not None:
+            await terminal_event_queue.put(None)
+            if completed_event_queue_claimed and completed_delivery_scope is not None:
+                async with session.pending_lock:
+                    # Keep the completed claim authoritative after its producer
+                    # returns. A concurrent timeout may still be finishing
+                    # awaited recovery work before it rechecks this scope.
+                    completed_delivery_scope.terminal_enqueued = True
 
         if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
             error_code = None

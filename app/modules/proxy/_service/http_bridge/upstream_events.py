@@ -856,8 +856,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                             async with session.pending_lock:
                                 if receive_task is not None and receive_task.done():
                                     continue
-                                expired_owner = any(
-                                    deadline is not None and deadline <= now
+                                expired_request_states = [
+                                    request_state
                                     for request_state in session.pending_requests
                                     if (
                                         deadline := _http_bridge_eventless_precreated_deadline(
@@ -866,17 +866,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                                         )
                                     )
                                     is not None
-                                )
-                                if not expired_owner:
+                                    and deadline <= now
+                                ]
+                                if not expired_request_states:
                                     continue
                                 pending_count = len(session.pending_requests)
-                                for request_state in session.pending_requests:
-                                    if request_state.failure_phase_override is None:
-                                        request_state.failure_phase_override = "upstream"
-                                    if request_state.failure_detail_override is None:
-                                        request_state.failure_detail_override = (
-                                            _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
-                                        )
                                 # A delta-only request has no other way to
                                 # convey prior context once its anchor is
                                 # cleared, so only clear anchors codex-lb
@@ -884,39 +878,61 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 expired_proxy_injected_anchor = any(
                                     request_state.proxy_injected_previous_response_id
                                     and request_state.proxy_injected_anchor_had_full_resend_payload
-                                    for request_state in session.pending_requests
+                                    for request_state in expired_request_states
                                 )
-                            # Clear while this owner still holds the durable
-                            # row. This must precede both the non-cancellable
-                            # receive-task retire path and the ordinary retry
-                            # path below.
-                            if expired_proxy_injected_anchor:
-                                await _clear_durable_http_bridge_response_anchor(self, session)
+
+                            # Do not mutate durable continuity while a receive
+                            # may still deliver the response event that proves
+                            # this timeout stale. The non-cancellable branch
+                            # remains fail-closed, so it clears immediately
+                            # before its forced retirement.
+                            force_retire = False
                             if receive_task is not None:
                                 receive_cancelled = await _cancel_http_bridge_reader_child(
                                     receive_task,
                                     label="HTTP bridge upstream receive after missing response.created",
                                     cleanup_tasks=self._background_cleanup_tasks,
                                 )
-                                if not receive_cancelled:
-                                    # Do not reconnect while the old receive
-                                    # task still owns the superseded socket.
-                                    # The ordinary timeout path takes the same
-                                    # fail-closed branch; retain the explicit
-                                    # account-neutral timeout classification
-                                    # rather than routing through the generic
-                                    # reader-crash account penalty path.
-                                    session.closed = True
-                                    await self._fail_http_bridge_reader_and_maybe_retire(
-                                        session,
-                                        error_code="upstream_request_timeout",
-                                        error_message=receive_timeout.error_message,
-                                        penalize_account=False,
-                                        retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
-                                        force_retire=True,
-                                    )
-                                    break
-                                receive_task = None
+                                if receive_task.done() and not receive_task.cancelled():
+                                    # A response (or a typed receive failure)
+                                    # won the race with timeout handling. Let
+                                    # the normal reader path settle it.
+                                    continue
+                                force_retire = not receive_cancelled and not receive_task.cancelled()
+                                if not force_retire:
+                                    receive_task = None
+                            async with session.pending_lock:
+                                for request_state in session.pending_requests:
+                                    if request_state.failure_phase_override is None:
+                                        request_state.failure_phase_override = "upstream"
+                                    if request_state.failure_detail_override is None:
+                                        request_state.failure_detail_override = (
+                                            _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+                                        )
+                            if force_retire:
+                                # Do not reconnect while the old receive task
+                                # still owns the superseded socket. The ordinary
+                                # timeout path takes the same fail-closed branch;
+                                # retain the explicit account-neutral timeout
+                                # classification rather than routing through the
+                                # generic reader-crash account penalty path.
+                                if expired_proxy_injected_anchor:
+                                    await _clear_durable_http_bridge_response_anchor(self, session)
+                                session.closed = True
+                                await self._fail_http_bridge_reader_and_maybe_retire(
+                                    session,
+                                    error_code="upstream_request_timeout",
+                                    error_message=receive_timeout.error_message,
+                                    penalize_account=False,
+                                    retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                    force_retire=True,
+                                )
+                                break
+                            # A successfully cancelled receive cannot deliver
+                            # a late response event, so this is the safe point
+                            # to persist the durable-anchor invalidation.
+                            if expired_proxy_injected_anchor:
+                                await _clear_durable_http_bridge_response_anchor(self, session)
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,

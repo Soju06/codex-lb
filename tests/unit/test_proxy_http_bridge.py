@@ -146,11 +146,16 @@ class _SilentEventlessUpstream:
 
     def __init__(self) -> None:
         self.first_receive_started = asyncio.Event()
+        self.receive_cancelled = asyncio.Event()
         self.closed = False
 
     async def receive(self) -> UpstreamWebSocketMessage:
         self.first_receive_started.set()
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.receive_cancelled.set()
+            raise
         raise AssertionError("unreachable")
 
     async def send_text(self, text: str) -> None:
@@ -19466,18 +19471,42 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("proxy_injected", "had_full_resend_payload", "expect_clear"),
+    (
+        "proxy_injected",
+        "had_full_resend_payload",
+        "has_unexpired_full_resend_sibling",
+        "expect_clear",
+        "receive_cancellation_refused",
+    ),
     [
-        pytest.param(True, True, True, id="full_resend_proxy_injected_anchor_is_cleared"),
-        pytest.param(True, False, False, id="delta_only_proxy_injected_anchor_stays"),
-        pytest.param(False, False, False, id="client_supplied_anchor_stays"),
+        pytest.param(False, False, False, False, False, id="client_supplied_anchor_stays"),
+        pytest.param(True, False, False, False, False, id="delta_only_proxy_injected_anchor_stays"),
+        pytest.param(True, True, False, True, False, id="full_resend_proxy_injected_anchor_is_cleared"),
+        pytest.param(
+            True,
+            False,
+            True,
+            False,
+            False,
+            id="unexpired_full_resend_sibling_does_not_clear_delta_only_anchor",
+        ),
+        pytest.param(
+            True,
+            True,
+            False,
+            True,
+            True,
+            id="full_resend_anchor_clears_before_non_cancellable_receive_retirement",
+        ),
     ],
 )
-async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_full_resend(
+async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_expired_full_resend(
     monkeypatch: pytest.MonkeyPatch,
     proxy_injected: bool,
     had_full_resend_payload: bool,
+    has_unexpired_full_resend_sibling: bool,
     expect_clear: bool,
+    receive_cancellation_refused: bool,
 ) -> None:
     # A delta-only proxy-injected anchor (``proxy_injected`` True,
     # ``had_full_resend_payload`` False) has no other way to convey prior
@@ -19500,8 +19529,54 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_full
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     monkeypatch.setattr(service, "_write_request_log", AsyncMock())
-    clear_anchor = AsyncMock(return_value=None)
+    if receive_cancellation_refused:
+        original_cancel_reader_child = http_bridge_upstream_events_module._cancel_http_bridge_reader_child
+
+        async def refuse_eventless_receive_cancellation(
+            task: asyncio.Task[Any] | None,
+            *,
+            label: str,
+            cleanup_tasks: set[asyncio.Task[None]] | None = None,
+        ) -> bool:
+            if label == "HTTP bridge upstream receive after missing response.created":
+                return False
+            return await original_cancel_reader_child(
+                task,
+                label=label,
+                cleanup_tasks=cleanup_tasks,
+            )
+
+        monkeypatch.setattr(
+            http_bridge_upstream_events_module,
+            "_cancel_http_bridge_reader_child",
+            refuse_eventless_receive_cancellation,
+        )
+
+    async def clear_anchor_after_receive_cancellation(
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> None:
+        assert (session_id, instance_id, owner_epoch) == (
+            "durable-session-1",
+            settings.http_responses_session_bridge_instance_id,
+            3,
+        )
+        if expect_clear and not receive_cancellation_refused:
+            assert upstream.receive_cancelled.is_set()
+
+    clear_anchor = AsyncMock(side_effect=clear_anchor_after_receive_cancellation)
     monkeypatch.setattr(service._durable_bridge, "clear_live_session_response_anchor", clear_anchor)
+    if receive_cancellation_refused:
+        original_fail_reader = service._fail_http_bridge_reader_and_maybe_retire
+
+        async def fail_after_anchor_clear(*args: Any, **kwargs: Any) -> bool:
+            assert args == (session,)
+            assert clear_anchor.await_count == 1
+            return await original_fail_reader(*args, **kwargs)
+
+        monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_after_anchor_clear)
 
     reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
     await asyncio.wait_for(upstream.first_receive_started.wait(), timeout=0.5)
@@ -19515,6 +19590,110 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_full
     owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
     owner.proxy_injected_previous_response_id = proxy_injected
     owner.proxy_injected_anchor_had_full_resend_payload = had_full_resend_payload
+    pending_requests = [owner]
+    if has_unexpired_full_resend_sibling:
+        sibling = _make_eventless_http_bridge_owner(request_id="req-queued-full-resend", sent_at=0.0)
+        sibling.response_create_sent_at = None
+        sibling.response_create_gate = session.response_create_gate
+        sibling.response_create_gate_acquired = False
+        sibling.awaiting_response_created = False
+        sibling.proxy_injected_previous_response_id = True
+        sibling.proxy_injected_anchor_had_full_resend_payload = True
+        pending_requests.append(sibling)
+    async with session.pending_lock:
+        session.pending_requests.extend(pending_requests)
+        session.queued_request_count = len(pending_requests)
+
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        owner,
+        owner.request_text,
+    )
+    await asyncio.wait_for(reader_task, timeout=1.0)
+
+    if expect_clear:
+        assert clear_anchor.await_count == 1
+    else:
+        clear_anchor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_receive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _LateResponseUpstream:
+        def __init__(self) -> None:
+            self.first_receive_started = asyncio.Event()
+            self.release_receive = asyncio.Event()
+            self.response_returned = asyncio.Event()
+            self.sent_texts: list[str] = []
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            self.first_receive_started.set()
+            await self.release_receive.wait()
+            self.response_returned.set()
+            return UpstreamWebSocketMessage(kind="text", text="late response")
+
+        async def send_text(self, text: str) -> None:
+            self.sent_texts.append(text)
+
+        async def close(self) -> None:
+            return None
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    upstream = _LateResponseUpstream()
+    session = _make_bridge_session(key_value="eventless-late-receive")
+    session.upstream = cast(UpstreamWebSocket, upstream)
+    session.durable_session_id = "durable-session-1"
+    session.durable_owner_epoch = 3
+    service._http_bridge_sessions[session.key] = session
+    settings = _make_app_settings(
+        sse_keepalive_interval_seconds=0.0,
+        stream_idle_timeout_seconds=60.0,
+        http_responses_session_bridge_request_budget_seconds=60.0,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    retry_precreated = AsyncMock(return_value=False)
+    process_text = AsyncMock()
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_process_http_bridge_upstream_text", process_text)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", AsyncMock(return_value=True))
+    clear_anchor = AsyncMock()
+    monkeypatch.setattr(service._durable_bridge, "clear_live_session_response_anchor", clear_anchor)
+    original_cancel_reader_child = http_bridge_upstream_events_module._cancel_http_bridge_reader_child
+
+    async def complete_receive_during_timeout(
+        task: asyncio.Task[Any] | None,
+        *,
+        label: str,
+        cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    ) -> bool:
+        if label == "HTTP bridge upstream receive after missing response.created":
+            upstream.release_receive.set()
+            await asyncio.wait_for(upstream.response_returned.wait(), timeout=0.5)
+            await asyncio.sleep(0)
+            assert task is not None and task.done() and not task.cancelled()
+            return True
+        return await original_cancel_reader_child(task, label=label, cleanup_tasks=cleanup_tasks)
+
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_cancel_http_bridge_reader_child",
+        complete_receive_during_timeout,
+    )
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    await asyncio.wait_for(upstream.first_receive_started.wait(), timeout=0.5)
+
+    gate = session.response_create_gate
+    await gate.acquire()
+    owner = _make_eventless_http_bridge_owner(request_id="req-late-response", sent_at=0.0)
+    owner.started_at = time.monotonic() - 30.0
+    owner.response_create_sent_at = None
+    owner.response_create_gate = gate
+    owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
+    owner.proxy_injected_previous_response_id = True
+    owner.proxy_injected_anchor_had_full_resend_payload = True
     async with session.pending_lock:
         session.pending_requests.append(owner)
         session.queued_request_count = 1
@@ -19526,14 +19705,11 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_full
     )
     await asyncio.wait_for(reader_task, timeout=1.0)
 
-    if expect_clear:
-        clear_anchor.assert_awaited_once_with(
-            session_id="durable-session-1",
-            instance_id=settings.http_responses_session_bridge_instance_id,
-            owner_epoch=3,
-        )
-    else:
-        clear_anchor.assert_not_awaited()
+    process_text.assert_awaited_once_with(session, "late response")
+    retry_precreated.assert_not_awaited()
+    clear_anchor.assert_not_awaited()
+    assert owner.failure_phase_override is None
+    assert owner.failure_detail_override is None
 
 
 @pytest.mark.asyncio

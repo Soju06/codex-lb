@@ -150,6 +150,15 @@ _RESPONSES_PAYLOAD_FIELDS_WITH_DEDICATED_VALIDATION = frozenset(
 class AccountNeutralReplayProjection:
     input_items: list[JsonValue]
     stored_prefix_count: int
+    canonical_lite_developer_index: int | None = None
+    """Projected index of the canonical Responses-Lite developer instruction.
+
+    Set only when the original stored prefix begins with a valid
+    ``additional_tools`` bundle and the developer message is that bundle's
+    original immediate successor. ``None`` keeps every stored developer
+    position fail-closed, so projection can never make a non-adjacent
+    developer message look canonical.
+    """
 
 
 def project_responses_input_for_account_neutral_fresh_replay(
@@ -170,6 +179,8 @@ def project_responses_input_for_account_neutral_fresh_replay(
 
     projected_items: list[JsonValue] = []
     projected_stored_count = 0
+    canonical_lite_developer_index: int | None = None
+    prefix_begins_with_lite_tool_bundle = stored_count >= 2 and _is_canonical_lite_tool_bundle(input_items[0])
     for index, item in enumerate(input_items):
         projected_item = _project_account_neutral_replay_item(
             item,
@@ -177,13 +188,39 @@ def project_responses_input_for_account_neutral_fresh_replay(
         )
         if projected_item is not None:
             projected_items.append(projected_item)
+            # The canonical position is the bundle's original immediate
+            # successor. Anchoring on the original index keeps a projected-out
+            # item between the bundle and a later developer message from
+            # collapsing into the same slot.
+            if (
+                index == 1
+                and prefix_begins_with_lite_tool_bundle
+                and len(projected_items) == 2
+                and _is_inline_developer_message(item)
+            ):
+                canonical_lite_developer_index = 1
         if index + 1 == stored_count:
             projected_stored_count = len(projected_items)
 
     return AccountNeutralReplayProjection(
         input_items=projected_items,
         stored_prefix_count=projected_stored_count,
+        canonical_lite_developer_index=canonical_lite_developer_index,
     )
+
+
+def _is_canonical_lite_tool_bundle(item: JsonValue) -> bool:
+    return (
+        isinstance(item, dict)
+        and item.get("type") == "additional_tools"
+        and item.get("role") == "developer"
+        and _input_item_has_only_known_fields(item, "additional_tools")
+        and _tools_are_account_neutral(item.get("tools"))
+    )
+
+
+def _is_inline_developer_message(item: JsonValue) -> bool:
+    return isinstance(item, dict) and item.get("role") == "developer" and item.get("type") != "additional_tools"
 
 
 def _project_account_neutral_replay_item(
@@ -195,6 +232,12 @@ def _project_account_neutral_replay_item(
         return item
 
     item_type = item.get("type")
+    if preserve_developer_message_ids and item.get("role") == "developer" and item_type != "additional_tools":
+        # Classification must see every inline developer-role item before
+        # projection can omit response-owned bookkeeping types. The
+        # additional_tools bundle is a distinct Responses-Lite input item,
+        # not an inline developer message.
+        return item
     if item_type is not None and not isinstance(item_type, str):
         return item
     if item_type == "reasoning" or (
@@ -203,8 +246,6 @@ def _project_account_neutral_replay_item(
         return None
 
     if "id" not in item:
-        return item
-    if preserve_developer_message_ids and item_type in (None, "message") and item.get("role") == "developer":
         return item
     projected_item = dict(item)
     projected_item.pop("id")
@@ -270,12 +311,16 @@ def responses_input_suffix_retains_prior_output(
     input_items: list[JsonValue],
     *,
     stored_count: int,
+    canonical_lite_developer_index: int | None = None,
 ) -> bool:
     """Prove that a stored input prefix is followed by prior output and new input."""
 
     if stored_count <= 0 or len(input_items) <= stored_count:
         return False
-    prefix_state = _direct_tool_call_prefix_state(input_items[:stored_count])
+    prefix_state = _direct_tool_call_prefix_state(
+        input_items[:stored_count],
+        canonical_lite_developer_index=canonical_lite_developer_index,
+    )
     if prefix_state is None:
         return False
     pending_suffix_calls, seen_suffix_call_ids = prefix_state
@@ -356,6 +401,7 @@ def responses_input_suffix_matches_pending_tool_calls(
     *,
     stored_count: int,
     pending_tool_calls: Mapping[str, str],
+    canonical_lite_developer_index: int | None = None,
 ) -> bool:
     """Prove the suffix exactly settles the durable prior-response call manifest."""
 
@@ -364,6 +410,7 @@ def responses_input_suffix_matches_pending_tool_calls(
     prefix_state = _direct_tool_call_prefix_state(
         input_items[:stored_count],
         allow_historical_developer_interleave=True,
+        canonical_lite_developer_index=canonical_lite_developer_index,
     )
     if prefix_state is None or prefix_state[0] or prefix_state[1] & pending_tool_calls.keys():
         return False
@@ -401,16 +448,32 @@ def _direct_tool_call_prefix_state(
     input_items: list[JsonValue],
     *,
     allow_historical_developer_interleave: bool = False,
+    canonical_lite_developer_index: int | None = None,
 ) -> tuple[deque[tuple[str, str]], set[str]] | None:
     pending_calls: deque[tuple[str, str]] = deque()
     seen_call_ids: set[str] = set()
-    for item in input_items:
+    for index, item in enumerate(input_items):
         if not isinstance(item, dict):
             return None
         item_type_value = item.get("type")
         if item_type_value is not None and not isinstance(item_type_value, str):
             return None
         item_type = item_type_value if isinstance(item_type_value, str) else None
+        if item.get("role") == "developer" and item_type != "additional_tools":
+            developer_message_is_transparent = _historical_pending_developer_message_is_transparent(
+                item,
+                item_type=item_type,
+            )
+            # Canonical position is proven by the projection against the
+            # original input, not by adjacency inside the projected prefix.
+            occupies_canonical_lite_position = (
+                canonical_lite_developer_index is not None and index == canonical_lite_developer_index
+            )
+            if developer_message_is_transparent and (
+                occupies_canonical_lite_position or (pending_calls and allow_historical_developer_interleave)
+            ):
+                continue
+            return None
         if item_type in _TOOL_CALL_TYPES:
             if item.get("status") not in (None, "completed"):
                 return None
@@ -431,13 +494,6 @@ def _direct_tool_call_prefix_state(
                 return None
             pending_calls.popleft()
             continue
-        if pending_calls and item.get("role") == "developer":
-            if allow_historical_developer_interleave and _historical_pending_developer_message_is_transparent(
-                item,
-                item_type=item_type,
-            ):
-                continue
-            return None
         if pending_calls and (
             (item_type in (None, "message") and item.get("role") in _ACCOUNT_NEUTRAL_MESSAGE_ROLES)
             or item_type in {"input_file", "input_image", "input_text"}

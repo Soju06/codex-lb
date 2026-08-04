@@ -19,8 +19,23 @@ Explicit null or malformed item types MUST fail closed.
 
 Classification MUST retain response-owned developer-message ID evidence until
 these checks have completed, even when other response-owned IDs are projected
-out. Non-Lite `input` or `messages` forms whose instruction-role messages are
-normalized into top-level `instructions` remain outside this requirement.
+out. It MUST retain developer-role items before applying projection rules that
+normally omit their declared item type, so a malformed developer item cannot
+disappear before validation. A canonical Lite-prefix developer instruction MAY
+appear immediately after the `additional_tools` bundle when it passes the same
+account-neutral item checks as historical interleaving and has no response-owned
+ID. A developer message in the stored prefix outside that canonical position or
+the verified pending-call/matching-output interleave MUST fail closed. Non-Lite
+`input` or `messages` forms whose instruction-role messages are normalized into
+top-level `instructions` remain outside this requirement.
+
+#### Scenario: Canonical Responses-Lite prefix remains transparent
+
+- **GIVEN** a fingerprint-verified stored prefix begins with an `additional_tools` bundle
+- **AND** a valid account-neutral developer instruction appears immediately after that bundle
+- **WHEN** exact manifest or retained-output replay proof validates the stored prefix
+- **THEN** the canonical developer instruction is transparent
+- **AND** the original full input remains eligible for account-neutral replay
 
 #### Scenario: Verified historical Responses-Lite developer message is transparent
 
@@ -37,6 +52,20 @@ normalized into top-level `instructions` remain outside this requirement.
 - **GIVEN** a supported direct call is pending in the verified stored prefix
 - **WHEN** a user, assistant, system, malformed developer, or response-owned message appears before its output
 - **THEN** exact manifest proof fails
+
+#### Scenario: Other stored developer positions remain fail-closed
+
+- **GIVEN** a fingerprint-verified stored prefix has no pending direct call
+- **WHEN** a developer message appears outside the canonical adjacent Lite-prefix position
+- **OR** the adjacent message has a response-owned ID
+- **THEN** exact manifest and retained-output proofs fail
+
+#### Scenario: Projection-omitted developer type remains visible to validation
+
+- **GIVEN** a developer-role item declares a type normally omitted by replay projection
+- **WHEN** account-neutral replay classification projects the full resend
+- **THEN** the malformed developer item remains visible to replay proof
+- **AND** replay classification fails closed
 
 #### Scenario: Historical output remains mandatory
 

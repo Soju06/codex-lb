@@ -9,6 +9,8 @@ from typing import Any, Protocol, cast
 
 import anyio
 
+from app.core.clients.proxy import ProxyResponseError
+from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.utils.request_id import get_request_id
@@ -289,13 +291,36 @@ class _ApiKeyUsageMixin:
                         )
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "Failed to settle compact API key reservation key_id=%s request_id=%s",
                     api_key.id,
                     get_request_id(),
                     exc_info=True,
                 )
+                try:
+                    async with proxy._repo_factory() as repos:
+                        api_keys_service = _service_api_keys_service()(repos.api_keys)
+                        await api_keys_service.release_usage_reservation(reservation_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to release compact API key reservation after settlement failure "
+                        "key_id=%s request_id=%s",
+                        api_key.id,
+                        get_request_id(),
+                        exc_info=True,
+                    )
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "usage_settlement_failed",
+                        "Compact API key usage could not be settled",
+                        error_type="server_error",
+                    ),
+                    failure_phase="usage_settlement",
+                    failure_detail="compact_api_key_usage_persistence_failed",
+                    failure_exception_type=type(exc).__name__,
+                ) from exc
 
     async def _settle_stream_api_key_usage(
         self,

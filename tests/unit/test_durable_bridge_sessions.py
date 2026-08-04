@@ -2652,3 +2652,43 @@ async def test_startup_rechecks_ownerless_stale_rows_before_delete(
             select(HttpBridgeSessionAlias).where(HttpBridgeSessionAlias.session_id == "sid-race-claim")
         )
         assert aliases.scalar_one_or_none() is not None
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_round_trip(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit",
+        api_key_id="key-1",
+        consecutive_failures=3,
+        cooldown_until_epoch=1234.5,
+        last_detail="stream_incomplete",
+        updated_at_epoch=1200.0,
+    )
+
+    persisted = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit",
+        api_key_id="key-1",
+    )
+    assert persisted is not None
+    assert persisted.consecutive_failures == 3
+    assert persisted.cooldown_until_epoch == 1234.5
+    assert persisted.last_detail == "stream_incomplete"
+
+    await coordinator.clear_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit",
+        api_key_id="key-1",
+    )
+    cleared = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit",
+        api_key_id="key-1",
+    )
+    assert cleared is not None
+    assert cleared.consecutive_failures == 0
+    assert cleared.cooldown_until_epoch == 0.0
+    assert cleared.last_detail is None

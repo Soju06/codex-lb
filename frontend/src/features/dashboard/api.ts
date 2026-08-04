@@ -1,16 +1,20 @@
 import { get } from "@/lib/api-client";
 
 import {
+  ConversationDetailsSchema,
+  ConversationsResponseSchema,
   DEFAULT_OVERVIEW_TIMEFRAME,
   DashboardOverviewSchema,
   DashboardProjectionsSchema,
   RequestLogFilterOptionsSchema,
   RequestLogsResponseSchema,
+  type ConversationTimeframe,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
 
 const DASHBOARD_PATH = "/api/dashboard";
 const REQUEST_LOGS_PATH = "/api/request-logs";
+const CONVERSATIONS_PATH = "/api/conversations";
 
 export type RequestLogsListFilters = {
   limit?: number;
@@ -99,4 +103,41 @@ export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {
   appendMany(query, "modelOption", params.modelOptions);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return get(`${REQUEST_LOGS_PATH}/options${suffix}`, RequestLogFilterOptionsSchema);
+}
+
+export type ConversationListFilters = {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  timeframe?: ConversationTimeframe;
+  since?: string;
+};
+
+export function getConversations(params: ConversationListFilters = {}) {
+  const query = new URLSearchParams();
+  if (typeof params.limit === "number") {
+    query.set("limit", String(params.limit));
+  }
+  if (typeof params.offset === "number") {
+    query.set("offset", String(params.offset));
+  }
+  if (params.search) {
+    query.set("search", params.search);
+  }
+  if (params.timeframe) {
+    query.set("timeframe", params.timeframe);
+  }
+  if (params.since) {
+    query.set("since", params.since);
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return get(`${CONVERSATIONS_PATH}${suffix}`, ConversationsResponseSchema);
+}
+
+export function getConversationDetails(conversationId: string) {
+  const opaqueId = conversationId === "." || conversationId === ".."
+    ? ` ${conversationId}`
+    : conversationId;
+  const encoded = encodeURIComponent(opaqueId);
+  return get(`${CONVERSATIONS_PATH}/${encoded}`, ConversationDetailsSchema);
 }

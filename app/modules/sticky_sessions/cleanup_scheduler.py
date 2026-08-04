@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -14,7 +15,11 @@ from app.core.config.settings import Settings, get_settings
 from app.core.utils.time import utcnow
 from app.db.models import DashboardSettings
 from app.db.session import SessionLocal, get_background_session
-from app.modules.proxy.durable_bridge_repository import DurableBridgeRepository, missing_durable_bridge_tables
+from app.modules.proxy.durable_bridge_repository import (
+    DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS,
+    DurableBridgeRepository,
+    missing_durable_bridge_tables,
+)
 from app.modules.proxy.ring_membership import RING_MEMBER_RETENTION_SECONDS, RingMembershipService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.settings.repository import SettingsRepository
@@ -120,6 +125,14 @@ class StickySessionCleanupScheduler:
                         if abandoned_deleted_count > 0:
                             logger.info(
                                 "Purged abandoned HTTP bridge sessions deleted_count=%s", abandoned_deleted_count
+                            )
+                        retry_circuit_deleted_count = await bridge_repo.purge_retry_circuits_before(
+                            time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
+                        )
+                        if retry_circuit_deleted_count > 0:
+                            logger.info(
+                                "Purged expired HTTP bridge retry circuits deleted_count=%s",
+                                retry_circuit_deleted_count,
                             )
                 ring_cutoff = utcnow() - timedelta(seconds=RING_MEMBER_RETENTION_SECONDS)
                 ring_deleted_count = await RingMembershipService(SessionLocal).purge_stale_before(ring_cutoff)

@@ -1082,6 +1082,25 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "shaqman",
+      "name": "Syakur Rahman",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1113851?v=4",
+      "profile": "http://expressthisout.com/",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "cigro-manager",
+      "name": "cigro-manager",
+      "avatar_url": "https://avatars.githubusercontent.com/u/219247995?v=4",
+      "profile": "https://github.com/cigro-manager",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

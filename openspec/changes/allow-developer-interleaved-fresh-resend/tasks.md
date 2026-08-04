@@ -5,6 +5,11 @@
 - [x] 1.3 Allow a terminal fresh developer message only after `final_answer` and exactly one explicit user follow-up.
 - [x] 1.4 Allow fresh tool interleaving only for an exact custom call/developer/matching-output suffix.
 - [x] 1.5 Reject malformed, account-scoped, parallel, function/apply-patch, leading, trailing, and repeated variants.
+- [x] 1.6 Preserve projection-omitted developer-role items until fail-closed validation completes.
+- [x] 1.7 Reject stored-prefix developer messages outside a verified pending call/output interleave.
+- [x] 1.8 Preserve only the canonical account-neutral developer instruction adjacent to a Lite tool bundle.
+- [x] 1.9 Prove the canonical position against the original input: the stored prefix must begin with a valid
+      bundle and the developer message must be its original immediate successor.
 
 ## 2. Regression coverage
 
@@ -12,6 +17,10 @@
 - [x] 2.2 Exercise historical developer interleaving through `/v1/responses`.
 - [x] 2.3 Exercise both bounded fresh developer suffixes through bridge-unit and `/v1/responses` coverage.
 - [x] 2.4 Verify the new positive regressions fail before the production fix and pass after it.
+- [x] 2.5 Add manifest, retained-output, and owner-failover regressions for the review findings.
+- [x] 2.6 Cover canonical Lite-prefix acceptance plus nonadjacent and response-owned rejections.
+- [x] 2.7 Reject a bundle that does not start the stored prefix and a developer message made adjacent only by
+      projection, at both the classifier and `/v1/responses` paths.
 
 ## 3. Validation
 

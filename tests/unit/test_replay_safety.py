@@ -1039,6 +1039,15 @@ def test_full_resend_tool_loop_manifest_rejects_unproven_fresh_developer_positio
         ),
         pytest.param(
             {
+                "type": "reasoning",
+                "role": "developer",
+                "content": "projection-omitted control",
+            },
+            False,
+            id="projection-omitted-developer-message",
+        ),
+        pytest.param(
+            {
                 "role": "developer",
                 "status": "completed",
                 "internal_chat_message_metadata_passthrough": {"turn_id": "turn_historical"},
@@ -1157,6 +1166,188 @@ def test_full_resend_exact_manifest_only_allows_historical_developer_interleavin
     )
 
 
+def test_full_resend_exact_manifest_accepts_canonical_lite_prefix_developer_without_pending_call() -> None:
+    stored_input: list[JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {"type": "message", "role": "developer", "content": "stored control"},
+        {"role": "user", "content": "first question"},
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "/workspace",
+        },
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert projection.canonical_lite_developer_index == 1
+    assert responses_input_suffix_matches_pending_tool_calls(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        pending_tool_calls={"call_current": "custom_tool_call"},
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_input",
+    [
+        pytest.param(
+            [
+                {"role": "user", "content": "first question"},
+                {"type": "message", "role": "developer", "content": "stored control"},
+            ],
+            id="nonadjacent-unowned-developer",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {
+                    "type": "message",
+                    "id": "msg_owned",
+                    "role": "developer",
+                    "content": "stored control",
+                },
+                {"role": "user", "content": "first question"},
+            ],
+            id="response-owned-canonical-position",
+        ),
+        pytest.param(
+            [
+                {"role": "user", "content": "first question"},
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "message", "role": "developer", "content": "stored control"},
+            ],
+            id="bundle-not-at-prefix-start",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "reasoning", "id": "rs_hidden", "summary": []},
+                {"type": "message", "role": "developer", "content": "stored control"},
+                {"role": "user", "content": "first question"},
+            ],
+            id="projection-collapsed-adjacency",
+        ),
+    ],
+)
+def test_full_resend_exact_manifest_rejects_unverified_stored_developer_without_pending_call(
+    stored_input: list[JsonValue],
+) -> None:
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "/workspace",
+        },
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        pending_tool_calls={"call_current": "custom_tool_call"},
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_input",
+    [
+        pytest.param(
+            [
+                {"role": "user", "content": "first question"},
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "message", "role": "developer", "content": "stored control"},
+            ],
+            id="bundle-not-at-prefix-start",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "reasoning", "id": "rs_hidden", "summary": []},
+                {"type": "message", "role": "developer", "content": "stored control"},
+                {"role": "user", "content": "first question"},
+            ],
+            id="projection-collapsed-adjacency",
+        ),
+    ],
+)
+def test_full_resend_retained_output_rejects_noncanonical_stored_lite_developer(
+    stored_input: list[JsonValue],
+) -> None:
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert projection.canonical_lite_developer_index is None
+    assert not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
 @pytest.mark.parametrize(
     "historical_output",
     [
@@ -1245,6 +1436,96 @@ def test_full_resend_retained_output_tolerates_fresh_developer_after_user() -> N
             stored_count=projection.stored_prefix_count,
         )
         is True
+    )
+
+
+def test_full_resend_retained_output_accepts_canonical_lite_prefix_developer_without_pending_call() -> None:
+    stored_input: list[JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {"type": "message", "role": "developer", "content": "stored control"},
+        {"role": "user", "content": "first question"},
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert projection.canonical_lite_developer_index == 1
+    assert responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_input",
+    [
+        pytest.param(
+            [
+                {"role": "user", "content": "first question"},
+                {"type": "message", "role": "developer", "content": "stored control"},
+            ],
+            id="nonadjacent-unowned-developer",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {
+                    "type": "message",
+                    "id": "msg_owned",
+                    "role": "developer",
+                    "content": "stored control",
+                },
+                {"role": "user", "content": "first question"},
+            ],
+            id="response-owned-canonical-position",
+        ),
+    ],
+)
+def test_full_resend_retained_output_rejects_unverified_stored_developer_without_pending_call(
+    stored_input: list[JsonValue],
+) -> None:
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
     )
 
 

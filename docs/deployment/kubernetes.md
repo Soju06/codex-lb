@@ -95,6 +95,26 @@ gatewayApi:
 Gateway defaults to a single HTTP listener on port 80; override
 `gatewayApi.gateway.listeners` for TLS or other ports.
 
+## Grafana dashboard hierarchy
+
+The chart can assign concise titles to its packaged dashboards without copying
+their JSON. When the Grafana sidecar maps annotation paths to filesystem-backed
+nested folders, the following values produce `Applications / Codex LB /
+Overview` and `Applications / Codex LB / TTFT Breakdown`:
+
+```yaml
+metrics:
+  grafanaDashboard:
+    enabled: true
+    folder: Applications/Codex LB
+    titles:
+      codex-lb.json: Overview
+      ttft-breakdown.json: TTFT Breakdown
+```
+
+The title map is keyed by the JSON filenames packaged in the chart. Omitting it
+preserves the default dashboard titles.
+
 ## Full chart reference
 
 For external database, production config, ingress, observability, and more see the

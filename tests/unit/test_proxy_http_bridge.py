@@ -8926,6 +8926,31 @@ async def test_await_cancelled_task_propagates_caller_cancellation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_await_cancelled_task_allows_outer_cancellation_cleanup_to_finish() -> None:
+    cleanup_finished = asyncio.Event()
+
+    async def cancelled_owner() -> None:
+        child = asyncio.create_task(asyncio.Event().wait())
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await proxy_service._await_cancelled_task(
+                child,
+                timeout_seconds=1.0,
+                label="outer cancellation child",
+            )
+            cleanup_finished.set()
+
+    owner = asyncio.create_task(cancelled_owner())
+    await asyncio.sleep(0)
+    owner.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    assert cleanup_finished.is_set()
+
+
+@pytest.mark.asyncio
 async def test_await_cancelled_task_defers_stubborn_child_cleanup() -> None:
     child_cancelled = asyncio.Event()
     release_child = asyncio.Event()

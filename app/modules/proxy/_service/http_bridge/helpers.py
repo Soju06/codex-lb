@@ -1658,6 +1658,7 @@ async def _await_cancelled_task(
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
 ) -> bool:
     caller_task = asyncio.current_task()
+    caller_cancelling_at_entry = caller_task.cancelling() if caller_task is not None else 0
     # Give a new child one scheduling turn before cancellation so
     # cancellation-resistant tasks enter the deferred-drain path.
     if not task.done():
@@ -1670,7 +1671,11 @@ async def _await_cancelled_task(
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
     except asyncio.CancelledError:
-        if caller_task is not None and caller_task.cancelling():
+        # A caller may enter from its own finally block with cancellation
+        # already pending. The child's expected cancellation also surfaces as
+        # CancelledError; only a newly added caller cancellation should abort
+        # the rest of that finally block's transport and lease cleanup.
+        if caller_task is not None and caller_task.cancelling() > caller_cancelling_at_entry:
             _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
             raise
         return True

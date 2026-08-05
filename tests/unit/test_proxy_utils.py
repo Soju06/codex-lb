@@ -31619,7 +31619,7 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
 
 
 @pytest.mark.asyncio
-async def test_stream_verified_fresh_replay_moves_off_dead_owner_after_initial_connect_failure(monkeypatch):
+async def test_http_sse_stream_verified_fresh_replay_moves_off_dead_owner_after_initial_connect_failure(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

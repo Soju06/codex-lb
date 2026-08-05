@@ -44,12 +44,19 @@ account with the original sanitized failure. Soft prompt-cache and
 process-session affinity may move; the failed account's sticky binding is
 reallocated so the replacement selection does not immediately loop back.
 
-A previous-response continuation is movable when local continuity evidence
-verifies that its input is a complete fresh replay which can be resent without
-the owner anchor. A confirmed pre-dispatch failure may remove that anchor before
-replacement selection. This exception does not override turn-state or uploaded-
-file ownership, forced single-account routing, another required-account contract,
-or downstream-visible output.
+A raw HTTP/SSE previous-response continuation is movable when local continuity
+evidence verifies that its input is a complete fresh replay which can be resent
+without the owner anchor. On that surface, a confirmed pre-dispatch failure may
+remove the anchor before replacement selection. This exception does not override
+turn-state or uploaded-file ownership, forced single-account routing, another
+required-account contract, or downstream-visible output.
+
+This exception is intentionally limited to the raw HTTP/SSE retry loop. Native
+Responses WebSocket and HTTP bridge startup retain their transport-specific
+owner and replay gates: native WebSocket owns pending request/account-switch
+state, while the bridge also owns durable session, lease, and replay-fencing
+state. Expanding either transport requires a separate change that proves those
+lifecycle invariants rather than inferring authorization from the HTTP/SSE proof.
 
 ## Account backoff and resource ordering
 

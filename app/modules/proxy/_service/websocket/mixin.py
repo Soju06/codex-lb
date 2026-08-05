@@ -854,6 +854,7 @@ class _WebSocketMixin:
                 await _facade()._await_cancelled_task(
                     upstream_reader,
                     label="proxy websocket upstream reader",
+                    cleanup_tasks=proxy._background_cleanup_tasks,
                 )
                 upstream_reader = None
             upstream_control = None
@@ -1097,7 +1098,11 @@ class _WebSocketMixin:
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(
-                                            _wrapped_websocket_error_event(status_code, error_payload)
+                                            _wrapped_websocket_error_event(
+                                                status_code,
+                                                error_payload,
+                                                expose_stale_previous_response_classifier=codex_session_affinity,
+                                            )
                                         )
                                     )
                                 continue
@@ -1723,7 +1728,11 @@ class _WebSocketMixin:
                             downstream_activity,
                         )
                     if upstream_reader is not None:
-                        await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                        await _facade()._await_cancelled_task(
+                            upstream_reader,
+                            label="proxy websocket upstream reader",
+                            cleanup_tasks=proxy._background_cleanup_tasks,
+                        )
                         upstream_reader = None
                     upstream_control = None
                     if upstream is not None:
@@ -1753,7 +1762,9 @@ class _WebSocketMixin:
                         replay_request_state = replay_candidate
                         if upstream_reader is not None:
                             await _facade()._await_cancelled_task(
-                                upstream_reader, label="proxy websocket upstream reader"
+                                upstream_reader,
+                                label="proxy websocket upstream reader",
+                                cleanup_tasks=proxy._background_cleanup_tasks,
                             )
                             upstream_reader = None
                         upstream_control = None
@@ -1790,7 +1801,11 @@ class _WebSocketMixin:
                             downstream_activity,
                         )
                     if upstream_reader is not None:
-                        await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                        await _facade()._await_cancelled_task(
+                            upstream_reader,
+                            label="proxy websocket upstream reader",
+                            cleanup_tasks=proxy._background_cleanup_tasks,
+                        )
                         upstream_reader = None
                     upstream_control = None
                     if upstream is not None:
@@ -1806,7 +1821,11 @@ class _WebSocketMixin:
                     continue
         finally:
             if upstream_reader is not None:
-                await _facade()._await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                await _facade()._await_cancelled_task(
+                    upstream_reader,
+                    label="proxy websocket upstream reader",
+                    cleanup_tasks=proxy._background_cleanup_tasks,
+                )
             if upstream is not None:
                 try:
                     await upstream.close()
@@ -3777,6 +3796,14 @@ class _WebSocketMixin:
                     penalize_account=message.error_code != "proxy_network_unavailable",
                     suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                 )
+                # A terminal receive can race the outer session loop's
+                # cleanup (especially when the downstream closes as soon as
+                # it receives the failure event). Close here as well so the
+                # transport is retired before the reader task exits.
+                try:
+                    await upstream.close()
+                except Exception:
+                    _facade().logger.debug("Failed to close upstream websocket after terminal receive", exc_info=True)
                 if sequenced_downstream_replay_refused:
                     await _close_downstream_after_sequenced_replay_refusal(
                         websocket,
@@ -4741,7 +4768,12 @@ class _WebSocketMixin:
             settlement.account_health_error = False
         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)
         await _release_websocket_response_create_gate(request_state, response_create_gate)
-        await proxy._settle_stream_api_key_usage(
+        if settlement.account_health_error:
+            # Connection safety must not wait on settlement or health
+            # persistence. The health write remains ordered below.
+            upstream_control.reconnect_requested = True
+            upstream_control.retire_after_drain = True
+        settlement_confirmed = await proxy._settle_stream_api_key_usage(
             api_key,
             request_state.api_key_reservation,
             settlement,
@@ -4751,13 +4783,12 @@ class _WebSocketMixin:
             wait_for_settlement=settlement.account_health_error,
         )
         if settlement.account_health_error:
-            await proxy._handle_stream_error(
-                account,
-                _stream_settlement_error_payload(settlement),
-                settlement.error_code or "upstream_error",
-            )
-            upstream_control.reconnect_requested = True
-            upstream_control.retire_after_drain = True
+            if settlement_confirmed:
+                await proxy._handle_stream_error(
+                    account,
+                    _stream_settlement_error_payload(settlement),
+                    settlement.error_code or "upstream_error",
+                )
         elif settlement.record_success:
             await proxy._load_balancer.record_success(account)
             for remembered_response_id in _websocket_continuity_response_ids(request_state, response_id):
@@ -4941,7 +4972,15 @@ class _WebSocketMixin:
             await _release_websocket_response_create_gate(request_state, response_create_gate)
         async with client_send_lock:
             await websocket.send_text(
-                _serialize_websocket_error_event(_wrapped_websocket_error_event(status_code, payload))
+                _serialize_websocket_error_event(
+                    _wrapped_websocket_error_event(
+                        status_code,
+                        payload,
+                        expose_stale_previous_response_classifier=(
+                            request_state.expose_stale_previous_response_classifier
+                        ),
+                    )
+                )
             )
 
     async def _emit_websocket_proxy_request_timeout(

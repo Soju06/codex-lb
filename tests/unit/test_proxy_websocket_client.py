@@ -52,6 +52,8 @@ class _UnexpectedHttpClient:
 
 
 class _FakeConnection:
+    connection_lost_waiter: asyncio.Future[object]
+
     def __init__(self, *, subprotocol: str | None = None) -> None:
         self.sent: list[str | bytes] = []
         self.closed = False
@@ -65,6 +67,18 @@ class _FakeConnection:
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_websockets_response_websocket_consumes_connection_lost_waiter_error():
+    connection = _FakeConnection()
+    connection.connection_lost_waiter = asyncio.get_running_loop().create_future()
+
+    WebsocketsUpstreamWebSocket(cast(Any, connection))
+    connection.connection_lost_waiter.set_exception(RuntimeError("keepalive ping timeout"))
+    await asyncio.sleep(0)
+
+    assert connection.connection_lost_waiter.exception() is not None
 
 
 async def _local_proxy_tunnel_handler(

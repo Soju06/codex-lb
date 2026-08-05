@@ -343,6 +343,26 @@ class _ApiKeyUsageMixin:
         model_name = api_key_reservation.model or settlement.model or ""
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
 
+        async def _release_ordering_sensitive_fallback() -> bool:
+            fallback_task = asyncio.create_task(
+                self._release_unsettled_stream_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    request_id=request_id,
+                ),
+                name=f"proxy-stream-api-key-fallback-{request_id}",
+            )
+            cancellation_pending = False
+            while not fallback_task.done():
+                try:
+                    await asyncio.shield(fallback_task)
+                except asyncio.CancelledError:
+                    cancellation_pending = True
+            settled = fallback_task.result()
+            if cancellation_pending:
+                return False
+            return settled
+
         async def _settle_once() -> bool:
             try:
                 async with proxy._repo_factory() as repos:
@@ -363,6 +383,11 @@ class _ApiKeyUsageMixin:
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
                 return True
+            except asyncio.CancelledError:
+                if wait_for_settlement:
+                    await _release_ordering_sensitive_fallback()
+                    return False
+                raise
             except Exception:
                 logger.warning(
                     "Failed to settle stream API key reservation key_id=%s request_id=%s",
@@ -370,11 +395,16 @@ class _ApiKeyUsageMixin:
                     request_id,
                     exc_info=True,
                 )
+                if wait_for_settlement:
+                    return await _release_ordering_sensitive_fallback()
                 return False
 
-        # Detach unconditionally instead of shield-awaiting: the tracking
-        # callback already schedules a release when settlement fails or is
-        # cancelled, the caller's finally-net skips via
+        # Detach unconditionally instead of shield-awaiting: for ordinary
+        # callers the tracking callback schedules a release when settlement
+        # fails or is cancelled; an ordering-sensitive settlement task runs
+        # that fallback before the tracked task completes once started, while
+        # the tracker still owns cancellation before coroutine startup. The
+        # caller's finally-net skips via
         # usage_settlement_transferred, and reservations keep counting toward
         # limits until finalized/released, so a briefly-lagging settlement can
         # only over-restrict, never over-admit. Awaiting the ~5+2N-statement
@@ -387,16 +417,26 @@ class _ApiKeyUsageMixin:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             request_id=request_id,
+            release_on_failure=not wait_for_settlement,
         )
         if wait_for_settlement:
             # Ordering-sensitive callers (the websocket error path) must
             # commit the settlement before load-balancer health writes; they
             # opt into waiting while everything else stays detached.
+            settlement_committed = False
             with anyio.CancelScope(shield=True):
-                try:
-                    await asyncio.shield(task)
-                except Exception:  # failures release via the tracking callback
-                    pass
+                while True:
+                    try:
+                        settlement_committed = await asyncio.shield(task)
+                        break
+                    except asyncio.CancelledError:
+                        # Caller cancellation must not race fallback release
+                        # against the still-running settlement transaction.
+                        if task.cancelled():
+                            break
+                    except Exception:
+                        break
+            return settlement_committed
         return True
 
     def _track_stream_usage_settlement_task(
@@ -406,9 +446,17 @@ class _ApiKeyUsageMixin:
         api_key: ApiKeyData,
         api_key_reservation: ApiKeyUsageReservationData,
         request_id: str,
+        release_on_failure: bool = True,
     ) -> None:
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         proxy._background_cleanup_tasks.add(cast(asyncio.Task[None], task))
+
+        async def _release_after_failed_settlement() -> None:
+            await self._release_unsettled_stream_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                request_id=request_id,
+            )
 
         def _settlement_done(done_task: asyncio.Task[bool]) -> None:
             proxy._background_cleanup_tasks.discard(cast(asyncio.Task[None], done_task))
@@ -427,7 +475,7 @@ class _ApiKeyUsageMixin:
                     retry_persistence_failures=True,
                 )
                 self._schedule_cancel_safe_cleanup(
-                    release_coro,
+                    _release_after_failed_settlement(),
                     action="release_stream_api_key_reservation_after_cancelled_settlement",
                     request_id=request_id,
                 )
@@ -447,7 +495,7 @@ class _ApiKeyUsageMixin:
                         retry_persistence_failures=True,
                     )
                     self._schedule_cancel_safe_cleanup(
-                        release_coro,
+                        _release_after_failed_settlement(),
                         action="release_stream_api_key_reservation_after_failed_settlement",
                         request_id=request_id,
                     )

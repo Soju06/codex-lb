@@ -11,7 +11,6 @@ from typing import Any, AsyncIterator, Literal, Mapping, NoReturn, TypeVar, cast
 import aiohttp
 import anyio
 
-from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import (
     RefreshError,
     is_transient_refresh_contention,
@@ -138,13 +137,16 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.file_ops import _FileOpsMixin
 from app.modules.proxy._service.http_bridge import _HTTPBridgeMixin
 from app.modules.proxy._service.http_bridge.helpers import (
+    _TASK_CANCEL_TIMEOUT_SECONDS as _TASK_CANCEL_TIMEOUT_SECONDS,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _active_http_bridge_instance_ring as _active_http_bridge_instance_ring,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
-    _build_http_bridge_prewarm_text as _build_http_bridge_prewarm_text,
+    _await_cancelled_task as _await_cancelled_task,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
-    _cancel_and_track_cancelled_task as _cancel_and_track_cancelled_task,
+    _build_http_bridge_prewarm_text as _build_http_bridge_prewarm_text,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_active_owner as _durable_bridge_lookup_active_owner,
@@ -750,8 +752,6 @@ from app.modules.proxy.work_admission import WorkAdmissionController
 
 logger = logging.getLogger(__name__)
 
-_TASK_CANCEL_TIMEOUT_SECONDS = 1.0
-_TaskResultT = TypeVar("_TaskResultT")
 _ResponsesPayloadT = TypeVar("_ResponsesPayloadT", ResponsesRequest, ResponsesCompactRequest)
 _DOWNSTREAM_WEBSOCKET_IDLE_CLOSE_REASON = "Idle downstream websocket timeout"
 _DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS = 1.0
@@ -788,58 +788,6 @@ _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 # window this ensures the client sees a terminal event within ≈70s when the
 # upstream silently stops responding.
 _STREAM_KEEPALIVE_MAX_COUNT = 6
-
-
-async def _await_cancelled_task(
-    task: asyncio.Task[_TaskResultT],
-    *,
-    timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
-    label: str,
-    cancel: bool = True,
-    cleanup_tasks: set[asyncio.Task[None]] | None = None,
-) -> bool:
-    effective_timeout = max(float(timeout_seconds), 0.0)
-    remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
-    if remaining_drain_timeout is not None:
-        effective_timeout = min(effective_timeout, remaining_drain_timeout)
-
-    if cancel and not task.done():
-        try:
-            await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            _cancel_and_track_cancelled_task(
-                task,
-                label=label,
-                cleanup_tasks=cleanup_tasks,
-            )
-            raise
-    if cancel:
-        task.cancel()
-    try:
-        done, _ = await asyncio.wait({task}, timeout=effective_timeout)
-    except asyncio.CancelledError:
-        if not task.done():
-            _cancel_and_track_cancelled_task(
-                task,
-                label=label,
-                cleanup_tasks=cleanup_tasks,
-                cancel_task=False,
-            )
-        raise
-    if task not in done:
-        logger.warning("Timed out waiting for %s cancellation", label)
-        _cancel_and_track_cancelled_task(
-            task,
-            label=label,
-            cleanup_tasks=cleanup_tasks,
-            cancel_task=False,
-        )
-        return False
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return True
-    return True
 
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})

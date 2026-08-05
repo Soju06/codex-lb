@@ -39312,6 +39312,7 @@ async def test_retry_http_bridge_precreated_request_propagates_reader_restart(mo
         started_at=0.0,
         awaiting_response_created=True,
         request_text='{"type":"response.create"}',
+        transport="http",
     )
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-external-idle-retry", None),
@@ -39362,6 +39363,7 @@ async def test_retry_http_bridge_clean_close_keeps_hard_continuation_on_same_acc
         started_at=0.0,
         awaiting_response_created=True,
         request_text=json.dumps(original_payload, separators=(",", ":")),
+        transport="http",
         previous_response_id="resp_anchor",
         preferred_account_id=account.id,
         proxy_injected_previous_response_id=True,
@@ -39406,6 +39408,7 @@ async def test_retry_http_bridge_clean_close_keeps_hard_turn_state_on_same_accou
         started_at=0.0,
         awaiting_response_created=True,
         request_text='{"type":"response.create","input":"turn"}',
+        transport="http",
         hard_continuity_anchor=True,
     )
     session = proxy_service._HTTPBridgeSession(
@@ -39448,6 +39451,7 @@ async def test_retry_http_bridge_clean_close_allows_one_additional_retry(monkeyp
         started_at=0.0,
         awaiting_response_created=True,
         request_text='{"type":"response.create"}',
+        transport="http",
     )
     upstream = AsyncMock()
     session = proxy_service._HTTPBridgeSession(

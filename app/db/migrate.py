@@ -103,7 +103,18 @@ _SQLITE_FLOAT_TYPE_COMPAT_COLUMNS = frozenset(
 )
 _LEGACY_EXTRA_COLUMNS = frozenset(
     {
+        ("http_bridge_sessions", "requires_security_work_authorized"),
+        ("quota_planner_settings", "auto_redeem_expiring_reset_credits"),
+        ("quota_planner_settings", "reset_credit_redeem_lead_minutes"),
         ("request_logs", "slim_summary_json"),
+        ("sticky_sessions", "requires_security_work_authorized"),
+        ("usage_history", "requires_security_work_authorized"),
+    }
+)
+_LEGACY_NULLABLE_COLUMNS = frozenset(
+    {
+        ("sticky_sessions", "account_id"),
+        ("usage_history", "account_id"),
     }
 )
 
@@ -580,6 +591,20 @@ def _is_ignored_schema_drift(connection: Connection, diff: object) -> bool:
         column = diff[3]
         column_name = getattr(column, "name", None)
         if (str(diff[2]), str(column_name)) in _LEGACY_EXTRA_COLUMNS:
+            return True
+
+    if diff[0] == "modify_nullable" and len(diff) >= 7:
+        table_name = str(diff[2])
+        column_name = str(diff[3])
+        if (table_name, column_name) in _LEGACY_NULLABLE_COLUMNS:
+            return True
+
+    if diff[0] in {"add_fk", "remove_fk"} and len(diff) >= 2:
+        constraint = diff[1]
+        table = getattr(constraint, "table", None)
+        table_name = getattr(table, "name", None)
+        columns = {str(column.name) for column in getattr(constraint, "columns", ()) if getattr(column, "name", None)}
+        if table_name == "sticky_sessions" and columns == {"account_id"}:
             return True
 
     if connection.dialect.name == "sqlite" and diff[0] == "modify_type" and len(diff) >= 7:

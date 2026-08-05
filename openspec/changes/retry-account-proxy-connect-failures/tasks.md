@@ -5,6 +5,7 @@
 - [x] Add movable-account failover for raw HTTP/SSE and HTTP bridge startup.
 - [x] Preserve native WebSocket failover while applying the same confirmed-route backoff.
 - [x] Preserve hard continuity/file pins and the original failure when no replacement exists.
+- [x] Move a locally verified complete fresh replay off a dead previous-response owner without overriding other hard ownership.
 - [x] Defer dead-route account-health writes until request-scoped API-key settlement.
 - [x] Track HTTP-bridge settlement ownership per reservation generation and fail closed on unconfirmed release.
 - [x] Add core-client, load-balancer, HTTP/SSE, native WebSocket, and HTTP-bridge regressions.

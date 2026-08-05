@@ -8,7 +8,9 @@ When an account-routed transport reports that it could not connect to the select
 
 This behavior MUST cover raw HTTP/SSE, native Responses WebSocket, and the HTTP responses bridge. Before recording transient account backoff, the service MUST release response-create and stream leases held for the failed account. A request-scoped API-key reservation MUST remain singular across an internal pre-dispatch failover, MUST settle or release at the terminal request outcome before the account-health write, and MUST NOT be reacquired solely for the internal failover. If neither settlement nor fallback release can be confirmed, the service MUST leave the health write unapplied. HTTP-bridge startup cleanup MUST release only an unowned current request lifecycle, and each reservation lifecycle MUST drain only its own health writes after confirmed settlement or release. The confirmed failure MUST place the account at the existing bounded transient error-backoff floor, but MUST NOT pause, deactivate, rate-limit, or quota-penalize it.
 
-The service MUST NOT replay a request when dispatch is unknown or when the request depends on hard previous-response, turn-state, uploaded-file, single-account, or other required account ownership. If no eligible replacement account exists, the service MUST preserve the original sanitized upstream-unavailable failure instead of replacing it with a generated `no_accounts` error.
+When local continuity evidence verifies that a previous-response continuation contains a complete fresh replay which can be resent without its owner anchor, a confirmed pre-dispatch failure on that owner MUST remove the anchor and retry another eligible account. This exception MUST NOT apply when the request also depends on turn-state, uploaded-file, single-account, or other required account ownership, or after any output becomes downstream-visible.
+
+The service MUST NOT replay a request when dispatch is unknown or when the request depends on a previous-response owner without a verified complete fresh replay, turn-state, uploaded-file, single-account, or other required account ownership. If no eligible replacement account exists, the service MUST preserve the original sanitized upstream-unavailable failure instead of replacing it with a generated `no_accounts` error.
 
 #### Scenario: POST uses a healthy endpoint from the same proxy pool
 
@@ -35,6 +37,15 @@ The service MUST NOT replay a request when dispatch is unknown or when the reque
 - **WHEN** another account is otherwise eligible
 - **THEN** the service does not send the request to the other account
 - **AND** it returns the sanitized upstream-unavailable failure for the required account
+
+#### Scenario: verified full replay moves off a dead previous-response owner
+
+- **GIVEN** a previous-response continuation whose complete fresh input has been verified locally
+- **AND** the request has no turn-state, uploaded-file, single-account, or other required ownership
+- **WHEN** the previous-response owner's proxy refuses the connection before dispatch
+- **THEN** the service removes the previous-response owner anchor
+- **AND** it excludes the failed owner and completes through another eligible account
+- **AND** no failure event from the failed owner is forwarded downstream
 
 #### Scenario: ambiguous transport failure is not replayed
 

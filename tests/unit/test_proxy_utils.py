@@ -31619,6 +31619,88 @@ async def test_stream_verified_fresh_replay_moves_off_owner_after_previsible_quo
 
 
 @pytest.mark.asyncio
+async def test_stream_verified_fresh_replay_moves_off_dead_owner_after_initial_connect_failure(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    owner_account = _make_account("acc_stream_replay_dead_owner")
+    replacement_account = _make_account("acc_stream_replay_dead_owner_replacement")
+    session_id = "sid_stream_verified_dead_owner_replay"
+    previous_response_id = "resp_stream_verified_dead_owner"
+    request_logs.response_owner_by_id[(previous_response_id, None, session_id)] = owner_account.id
+    initial_input: list[JsonValue] = [{"role": "user", "content": "first turn"}]
+    full_input: list[JsonValue] = [
+        *initial_input,
+        {"role": "user", "content": "fresh full resend after dead route"},
+    ]
+    service._websocket_continuity_index[(session_id, None)] = proxy_service._WebSocketContinuityState(
+        last_completed_response_id=previous_response_id,
+        last_completed_input_count=len(initial_input),
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(initial_input),
+    )
+    selection_calls: list[dict[str, object]] = []
+    streamed_payloads: list[ResponsesRequest] = []
+    streamed_account_ids: list[str | None] = []
+    record_error_backoff = AsyncMock()
+    handle_stream_error = AsyncMock()
+
+    async def fake_select_account(**kwargs):
+        selection_calls.append(dict(kwargs))
+        if kwargs.get("required_account_id") == owner_account.id:
+            return AccountSelection(account=owner_account, error_message=None)
+        assert kwargs.get("required_account_id") is None
+        assert kwargs.get("exclude_account_ids") == {owner_account.id}
+        assert kwargs.get("reallocate_sticky") is True
+        return AccountSelection(account=replacement_account, error_message=None)
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, base_url, raise_for_status, kwargs
+        streamed_payloads.append(payload)
+        streamed_account_ids.append(account_id)
+        if account_id == owner_account.chatgpt_account_id:
+            raise _pre_dispatch_proxy_connect_error("verified owner proxy route unavailable")
+        assert account_id == replacement_account.chatgpt_account_id
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_dead_owner_replay_ok",'
+            '"status":"completed","usage":{"input_tokens":1,"output_tokens":1,'
+            '"total_tokens":2}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", AsyncMock(side_effect=fake_select_account))
+    monkeypatch.setattr(service._load_balancer, "record_error_backoff", record_error_backoff)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "test verified full replay after dead route",
+            "input": full_input,
+            "previous_response_id": previous_response_id,
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": session_id})]
+
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["response"]["id"] == "resp_dead_owner_replay_ok"
+    assert [streamed.previous_response_id for streamed in streamed_payloads] == [previous_response_id, None]
+    assert streamed_payloads[1].input == full_input
+    assert streamed_account_ids == [
+        owner_account.chatgpt_account_id,
+        replacement_account.chatgpt_account_id,
+    ]
+    assert len(selection_calls) == 2
+    record_error_backoff.assert_awaited_once_with(owner_account)
+    handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_verified_fresh_replay_moves_off_owner_after_refresh_connect_failure(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()

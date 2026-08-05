@@ -44,6 +44,13 @@ account with the original sanitized failure. Soft prompt-cache and
 process-session affinity may move; the failed account's sticky binding is
 reallocated so the replacement selection does not immediately loop back.
 
+A previous-response continuation is movable when local continuity evidence
+verifies that its input is a complete fresh replay which can be resent without
+the owner anchor. A confirmed pre-dispatch failure may remove that anchor before
+replacement selection. This exception does not override turn-state or uploaded-
+file ownership, forced single-account routing, another required-account contract,
+or downstream-visible output.
+
 ## Account backoff and resource ordering
 
 A confirmed dead account route is stronger evidence than a generic transient

@@ -1965,10 +1965,25 @@ class _StreamingRetryMixin:
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
                                     await _record_or_defer_confirmed_route_backoff(account)
-                                    can_try_other_account = (
-                                        not require_preferred_account
-                                        and account.id != file_preferred_account_id
-                                        and attempt < max_attempts - 1
+                                    verified_owner_replay_moved = False
+                                    if (
+                                        attempt < max_attempts - 1
+                                        and routing_strategy != "single_account"
+                                        and file_preferred_account_id is None
+                                        and turn_state_owner_account_id is None
+                                        and not settlement.downstream_visible
+                                    ):
+                                        verified_owner_replay_moved = _move_verified_fresh_replay_from_owner(
+                                            account_id=account.id,
+                                            outcome="owner_initial_proxy_connect_failure",
+                                        )
+                                    can_try_other_account = bool(
+                                        attempt < max_attempts - 1
+                                        and routing_strategy != "single_account"
+                                        and file_preferred_account_id is None
+                                        and turn_state_owner_account_id is None
+                                        and not settlement.downstream_visible
+                                        and not require_preferred_account
                                     )
                                     if not can_try_other_account:
                                         # Hard account ownership or exhausted
@@ -1980,7 +1995,8 @@ class _StreamingRetryMixin:
                                     last_pre_dispatch_transport_error = tex
                                     transient_failed_account_id = account.id
                                     excluded_account_ids.add(account.id)
-                                    affinity = replace(affinity, reallocate_sticky=True)
+                                    if not verified_owner_replay_moved:
+                                        affinity = replace(affinity, reallocate_sticky=True)
                                     _facade().logger.info(
                                         "Retrying stream after confirmed pre-dispatch proxy connect failure "
                                         "request_id=%s account_id=%s attempt=%d",

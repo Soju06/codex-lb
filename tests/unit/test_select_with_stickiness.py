@@ -14,7 +14,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.core.balancer import AccountState, RoutingCost, RoutingCostsByAccount, RoutingStrategy
+from app.core.balancer import (
+    HEALTH_TIER_DRAINING,
+    AccountState,
+    RoutingCost,
+    RoutingCostsByAccount,
+    RoutingStrategy,
+)
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.modules.proxy.load_balancer import LoadBalancer
 
@@ -983,6 +989,55 @@ async def test_sticky_thread_below_threshold_does_not_reallocate():
     assert result.account is not None
     assert result.account.account_id == "a"
     repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_usage_draining_burn_first_does_not_reallocate_soft_sticky_owner():
+    pinned = _active("pinned", used_percent=20.0)
+    burn = _active("burn", used_percent=98.0, routing_policy="burn_first")
+    burn.health_tier = HEALTH_TIER_DRAINING
+    repo = _make_sticky_repo(existing_account_id=pinned.account_id)
+
+    result = await _invoke_stickiness(
+        [pinned, burn],
+        "codex-session-123",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == pinned.account_id
+    repo.delete.assert_not_called()
+    repo.upsert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_fresh_sticky_mapping_can_select_usage_draining_burn_first():
+    fallback = _active("fallback", used_percent=20.0)
+    burn = _active("burn", used_percent=98.0, routing_policy="burn_first")
+    burn.health_tier = HEALTH_TIER_DRAINING
+    repo = _make_sticky_repo(existing_account_id=None)
+
+    result = await _invoke_stickiness(
+        [fallback, burn],
+        "new-codex-session",
+        repo,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_max_age_seconds=None,
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == burn.account_id
+    repo.delete.assert_not_called()
+    repo.upsert.assert_called_once_with(
+        "new-codex-session",
+        burn.account_id,
+        kind=StickySessionKind.CODEX_SESSION,
+    )
 
 
 @pytest.mark.asyncio

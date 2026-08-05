@@ -21,6 +21,7 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
+    evaluate_health_tier,
     select_account,
 )
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -1105,6 +1106,7 @@ async def _select_with_stickiness(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs_by_account_id=routing_costs_by_account_id,
+        allow_usage_draining_burn_first=existing is None,
     )
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
         return finish_selection(chosen, persist_account_id=chosen.account.account_id)
@@ -1308,6 +1310,7 @@ def _select_account_preferring_budget_safe(
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
+    allow_usage_draining_burn_first: bool = False,
 ) -> SelectionResult:
     state_list = list(states)
     if routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
@@ -1329,6 +1332,48 @@ def _select_account_preferring_budget_safe(
         )
         if recovery_probe.account is not None:
             return recovery_probe
+    if allow_usage_draining_burn_first and routing_strategy not in (
+        "sequential_drain",
+        "reset_drain",
+        "single_account",
+    ):
+        now = time.time()
+        usage_draining_burn_first = [
+            state for state in state_list if _is_usage_only_draining_burn_first(state, now=now)
+        ]
+        healthy_fallbacks = [state for state in state_list if state.health_tier == HEALTH_TIER_HEALTHY]
+        fallback = select_account(
+            healthy_fallbacks,
+            prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=False,
+            deterministic_probe=deterministic_probe,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs=routing_costs_by_account_id,
+        )
+        if usage_draining_burn_first and fallback.account is not None:
+            burn_first = select_account(
+                usage_draining_burn_first,
+                prefer_earlier_reset=prefer_earlier_reset,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                routing_strategy=routing_strategy,
+                allow_backoff_fallback=False,
+                deterministic_probe=deterministic_probe,
+                relative_availability_power=relative_availability_power,
+                relative_availability_top_k=relative_availability_top_k,
+                traffic_class=traffic_class,
+                ignore_standard_quota=ignore_standard_quota,
+                routing_costs=routing_costs_by_account_id,
+            )
+            if burn_first.account is not None:
+                return burn_first
+        elif usage_draining_burn_first:
+            excluded_account_ids = {state.account_id for state in usage_draining_burn_first}
+            state_list = [state for state in state_list if state.account_id not in excluded_account_ids]
     state_budget_threshold = (
         (
             lambda state: _state_above_sticky_budget_threshold(
@@ -1428,6 +1473,37 @@ def _select_account_preferring_budget_safe(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs=routing_costs_by_account_id,
+    )
+
+
+def _is_usage_only_draining_burn_first(
+    state: AccountState,
+    *,
+    now: float,
+) -> bool:
+    if (
+        state.status != AccountStatus.ACTIVE
+        or state.routing_policy != ROUTING_POLICY_BURN_FIRST
+        or state.health_tier != HEALTH_TIER_DRAINING
+        or (state.used_percent is not None and state.used_percent >= 100.0)
+        or (state.secondary_used_percent is not None and state.secondary_used_percent >= 100.0)
+    ):
+        return False
+    usage_only_state = replace(
+        state,
+        health_tier=HEALTH_TIER_HEALTHY,
+        error_count=0,
+        last_error_at=None,
+    )
+    error_only_state = replace(
+        state,
+        health_tier=HEALTH_TIER_HEALTHY,
+        used_percent=None,
+        secondary_used_percent=None,
+    )
+    return (
+        evaluate_health_tier(usage_only_state, now=now) == HEALTH_TIER_DRAINING
+        and evaluate_health_tier(error_only_state, now=now) == HEALTH_TIER_HEALTHY
     )
 
 

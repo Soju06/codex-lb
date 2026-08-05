@@ -428,6 +428,130 @@ async def test_select_account_prefers_budget_safe_account_when_any_exist() -> No
 
 
 @pytest.mark.asyncio
+async def test_unbound_selection_drains_burn_first_with_healthy_fallback() -> None:
+    fallback = _make_account("acc-fallback", "fallback@example.com")
+    burn = _make_account("acc-burn", "burn@example.com")
+    burn.routing_policy = "burn_first"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary = {
+        fallback.id: UsageHistory(
+            id=1,
+            account_id=fallback.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=20.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        burn.id: UsageHistory(
+            id=2,
+            account_id=burn.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=98.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        fallback.id: UsageHistory(
+            id=3,
+            account_id=fallback.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=20.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        burn.id: UsageHistory(
+            id=4,
+            account_id=burn.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=98.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+    accounts_repo = StubAccountsRepository([fallback, burn])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == burn.id
+
+
+@pytest.mark.asyncio
+async def test_required_continuity_owner_ignores_usage_draining_burn_first() -> None:
+    owner = _make_account("acc-owner", "owner@example.com")
+    burn = _make_account("acc-burn", "burn@example.com")
+    burn.routing_policy = "burn_first"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary = {
+        owner.id: UsageHistory(
+            id=1,
+            account_id=owner.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=20.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+        burn.id: UsageHistory(
+            id=2,
+            account_id=burn.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=98.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        ),
+    }
+    secondary = {
+        owner.id: UsageHistory(
+            id=3,
+            account_id=owner.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=20.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+        burn.id: UsageHistory(
+            id=4,
+            account_id=burn.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=98.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        ),
+    }
+    accounts_repo = StubAccountsRepository([owner, burn])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(
+        required_account_id=owner.id,
+        required_continuity_owner=True,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == owner.id
+
+
+@pytest.mark.asyncio
 async def test_budget_safe_filter_ignores_secondary_only_pressure_when_primary_safe() -> None:
     weekly_pressured_account = _make_account("acc-weekly-pressured", "weekly-pressured@example.com")
     primary_pressured_account = _make_account("acc-primary-pressured", "primary-pressured@example.com")

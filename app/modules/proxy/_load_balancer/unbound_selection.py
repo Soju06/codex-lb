@@ -184,6 +184,7 @@ async def run_unbound_selection_path(
                     traffic_class=traffic_class,
                     ignore_standard_quota=False,
                     routing_costs_by_account_id=effective_routing_costs,
+                    allow_usage_draining_burn_first=required_account_id is None,
                 )
                 probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
                     selection_states,

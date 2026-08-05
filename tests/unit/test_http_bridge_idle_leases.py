@@ -18,6 +18,7 @@ from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import openai_error
 from app.db.models import AccountStatus
 from app.modules.api_keys.service import ApiKeyRequestUsageBudget
+from app.modules.proxy import load_balancer as load_balancer_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 
@@ -169,6 +170,167 @@ async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
         kind="stream",
         estimated_tokens=expected_tokens,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("single_account_id", "expected_required_account_id", "expected_candidate_account_ids"),
+    (
+        ("acc-bridge", "acc-bridge", None),
+        ("  ", None, frozenset()),
+    ),
+)
+async def test_keyed_reacquire_passes_scoped_fair_share_context(
+    monkeypatch: pytest.MonkeyPatch,
+    single_account_id: str,
+    expected_required_account_id: str | None,
+    expected_candidate_account_ids: frozenset[str] | None,
+) -> None:
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    api_key = cast(
+        Any,
+        SimpleNamespace(
+            id="key-heavy",
+            account_assignment_scope_enabled=True,
+            assigned_account_ids=["acc-bridge", "acc-peer"],
+        ),
+    )
+    session = _make_bridge_session()
+    session.key = proxy_service._HTTPBridgeSessionKey("session_header", "idle-lease-test", api_key.id)
+    session.api_key = api_key
+    session.request_service_tier = "priority"
+    lease = _make_lease("l-keyed")
+    acquire_account_lease = AsyncMock(return_value=lease)
+    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=acquire_account_lease))
+    settings = SimpleNamespace(
+        proxy_api_key_fair_share_congestion_threshold_pct=80,
+        proxy_account_stream_recovery_reserve=1,
+        routing_strategy="single_account",
+        single_account_id=single_account_id,
+    )
+    caps = proxy_service.AccountConcurrencyCaps(response_create_limit=3, stream_limit=5)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "effective_account_concurrency_caps",
+        lambda dashboard_settings: caps,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-keyed-reacquire",
+        model="gpt-5.2",
+        service_tier="priority",
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        skip_request_log=True,
+        api_key=api_key,
+        excluded_account_ids={"acc-excluded"},
+        require_security_work_authorized=True,
+    )
+
+    async with session.pending_lock:
+        await mixin._ensure_http_bridge_session_stream_lease_locked(
+            fake_self,
+            session,
+            request_state=request_state,
+        )
+
+    assert session.account_lease is lease
+    acquire_account_lease.assert_awaited_once_with(
+        "acc-bridge",
+        kind="stream",
+        estimated_tokens=0.0,
+        concurrency_caps=caps,
+        fair_share_context=load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="key-heavy",
+            threshold_pct=80,
+            # Idle direct reacquisition does not consume the recovery reserve;
+            # fair-share capacity must match the hard-cap admission below it.
+            stream_reserve_slots=0,
+            model="gpt-5.2",
+            service_tier="priority",
+            account_ids=frozenset({"acc-bridge", "acc-peer"}),
+            required_account_id=expected_required_account_id,
+            excluded_account_ids=frozenset({"acc-excluded"}),
+            require_security_work_authorized=True,
+            candidate_account_ids=expected_candidate_account_ids,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_keyed_reacquire_fair_share_denial_raises_stable_429_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    api_key = cast(
+        Any,
+        SimpleNamespace(
+            id="key-heavy",
+            account_assignment_scope_enabled=False,
+            assigned_account_ids=[],
+        ),
+    )
+    session = _make_bridge_session()
+    session.key = proxy_service._HTTPBridgeSessionKey("session_header", "idle-lease-test", api_key.id)
+    session.api_key = api_key
+    decision = load_balancer_module.FairShareDecision(
+        admitted=False,
+        congested=True,
+        fair_share=2,
+        pool_capacity=4,
+        pool_inflight=3,
+        active_key_count=2,
+        requester_inflight=2,
+    )
+    acquire_account_lease = AsyncMock(side_effect=load_balancer_module.StreamLeaseFairShareDenied(decision))
+    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=acquire_account_lease))
+    settings = SimpleNamespace(
+        proxy_api_key_fair_share_congestion_threshold_pct=80,
+        proxy_account_stream_recovery_reserve=0,
+    )
+    caps = proxy_service.AccountConcurrencyCaps(response_create_limit=3, stream_limit=5)
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(get=AsyncMock(return_value=settings)),
+    )
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "effective_account_concurrency_caps",
+        lambda dashboard_settings: caps,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-keyed-fair-share-denial",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        skip_request_log=True,
+        api_key=api_key,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async with session.pending_lock:
+            await mixin._ensure_http_bridge_session_stream_lease_locked(
+                fake_self,
+                session,
+                request_state=request_state,
+            )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.payload["error"]["type"] == "rate_limit_error"
+    assert exc_info.value.payload["error"]["code"] == "api_key_stream_fair_share"
+    assert "key holds 2 of a fair share of 2" in exc_info.value.payload["error"]["message"]
+    assert "3/4 pool streams" in exc_info.value.payload["error"]["message"]
+    assert session.account_lease is None
 
 
 @pytest.mark.asyncio

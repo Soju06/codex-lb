@@ -117,9 +117,11 @@ from app.modules.proxy.cap_partitioning import (
     partition_cap,
 )
 from app.modules.proxy.fair_share import (
+    API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
     FairShareDecision,
     effective_stream_pool_capacity,
     evaluate_stream_fair_share,
+    fair_share_denial_message,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.quota_planner.logic import PlannerSettings
@@ -193,6 +195,32 @@ class AccountSelection:
     error_code: str | None = None
     lease: AccountLease | None = None
     catalog_omission_quota_admission: CatalogOmissionQuotaAdmission | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StreamLeaseFairShareContext:
+    """API-key and candidate-pool inputs for a direct stream reacquire."""
+
+    api_key_id: str
+    threshold_pct: int
+    stream_reserve_slots: int = 0
+    model: str | None = None
+    service_tier: str | None = None
+    account_ids: frozenset[str] | None = None
+    required_account_id: str | None = None
+    excluded_account_ids: frozenset[str] = frozenset()
+    require_security_work_authorized: bool = False
+    candidate_account_ids: frozenset[str] | None = None
+
+
+class StreamLeaseFairShareDenied(Exception):
+    """Raised when a direct stream reacquire is denied by fair share."""
+
+    error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
+
+    def __init__(self, decision: FairShareDecision) -> None:
+        self.decision = decision
+        super().__init__(fair_share_denial_message(decision))
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,10 +314,60 @@ class LoadBalancer:
         kind: AccountLeaseKind,
         estimated_tokens: float = 0.0,
         concurrency_caps: AccountConcurrencyCaps | None = None,
+        fair_share_context: StreamLeaseFairShareContext | None = None,
     ) -> AccountLease | None:
         caps = concurrency_caps or effective_account_concurrency_caps()
+        candidate_account_ids: frozenset[str] | None = None
+        if (
+            kind == "stream"
+            and fair_share_context is not None
+            and fair_share_context.threshold_pct > 0
+            and caps.stream_limit > 0
+        ):
+            candidate_account_ids = fair_share_context.candidate_account_ids
+            if candidate_account_ids is None:
+                selection_inputs = await self._load_selection_inputs(
+                    model=fair_share_context.model,
+                    service_tier=fair_share_context.service_tier,
+                    account_ids=fair_share_context.account_ids,
+                )
+                candidate_accounts = selection_inputs.accounts
+                if fair_share_context.required_account_id is not None:
+                    candidate_accounts = [
+                        account
+                        for account in candidate_accounts
+                        if account.id == fair_share_context.required_account_id
+                    ]
+                if fair_share_context.require_security_work_authorized:
+                    candidate_accounts = [
+                        account for account in candidate_accounts if bool(account.security_work_authorized)
+                    ]
+                if fair_share_context.excluded_account_ids:
+                    candidate_accounts = [
+                        account
+                        for account in candidate_accounts
+                        if account.id not in fair_share_context.excluded_account_ids
+                    ]
+                candidate_account_ids = frozenset(account.id for account in candidate_accounts)
         async with self._runtime_lock:
             self._reclaim_stale_account_leases_locked()
+            if candidate_account_ids is not None and account_id not in candidate_account_ids:
+                logger.warning(
+                    "Direct stream reacquire target is outside the fair-share candidate pool candidate_count=%s",
+                    len(candidate_account_ids),
+                )
+                return None
+            if kind == "stream" and fair_share_context is not None and candidate_account_ids is not None:
+                fair_share_denial = self._api_key_stream_fair_share_denial_locked(
+                    api_key_id=fair_share_context.api_key_id,
+                    lease_kind=kind,
+                    candidate_account_ids=candidate_account_ids,
+                    caps=caps,
+                    stream_reserve_slots=fair_share_context.stream_reserve_slots,
+                    threshold_pct=fair_share_context.threshold_pct,
+                )
+                if fair_share_denial is not None:
+                    raise StreamLeaseFairShareDenied(fair_share_denial)
             runtime = self._runtime.setdefault(account_id, RuntimeState())
             if kind == "response_create":
                 cap = caps.response_create_limit
@@ -305,6 +383,9 @@ class LoadBalancer:
                 account_id,
                 kind=kind,
                 estimated_tokens=estimated_tokens,
+                api_key_id=(
+                    fair_share_context.api_key_id if kind == "stream" and fair_share_context is not None else None
+                ),
             )
 
     async def account_pressure_snapshot(self, account_id: str) -> tuple[int, int, float]:

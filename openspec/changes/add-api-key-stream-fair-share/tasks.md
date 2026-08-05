@@ -11,3 +11,4 @@
 - [x] Setting `proxy_api_key_fair_share_congestion_threshold_pct` (env default 0, ge=0 le=100) + nullable `DashboardSettings` column + Alembic migration + settings schemas/repository/service/api plumbing + audit trace list + `docs/reference/settings.md` regen
 - [x] Frontend: settings schema/payload/routing-settings field (+ tests), mock factories, en/ko/zh-CN locale keys, before/after screenshots
 - [x] Contract guards: `test_load_balancer.py` / `test_load_balancer_contract.py` unchanged-defaults + denial-shape cases; settings round-trip/null-inherit/range tests; `openspec validate add-api-key-stream-fair-share --strict`
+- [x] Idle HTTP bridge direct stream reacquisition: preserve API-key attribution even while disabled, evaluate fair share over the initial-selection-equivalent candidate pool without applying the recovery reserve, keep gate + lease mutation atomic, and surface the stable fair-share 429 envelope — load-balancer + bridge regression tests

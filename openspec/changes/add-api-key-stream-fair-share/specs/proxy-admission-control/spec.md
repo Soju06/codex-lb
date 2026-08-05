@@ -70,7 +70,7 @@ A fair-share denial MUST surface the stable local-overload reason `api_key_strea
 
 ### Requirement: Per-API-key stream accounting follows the lease lifecycle
 
-Every stream lease acquired through account selection MUST record the requesting API key, and the per-account per-key in-flight map MUST be maintained under the runtime lock across acquire, explicit release, and stale reclaim, with map entries removed when a key's count reaches zero and removed together with pruned account runtime state. Account-scoped keys MUST be measured against their scoped candidate accounts only. On the sticky selection path the gate decision MUST be re-validated in the commit lock section before the lease is acquired, so concurrent selections for one key cannot overshoot the share between the filter and commit sections; the unbound path MUST evaluate the gate and acquire the lease in a single lock section.
+Every stream lease acquired through account selection or direct idle-session reacquisition MUST record the requesting API key, and the per-account per-key in-flight map MUST be maintained under the runtime lock across acquire, explicit release, and stale reclaim, with map entries removed when a key's count reaches zero and removed together with pruned account runtime state. Account-scoped keys MUST be measured against their scoped candidate accounts only. When the fair-share gate is enabled, direct keyed reacquisition MUST evaluate it over the same model- and service-tier-eligible routing candidate set as initial selection, including API-key assignment scope, single-account routing, excluded accounts, and security-work authorization. The reacquisition target MUST then belong to that filtered candidate set; otherwise reacquisition MUST fail closed without acquiring a lease or changing counters. Direct reacquisition MUST NOT apply the stream recovery reserve because it uses normal hard-cap admission rather than selection-time recovery reserve, and MUST evaluate candidate membership, the gate, and attributed lease acquisition in the same runtime-lock section. A disabled threshold MUST still preserve API-key attribution without loading or validating candidate accounts. On the sticky selection path the gate decision MUST be re-validated in the commit lock section before the lease is acquired, so concurrent selections for one key cannot overshoot the share between the filter and commit sections; the unbound path MUST evaluate the gate and acquire the lease in a single lock section.
 
 #### Scenario: Release and stale reclaim decrement the owning key
 
@@ -89,3 +89,46 @@ Every stream lease acquired through account selection MUST record the requesting
 - **GIVEN** a congested pool and one key one stream below its fair share
 - **WHEN** two sticky selections for that key pass the filter-phase gate concurrently
 - **THEN** at most one acquires a lease and the other is denied at the commit re-check
+
+#### Scenario: Idle HTTP bridge reacquisition cannot bypass fair share
+
+- **GIVEN** an API-key-owned HTTP bridge session released its stream lease while idle
+- **AND** the key's eligible scoped candidate pool is congested and the key is at its fair share
+- **WHEN** the next turn directly reacquires the session's stream lease
+- **THEN** reacquisition is denied under the runtime lock without changing lease counters
+- **AND** the bridge surfaces HTTP 429 with `error.type` `rate_limit_error` and `error.code` `api_key_stream_fair_share`
+
+#### Scenario: Disabled direct reacquisition remains attributed
+
+- **GIVEN** an API-key-owned HTTP bridge session and a disabled fair-share threshold
+- **WHEN** the next turn directly reacquires its stream lease
+- **THEN** the lease records the API key without loading or evaluating a candidate pool
+
+#### Scenario: Direct reacquisition preserves routing candidate constraints
+
+- **GIVEN** an API-key-owned idle bridge turn is constrained by account assignment, single-account routing, account exclusions, or security-work authorization
+- **WHEN** the fair-share gate reconstructs the candidate pool for direct reacquisition
+- **THEN** it applies the same constraints as initial account selection before computing pool capacity and in-flight counts
+
+#### Scenario: Filtered-out direct target fails closed
+
+- **GIVEN** the fair-share gate is enabled
+- **AND** account assignment, single-account routing, account exclusion, or security-work authorization removes the idle session owner from the current candidate pool
+- **WHEN** that session attempts direct stream-lease reacquisition
+- **THEN** no lease is acquired and no per-account or per-key counter changes
+- **AND** the filtered owner cannot sit outside the measured pool and bypass fair share
+
+#### Scenario: Unconfigured single-account routing remains fail closed
+
+- **GIVEN** the fair-share gate is enabled
+- **AND** routing strategy is `single_account` but no non-blank single account ID is configured
+- **WHEN** an idle session attempts direct stream-lease reacquisition
+- **THEN** the routing candidate set is empty and no lease is acquired
+- **AND** the configuration does not expand to the unrestricted account pool
+
+#### Scenario: Direct reacquisition does not consume recovery reserve
+
+- **GIVEN** the configured stream recovery reserve is greater than zero
+- **WHEN** an idle bridge turn directly reacquires its stream lease
+- **THEN** fair-share capacity uses the same normal stream slots as hard-cap reacquisition
+- **AND** the selection-time recovery reserve does not reduce that capacity

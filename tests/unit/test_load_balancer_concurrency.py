@@ -3339,6 +3339,251 @@ async def test_stream_lease_api_key_accounting_tracks_acquire_release_and_delete
 
 
 @pytest.mark.asyncio
+async def test_direct_keyed_stream_reacquire_gates_and_attributes_atomically() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-direct-reacquire")
+    account_a, account_b = accounts
+    candidate_account_ids = frozenset(account.id for account in accounts)
+    disabled_heavy_context = load_balancer_module.StreamLeaseFairShareContext(
+        api_key_id="heavy",
+        threshold_pct=0,
+        candidate_account_ids=candidate_account_ids,
+    )
+    disabled_light_context = load_balancer_module.StreamLeaseFairShareContext(
+        api_key_id="light",
+        threshold_pct=0,
+        candidate_account_ids=candidate_account_ids,
+    )
+    heavy_lease = await balancer.acquire_account_lease(
+        account_b.id,
+        kind="stream",
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        fair_share_context=disabled_heavy_context,
+    )
+    light_lease = await balancer.acquire_account_lease(
+        account_a.id,
+        kind="stream",
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        fair_share_context=disabled_light_context,
+    )
+    assert heavy_lease is not None and heavy_lease.api_key_id == "heavy"
+    assert light_lease is not None and light_lease.api_key_id == "light"
+
+    # C = 4 and T = 2 at a 50% threshold, so heavy is one stream below its
+    # fair share of 2. The gate and lease mutation must share one lock: two
+    # concurrent direct reacquires may fill that one slot exactly once.
+    fair_share_context = load_balancer_module.StreamLeaseFairShareContext(
+        api_key_id="heavy",
+        threshold_pct=50,
+        candidate_account_ids=candidate_account_ids,
+    )
+    results = await asyncio.gather(
+        *(
+            balancer.acquire_account_lease(
+                account_a.id,
+                kind="stream",
+                concurrency_caps=_FAIR_SHARE_CAPS,
+                fair_share_context=fair_share_context,
+            )
+            for _ in range(2)
+        ),
+        return_exceptions=True,
+    )
+
+    admitted = [result for result in results if isinstance(result, load_balancer_module.AccountLease)]
+    denied = [result for result in results if isinstance(result, load_balancer_module.StreamLeaseFairShareDenied)]
+    assert len(admitted) == 1
+    assert admitted[0].api_key_id == "heavy"
+    assert len(denied) == 1
+    assert denied[0].decision.requester_inflight == 2
+    pressure_snapshots = [await balancer.account_pressure_snapshot(account.id) for account in accounts]
+    assert sum(snapshot[1] for snapshot in pressure_snapshots) == 3
+
+    await balancer.release_account_lease(admitted[0])
+    readmitted = await balancer.acquire_account_lease(
+        account_a.id,
+        kind="stream",
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        fair_share_context=fair_share_context,
+    )
+    assert readmitted is not None
+    assert readmitted.api_key_id == "heavy"
+
+
+@pytest.mark.asyncio
+async def test_direct_keyed_stream_reacquire_loads_the_scoped_candidate_pool() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-direct-scope")
+    account_a, account_b = accounts
+    caps = load_balancer_module.AccountConcurrencyCaps(response_create_limit=4, stream_limit=4)
+    all_candidate_ids = frozenset(account.id for account in accounts)
+
+    for api_key_id in ("heavy", "heavy", "light"):
+        lease = await balancer.acquire_account_lease(
+            account_a.id,
+            kind="stream",
+            concurrency_caps=caps,
+            fair_share_context=load_balancer_module.StreamLeaseFairShareContext(
+                api_key_id=api_key_id,
+                threshold_pct=0,
+                candidate_account_ids=all_candidate_ids,
+            ),
+        )
+        assert lease is not None
+
+    # The API key can use only account A. Its actual pool is therefore C = 4,
+    # T = 3 and fair share = 2; measuring the unscoped two-account pool would
+    # incorrectly produce C = 8 and admit this reacquire.
+    scoped_context = load_balancer_module.StreamLeaseFairShareContext(
+        api_key_id="heavy",
+        threshold_pct=50,
+        model=None,
+        service_tier=None,
+        account_ids=frozenset({account_a.id}),
+    )
+    with pytest.raises(load_balancer_module.StreamLeaseFairShareDenied) as exc_info:
+        await balancer.acquire_account_lease(
+            account_a.id,
+            kind="stream",
+            concurrency_caps=caps,
+            fair_share_context=scoped_context,
+        )
+
+    assert exc_info.value.decision.pool_capacity == 4
+    assert exc_info.value.decision.pool_inflight == 3
+    assert exc_info.value.decision.requester_inflight == 2
+    assert (await balancer.account_pressure_snapshot(account_b.id))[1] == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_keyed_stream_reacquire_preserves_selection_candidate_filters() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-direct-selection-filters")
+    account_a, account_b = accounts
+    account_a.security_work_authorized = True
+    account_b.security_work_authorized = False
+    caps = load_balancer_module.AccountConcurrencyCaps(response_create_limit=4, stream_limit=4)
+    all_candidate_ids = frozenset(account.id for account in accounts)
+
+    for api_key_id in ("heavy", "heavy", "light"):
+        lease = await balancer.acquire_account_lease(
+            account_a.id,
+            kind="stream",
+            concurrency_caps=caps,
+            fair_share_context=load_balancer_module.StreamLeaseFairShareContext(
+                api_key_id=api_key_id,
+                threshold_pct=0,
+                candidate_account_ids=all_candidate_ids,
+            ),
+        )
+        assert lease is not None
+
+    constrained_contexts = (
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            account_ids=frozenset({account_a.id}),
+        ),
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            required_account_id=account_a.id,
+        ),
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            excluded_account_ids=frozenset({account_b.id}),
+        ),
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            require_security_work_authorized=True,
+        ),
+    )
+
+    for context in constrained_contexts:
+        with pytest.raises(load_balancer_module.StreamLeaseFairShareDenied) as exc_info:
+            await balancer.acquire_account_lease(
+                account_a.id,
+                kind="stream",
+                concurrency_caps=caps,
+                fair_share_context=context,
+            )
+
+        assert exc_info.value.decision.pool_capacity == 4
+        assert exc_info.value.decision.pool_inflight == 3
+        assert exc_info.value.decision.requester_inflight == 2
+
+
+@pytest.mark.asyncio
+async def test_direct_keyed_stream_reacquire_rejects_target_outside_filtered_candidates() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-direct-target-filtered")
+    target_account, eligible_peer = accounts
+    target_account.security_work_authorized = False
+    eligible_peer.security_work_authorized = True
+    caps = load_balancer_module.AccountConcurrencyCaps(response_create_limit=4, stream_limit=4)
+    contexts_excluding_target = (
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            account_ids=frozenset({eligible_peer.id}),
+        ),
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            required_account_id=eligible_peer.id,
+        ),
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            excluded_account_ids=frozenset({target_account.id}),
+        ),
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            require_security_work_authorized=True,
+        ),
+        load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="heavy",
+            threshold_pct=50,
+            candidate_account_ids=frozenset(),
+        ),
+    )
+
+    for context in contexts_excluding_target:
+        lease = await balancer.acquire_account_lease(
+            target_account.id,
+            kind="stream",
+            concurrency_caps=caps,
+            fair_share_context=context,
+        )
+
+        assert lease is None
+        assert (await balancer.account_pressure_snapshot(target_account.id))[1] == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_keyed_stream_reacquire_disabled_threshold_skips_candidate_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-direct-disabled-load", account_count=1)
+    account = accounts[0]
+    load_selection_inputs = AsyncMock(side_effect=AssertionError("candidate pool must not load while disabled"))
+    monkeypatch.setattr(balancer, "_load_selection_inputs", load_selection_inputs)
+
+    lease = await balancer.acquire_account_lease(
+        account.id,
+        kind="stream",
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        fair_share_context=load_balancer_module.StreamLeaseFairShareContext(
+            api_key_id="key-disabled",
+            threshold_pct=0,
+        ),
+    )
+
+    assert lease is not None
+    assert lease.api_key_id == "key-disabled"
+    load_selection_inputs.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_lease_api_key_stale_reclaim_decrements_per_key_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

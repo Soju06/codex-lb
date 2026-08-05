@@ -100,6 +100,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _prewarm_response_timeout_seconds,
     _release_websocket_response_create_gate,
     _response_create_client_metadata,
+    _routing_strategy,
     _security_work_advisory_event,
     _service_as_image_fetch_session,
     _service_get_settings,
@@ -131,6 +132,7 @@ from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _api_key_fair_share_threshold_pct_from_settings,
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
@@ -189,7 +191,11 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
-from app.modules.proxy.load_balancer import effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import (
+    StreamLeaseFairShareContext,
+    StreamLeaseFairShareDenied,
+    effective_account_concurrency_caps,
+)
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -1560,16 +1566,78 @@ class _HTTPBridgeRequestSubmitMixin:
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
             return
-        lease = await load_balancer.acquire_account_lease(
-            session.account.id,
-            kind="stream",
-            # Carry the turn's usage-budget estimate like initial selection
-            # and reconnect do, so capacity-weighted routing pressure still
-            # sees large turns on reused warm sessions.
-            estimated_tokens=_estimated_lease_tokens_from_request_usage_budget(
-                request_state.request_usage_budget if request_state is not None else None
-            ),
+        # Carry the turn's usage-budget estimate like initial selection and
+        # reconnect do, so capacity-weighted routing pressure still sees large
+        # turns on reused warm sessions.
+        estimated_tokens = _estimated_lease_tokens_from_request_usage_budget(
+            request_state.request_usage_budget if request_state is not None else None
         )
+        api_key_id = session.key.api_key_id
+        if api_key_id is None:
+            lease = await load_balancer.acquire_account_lease(
+                session.account.id,
+                kind="stream",
+                estimated_tokens=estimated_tokens,
+            )
+        else:
+            settings = await _service_get_settings_cache().get()
+            reattach_stage = request_state is not None and request_state.request_stage == "reattach"
+            api_key = (
+                request_state.api_key
+                if request_state is not None and request_state.api_key is not None
+                else session.api_key
+            )
+            account_ids = (
+                frozenset(api_key.assigned_account_ids)
+                if api_key is not None and api_key.id == api_key_id and api_key.account_assignment_scope_enabled
+                else None
+            )
+            required_account_id: str | None = None
+            candidate_account_ids: frozenset[str] | None = None
+            if _routing_strategy(settings) == "single_account":
+                required_account_id = (settings.single_account_id or "").strip() or None
+                if required_account_id is None:
+                    candidate_account_ids = frozenset()
+            fair_share_context = StreamLeaseFairShareContext(
+                api_key_id=api_key_id,
+                threshold_pct=(0 if reattach_stage else _api_key_fair_share_threshold_pct_from_settings(settings)),
+                model=(
+                    request_state.model
+                    if request_state is not None and request_state.model is not None
+                    else session.request_model
+                ),
+                service_tier=(
+                    request_state.service_tier
+                    if request_state is not None and request_state.service_tier is not None
+                    else session.request_service_tier
+                ),
+                account_ids=account_ids,
+                required_account_id=required_account_id,
+                excluded_account_ids=(
+                    frozenset(request_state.excluded_account_ids) if request_state is not None else frozenset()
+                ),
+                require_security_work_authorized=(
+                    request_state.require_security_work_authorized if request_state is not None else False
+                ),
+                candidate_account_ids=candidate_account_ids,
+            )
+            try:
+                lease = await load_balancer.acquire_account_lease(
+                    session.account.id,
+                    kind="stream",
+                    estimated_tokens=estimated_tokens,
+                    concurrency_caps=effective_account_concurrency_caps(settings),
+                    fair_share_context=fair_share_context,
+                )
+            except StreamLeaseFairShareDenied as exc:
+                raise ProxyResponseError(
+                    429,
+                    openai_error(
+                        exc.error_code,
+                        str(exc),
+                        error_type="rate_limit_error",
+                    ),
+                ) from exc
         if lease is None:
             raise ProxyResponseError(
                 429,

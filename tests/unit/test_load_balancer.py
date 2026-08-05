@@ -963,7 +963,7 @@ def test_select_account_reset_drain_skips_exhausted_nearest_reset_account():
     assert result.account.account_id == "next"
 
 
-def test_select_account_reset_drain_drains_highest_remaining_inside_same_reset_bucket():
+def test_select_account_reset_drain_drains_highest_remaining_at_same_reset_time():
     now = 1_700_000_000.0
     reset_at = int(now + 300)
     states = [
@@ -987,7 +987,7 @@ def test_select_account_reset_drain_drains_highest_remaining_inside_same_reset_b
     assert result.account.account_id == "high-left"
 
 
-def test_select_account_reset_drain_uses_bucket_before_exact_reset_time():
+def test_select_account_reset_drain_uses_exact_reset_before_remaining_quota():
     now = 1_700_000_000.0
     states = [
         AccountState(
@@ -1007,7 +1007,7 @@ def test_select_account_reset_drain_uses_bucket_before_exact_reset_time():
     ]
     result = select_account(states, now=now, routing_strategy="reset_drain")
     assert result.account is not None
-    assert result.account.account_id == "later-high-left"
+    assert result.account.account_id == "soon-low-left"
 
 
 def test_select_account_reset_drain_falls_back_to_primary_reset_when_weekly_unknown():

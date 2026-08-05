@@ -4485,7 +4485,11 @@ async def test_v1_responses_http_bridge_forks_incompatible_prompt_cache_waiter_w
     app_instance,
     monkeypatch,
 ):
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        admission_wait_timeout_seconds=1.0,
+    )
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_incompatible_prompt_cache_waiter",

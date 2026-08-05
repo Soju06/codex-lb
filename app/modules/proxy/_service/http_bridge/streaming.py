@@ -3244,21 +3244,9 @@ class _HTTPBridgeStreamingMixin:
                             keepalive_count += 1
                         downstream_response_id = _websocket_downstream_response_id(request_state)
                         if not completed_delivery_in_progress and keepalive_count > max_keepalive_count:
-                            logger.info(
-                                "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
-                                "max_keepalive_count=%s",
-                                request_state.request_id,
-                                keepalive_count,
-                                max_keepalive_count,
-                            )
-                            yield format_sse_event(
-                                cast(
-                                    Mapping[str, JsonValue],
-                                    response_failed_event(
-                                        "stream_idle_timeout",
-                                        "Upstream did not respond within the keepalive window",
-                                        response_id=downstream_response_id,
-                                    ),
+                            if not response_started:
+                                retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(
+                                    session
                                 )
                                 fresh_replay_is_safe = bool(
                                     request_state.fresh_upstream_request_is_retry_safe

@@ -233,12 +233,15 @@ def test_calculate_cost_from_usage_flex_service_tier():
         ("gpt-5.6-sol", None, 30.55),
         ("gpt-5.6-sol", "flex", 15.275),
         ("gpt-5.6-sol", "priority", 61.1),
-        ("gpt-5.6-terra", None, 15.275),
-        ("gpt-5.6-terra", "flex", 7.6375),
-        ("gpt-5.6-terra", "priority", 30.55),
-        ("gpt-5.6-luna", None, 6.11),
-        ("gpt-5.6-luna", "flex", 3.055),
-        ("gpt-5.6-luna", "priority", 12.22),
+        ("gpt-5.6-sol", "fast", 61.1),
+        ("gpt-5.6-terra", None, 12.22),
+        ("gpt-5.6-terra", "flex", 6.11),
+        ("gpt-5.6-terra", "priority", 24.44),
+        ("gpt-5.6-terra", "fast", 24.44),
+        ("gpt-5.6-luna", None, 1.222),
+        ("gpt-5.6-luna", "flex", 0.611),
+        ("gpt-5.6-luna", "priority", 2.444),
+        ("gpt-5.6-luna", "fast", 2.444),
     ],
 )
 def test_calculate_cost_from_usage_gpt_5_6_service_tiers(
@@ -262,10 +265,10 @@ def test_calculate_cost_from_usage_gpt_5_6_service_tiers(
     [
         ("gpt-5.6-sol", None, 7.05),
         ("gpt-5.6-sol", "flex", 3.525),
-        ("gpt-5.6-terra", None, 3.525),
-        ("gpt-5.6-terra", "flex", 1.7625),
-        ("gpt-5.6-luna", None, 1.41),
-        ("gpt-5.6-luna", "flex", 0.705),
+        ("gpt-5.6-terra", None, 2.82),
+        ("gpt-5.6-terra", "flex", 1.41),
+        ("gpt-5.6-luna", None, 0.282),
+        ("gpt-5.6-luna", "flex", 0.141),
     ],
 )
 def test_calculate_cost_from_usage_gpt_5_6_long_context(
@@ -288,8 +291,8 @@ def test_calculate_cost_from_usage_gpt_5_6_long_context(
     ("model", "standard_input_rate", "long_context_input_rate"),
     [
         ("gpt-5.6-sol", 5.0, 10.0),
-        ("gpt-5.6-terra", 2.5, 5.0),
-        ("gpt-5.6-luna", 1.0, 2.0),
+        ("gpt-5.6-terra", 2.0, 4.0),
+        ("gpt-5.6-luna", 0.2, 0.4),
     ],
 )
 def test_calculate_cost_from_usage_gpt_5_6_uses_272k_long_context_boundary(

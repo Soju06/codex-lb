@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -10,7 +10,15 @@ from sqlalchemy.exc import ResourceClosedError
 
 from app.db.models import ModelSource, RequestLog
 from app.db.session import SessionLocal
+from app.modules.request_logs import repository as repository_module
 from app.modules.request_logs.repository import RequestLogsRepository
+
+
+@pytest.fixture(autouse=True)
+def _clear_recent_count_cache_between_tests():
+    repository_module._clear_recent_count_cache()
+    yield
+    repository_module._clear_recent_count_cache()
 
 
 @pytest.mark.asyncio
@@ -410,3 +418,112 @@ async def test_find_latest_account_id_for_response_id_falls_back_when_session_sc
     assert len(executed_sql) == 2
     assert "request_logs.session_id = :session_id_1" in executed_sql[0]
     assert "request_logs.session_id = :session_id_1" not in executed_sql[1]
+
+
+def _conversation_count_session(count: int = 3) -> tuple[AsyncMock, list[str]]:
+    session = AsyncMock()
+    session.get_bind = MagicMock(return_value=SimpleNamespace(dialect=SimpleNamespace(name="sqlite")))
+    count_queries: list[str] = []
+
+    async def _execute(statement):
+        sql = str(statement)
+        if sql.lstrip().upper().startswith("SELECT COUNT"):
+            count_queries.append(sql)
+        return SimpleNamespace(scalar_one=lambda: count, all=lambda: [])
+
+    session.execute.side_effect = _execute
+    return session, count_queries
+
+
+@pytest.mark.asyncio
+async def test_conversation_count_cache_hits_for_same_timeframe(monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    session, count_queries = _conversation_count_session()
+    repo = RequestLogsRepository(session)
+    since = datetime(2026, 7, 20, 12, 0, 0)
+
+    await repo.list_conversations(cache_mode="timeframe", timeframe="7d", since=since)
+    await repo.list_conversations(cache_mode="timeframe", timeframe="7d", since=since)
+
+    assert len(count_queries) == 1
+
+
+@pytest.mark.asyncio
+async def test_conversation_count_cache_normalizes_search_whitespace(monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    session, count_queries = _conversation_count_session()
+    repo = RequestLogsRepository(session)
+    since = datetime(2026, 7, 20, 12, 0, 0)
+
+    await repo.list_conversations(cache_mode="timeframe", timeframe="7d", since=since, search=None)
+    await repo.list_conversations(cache_mode="timeframe", timeframe="7d", since=since, search="foo")
+    await repo.list_conversations(cache_mode="timeframe", timeframe="7d", since=since, search="  foo  ")
+
+    assert len(count_queries) == 2
+
+
+@pytest.mark.asyncio
+async def test_conversation_count_cache_misses_for_different_timeframe(monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    session, count_queries = _conversation_count_session()
+    repo = RequestLogsRepository(session)
+    since = datetime(2026, 7, 20, 12, 0, 0)
+
+    await repo.list_conversations(cache_mode="timeframe", timeframe="7d", since=since)
+    await repo.list_conversations(cache_mode="timeframe", timeframe="30d", since=since)
+
+    assert len(count_queries) == 2
+
+
+@pytest.mark.asyncio
+async def test_conversation_count_cache_uses_legacy_since_identity(monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    session, count_queries = _conversation_count_session()
+    repo = RequestLogsRepository(session)
+    first_since = datetime(2026, 7, 20, 12, 0, 0)
+    second_since = first_since - timedelta(hours=1)
+
+    await repo.list_conversations(cache_mode="since", since=first_since)
+    await repo.list_conversations(cache_mode="since", since=first_since)
+    await repo.list_conversations(cache_mode="since", since=second_since)
+
+    assert len(count_queries) == 2
+
+
+@pytest.mark.asyncio
+async def test_conversation_count_cache_namespaces_timeframe_and_since_modes(monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    session, count_queries = _conversation_count_session()
+    repo = RequestLogsRepository(session)
+    now = datetime(2026, 7, 27, 12, 0, 0)
+    thirty_days_ago = now - timedelta(days=30)
+
+    await repo.list_conversations(cache_mode="timeframe", timeframe="30d", since=thirty_days_ago)
+    await repo.list_conversations(cache_mode="since", since=thirty_days_ago)
+
+    assert len(count_queries) == 2
+
+
+@pytest.mark.asyncio
+async def test_conversation_count_cache_evicts_oldest_entry_at_256_entries(monkeypatch) -> None:
+    monkeypatch.setattr(repository_module, "_COUNT_CACHE_TTL_SECONDS", 30.0)
+    session, count_queries = _conversation_count_session(count=7)
+    repo = RequestLogsRepository(session)
+    since = datetime(2026, 7, 20, 12, 0, 0)
+
+    for index in range(257):
+        await repo.list_conversations(
+            cache_mode="timeframe",
+            timeframe="7d",
+            since=since,
+            search=f"conversation-{index}",
+        )
+    result = await repo.list_conversations(
+        cache_mode="timeframe",
+        timeframe="7d",
+        since=since,
+        search="conversation-0",
+    )
+
+    assert result.total == 7
+    assert len(count_queries) == 258

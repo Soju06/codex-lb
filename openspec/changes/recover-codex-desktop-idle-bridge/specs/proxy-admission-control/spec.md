@@ -2,19 +2,20 @@
 
 ### Requirement: Stuck HTTP bridge response-create gate sessions are retired
 
-The proxy MUST retain the existing waiter-triggered retirement behavior for stale HTTP bridge response-create gate owners and MUST additionally enforce an owner-side deadline for a visible HTTP request whose current upstream `response.create` send remains completely eventless before `response.created`. The owner-side deadline MUST be measured from a monotonic timestamp recorded immediately before the current upstream send, MUST use the smaller of the configured stuck-gate retirement threshold and 240 seconds, MUST run without a second gate waiter, and MUST remain active when periodic SSE keepalives are disabled.
+The proxy MUST retain the existing waiter-triggered retirement behavior for stale HTTP bridge response-create gate owners and MUST additionally enforce an owner-side deadline for a visible HTTP request whose current upstream `response.create` send remains completely eventless before `response.created`. The owner-side deadline MUST be measured from a monotonic timestamp recorded immediately before the current upstream send, MUST use the smaller of the configured stuck-gate retirement threshold and 60 seconds, MUST run without a second gate waiter, and MUST remain active when periodic SSE keepalives are disabled.
 
 The owner-side watchdog MUST apply only while the request owns the response-create gate, awaits `response.created`, has neither a response id nor recorded `response.created` latency, has received no matched `response.*` lifecycle event, and has produced no downstream-visible output or sequence evidence. Non-response telemetry such as `codex.rate_limits` MUST NOT suppress this watchdog. Any matched `response.*` lifecycle event, response-created milestone, or downstream-visible evidence MUST suppress the owner-side watchdog and leave existing timeout behavior unchanged.
 
-When the owner-side deadline expires, the proxy MUST recheck eligibility, emit a structured low-cardinality log and the existing stuck-retirement Prometheus counter, terminally fail and settle every pending request exactly once, and retire the whole bridge session. It MUST NOT transparently replay the timed-out request, move it to another account, or write an account-health failure for the missing-created timeout.
+When the owner-side deadline expires, the proxy MUST recheck eligibility and emit a structured low-cardinality log and the existing stuck-retirement Prometheus counter. For requests that are not eligible for the bounded fresh-hard recovery defined by `recover-fresh-hard-bridge-timeouts`, it MUST terminally fail and settle every pending request exactly once, retire the whole bridge session, and MUST NOT transparently replay the timed-out request or move it to another account. An eligible fresh hard request MAY take that single bounded recovery path; if recovery is unavailable or fails, it MUST fall back to the same terminal fail-closed retirement. Neither path may write an account-health failure solely because `response.created` was missing.
 
 #### Scenario: Lone eventless gate owner is retired before the client timeout
 
 - **GIVEN** a visible HTTP bridge request owns the response-create gate
 - **AND** its current `response.create` send produced no matched `response.*` event, response id, or downstream-visible output
 - **AND** no second request waits for the gate
-- **WHEN** the smaller of the configured stuck threshold and 240 seconds elapses after the current send
-- **THEN** the proxy emits an explicit terminal failure and retires the bridge session
+- **WHEN** the smaller of the configured stuck threshold and 60 seconds elapses after the current send
+- **THEN** the proxy emits an explicit terminal failure and retires the bridge session when the request is not eligible for bounded fresh-hard recovery
+- **AND** an eligible fresh hard request instead follows the single bounded recovery defined by `recover-fresh-hard-bridge-timeouts`
 - **AND** recovery occurs before the native client's 300-second parsed-event idle timeout
 
 #### Scenario: Send time rather than request age anchors the deadline
@@ -43,5 +44,5 @@ When the owner-side deadline expires, the proxy MUST recheck eligibility, emit a
 - **GIVEN** an eventless pre-created owner reaches the owner-side deadline
 - **WHEN** terminal cleanup runs
 - **THEN** every pending request is settled exactly once and the whole session is retired
-- **AND** the proxy does not replay the timed-out request or submit it on another account
+- **AND** the proxy does not replay the timed-out request or submit it on another account unless it satisfies the bounded fresh-hard recovery requirement
 - **AND** the selected account is not marked unhealthy solely because `response.created` was missing

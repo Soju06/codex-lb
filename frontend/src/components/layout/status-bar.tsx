@@ -1,16 +1,24 @@
-import { useEffect, useState } from "react";
-import { Activity, ArrowRightLeft, ArrowUpCircle, Tag } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ArrowRightLeft, ArrowUpCircle, Tag } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
 import { getDashboardOverview } from "@/features/dashboard/api";
 import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
+import { getServiceReadiness } from "@/features/health/api";
 import { getRuntimeVersion } from "@/features/runtime/api";
 import { getSettings } from "@/features/settings/api";
 import { formatTimeLong } from "@/utils/formatters";
 
 const GITHUB_REPOSITORY_URL = "https://github.com/soju06/codex-lb";
+const STATUS_REFRESH_INTERVAL_MS = 60_000;
+const USAGE_FRESHNESS_THRESHOLD_MS = 60_000;
+export const STATUS_BAR_DEFAULT_HEIGHT_PX = 40;
+
+export interface StatusBarProps {
+  onHeightChange?: (height: number) => void;
+}
 
 type RoutingStrategy =
   | "usage_weighted"
@@ -80,12 +88,20 @@ function getRoutingLabel(
   return strategyLabel;
 }
 
-export function StatusBar() {
+export function StatusBar({ onHeightChange }: StatusBarProps = {}) {
   const { t } = useTranslation();
+  const footerRef = useRef<HTMLElement>(null);
+  const readinessQuery = useQuery({
+    queryKey: ["health", "ready"],
+    queryFn: getServiceReadiness,
+    refetchInterval: STATUS_REFRESH_INTERVAL_MS,
+    refetchIntervalInBackground: false,
+    retry: false,
+  });
   const { data: lastSyncAt = null } = useQuery({
     queryKey: ["dashboard", "overview", DEFAULT_OVERVIEW_TIMEFRAME],
     queryFn: () => getDashboardOverview({ timeframe: DEFAULT_OVERVIEW_TIMEFRAME }),
-    refetchInterval: 60_000,
+    refetchInterval: STATUS_REFRESH_INTERVAL_MS,
     refetchIntervalInBackground: false,
     select: (data) => data.lastSyncAt,
   });
@@ -101,15 +117,26 @@ export function StatusBar() {
     staleTime: 6 * 60 * 60 * 1000,
   });
   const lastSync = formatTimeLong(lastSyncAt);
-  const [isLive, setIsLive] = useState(false);
+  const [isUsageSynced, setIsUsageSynced] = useState(false);
   useEffect(() => {
     function check() {
-      setIsLive(lastSyncAt ? Date.now() - new Date(lastSyncAt).getTime() < 60_000 : false);
+      setIsUsageSynced(
+        lastSyncAt
+          ? Date.now() - new Date(lastSyncAt).getTime() < USAGE_FRESHNESS_THRESHOLD_MS
+          : false,
+      );
     }
     check();
     const id = setInterval(check, 10_000);
     return () => clearInterval(id);
   }, [lastSyncAt]);
+  const serviceReadiness = readinessQuery.isPending
+    ? "checking"
+    : !readinessQuery.isError && readinessQuery.data?.status === "ok"
+      ? "ready"
+      : "notReady";
+  const serviceStatusLabel = t(`statusBar.${serviceReadiness}`);
+  const usageStatusLabel = t(isUsageSynced ? "statusBar.synced" : "statusBar.stale");
 
   const routingLabel = settings
     ? getRoutingLabel(
@@ -127,17 +154,52 @@ export function StatusBar() {
     ? t("statusBar.updateAvailableWithVersion", { version: latestVersion })
     : t("statusBar.updateAvailable");
 
+  useLayoutEffect(() => {
+    const footer = footerRef.current;
+    if (!footer || !onHeightChange) {
+      return;
+    }
+
+    const reportHeight = () => {
+      onHeightChange(Math.max(STATUS_BAR_DEFAULT_HEIGHT_PX, footer.offsetHeight));
+    };
+    reportHeight();
+
+    const observer = new ResizeObserver(reportHeight);
+    observer.observe(footer);
+    return () => observer.disconnect();
+  }, [onHeightChange]);
+
   return (
-    <footer className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 py-2 shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]">
+    <footer
+      ref={footerRef}
+      className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/[0.08] bg-background/50 px-4 py-2 shadow-[0_-1px_12px_rgba(0,0,0,0.06)] backdrop-blur-xl backdrop-saturate-[1.8] supports-[backdrop-filter]:bg-background/40 dark:shadow-[0_-1px_12px_rgba(0,0,0,0.25)]"
+    >
       <div className="mx-auto flex w-full max-w-[1500px] items-center gap-4 text-xs text-muted-foreground">
         <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1">
           <span className="inline-flex items-center gap-1.5">
-            {isLive ? (
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" title={t("statusBar.live")} />
-            ) : (
-              <Activity className="h-3 w-3" aria-hidden="true" />
-            )}
-            <span className="font-medium">{t("statusBar.lastSync")}</span> {lastSync.time}
+            <span
+              aria-hidden="true"
+              className={`h-1.5 w-1.5 rounded-full ${
+                serviceReadiness === "ready"
+                  ? "bg-emerald-500"
+                  : serviceReadiness === "checking"
+                    ? "bg-amber-500"
+                    : "bg-red-500"
+              }`}
+            />
+            <span className="font-medium">{t("statusBar.serviceReady")}</span>{" "}
+            <span>{serviceStatusLabel}</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              aria-hidden="true"
+              className={`h-1.5 w-1.5 rounded-full ${
+                isUsageSynced ? "bg-emerald-500" : "bg-amber-500"
+              }`}
+            />
+            <span className="font-medium">{t("statusBar.usageSynced")}</span>{" "}
+            <span>{usageStatusLabel}</span> · {lastSync.time}
           </span>
           <span className="inline-flex items-center gap-1.5">
             <ArrowRightLeft className="h-3 w-3" aria-hidden="true" />

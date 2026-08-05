@@ -58,6 +58,7 @@ nav:
   - Getting Started: getting-started.md
   - Client Setup: client-setup.md
   - Live Voice: live-voice.md
+  - Conversations: conversations.md
   - Configuration: configuration.md
   - Authentication: authentication.md
   - API Keys: api-keys.md

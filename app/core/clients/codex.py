@@ -251,9 +251,11 @@ class CodexClient:
         for index, endpoint in enumerate(endpoints):
             candidate = route.with_endpoint(endpoint, tuple(endpoints[index + 1 :]))
             context: Any | None = None
+            entered_context: Any | None = None
             try:
                 if endpoint.scheme.startswith("socks"):
                     websocket, context = await _open_ws_via_socks_proxy(url, endpoint, **kwargs)
+                    entered_context = context
                 else:
                     context = self._session.ws_connect(
                         url,
@@ -262,16 +264,20 @@ class CodexClient:
                     )
                     if asyncio.iscoroutine(context):
                         context = await context
-                    websocket = await context.__aenter__() if hasattr(context, "__aenter__") else context
+                    if hasattr(context, "__aenter__"):
+                        websocket = await context.__aenter__()
+                        entered_context = context
+                    else:
+                        websocket = context
                 return CodexWebSocketResult(
                     websocket,
-                    context if hasattr(context, "__aenter__") else None,
+                    entered_context,
                     candidate,
                     index > 0,
                 )
             except Exception as exc:
-                if context is not None and hasattr(context, "__aexit__"):
-                    await context.__aexit__(None, None, None)
+                if entered_context is not None and hasattr(entered_context, "__aexit__"):
+                    await entered_context.__aexit__(None, None, None)
                 handshake_status = _transport_error_status_code(exc)
                 if handshake_status is not None and not retry_handshake_status:
                     raise _transport_error(

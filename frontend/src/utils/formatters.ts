@@ -266,6 +266,42 @@ export function formatTimeLong(iso: string | null | undefined): FormattedDateTim
   };
 }
 
+export function formatConversationDuration(
+  firstIso: string | null | undefined,
+  lastIso: string | null | undefined,
+): string {
+  const first = parseDate(firstIso);
+  const last = parseDate(lastIso);
+  if (!first || !last) {
+    return "—";
+  }
+
+  const totalSeconds = Math.max(0, Math.floor((last.getTime() - first.getTime()) / 1000));
+  if (totalSeconds === 0) {
+    return t("formatters.duration.seconds", { count: 0 });
+  }
+  if (totalSeconds < 60) {
+    return t("formatters.duration.seconds", { count: totalSeconds });
+  }
+  if (totalSeconds < 3600) {
+    return t("formatters.duration.minutesSeconds", {
+      minutes: Math.floor(totalSeconds / 60),
+      seconds: totalSeconds % 60,
+    });
+  }
+  if (totalSeconds < 86400) {
+    return t("formatters.duration.hoursMinutes", {
+      hours: Math.floor(totalSeconds / 3600),
+      minutes: Math.floor((totalSeconds % 3600) / 60),
+    });
+  }
+
+  return t("formatters.duration.daysHours", {
+    days: Math.floor(totalSeconds / 86400),
+    hours: Math.floor((totalSeconds % 86400) / 3600),
+  });
+}
+
 export function formatDateTimeInline(iso: string | null | undefined): string {
   const formatted = formatTimeLong(iso);
   return formatted.time === "--" ? "--" : `${formatted.time} ${formatted.date}`;

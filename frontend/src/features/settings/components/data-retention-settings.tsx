@@ -17,6 +17,7 @@ const MAX_RETENTION_DAYS = 3650;
 const REQUEST_LOG_FLOOR_DAYS = 30;
 const USAGE_HISTORY_FLOOR_DAYS = 45;
 const INTEGER_DAYS_PATTERN = /^\d+$/;
+const REQUEST_LOG_PRESET_DAYS = [30, 90] as const;
 
 type ParsedOverride =
   | { valid: true; value: number | null } // null = inherit (cleared input)
@@ -78,6 +79,7 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
 
   const showRequestLogInheritedHint = requestLogDays.trim() === "";
   const showUsageHistoryInheritedHint = usageHistoryDays.trim() === "";
+  const showRequestLogDisabledInfo = settings.requestLogRetentionDays === 0;
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -93,6 +95,40 @@ export function DataRetentionSettings({ settings, busy, onSave }: DataRetentionS
             </div>
           </div>
         </div>
+
+        {showRequestLogDisabledInfo ? (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              {t("settings.retention.requestLogs.disabledInfo")}
+            </p>
+            <div
+              className="flex flex-wrap items-center gap-2"
+              role="group"
+              aria-label={t("settings.retention.requestLogs.presetsLabel")}
+            >
+              <span className="text-xs font-medium text-muted-foreground">
+                {t("settings.retention.requestLogs.presetsLabel")}
+              </span>
+              {REQUEST_LOG_PRESET_DAYS.map((days) => {
+                const selected = requestLogDays === String(days);
+                return (
+                  <Button
+                    key={days}
+                    type="button"
+                    size="sm"
+                    variant={selected ? "default" : "outline"}
+                    className="h-7 px-2.5 text-xs"
+                    disabled={busy}
+                    aria-pressed={selected}
+                    onClick={() => setRequestLogDays(String(days))}
+                  >
+                    {t("settings.retention.requestLogs.presetButton", { days })}
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
 
         <div className="divide-y rounded-lg border">
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">

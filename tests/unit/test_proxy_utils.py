@@ -40026,12 +40026,16 @@ async def test_http_bridge_session_events_keepalive_backstop(monkeypatch):
     finally:
         await events.aclose()
 
-    assert len(collected) == 2, f"Expected 2 events (1 keepalive + stream_idle_timeout), got {len(collected)}"
+    assert len(collected) == 2, f"Expected 2 events (1 keepalive + bridge_eventless_timeout), got {len(collected)}"
     assert collected[0] == proxy_service.CODEX_KEEPALIVE_FRAME
     last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], last["response"])["status"] == "failed"
-    assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
+    # Pre-response-start silence is bridge_eventless_timeout, never the
+    # post-start stream_idle_timeout budget.
+    error = cast(dict[str, object], cast(dict[str, object], last["response"])["error"])
+    assert error["code"] == "bridge_eventless_timeout"
+    assert "Upstream" not in cast(str, error["message"])
 
 
 @pytest.mark.asyncio
@@ -40041,6 +40045,9 @@ async def test_http_bridge_session_events_retries_silent_pre_response_once(monke
     settings = _make_proxy_settings()
     settings.sse_keepalive_interval_seconds = 0.001
     settings.stream_idle_timeout_seconds = 7200.0
+    # The pre-response budget is derived from the owner-side stuck gate, not
+    # from stream_idle_timeout_seconds; scale it down for the test clock.
+    settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.002
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_idle_retry",
         model="gpt-5.1",
@@ -40095,7 +40102,10 @@ async def test_http_bridge_session_events_retries_silent_pre_response_once(monke
     assert len(collected) == 3
     assert collected[:2] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 2
     last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[-1]))
-    assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
+    assert (
+        cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"]
+        == "bridge_eventless_timeout"
+    )
     assert retry_precreated.await_count == 2
     assert all(attempt.kwargs == {"restart_reader": True} for attempt in retry_precreated.await_args_list)
 
@@ -40166,7 +40176,10 @@ async def test_http_bridge_session_events_keeps_alive_during_retry_circuit_coold
     assert len(collected) >= 2
     assert collected[:-1] == [proxy_service.CODEX_KEEPALIVE_FRAME] * (len(collected) - 1)
     last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[-1]))
-    assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
+    assert (
+        cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"]
+        == "bridge_eventless_timeout"
+    )
     assert retry_precreated.await_count >= 1
     assert retry_cooldown.await_count >= 1
 
@@ -40229,11 +40242,17 @@ async def test_http_bridge_session_events_keepalive_backstop_respects_idle_timeo
     finally:
         await events.aclose()
 
-    assert len(collected) == 2
-    assert collected[0] == proxy_service.CODEX_KEEPALIVE_FRAME
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
+    # The pre-response budget is min(stuck gate, stream idle, request budget)
+    # = 0.05s, i.e. ceil(0.05 / 0.01) = 5 keepalive ticks, instead of the old
+    # implicit _STREAM_KEEPALIVE_MAX_COUNT product.
+    assert len(collected) == 5
+    assert collected[:-1] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 4
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[-1]))
     assert last["type"] == "response.failed"
-    assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
+    assert (
+        cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"]
+        == "bridge_eventless_timeout"
+    )
 
 
 @pytest.mark.asyncio

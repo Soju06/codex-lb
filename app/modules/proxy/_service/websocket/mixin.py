@@ -63,6 +63,7 @@ from app.core.clients.proxy_websocket import (
     filter_inbound_websocket_headers,
 )
 from app.core.errors import (
+    STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES,
     OpenAIErrorEnvelope,
     openai_error,
     response_failed_event,
@@ -5480,7 +5481,7 @@ class _WebSocketMixin:
         if (
             error_code == "stream_incomplete"
             and request_state.previous_response_id is not None
-            and error_message == "Upstream websocket closed before response.completed"
+            and error_message in STREAM_INCOMPLETE_ANCHOR_NEUTRAL_MESSAGES
         ):
             settlement.account_health_error = False
         proxy._cancel_request_state_api_key_reservation_heartbeat(request_state)

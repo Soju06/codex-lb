@@ -50,12 +50,14 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _http_bridge_durable_lease_ttl_seconds,
+    _http_bridge_event_proves_upstream_liveness,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
     _record_http_bridge_stuck_retire,
+    _record_http_bridge_unmatched_upstream_liveness,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
@@ -1581,15 +1583,39 @@ class _HTTPBridgeUpstreamEventsMixin:
             # whatever was waiting for it waits until a timeout fires, so the
             # drop needs to be visible rather than inferred from a missing
             # downstream response.
+            #
+            # The frame still proves the upstream transport is alive. Nothing
+            # resets the downstream pre-response silence clock from here (that
+            # clock only sees matched queue items), so record the liveness as an
+            # explicit marker: a later bridge_eventless_timeout with a non-zero
+            # count is a local matching wedge, not a silent upstream.
+            unmatched_liveness_count = _record_http_bridge_unmatched_upstream_liveness(
+                session,
+                event_type=event_type,
+            )
             logger.warning(
                 "HTTP bridge upstream event matched no pending request account_id=%s bridge_kind=%s "
-                "event_type=%s has_response_id=%s pending_count=%d",
+                "event_type=%s has_response_id=%s pending_count=%d unmatched_upstream_liveness=%d",
                 session.account.id,
                 session.key.affinity_kind,
                 event_type or "unknown",
                 response_id is not None,
                 pending_request_count,
+                unmatched_liveness_count,
             )
+            if _http_bridge_event_proves_upstream_liveness(event_type):
+                _log_http_bridge_event(
+                    "unmatched_upstream_liveness",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    pending_count=pending_request_count,
+                    detail=(
+                        f"event_type={event_type or 'unknown'} unmatched_upstream_liveness={unmatched_liveness_count}"
+                    ),
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
 
         if status_request_state is not None and event_type not in {
             "response.completed",

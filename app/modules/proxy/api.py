@@ -72,6 +72,7 @@ from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
+    HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
     is_previous_response_not_found_error,
@@ -7858,6 +7859,11 @@ def _mask_previous_response_not_found_error(
 def _status_for_error(error_value: OpenAIError | None) -> int:
     if error_value and error_value.code == "previous_response_not_found":
         return 502
+    if error_value and error_value.code == HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE:
+        # The bridge never got a response created upstream, so this is our
+        # availability problem and the request is safe to repeat: 503, not a
+        # 502 that claims the upstream returned a bad response.
+        return 503
     if error_value and error_value.code in _UNAVAILABLE_SELECTION_ERROR_CODES:
         return 503
     if error_value and error_value.code in {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota"}:

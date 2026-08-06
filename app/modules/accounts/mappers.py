@@ -7,6 +7,7 @@ from app.core.auth import DEFAULT_EMAIL, DEFAULT_PLAN, extract_id_token_claims, 
 from app.core.config import settings as config_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
+from app.core.usage.account_limits import evaluate_standard_usage_limit
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
@@ -117,6 +118,15 @@ def _account_to_summary(
     effective_primary_usage, effective_secondary_usage = _effective_usage_windows(
         primary_usage,
         secondary_usage,
+    )
+    usage_limit_state = evaluate_standard_usage_limit(
+        enabled=bool(account.usage_limit_enabled),
+        limit_percent=account.usage_limit_percent,
+        plan_type=plan_type,
+        primary=usage_history_to_window_row(primary_usage) if primary_usage is not None else None,
+        secondary=usage_history_to_window_row(secondary_usage) if secondary_usage is not None else None,
+        monthly=usage_history_to_window_row(monthly_usage) if monthly_usage is not None else None,
+        refresh_interval_seconds=_usage_refresh_interval_seconds(),
     )
 
     if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
@@ -264,6 +274,9 @@ def _account_to_summary(
         plan_type=plan_type,
         status=effective_status.value,
         routing_policy=_normalize_account_routing_policy(account.routing_policy),
+        usage_limit_enabled=bool(account.usage_limit_enabled),
+        usage_limit_percent=account.usage_limit_percent,
+        usage_limit_state=usage_limit_state,
         security_work_authorized=bool(account.security_work_authorized),
         usage=AccountUsage(
             primary_remaining_percent=primary_remaining_percent,

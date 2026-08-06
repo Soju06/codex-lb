@@ -668,6 +668,26 @@ class AccountsRepository:
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
+    async def update_usage_limit(
+        self,
+        account_id: str,
+        *,
+        enabled: bool,
+        percent: float | None,
+    ) -> bool:
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(
+                    usage_limit_enabled=enabled,
+                    usage_limit_percent=percent,
+                )
+                .returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
+
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         async with sqlite_writer_section():
             # Serialize against fold passes before touching the account's

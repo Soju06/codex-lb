@@ -22,7 +22,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _account_cap_error_message,
     _clone_account,
     _filter_recovery_probe_candidates,
-    _filter_states_for_account_caps,
+    _filter_states_for_usage_limit_and_account_caps,
     _probing_result_requires_recovery_reservation,
     _select_account_preferring_budget_safe,
 )
@@ -148,7 +148,7 @@ async def run_unbound_selection_path(
                     now=datetime.now(timezone.utc),
                 )
             )
-            selection_states = _filter_states_for_account_caps(
+            selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
                 states,
                 lease_kind=lease_kind,
                 caps=caps,
@@ -159,7 +159,7 @@ async def run_unbound_selection_path(
                     selection_states,
                     traffic_class=traffic_class,
                 )
-            if not selection_states and states:
+            if account_caps_exhausted:
                 selection_error_code = _account_cap_error_code(lease_kind)
                 error_message = _account_cap_error_message(lease_kind, caps)
                 result = SelectionResult(None, error_message)
@@ -171,7 +171,6 @@ async def run_unbound_selection_path(
                 )
                 _record_account_cap_rejection(lease_kind)
             else:
-                selection_error_code = None
                 result = _select_account_preferring_budget_safe(
                     selection_states,
                     prefer_earlier_reset=prefer_earlier_reset_accounts,
@@ -185,6 +184,7 @@ async def run_unbound_selection_path(
                     ignore_standard_quota=False,
                     routing_costs_by_account_id=effective_routing_costs,
                 )
+                selection_error_code = result.error_code
                 probing_result_requires_reservation = _probing_result_requires_recovery_reservation(
                     selection_states,
                     result.account,

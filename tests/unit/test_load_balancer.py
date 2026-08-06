@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -11,6 +11,7 @@ import pytest
 
 from app.core import usage as usage_core
 from app.core.balancer import (
+    ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
@@ -26,8 +27,9 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.usage.quota import apply_usage_quota
-from app.db.models import Account, AccountStatus, UsageHistory
+from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.proxy.load_balancer import (
     RuntimeState,
     _additional_quota_applies_to_plan,
@@ -52,6 +54,100 @@ def test_select_account_picks_lowest_used_percent():
     result = select_account(states, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def test_select_account_never_uses_reached_limit_even_for_burn_first_policy() -> None:
+    limited = AccountState(
+        "limited",
+        AccountStatus.ACTIVE,
+        used_percent=1.0,
+        routing_policy="burn_first",
+        usage_limit_state=AccountUsageLimitState.REACHED,
+        usage_limit_percent=10.0,
+    )
+    available = AccountState(
+        "available",
+        AccountStatus.ACTIVE,
+        used_percent=90.0,
+        routing_policy="preserve",
+        usage_limit_state=AccountUsageLimitState.AVAILABLE,
+        usage_limit_percent=10.0,
+    )
+
+    result = _select_account_preferring_budget_safe(
+        [limited, available],
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "available"
+
+
+@pytest.mark.parametrize(
+    "limit_state",
+    [AccountUsageLimitState.REACHED, AccountUsageLimitState.DATA_UNAVAILABLE],
+)
+def test_select_account_returns_stable_error_when_all_accounts_are_usage_limited(
+    limit_state: AccountUsageLimitState,
+) -> None:
+    state = AccountState(
+        "limited",
+        AccountStatus.ACTIVE,
+        usage_limit_state=limit_state,
+        usage_limit_percent=10.0,
+    )
+
+    result = select_account([state])
+
+    assert result.account is None
+    assert result.error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
+    assert result.error_message is not None
+
+
+def test_additional_quota_bypass_does_not_bypass_standard_usage_limit() -> None:
+    now = datetime.now(timezone.utc)
+    account = _make_test_account(account_id="additional-limited")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 10.0
+    standard_primary = _make_test_usage(
+        account_id=account.id,
+        window="primary",
+        used_percent=10.0,
+        reset_at=int((now + timedelta(hours=1)).timestamp()),
+        recorded_at=now.replace(tzinfo=None),
+    )
+    additional_primary = AdditionalUsageHistory(
+        id=1,
+        account_id=account.id,
+        quota_key="codex-spark",
+        limit_name="codex-spark",
+        metered_feature="codex-spark",
+        window="primary",
+        used_percent=1.0,
+        reset_at=int((now + timedelta(hours=1)).timestamp()),
+        window_minutes=300,
+        recorded_at=now.replace(tzinfo=None),
+    )
+
+    states, _ = _build_states(
+        accounts=[account],
+        latest_primary={account.id: additional_primary},
+        latest_secondary={},
+        latest_monthly={},
+        standard_latest_primary={account.id: standard_primary},
+        standard_latest_secondary={},
+        standard_latest_monthly={},
+        runtime={},
+        ignore_standard_quota_account_ids=frozenset({account.id}),
+    )
+    result = select_account(states, ignore_standard_quota=True)
+
+    assert states[0].used_percent == 1.0
+    assert states[0].usage_limit_state is AccountUsageLimitState.REACHED
+    assert result.account is None
+    assert result.error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
 
 
 def test_select_account_applies_planner_cold_start_penalty():
@@ -1847,6 +1943,122 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     from datetime import timezone
 
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
+
+
+def _usage_limit_test_repositories(
+    accounts: list[Account],
+    primary_usage: dict[str, UsageHistory],
+) -> MagicMock:
+    async def latest_by_account(*, window: str = "primary", **_kwargs):
+        if window == "primary":
+            return primary_usage
+        return {}
+
+    repos = MagicMock()
+    repos.accounts.list_accounts = AsyncMock(return_value=accounts)
+    repos.usage.latest_by_account = AsyncMock(side_effect=latest_by_account)
+    repos.sticky_sessions.get_account_id = AsyncMock(return_value=None)
+    repos.sticky_sessions.upsert = AsyncMock()
+    repos.sticky_sessions.delete = AsyncMock()
+    repos.__aenter__ = AsyncMock(return_value=repos)
+    repos.__aexit__ = AsyncMock(return_value=None)
+    return repos
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_propagates_usage_limit_error_code() -> None:
+    from app.modules.proxy.load_balancer import LoadBalancer
+
+    now = datetime.now(timezone.utc)
+    account = _make_test_account(account_id="all-limited")
+    account.usage_limit_enabled = True
+    account.usage_limit_percent = 10.0
+    usage = _make_test_usage(
+        account_id=account.id,
+        window="primary",
+        used_percent=10.0,
+        reset_at=int((now + timedelta(hours=1)).timestamp()),
+        recorded_at=now.replace(tzinfo=None),
+    )
+    repos = _usage_limit_test_repositories([account], {account.id: usage})
+    balancer = LoadBalancer(repo_factory=lambda: repos)
+
+    selection = await balancer.select_account(routing_strategy="usage_weighted")
+
+    assert selection.account is None
+    assert selection.error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_preserves_usage_limit_error_with_paused_peer() -> None:
+    from app.modules.proxy.load_balancer import LoadBalancer
+
+    now = datetime.now(timezone.utc)
+    limited = _make_test_account(account_id="limited-with-paused-peer")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    paused = _make_test_account(account_id="paused-peer")
+    paused.status = AccountStatus.PAUSED
+    usage = _make_test_usage(
+        account_id=limited.id,
+        window="primary",
+        used_percent=10.0,
+        reset_at=int((now + timedelta(hours=1)).timestamp()),
+        recorded_at=now.replace(tzinfo=None),
+    )
+    repos = _usage_limit_test_repositories([limited, paused], {limited.id: usage})
+    balancer = LoadBalancer(repo_factory=lambda: repos)
+
+    selection = await balancer.select_account(routing_strategy="usage_weighted")
+
+    assert selection.account is None
+    assert selection.error_code == ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_sticky_selection_falls_back_from_usage_limited_account() -> None:
+    from app.modules.proxy.load_balancer import LoadBalancer
+
+    now = datetime.now(timezone.utc)
+    limited = _make_test_account(account_id="sticky-limited")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    available = _make_test_account(account_id="sticky-available")
+    available.usage_limit_enabled = True
+    available.usage_limit_percent = 10.0
+    usage = {
+        limited.id: _make_test_usage(
+            account_id=limited.id,
+            window="primary",
+            used_percent=10.0,
+            reset_at=int((now + timedelta(hours=1)).timestamp()),
+            recorded_at=now.replace(tzinfo=None),
+        ),
+        available.id: _make_test_usage(
+            account_id=available.id,
+            window="primary",
+            used_percent=5.0,
+            reset_at=int((now + timedelta(hours=1)).timestamp()),
+            recorded_at=now.replace(tzinfo=None),
+        ),
+    }
+    repos = _usage_limit_test_repositories([limited, available], usage)
+    repos.sticky_sessions.get_account_id.return_value = limited.id
+    balancer = LoadBalancer(repo_factory=lambda: repos)
+
+    selection = await balancer.select_account(
+        sticky_key="sticky-usage-limit",
+        sticky_kind=StickySessionKind.STICKY_THREAD,
+        routing_strategy="usage_weighted",
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == available.id
+    repos.sticky_sessions.upsert.assert_awaited_with(
+        "sticky-usage-limit",
+        available.id,
+        kind=StickySessionKind.STICKY_THREAD,
+    )
 
 
 def test_state_from_account_keeps_active_account_selectable_when_primary_usage_snapshot_is_exhausted(

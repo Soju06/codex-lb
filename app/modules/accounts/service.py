@@ -21,7 +21,12 @@ from app.core.auth import (
 )
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.auth.refresh import RefreshError
-from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
+from app.core.cache.invalidation import (
+    NAMESPACE_ACCOUNT_SELECTION,
+    NAMESPACE_API_KEY,
+    bump_cache_invalidation_local,
+    get_cache_invalidation_poller,
+)
 from app.core.clients.http import lease_http_session
 from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse,
@@ -656,6 +661,23 @@ class AccountsService:
         result = await self._repo.update_routing_policy(account_id, routing_policy)
         if result:
             get_account_selection_cache().invalidate()
+        return result
+
+    async def set_usage_limit(
+        self,
+        account_id: str,
+        *,
+        enabled: bool,
+        percent: float | None,
+    ) -> bool:
+        result = await self._repo.update_usage_limit(
+            account_id,
+            enabled=enabled,
+            percent=percent,
+        )
+        if result:
+            get_account_selection_cache().invalidate(propagate=False)
+            await bump_cache_invalidation_local(NAMESPACE_ACCOUNT_SELECTION)
         return result
 
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:

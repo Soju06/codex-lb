@@ -95,6 +95,86 @@ async def test_import_invalid_json_returns_400(async_client):
 
 
 @pytest.mark.asyncio
+async def test_account_usage_limit_can_be_set_disabled_retained_and_removed(async_client, db_setup):
+    account = _make_account("acc_usage_limit_api", "usage-limit-api@example.com")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    enabled = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": True, "percent": 10},
+    )
+    assert enabled.status_code == 200
+    assert enabled.json() == {
+        "accountId": account.id,
+        "enabled": True,
+        "percent": 10.0,
+    }
+
+    listed = await async_client.get("/api/accounts")
+    summary = next(item for item in listed.json()["accounts"] if item["accountId"] == account.id)
+    assert summary["usageLimitEnabled"] is True
+    assert summary["usageLimitPercent"] == 10.0
+    assert summary["usageLimitState"] == "data_unavailable"
+
+    disabled = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": False, "percent": 10},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["enabled"] is False
+    assert disabled.json()["percent"] == 10.0
+
+    listed = await async_client.get("/api/accounts")
+    summary = next(item for item in listed.json()["accounts"] if item["accountId"] == account.id)
+    assert summary["usageLimitEnabled"] is False
+    assert summary["usageLimitPercent"] == 10.0
+    assert summary["usageLimitState"] == "disabled"
+
+    removed = await async_client.put(
+        f"/api/accounts/{account.id}/usage-limit",
+        json={"enabled": False, "percent": None},
+    )
+    assert removed.status_code == 200
+
+    async with SessionLocal() as session:
+        stored = await session.get(Account, account.id)
+        assert stored is not None
+        assert stored.usage_limit_enabled is False
+        assert stored.usage_limit_percent is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"enabled": True, "percent": None},
+        {"enabled": True, "percent": 0},
+        {"enabled": True, "percent": 100.01},
+    ],
+)
+async def test_account_usage_limit_rejects_invalid_configuration(async_client, db_setup, payload):
+    account = _make_account("acc_usage_limit_invalid", "usage-limit-invalid@example.com")
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    response = await async_client.put(f"/api/accounts/{account.id}/usage-limit", json=payload)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_account_usage_limit_missing_account_returns_404(async_client):
+    response = await async_client.put(
+        "/api/accounts/missing/usage-limit",
+        json={"enabled": True, "percent": 10},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "account_not_found"
+
+
+@pytest.mark.asyncio
 async def test_import_missing_tokens_returns_400(async_client):
     files = {"auth_json": ("auth.json", json.dumps({"foo": "bar"}), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)

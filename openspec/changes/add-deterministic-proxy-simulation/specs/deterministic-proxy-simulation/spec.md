@@ -26,12 +26,16 @@ that advances time explicitly instead of sleeping on the wall clock.
 ### Requirement: Bridge turn lifecycle schedule checking proves exactly-once settlement
 
 The deterministic simulation test suite MUST include a seeded schedule checker
-that executes at least 200 schedules by default. For every schedule interleaving
-admission wait, upstream terminal event, downstream cancellation, and retry
-request, the checker MUST assert that the bridge request reaches exactly one
-terminal outcome and releases its response-create, API-key, and account leases
-exactly once. Failure output MUST include the seed needed to reproduce the
-schedule.
+that executes at least 200 schedules by default. Each schedule MUST dispatch its
+lifecycle events as concurrent scheduler tasks with seeded virtual wake-up
+deadlines, so events sharing a deadline interleave at their await points. For
+every schedule interleaving admission wait, upstream terminal event, downstream
+cancellation, and retry request, the checker MUST assert that the bridge request
+reaches exactly one terminal outcome and releases its response-create, API-key,
+and account leases exactly once. The checker MUST also assert that the released
+response-create permit is observable by a waiting admission request, so the
+release counters cannot be satisfied by never releasing. Failure output MUST
+include the seed needed to reproduce the schedule.
 
 The checker MUST also be run against a deliberately buggy implementation and the
 test MUST assert that the checker fails that implementation.
@@ -40,11 +44,14 @@ test MUST assert that the checker fails that implementation.
 
 - **WHEN** the bridge lifecycle checker runs its default schedule set
 - **THEN** at least 200 deterministic schedules are exercised
+- **AND** every schedule contains all four lifecycle events
 - **AND** every accepted schedule reaches one terminal outcome
 - **AND** every lease category is released exactly once
+- **AND** every queued admission waiter is admitted
 
 #### Scenario: Canary double release is caught
 
-- **WHEN** the same checker runs against a toy implementation that releases
-  leases twice after cancellation and a late upstream terminal event
+- **WHEN** the same checker runs against a toy implementation whose cancel path
+  releases the response-create admission and account create lease before the
+  shared terminal cleanup takes ownership of them
 - **THEN** the checker fails the toy implementation

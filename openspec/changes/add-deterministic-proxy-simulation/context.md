@@ -16,6 +16,18 @@ The first schedule checker models the recurring lease and terminal-state bug
 class from the taxonomy: a bridge turn must reach exactly one terminal outcome
 and release response-create, API-key, and account leases exactly once even when
 admission, upstream terminal delivery, downstream cancellation, and retry
-attachment interleave. Its planted-bug canary double-releases on cancel followed
-by a late upstream terminal event, proving the checker fails a known bad state
-machine.
+attachment interleave.
+
+The checker drives production code rather than a model of it. Release runs
+through `_release_websocket_response_create_ownership_for_cleanup` and
+`ProxyService._release_websocket_request_state_reservation`, and the admission
+wait contends for a permit on a real `WorkAdmissionController`. Every event in a
+schedule is a concurrent task with its own seeded virtual deadline, so equal
+deadlines produce real interleaving at the await points inside those helpers.
+
+Its planted-bug canary releases the create ownership on the cancel path before
+the shared cleanup takes ownership of it, so a cancel racing an upstream
+terminal double-releases. That proves the checker fails a known bad state
+machine. The same checker also rejects a lost terminal claim, a dropped API-key
+reservation release, and a permit that is never handed back to the admission
+gate.

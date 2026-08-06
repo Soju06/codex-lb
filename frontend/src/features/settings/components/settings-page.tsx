@@ -20,6 +20,7 @@ import { ResetCreditSettings } from "@/features/settings/components/reset-credit
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
+import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -135,6 +136,8 @@ export function SettingsPage() {
                 void handleSave(buildSettingsUpdateRequest(settings, { hideUpstreamQuotaFromApiKeys: enabled }))
               }
             />
+
+            <TelemetrySettings disabled={controlsDisabled} />
 
             <AdvancedSettingsGroup>
               <RoutingSettings

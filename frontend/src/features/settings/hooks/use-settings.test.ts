@@ -3,7 +3,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { useSettings } from "@/features/settings/hooks/use-settings";
+import { useSettings, useTelemetryConsent } from "@/features/settings/hooks/use-settings";
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -52,6 +52,28 @@ describe("useSettings", () => {
 
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["settings", "detail"] });
+    });
+  });
+});
+
+describe("useTelemetryConsent", () => {
+  it("loads consent and invalidates cache on decision", async () => {
+    const queryClient = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const { result } = renderHook(() => useTelemetryConsent(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.telemetryConsentQuery.isSuccess).toBe(true));
+    expect(result.current.telemetryConsentQuery.data?.state).toBe("enabled");
+    expect(result.current.telemetryConsentQuery.data?.active).toBe(true);
+    expect(result.current.telemetryConsentQuery.data?.preview).toMatchObject({ schema_version: 1 });
+
+    await result.current.updateTelemetryConsentMutation.mutateAsync({ enabled: false });
+
+    await waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["settings", "telemetry"] });
     });
   });
 });

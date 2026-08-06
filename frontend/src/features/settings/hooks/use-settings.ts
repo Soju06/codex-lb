@@ -8,14 +8,17 @@ import {
   createUpstreamProxyEndpoint,
   createUpstreamProxyPool,
   getSettings,
+  getTelemetryConsent,
   getUpstreamProxyAdmin,
   putAccountProxyBinding,
   testUpstreamProxyEndpoint,
   updateSettings,
+  updateTelemetryConsent,
 } from "@/features/settings/api";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 import type {
   AccountProxyBindingRequest,
+  TelemetryConsentUpdateRequest,
   UpstreamProxyEndpointCreateRequest,
   UpstreamProxyPoolCreateRequest,
   UpstreamProxyPoolMemberRequest,
@@ -51,6 +54,33 @@ export function useSettings() {
   return {
     settingsQuery,
     updateSettingsMutation,
+  };
+}
+
+export function useTelemetryConsent() {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
+    queryKey: ["settings", "telemetry"],
+    queryFn: getTelemetryConsent,
+  });
+  const telemetryConsentQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
+
+  const updateTelemetryConsentMutation = useMutation({
+    mutationFn: (payload: TelemetryConsentUpdateRequest) => updateTelemetryConsent(payload),
+    onSuccess: () => {
+      toast.success(t("settings.telemetry.toasts.saved"));
+      void queryClient.invalidateQueries({ queryKey: ["settings", "telemetry"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("settings.telemetry.toasts.saveFailed"));
+    },
+  });
+
+  return {
+    telemetryConsentQuery,
+    updateTelemetryConsentMutation,
   };
 }
 

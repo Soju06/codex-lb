@@ -343,6 +343,22 @@ export const UpstreamProxyAdminSchema = z.object({
   bindings: z.array(AccountProxyBindingSchema),
 });
 
+export const TelemetryConsentStateSchema = z.enum(["undecided", "enabled", "disabled"]);
+export const TelemetryConsentSourceSchema = z.enum(["env", "persisted", "default"]);
+
+export const TelemetryConsentSchema = z.object({
+  state: TelemetryConsentStateSchema,
+  source: TelemetryConsentSourceSchema,
+  active: z.boolean(),
+  // The exact snapshot the instance would transmit (snake_case wire format).
+  // Kept as an opaque record so the dialog renders it verbatim.
+  preview: z.record(z.string(), z.unknown()),
+});
+
+export const TelemetryConsentUpdateRequestSchema = z.object({
+  enabled: z.boolean(),
+});
+
 export type UpstreamProxyEndpoint = z.infer<typeof UpstreamProxyEndpointSchema>;
 export type UpstreamProxyEndpointCreateRequest = z.infer<typeof UpstreamProxyEndpointCreateRequestSchema>;
 export type UpstreamProxyEndpointTestResponse = z.infer<typeof UpstreamProxyEndpointTestResponseSchema>;
@@ -352,3 +368,5 @@ export type UpstreamProxyPoolMemberRequest = z.infer<typeof UpstreamProxyPoolMem
 export type AccountProxyBinding = z.infer<typeof AccountProxyBindingSchema>;
 export type AccountProxyBindingRequest = z.infer<typeof AccountProxyBindingRequestSchema>;
 export type UpstreamProxyAdmin = z.infer<typeof UpstreamProxyAdminSchema>;
+export type TelemetryConsent = z.infer<typeof TelemetryConsentSchema>;
+export type TelemetryConsentUpdateRequest = z.infer<typeof TelemetryConsentUpdateRequestSchema>;

@@ -4,6 +4,8 @@ import {
   AccountProxyBindingSchema,
   DashboardSettingsSchema,
   SettingsUpdateRequestSchema,
+  TelemetryConsentSchema,
+  TelemetryConsentUpdateRequestSchema,
   UpstreamProxyAdminSchema,
   UpstreamProxyEndpointCreateRequestSchema,
   UpstreamProxyEndpointSchema,
@@ -15,6 +17,7 @@ import {
 
 const SETTINGS_PATH = "/api/settings";
 const UPSTREAM_PROXY_PATH = `${SETTINGS_PATH}/upstream-proxy`;
+const TELEMETRY_PATH = `${SETTINGS_PATH}/telemetry`;
 
 export function getSettings() {
   return get(SETTINGS_PATH, DashboardSettingsSchema);
@@ -23,6 +26,17 @@ export function getSettings() {
 export function updateSettings(payload: unknown) {
   const validated = SettingsUpdateRequestSchema.parse(payload);
   return put(SETTINGS_PATH, DashboardSettingsSchema, {
+    body: validated,
+  });
+}
+
+export function getTelemetryConsent() {
+  return get(TELEMETRY_PATH, TelemetryConsentSchema);
+}
+
+export function updateTelemetryConsent(payload: unknown) {
+  const validated = TelemetryConsentUpdateRequestSchema.parse(payload);
+  return put(TELEMETRY_PATH, TelemetryConsentSchema, {
     body: validated,
   });
 }

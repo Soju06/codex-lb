@@ -10,6 +10,7 @@ from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
 from app.db.session import get_background_session
+from app.core.utils.time import to_utc_naive
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.load_balancer import _build_states
 from app.modules.quota_planner.logic import build_demand_forecast, plan_shadow_actions, simulate_pool
@@ -163,7 +164,10 @@ class QuotaPlannerScheduler:
                         separators=(",", ":"),
                     ),
                 )
-                due = action.scheduled_at is None or action.scheduled_at <= now
+                # Decision timestamps come back from the timezone-naive DB
+                # columns while planner output is timezone-aware. Compare
+                # normalized UTC-naive instants at this boundary.
+                due = action.scheduled_at is None or to_utc_naive(action.scheduled_at) <= to_utc_naive(now)
                 if (
                     settings.mode == "auto"
                     and action.action == "warmup"

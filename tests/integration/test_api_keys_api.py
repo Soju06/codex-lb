@@ -1365,6 +1365,78 @@ async def test_backend_codex_responses_routes_responses_capable_model_source(asy
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_strips_replayed_tool_call_namespaces_for_model_source(async_client, monkeypatch):
+    model = "external-v1-namespaced-replay"
+    await _create_model_source(
+        async_client,
+        name="v1-namespaced-replay",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream(source, payload):
+        observed["payload"] = dict(payload)
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=2, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_source_namespaced_replay",'
+                b'"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [
+                {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "call_id": "call_1",
+                    "name": "spawn_agent",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "custom_tool_call",
+                    "namespace": "exec",
+                    "call_id": "call_2",
+                    "name": "exec",
+                    "input": "pwd",
+                },
+            ],
+            "stream": True,
+            "temperature": 0.2,
+            "metadata": {"client": "source-compatible"},
+        },
+    )
+    assert response.status_code == 200
+
+    forwarded_payload = cast("dict[str, object]", observed["payload"])
+    assert forwarded_payload["input"] == [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "spawn_agent",
+            "arguments": "{}",
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_2",
+            "name": "exec",
+            "input": "pwd",
+        },
+    ]
+    assert forwarded_payload["temperature"] == 0.2
+    assert forwarded_payload["metadata"] == {"client": "source-compatible"}
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_responses_filters_unsupported_model_source_tools(async_client, monkeypatch):
     model = "external-codex-responses-tools"
     await _create_model_source(
@@ -3659,6 +3731,114 @@ async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch
         limits = await repo.get_limits_by_key(key_id)
         assert len(limits) == 1
         assert limits[0].current_value == 30  # 20 input + 10 output, finalized once
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["stream", "collect", "compact", "transcribe"])
+async def test_rate_limit_header_failure_releases_reservation_once(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+    surface: str,
+) -> None:
+    await _populate_test_registry()
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": f"header-failure-{surface}",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 50_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    release_calls: list[str] = []
+    upstream_calls: list[str] = []
+    original_release_reservation = proxy_api._release_reservation
+
+    async def fail_rate_limit_headers(_service) -> dict[str, str]:
+        raise RuntimeError("injected rate-limit header failure")
+
+    async def release_reservation(reservation) -> None:
+        assert reservation is not None
+        release_calls.append(reservation.reservation_id)
+        await original_release_reservation(reservation)
+
+    def unexpected_stream(*_args, **_kwargs):
+        upstream_calls.append("stream")
+        raise AssertionError("stream transport must not start")
+
+    async def unexpected_compact(*_args, **_kwargs):
+        upstream_calls.append("compact")
+        raise AssertionError("compact transport must not start")
+
+    async def unexpected_transcribe(*_args, **_kwargs):
+        upstream_calls.append("transcribe")
+        raise AssertionError("transcribe transport must not start")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "rate_limit_headers", fail_rate_limit_headers)
+    monkeypatch.setattr(proxy_api, "_release_reservation", release_reservation)
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_responses", unexpected_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_http_responses", unexpected_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "compact_responses", unexpected_compact)
+    monkeypatch.setattr(proxy_module.ProxyService, "transcribe", unexpected_transcribe)
+
+    headers = {"Authorization": f"Bearer {key}"}
+    with pytest.raises(RuntimeError, match="injected rate-limit header failure"):
+        if surface == "stream":
+            await async_client.post(
+                "/backend-api/codex/responses",
+                headers=headers,
+                json={"model": _TEST_MODELS[0], "instructions": "hi", "input": [], "stream": True},
+            )
+        elif surface == "collect":
+            await async_client.post(
+                "/v1/responses",
+                headers=headers,
+                json={"model": _TEST_MODELS[0], "instructions": "hi", "input": [], "stream": False},
+            )
+        elif surface == "compact":
+            await async_client.post(
+                "/v1/responses/compact",
+                headers=headers,
+                json={"model": _TEST_MODELS[0], "instructions": "hi", "input": []},
+            )
+        else:
+            await async_client.post(
+                "/backend-api/transcribe",
+                headers=headers,
+                files={"file": ("sample.wav", b"\x00\x01\x02", "audio/wav")},
+            )
+
+    assert upstream_calls == []
+    assert len(release_calls) == 1
+
+    async with SessionLocal() as session:
+        reservations = (
+            (await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)))
+            .scalars()
+            .all()
+        )
+        assert len(reservations) == 1
+        assert release_calls == [reservations[0].id]
+        assert reservations[0].status == "released"
+
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
 
 
 @pytest.mark.asyncio

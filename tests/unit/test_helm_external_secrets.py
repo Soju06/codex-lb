@@ -47,6 +47,21 @@ def _helm_template(*args: str) -> str:
     return completed.stdout
 
 
+def _helm_template_failure(*args: str) -> subprocess.CalledProcessError:
+    if shutil.which("helm") is None:
+        pytest.skip("helm is required for chart rendering tests")
+    _ensure_chart_dependencies()
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        subprocess.run(
+            ["helm", "template", "codex-lb", str(_CHART_DIR), *args],
+            cwd=_REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    return exc_info.value
+
+
 def _helm_documents(rendered: str) -> list[dict]:
     return [document for document in yaml.safe_load_all(rendered) if document]
 
@@ -390,10 +405,43 @@ def test_deployment_prestop_starts_and_polls_local_drain() -> None:
     )
 
     assert "http://127.0.0.1:3456" in rendered
-    assert "/internal/drain/start" in rendered
-    assert "/internal/drain/status" in rendered
-    assert "deadline = time.monotonic() + 15" in rendered
-    assert "break" not in rendered
+    assert "-m" in rendered
+    assert "app.core.prestop" in rendered
+    assert "--routing-dwell-seconds" in rendered
+    assert '"15"' in rendered
+    assert "--drain-timeout-seconds" in rendered
+    assert '"30"' in rendered
+
+
+def test_deployment_rejects_routing_dwell_larger_than_drain_timeout() -> None:
+    failure = _helm_template_failure(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "preStopSleepSeconds=31",
+        "--set",
+        "config.shutdownDrainTimeoutSeconds=30",
+        "--set",
+        "terminationGracePeriodSeconds=61",
+    )
+
+    assert "shutdownDrainTimeoutSeconds must be greater than or equal to preStopSleepSeconds" in failure.stderr
+
+
+def test_deployment_rejects_missing_post_drain_cleanup_buffer() -> None:
+    failure = _helm_template_failure(
+        "--show-only",
+        "templates/deployment.yaml",
+        "--set",
+        "preStopSleepSeconds=15",
+        "--set",
+        "config.shutdownDrainTimeoutSeconds=30",
+        "--set",
+        "terminationGracePeriodSeconds=44",
+    )
+
+    assert "terminationGracePeriodSeconds must cover preStop start fallback" in failure.stderr
+    assert "config.shutdownDrainTimeoutSeconds + 32" in failure.stderr
 
 
 def test_deployment_uses_service_port_for_container_and_probes() -> None:

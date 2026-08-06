@@ -41,6 +41,7 @@ from app.modules.accounts.usage_time_rollup import (
     mirror_account_soft_delete_into_time_rollups,
 )
 from app.modules.usage.additional_quota_keys import normalize_additional_quota_routing_policy_overrides
+from app.modules.usage.plan_downgrade_observations import discard_plan_downgrade_observations
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 _SETTINGS_ROW_ID = 1
@@ -243,7 +244,7 @@ class AccountsRepository:
                 email=account.email,
             )
             if canonical is not None:
-                _apply_account_updates(canonical, account)
+                await self._apply_account_replacement(canonical, account)
                 usage_cache_dirty = await self._reconcile_chatgpt_identity_duplicates(
                     canonical=canonical,
                     chatgpt_account_id=account.chatgpt_account_id,
@@ -268,7 +269,7 @@ class AccountsRepository:
                 account,
                 merge_by_chatgpt_identity=merge_by_chatgpt_identity,
             ):
-                _apply_account_updates(existing, account)
+                await self._apply_account_replacement(existing, account)
                 await self._session.commit()
                 await self._session.refresh(existing)
                 return existing
@@ -277,7 +278,7 @@ class AccountsRepository:
         if merge_by_email:
             existing_by_email = await self._single_account_by_email(account.email)
             if existing_by_email:
-                _apply_account_updates(existing_by_email, account)
+                await self._apply_account_replacement(existing_by_email, account)
                 await self._session.commit()
                 await self._session.refresh(existing_by_email)
                 return existing_by_email
@@ -296,10 +297,24 @@ class AccountsRepository:
             existing = await self._session.get(Account, account_id)
             if existing is None:
                 return None
-            _apply_account_updates(existing, account)
+            await self._apply_account_replacement(existing, account)
             await self._session.commit()
             await self._session.refresh(existing)
             return existing
+
+    async def _apply_account_replacement(self, target: Account, source: Account) -> None:
+        """Apply freshly imported or reauthorized material onto an existing row.
+
+        Every in-place credential replacement goes through here rather than
+        calling :func:`_apply_account_updates` directly, so replacing a
+        credential always discards the account's pending plan-downgrade
+        evidence in the same transaction: evidence gathered under the previous
+        credential must not count toward a downgrade for the new one (#1456).
+        Routine token rotation is a different event with its own path
+        (:meth:`rotate_tokens`) and deliberately does not discard evidence.
+        """
+        _apply_account_updates(target, source)
+        await discard_plan_downgrade_observations(self._session, target.id)
 
     async def upsert_account_slot(
         self,
@@ -338,7 +353,7 @@ class AccountsRepository:
 
         existing = await self._account_by_slot_identity(account)
         if existing:
-            _apply_account_updates(existing, account)
+            await self._apply_account_replacement(existing, account)
             await self._session.commit()
             await self._session.refresh(existing)
             return existing
@@ -346,7 +361,7 @@ class AccountsRepository:
         existing_by_id = await self._session.get(Account, account.id)
         if existing_by_id:
             if _same_unknown_workspace_identity(existing_by_id, account) and not preserve_unknown_workspace_duplicates:
-                _apply_account_updates(existing_by_id, account)
+                await self._apply_account_replacement(existing_by_id, account)
                 await self._session.commit()
                 await self._session.refresh(existing_by_id)
                 return existing_by_id
@@ -361,7 +376,7 @@ class AccountsRepository:
             if existing_by_email and not _can_reuse_email_fallback(existing_by_email, account):
                 existing_by_email = None
             if existing_by_email:
-                _apply_account_updates(existing_by_email, account)
+                await self._apply_account_replacement(existing_by_email, account)
                 await self._session.commit()
                 await self._session.refresh(existing_by_email)
                 return existing_by_email

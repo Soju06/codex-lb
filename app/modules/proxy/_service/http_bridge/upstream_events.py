@@ -1123,6 +1123,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 release_create_gate = False
 
             _archive_http_bridge_upstream_text(session, original_text, matched_request_state)
+            pending_request_count = len(session.pending_requests)
 
             if matched_request_state is not None:
                 now = _service_time().monotonic()
@@ -1345,6 +1346,22 @@ class _HTTPBridgeUpstreamEventsMixin:
         if status_request_state is None and is_previous_response_not_found_event:
             session.upstream_control.reconnect_requested = True
             return
+
+        if status_request_state is None and pending_request_count:
+            # The bridge multiplexes one upstream connection across pending
+            # requests. An event that reaches none of them is dropped here, and
+            # whatever was waiting for it waits until a timeout fires, so the
+            # drop needs to be visible rather than inferred from a missing
+            # downstream response.
+            logger.warning(
+                "HTTP bridge upstream event matched no pending request account_id=%s bridge_kind=%s "
+                "event_type=%s has_response_id=%s pending_count=%d",
+                session.account.id,
+                session.key.affinity_kind,
+                event_type or "unknown",
+                response_id is not None,
+                pending_request_count,
+            )
 
         if status_request_state is not None and event_type not in {
             "response.completed",

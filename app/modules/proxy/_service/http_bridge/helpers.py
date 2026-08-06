@@ -12,6 +12,7 @@ from ipaddress import ip_address
 from typing import Any, Literal, Mapping, TypeVar, cast
 from urllib.parse import urlparse
 
+from app.core import shutdown as shutdown_state
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -1655,29 +1656,38 @@ async def _await_cancelled_task(
     *,
     timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
     label: str,
+    cancel: bool = True,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
 ) -> bool:
-    caller_task = asyncio.current_task()
+    effective_timeout = max(float(timeout_seconds), 0.0)
+    remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
+    if remaining_drain_timeout is not None:
+        effective_timeout = min(effective_timeout, remaining_drain_timeout)
+
     # Give a new child one scheduling turn before cancellation so
     # cancellation-resistant tasks enter the deferred-drain path.
-    if not task.done():
+    if cancel and not task.done():
         try:
             await asyncio.sleep(0)
         except asyncio.CancelledError:
             _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks)
             raise
-    task.cancel()
+    if cancel:
+        task.cancel()
     try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        done, _ = await asyncio.wait({task}, timeout=effective_timeout)
     except asyncio.CancelledError:
-        if caller_task is not None and caller_task.cancelling():
+        if not task.done():
             _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
-            raise
-        return True
-    except TimeoutError:
+        raise
+    if task not in done:
         logger.warning("Timed out waiting for %s cancellation", label)
         _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
         return False
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return True
     return True
 
 

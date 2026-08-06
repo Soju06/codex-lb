@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
+import anyio
 import pytest
 
 import app.modules.proxy.api as proxy_api_module
@@ -15,6 +17,152 @@ pytestmark = pytest.mark.unit
 async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
     for block in blocks:
         yield block
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError], ids=["error", "cancelled"])
+@pytest.mark.parametrize(("owns_reservation", "expected_releases"), [(True, 1), (False, 0)])
+async def test_rate_limit_header_failure_releases_only_owned_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+    owns_reservation: bool,
+    expected_releases: int,
+) -> None:
+    reservation = object()
+    failure = failure_type("rate-limit header failure")
+    releases: list[object] = []
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise failure
+
+    async def release_reservation(value: object) -> None:
+        releases.append(value)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", release_reservation)
+
+    with pytest.raises(failure_type) as caught:
+        await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation if owns_reservation else None),
+        )
+
+    assert caught.value is failure
+    assert releases == ([reservation] if expected_releases else [])
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_header_cancellation_shields_reservation_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = object()
+    failure = asyncio.CancelledError("rate-limit header cancellation")
+    releases: list[object] = []
+    release_started = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    async def cancel_headers(*_args: object) -> dict[str, str]:
+        raise failure
+
+    async def release_reservation(value: object) -> None:
+        releases.append(value)
+        release_started.set()
+        await asyncio.sleep(0)
+        release_finished.set()
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", cancel_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", release_reservation)
+
+    with anyio.CancelScope() as cancel_scope:
+        cancel_scope.cancel()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+                cast(Any, object()),
+                None,
+                cast(Any, reservation),
+            )
+
+    assert caught.value is failure
+    assert release_started.is_set()
+    assert release_finished.is_set()
+    assert releases == [reservation]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_header_failure_defers_repeated_cancellation_until_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = object()
+    failure = RuntimeError("rate-limit header failure")
+    releases: list[object] = []
+    release_started = asyncio.Event()
+    release_continue = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise failure
+
+    async def release_reservation(value: object) -> None:
+        releases.append(value)
+        release_started.set()
+        await release_continue.wait()
+        release_finished.set()
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", release_reservation)
+
+    caller = asyncio.create_task(
+        proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation),
+        )
+    )
+    await release_started.wait()
+    caller.cancel()
+    await asyncio.sleep(0)
+    caller.cancel()
+    release_continue.set()
+
+    with pytest.raises(RuntimeError) as caught:
+        await caller
+
+    assert caught.value is failure
+    assert release_finished.is_set()
+    assert releases == [reservation]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_header_failure_survives_release_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reservation = object()
+    header_failure = RuntimeError("rate-limit header failure")
+    releases: list[object] = []
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise header_failure
+
+    async def fail_release(value: object) -> None:
+        releases.append(value)
+        raise ValueError("release persistence failed")
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", fail_release)
+
+    with pytest.raises(RuntimeError) as caught:
+        await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation),
+        )
+
+    assert caught.value is header_failure
+    assert releases == [reservation]
+    assert "Failed to release API key reservation after rate-limit header failure" in caplog.text
 
 
 def test_strip_blank_reasoning_comment_preserves_unmatched_whitespace_and_inline_comments() -> None:

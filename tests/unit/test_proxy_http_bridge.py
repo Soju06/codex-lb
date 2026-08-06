@@ -120,6 +120,29 @@ def _make_bridge_session(
     )
 
 
+def test_http_bridge_account_neutral_replay_rejects_namespaced_tool_call_history() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [
+                {"role": "user", "content": "old request"},
+                {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "call_id": "call_1",
+                    "name": "spawn_agent",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+                {"role": "user", "content": "next request"},
+            ],
+        }
+    )
+
+    assert http_bridge_streaming_module._http_bridge_payload_is_account_neutral_fresh_replay(payload) is False
+
+
 def _make_eventless_http_bridge_owner(
     *,
     request_id: str = "req-eventless-owner",
@@ -8045,6 +8068,33 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
         pytest.param(
             [
                 {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-previous"},
+                    "content": [{"type": "output_text", "text": "hello back"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "follow up"}],
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "new control message"}],
+                },
+            ],
+            None,
+            True,
+            False,
+            id="retained-assistant-output-with-fresh-developer-followup",
+        ),
+        pytest.param(
+            [
+                {
                     "type": "function_call",
                     "call_id": "call-1",
                     "name": "lookup",
@@ -8060,6 +8110,33 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
             True,
             False,
             id="self-contained-tool-loop",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call-1",
+                    "name": "shell",
+                    "input": "pwd",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "new control message"}],
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-1",
+                    "output": "/workspace",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                },
+            ],
+            {"call-1": "custom_tool_call"},
+            True,
+            False,
+            id="self-contained-tool-loop-with-fresh-developer-interleave",
         ),
         pytest.param(
             [
@@ -16431,7 +16508,7 @@ def test_websocket_admission_rejection_cancels_reservation_heartbeat_before_rele
     start_index = source.index("except ProxyResponseError as exc:", source.index("not request_state_registered"))
     branch = source[start_index : source.index("await proxy._emit_websocket_terminal_error", start_index)]
 
-    assert "proxy._release_websocket_request_state_reservation(request_state)" in branch
+    assert "proxy._release_websocket_request_state_reservation(response_create_request_state)" in branch
     assert "_release_websocket_reservation(request_state.api_key_reservation)" not in source
 
 
@@ -18530,6 +18607,8 @@ async def test_stream_via_http_bridge_fails_closed_before_file_affinity_when_pre
         ("file", False, None),
         ("missing_prior_output", False, None),
         ("orphan_output", False, None),
+        ("response_owned_developer", False, None),
+        ("response_owned_stored_developer", False, None),
         ("missing_owner", False, None),
     ],
 )
@@ -18563,6 +18642,26 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             "internal_chat_message_metadata_passthrough": owner_metadata,
         },
     ]
+    if unsafe_replay_input in {"response_owned_developer", "response_owned_stored_developer"}:
+        responses_lite_tools: proxy_service.JsonValue = {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        }
+        historical_input.insert(0, responses_lite_tools)
+    if unsafe_replay_input == "response_owned_stored_developer":
+        # Immediately after the Responses-Lite bundle, so the canonical position holds and the
+        # response-owned ID is the only remaining rejection cause.
+        historical_input.insert(
+            1,
+            {
+                "type": "message",
+                "id": "msg_stored_response_owned",
+                "role": "developer",
+                "internal_chat_message_metadata_passthrough": owner_metadata,
+                "content": [{"type": "input_text", "text": "stored response-owned control"}],
+            },
+        )
     if unsafe_replay_input == "file":
         historical_input.append(
             {
@@ -18598,6 +18697,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
         "id": "msg_owner",
         "role": "assistant",
         "status": "completed",
+        "phase": "final_answer",
         "content": [{"type": "output_text", "text": "old answer"}],
         "internal_chat_message_metadata_passthrough": owner_metadata,
     }
@@ -18636,6 +18736,19 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             *completed_search_bookkeeping,
             *([] if unsafe_replay_input == "missing_prior_output" else [retained_prior_output]),
             new_input,
+            *(
+                [
+                    {
+                        "type": "message",
+                        "id": "msg_response_owned",
+                        "role": "developer",
+                        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+                        "content": [{"type": "input_text", "text": "response-owned control"}],
+                    }
+                ]
+                if unsafe_replay_input == "response_owned_developer"
+                else []
+            ),
         ],
     }
     if unsafe_replay_input == "conversation":
@@ -18789,10 +18902,13 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             last_call = get_or_create.await_args
             assert last_call is not None
             assert last_call.kwargs["previous_response_id"] is None
-        if unsafe_replay_input in {"missing_prior_output", "orphan_output"}:
+        if unsafe_replay_input in {
+            "missing_prior_output",
+            "orphan_output",
+            "response_owned_developer",
+            "response_owned_stored_developer",
+        }:
             account_neutral_classifier.assert_not_called()
-        elif unsafe_replay_input == "missing_owner":
-            account_neutral_classifier.assert_called_once()
         else:
             account_neutral_classifier.assert_called_once()
         return
@@ -18853,6 +18969,7 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
             "type": "message",
             "role": "assistant",
             "status": "completed",
+            "phase": "final_answer",
             "content": [{"type": "output_text", "text": "old answer"}],
             "internal_chat_message_metadata_passthrough": owner_metadata,
         },

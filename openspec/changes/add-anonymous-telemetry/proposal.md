@@ -14,7 +14,7 @@ proves instances phone GitHub already but gives the project nothing.
 ## Solution
 
 Add a new `telemetry` capability: an anonymous, schema-allowlisted usage snapshot sent to a
-project-operated collection endpoint (self-hosted SHM server, `https://telemetry.nekos.me`)
+project-operated collection endpoint (self-hosted SHM server, `https://telemetry.tokmaxxing.com`)
 at startup and every 24 hours. Consent is **informed opt-out**: telemetry is active by default,
 every user (new and upgrading) gets a one-time dashboard dialog showing the exact JSON payload
 before deciding, a persistent settings toggle, an environment variable kill switch for headless
@@ -54,7 +54,7 @@ instance); model statistics go through the official model catalog allowlist.
   (bounded timeout, fire-and-forget).
 - `app/core/config/settings.py` — `telemetry_enabled: bool | None = None` (tri-state; env
   `CODEX_LB_TELEMETRY_ENABLED` maps to it), `telemetry_endpoint` (default
-  `https://telemetry.nekos.me`).
+  `https://telemetry.tokmaxxing.com`).
 - `app/db/models.py` + Alembic migration — persisted consent decision + `telemetry_instance_id`
   (random UUID minted on first run).
 - Dashboard (frontend) — one-time consent dialog with payload preview; Settings toggle.

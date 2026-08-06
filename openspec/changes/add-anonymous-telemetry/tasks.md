@@ -8,7 +8,7 @@
 - [x] T2: Consent state — DB columns (`telemetry_consent`, `telemetry_instance_id`) +
   Alembic migration on current main head; resolution precedence env > persisted > default.
 - [x] T3: Settings — `telemetry_enabled: bool | None` (env `CODEX_LB_TELEMETRY_ENABLED`),
-  `telemetry_endpoint` default `https://telemetry.nekos.me`.
+  `telemetry_endpoint` default `https://telemetry.tokmaxxing.com`.
 - [x] T4: Sender — SHM `/v1/register` + `/v1/activate` + `/v1/snapshot` client (Ed25519
   keypair per instance), 5s timeout, ≤1 retry/interval, debug-only failure logs.
 - [x] T5: Scheduler — startup snapshot + 24h interval; undecided-consent startup notice

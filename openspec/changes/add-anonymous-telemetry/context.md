@@ -13,7 +13,7 @@ both new and existing users; settings toggle; expanded field set over the minima
 ## Collection endpoint
 
 Self-hosted SHM (kOlapsis/shm) server operated by the maintainer at
-`https://telemetry.nekos.me`. SHM provides Ed25519 instance signing, aggregate dashboards,
+`https://telemetry.tokmaxxing.com`. SHM provides Ed25519 instance signing, aggregate dashboards,
 and public README badges (`/badge/codex-lb/instances`, `/badge/codex-lb/version`).
 The SDK path is `/v1/register`, `/v1/activate`, `/v1/snapshot` (note: NOT `/api/v1/`,
 which is SHM's admin namespace). codex-lb implements a small Python client (SHM ships

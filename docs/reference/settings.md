@@ -242,7 +242,7 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_TELEMETRY_ENABLED` | `bool \| None` | `None` |
-| `CODEX_LB_TELEMETRY_ENDPOINT` | `str` | `'https://telemetry.nekos.me'` |
+| `CODEX_LB_TELEMETRY_ENDPOINT` | `str` | `'https://telemetry.tokmaxxing.com'` |
 | `CODEX_LB_WARMUP_MODEL` | `str` | `'gpt-5.4-mini'` |
 
 ## Removed / deprecated

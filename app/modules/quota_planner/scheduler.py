@@ -164,7 +164,14 @@ class QuotaPlannerScheduler:
                     ),
                 )
                 due = action.scheduled_at is None or action.scheduled_at <= now
-                if settings.mode == "auto" and action.action == "warmup" and due and decision.status == "planned":
+                if (
+                    settings.mode == "auto"
+                    and action.action == "warmup"
+                    and due
+                    and decision.status in {"planned", "executing"}
+                ):
+                    # An expired executing row is reclaimed inside warm_now;
+                    # a still-live executing row is read back and left alone.
                     await warmup_service.warm_now(account_id=action.account_id, decision_id=decision.id)
 
 

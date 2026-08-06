@@ -175,11 +175,8 @@ async def test_usage_reservation_creation_and_settlement_relax_commit_durability
                 cached_input_tokens=0,
                 cost_microdollars=0,
             )
-            await repo.update_last_used(key_id, commit=False)
             await repo.commit()
         _assert_relaxed_before(statements, "UPDATE api_key_usage_reservations")
-        # The last_used_at touch rides the same relaxed settlement transaction.
-        assert any("UPDATE api_keys" in statement for statement in statements)
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.sticky_repository import StickyOwnerLookup
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
 
@@ -192,14 +193,27 @@ class _StubStickySessionsRepository:
     def __init__(self) -> None:
         self.account_id: str | None = None
         self.account_ids_by_key: dict[str, str] | None = None
+        # Keys reported as purge tombstones (see
+        # purge_stale_hard_codex_session_mappings): get_account_id_and_abandonment
+        # reports these as ownerless, same as a missing row, but flags them as
+        # abandoned so run_sticky_selection_path can bypass the
+        # ambiguous-owner check for them.
+        self.abandoned_keys: set[str] = set()
         self.deleted: list[tuple[str, StickySessionKind | None]] = []
         self.upserts: list[tuple[str, str, StickySessionKind | None]] = []
 
     async def get_account_id(self, *args: Any, **kwargs: Any) -> str | None:
+        lookup = await self.get_account_id_and_abandonment(*args, **kwargs)
+        return lookup.account_id
+
+    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
+        key = cast(str, args[0])
+        if key in self.abandoned_keys:
+            return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
         if self.account_ids_by_key is not None:
-            return self.account_ids_by_key.get(cast(str, args[0]))
-        del args, kwargs
-        return self.account_id
+            return StickyOwnerLookup(account_id=self.account_ids_by_key.get(key), continuity_abandoned=False)
+        del kwargs
+        return StickyOwnerLookup(account_id=self.account_id, continuity_abandoned=False)
 
     async def upsert(self, *args: Any, **kwargs: Any) -> Any:
         sticky_key = cast(str, args[0])
@@ -240,13 +254,13 @@ class _ConcurrentUnboundStickySessionsRepository(_StubStickySessionsRepository):
         self._lookup_count = 0
         self._all_lookups_started = asyncio.Event()
 
-    async def get_account_id(self, *args: Any, **kwargs: Any) -> None:
+    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
         del args, kwargs
         self._lookup_count += 1
         if self._lookup_count >= self._expected_lookups:
             self._all_lookups_started.set()
         await self._all_lookups_started.wait()
-        return None
+        return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
 
 
 class _ConcurrentBoundStickySessionsRepository(_StubStickySessionsRepository):
@@ -258,13 +272,13 @@ class _ConcurrentBoundStickySessionsRepository(_StubStickySessionsRepository):
         self._lookup_count = 0
         self._all_lookups_started = asyncio.Event()
 
-    async def get_account_id(self, *args: Any, **kwargs: Any) -> str:
+    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
         del args, kwargs
         self._lookup_count += 1
         if self._lookup_count >= self._expected_lookups:
             self._all_lookups_started.set()
         await self._all_lookups_started.wait()
-        return self._initial_account_id
+        return StickyOwnerLookup(account_id=self._initial_account_id, continuity_abandoned=False)
 
 
 class _FailingUpsertStickySessionsRepository(_StubStickySessionsRepository):
@@ -2697,6 +2711,37 @@ async def test_bare_session_mapping_does_not_prove_ambiguous_conversation_owner(
 
     assert selected.account is None
     assert selected.error_code == "conversation_owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_tombstoned_hard_owner_lets_conversation_continuity_reselect() -> None:
+    """A purge-tombstoned mapping (see purge_stale_hard_codex_session_mappings)
+    must not permanently strand a `conversation`-continuity request just
+    because the pool has more than one account. Unlike a key that was never
+    seen, we know this key's owner was durably unavailable and continuity was
+    deliberately abandoned, so a fresh account may be selected and a new hard
+    mapping re-established — otherwise the request could never recover even
+    after the original owner comes back, since nothing on this path would
+    ever re-create the very row needed to stop failing closed."""
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("conversation-tombstoned")
+    assert alternate is not None
+    turn_state_key = "conversation-tombstoned-turn-state"
+    sticky_repo.abandoned_keys = {turn_state_key}
+
+    selected = await balancer.select_account(
+        sticky_key=turn_state_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="turn_state",
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id in {owner.id, alternate.id}
+    assert selected.error_code is None
+    assert sticky_repo.upserts
+    assert sticky_repo.upserts[-1][0] == turn_state_key
+    assert sticky_repo.upserts[-1][1] == selected.account.id
 
 
 @pytest.mark.asyncio

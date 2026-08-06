@@ -1332,6 +1332,7 @@ class _HTTPBridgeStreamingMixin:
         file_required_preferred_account = rewritten_file_account_id is not None
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
+            request_state.proxy_injected_anchor_had_full_resend_payload = payload_looks_like_full_resend
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
             # Durable-anchor injection actually runs when the incoming
             # payload is *not* a full resend (see the
@@ -1963,6 +1964,12 @@ class _HTTPBridgeStreamingMixin:
                         retry_request_state.input_item_count = recovery_anchor_input_count
                         retry_request_state.input_full_fingerprint = recovery_anchor_input_fingerprint
                         retry_request_state.proxy_injected_previous_response_id = True
+                        # ``recovery_anchor_input_count`` is only set when
+                        # ``durable_full_resend_anchor_count`` is not None,
+                        # which itself requires the incoming payload to have
+                        # classified as a full resend (see
+                        # ``classify_durable_full_resend`` above).
+                        retry_request_state.proxy_injected_anchor_had_full_resend_payload = True
                         retry_request_state.fresh_upstream_request_is_retry_safe = False
 
                     async for event_block in self._stream_http_bridge_session_events(
@@ -2044,6 +2051,9 @@ class _HTTPBridgeStreamingMixin:
             and (session_anchor_trimmable or recovery_session_can_anchor)
         ):
             fresh_upstream_request_text = text_data
+            session_level_payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(
+                effective_payload
+            )
             effective_payload = effective_payload.model_copy(
                 update={"previous_response_id": session.last_completed_response_id}
             )
@@ -2060,6 +2070,7 @@ class _HTTPBridgeStreamingMixin:
             request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
             request_state.proxy_injected_previous_response_id = True
+            request_state.proxy_injected_anchor_had_full_resend_payload = session_level_payload_looks_like_full_resend
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
             # Session-level anchor injection may be attached to a payload
             # that relied on the anchor for context (for example a
@@ -2154,6 +2165,16 @@ class _HTTPBridgeStreamingMixin:
                 request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
             if proxy_injected_previous_response_id:
                 request_state.proxy_injected_previous_response_id = True
+                # Unlike ``fresh_upstream_request_is_retry_safe`` below, this
+                # flag only asks whether the client's payload looked like a
+                # full resend, which cannot change between the original
+                # injection and this re-prepare: ``store_context_trim_applied``
+                # requires ``len(incoming_input) > stored_count > 0``, which
+                # already implies a full-resend-shaped payload, so a plain
+                # carry-forward is sufficient.
+                request_state.proxy_injected_anchor_had_full_resend_payload = (
+                    previous_request_state.proxy_injected_anchor_had_full_resend_payload
+                )
                 request_state.fresh_upstream_request_text = fresh_upstream_request_text
                 # The trim branch only fires when the untrimmed payload
                 # is a true full resend whose prefix exactly matches the

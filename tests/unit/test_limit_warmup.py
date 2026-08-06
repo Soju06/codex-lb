@@ -866,6 +866,70 @@ async def test_both_selected_windows_warm_primary_and_secondary_resets() -> None
 
 
 @pytest.mark.asyncio
+async def test_monthly_free_quota_reset_warms_and_records_monthly_window() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="secondary"),
+        before_primary={},
+        before_secondary={account.id: _usage(account.id, used_percent=100, reset_at=1000, window="monthly")},
+        after_primary={},
+        after_secondary={account.id: _usage(account.id, used_percent=0, reset_at=2000, window="monthly")},
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("monthly", 2000, "succeeded")]
+
+
+@pytest.mark.asyncio
+async def test_long_window_warmup_ignores_cross_window_transition() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    account.plan_type = "free"
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(limit_warmup_windows="secondary"),
+        before_primary={},
+        before_secondary={account.id: _usage(account.id, used_percent=100, reset_at=1000, window="secondary")},
+        after_primary={},
+        after_secondary={account.id: _usage(account.id, used_percent=0, reset_at=2000, window="monthly")},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_primary_warmup_accepts_legacy_null_window_transition() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    before = _usage(account.id, used_percent=100, reset_at=1000)
+    before.window = None
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={account.id: before},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 2000, "succeeded")]
+
+
+@pytest.mark.asyncio
 async def test_unsafe_account_state_does_not_send() -> None:
     repo = FakeWarmupRepo()
     sender = FakeSender()

@@ -14,7 +14,7 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy import load_balancer as load_balancer_module
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
-from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -72,6 +72,9 @@ class _StubUsageRepository:
 class _StubStickyRepository:
     async def get_account_id(self, *args, **kwargs) -> str | None:
         return None
+
+    async def get_account_id_and_abandonment(self, *args, **kwargs) -> StickyOwnerLookup:
+        return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
 
     async def upsert(self, *args, **kwargs):
         return None

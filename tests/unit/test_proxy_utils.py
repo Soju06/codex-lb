@@ -5912,6 +5912,27 @@ class _TimeoutAfterHeadersSseSession:
         return _TimeoutAfterHeadersSseResponse()
 
 
+class _SilentBeforeHeadersSseSession:
+    """Upstream that accepts the connection and never sends response headers."""
+
+    def __init__(self, clock: dict[str, float], *, silence_seconds: float) -> None:
+        self._clock = clock
+        self._silence_seconds = silence_seconds
+        self.timeouts: list[aiohttp.ClientTimeout | None] = []
+
+    def post(
+        self,
+        url: str,
+        *,
+        json=None,
+        headers: dict[str, str] | None = None,
+        timeout=None,
+    ):
+        self.timeouts.append(timeout)
+        self._clock["now"] += self._silence_seconds
+        raise aiohttp.SocketTimeoutError("Timeout on reading data from socket")
+
+
 class _ActiveThenTotalTimeoutChunkIterator:
     def __init__(self, clock: dict[str, float]) -> None:
         self._clock = clock
@@ -6846,6 +6867,51 @@ async def test_stream_responses_prefers_idle_timeout_when_total_deadline_ties_af
         )
     ]
 
+    event = json.loads(events[0].split("data: ", 1)[1])
+    assert event["response"]["error"]["code"] == "stream_idle_timeout"
+    assert event["response"]["error"]["message"] == "Upstream stream idle timeout"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_reports_idle_timeout_when_headers_never_arrive(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 180.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+        proxy_request_budget_seconds = 7200.0
+        http_responses_stream_request_budget_seconds = 7200.0
+        upstream_stream_transport = "http"
+
+    clock = {"now": 100.0}
+    session = _SilentBeforeHeadersSseSession(clock, silence_seconds=180.5)
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    # The idle budget, not the two-hour request budget, decides the outcome.
+    recorded_timeout = session.timeouts[0]
+    assert recorded_timeout is not None
+    assert recorded_timeout.sock_read == 180.0
     event = json.loads(events[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert event["response"]["error"]["message"] == "Upstream stream idle timeout"
@@ -11146,6 +11212,55 @@ async def test_service_stream_responses_records_typeless_raw_codex_error_after_c
     assert handle_args is not None
     assert handle_args.args[0] == account
     assert handle_args.args[2] == "rate_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_logs_upstream_event_that_matches_no_pending_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_owner",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+        response_id="resp_owned",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-unroutable", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.4",
+        account=_make_account("acc_bridge_unroutable"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+    cast(Any, session.upstream).archive_received = MagicMock()
+    stray_event = {"type": "response.in_progress", "response": {"id": "resp_from_another_turn"}}
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.service"):
+        await service._process_http_bridge_upstream_text(session, json.dumps(stray_event, separators=(",", ":")))
+
+    unroutable_logs = [record for record in caplog.records if "matched no pending request" in record.getMessage()]
+    assert len(unroutable_logs) == 1
+    message = unroutable_logs[0].getMessage()
+    assert "event_type=response.in_progress" in message
+    assert "pending_count=1" in message
+    # The drop is reported without leaking the identifiers it carried.
+    assert "resp_from_another_turn" not in message
+    assert "bridge-unroutable" not in message
 
 
 @pytest.mark.asyncio

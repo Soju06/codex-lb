@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -6028,6 +6029,20 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
             websocket.send_text(json.dumps(followup_request))
             failed_event = json.loads(websocket.receive_text())
             completed_event = json.loads(websocket.receive_text())
+
+            # Deliver the client disconnect explicitly and wait for the
+            # session teardown to retire the upstream socket before leaving
+            # the context. Relying on ``WebSocketTestSession.__exit__`` is
+            # racy: it cancels the application's cancel scope right after
+            # queueing the disconnect, so the session cleanup can be
+            # cancelled between the reader-task shutdown and
+            # ``upstream.close()``, leaving ``fake_upstream.closed`` unset.
+            # Real servers deliver client disconnects without cancelling the
+            # handler mid-cleanup.
+            websocket.close(1000)
+            deadline = time.monotonic() + 5.0
+            while not fake_upstream.closed and time.monotonic() < deadline:
+                time.sleep(0.01)
 
     assert created_event["type"] == "response.created"
     assert created_event["response"]["id"] == "resp_ws_inflight"

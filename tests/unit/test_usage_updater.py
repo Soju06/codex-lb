@@ -16,6 +16,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.core.usage.models import UsagePayload
+from app.core.usage.refresh_scheduler import _select_long_window_entries
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.usage import updater as usage_updater_module
@@ -368,6 +369,46 @@ def test_usage_refresh_scheduler_splits_interval_across_accounts() -> None:
     assert refresh_scheduler_module._usage_refresh_slice_seconds(120, 4) == 30.0
     assert refresh_scheduler_module._usage_refresh_slice_seconds(120, 240) == 0.5
     assert refresh_scheduler_module._usage_refresh_slice_seconds(120, 0) == 120.0
+
+
+def test_usage_refresh_scheduler_selects_monthly_long_window_for_free_accounts() -> None:
+    free_account = _make_account("acc_free", "workspace_free")
+    free_account.plan_type = "free"
+    plus_account = _make_account("acc_plus", "workspace_plus")
+
+    monthly = UsageHistory(
+        account_id=free_account.id,
+        used_percent=100,
+        reset_at=2000,
+        window="monthly",
+        window_minutes=43_200,
+        recorded_at=datetime.now(tz=timezone.utc),
+    )
+    free_secondary = UsageHistory(
+        account_id=free_account.id,
+        used_percent=25,
+        reset_at=1500,
+        window="secondary",
+        window_minutes=10_080,
+        recorded_at=datetime.now(tz=timezone.utc),
+    )
+    plus_secondary = UsageHistory(
+        account_id=plus_account.id,
+        used_percent=50,
+        reset_at=1600,
+        window="secondary",
+        window_minutes=10_080,
+        recorded_at=datetime.now(tz=timezone.utc),
+    )
+
+    selected = _select_long_window_entries(
+        accounts=[free_account, plus_account],
+        monthly_entries={free_account.id: monthly},
+        secondary_entries={free_account.id: free_secondary, plus_account.id: plus_secondary},
+    )
+
+    assert selected.get(free_account.id) is monthly
+    assert selected.get(plus_account.id) is plus_secondary
 
 
 def test_usage_refresh_scheduler_rotates_one_account_per_slice() -> None:

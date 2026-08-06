@@ -717,6 +717,17 @@ class StickySession(Base):
         onupdate=func.now(),
         nullable=False,
     )
+    # Set only by purge_stale_hard_codex_session_mappings's first pass. A hard
+    # codex_session row normally proves ownership for `conversation`-continuity
+    # requests (see affinity.py's require_unambiguous_account), which have no
+    # other owner index. Once the durably-unavailable owner's proof is this
+    # stale, we stop treating the row as a live pin (so a fresh account can be
+    # selected) but keep it around with this marker set instead of deleting it
+    # outright, so selection can tell "this key was deliberately abandoned,
+    # picking a new owner is authorized" apart from "this key was never seen,
+    # ambiguity must fail closed." The row is only ever hard-deleted once it
+    # has sat abandoned past a further grace window with nobody claiming it.
+    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
 
 class CapabilityLineageMarker(Base):

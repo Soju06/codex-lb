@@ -284,6 +284,7 @@ async def run_sticky_selection_path(
         )
 
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
+    sticky_continuity_abandoned = False
     attempt = 0
     suppress_recovery_probe_candidates = False
     while True:
@@ -293,17 +294,26 @@ async def run_sticky_selection_path(
             async with owner._runtime_lock:
                 pass
             async with owner._repo_factory() as repos:
-                sticky_existing_account_id = await repos.sticky_sessions.get_account_id(
+                sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
                     sticky_key,
                     kind=sticky_kind,
                     max_age_seconds=sticky_max_age_seconds,
                 )
+                sticky_existing_account_id = sticky_owner_lookup.account_id
+                # `is True` (not a truthy check): an un-configured test double
+                # for sticky_sessions may return an object whose attribute
+                # access auto-vivifies to a mock rather than a real bool, and
+                # that must fail safe as "not abandoned", the same as it
+                # always has, rather than silently bypassing the ambiguous
+                # owner check below.
+                sticky_continuity_abandoned = sticky_owner_lookup.continuity_abandoned is True
             if sticky_kind == StickySessionKind.CODEX_SESSION and sticky_existing_is_legacy:
                 # Mixed-version replicas can create both rows on
                 # different accounts. The raw row was loaded before
                 # branch selection and always wins as possible hard
                 # turn-state ownership.
                 sticky_existing_account_id = legacy_existing_account_id
+                sticky_continuity_abandoned = False
         async with owner._runtime_lock:
             states, account_map = owner._prepare_sticky_selection_states(
                 selection_inputs,
@@ -343,9 +353,19 @@ async def run_sticky_selection_path(
                 )
             # A resolved hard row proves ownership. Without one, use the
             # same pre-health/pre-cap pool as the no-sticky path above.
+            #
+            # A tombstoned row (sticky_continuity_abandoned — see
+            # purge_stale_hard_codex_session_mappings) is exempted from this
+            # fail-closed check even though it's just as pool-ambiguous as a
+            # never-seen key: unlike a never-seen key, we know this session's
+            # owner was durably unavailable and continuity was deliberately
+            # abandoned, so picking a fresh owner here is what lets the
+            # request recover instead of failing closed forever with no path
+            # back to a resolved hard row.
             if (
                 require_unambiguous_account
                 and not hard_sticky
+                and not sticky_continuity_abandoned
                 and len(selection_inputs.effective_continuity_owner_candidates) != 1
             ):
                 return _direct_error(

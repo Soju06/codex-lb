@@ -12,6 +12,9 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.limit_warmup.repository import LimitWarmupRepository
+from app.modules.limit_warmup.service import LimitWarmupSendResult
+from app.modules.settings.repository import SettingsRepository
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -133,8 +136,10 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
     assert query_scopes == [
         ("primary", (selected.id,)),
         ("secondary", (selected.id,)),
+        ("monthly", (selected.id,)),
         ("primary", (selected.id,)),
         ("secondary", (selected.id,)),
+        ("monthly", (selected.id,)),
         ("primary", (selected.id,)),
         ("secondary", (selected.id,)),
         ("monthly", (selected.id,)),
@@ -155,3 +160,77 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
     assert persisted_selected.status == AccountStatus.RATE_LIMITED
     assert persisted_unrelated is not None
     assert persisted_unrelated.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_scheduler_free_monthly_reset_creates_monthly_warmup_attempt(
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del db_setup
+    before_reset_at = int(time.time()) + 3600
+    after_reset_at = before_reset_at + 43_200 * 60
+    account = _account("acc_free", status=AccountStatus.ACTIVE)
+    account.plan_type = "free"
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        await UsageRepository(session).add_entry(
+            account.id,
+            100.0,
+            window="monthly",
+            reset_at=before_reset_at,
+            window_minutes=43_200,
+        )
+        await SettingsRepository(session).update(
+            limit_warmup_enabled=True,
+            limit_warmup_windows="secondary",
+            limit_warmup_model="gpt-5.1-codex-mini",
+        )
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert [candidate.id for candidate in accounts] == [account.id]
+            assert latest_usage == {}
+            async with SessionLocal() as session:
+                await UsageRepository(session).add_entry(
+                    account.id,
+                    0.0,
+                    window="monthly",
+                    reset_at=after_reset_at,
+                    window_minutes=43_200,
+                )
+            return True
+
+    class _Sender:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def send(self, target: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
+            self.calls.append((target.id, model))
+            return LimitWarmupSendResult(
+                request_id="warmup-monthly",
+                success=True,
+                latency_ms=12,
+            )
+
+    sender = _Sender()
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "StreamingLimitWarmupSender", lambda *_args, **_kwargs: sender)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+
+    assert await scheduler._refresh_once() == 60.0
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    async with SessionLocal() as session:
+        attempt = (await LimitWarmupRepository(session).latest_by_account([account.id]))[account.id]
+    assert (attempt.window, attempt.reset_at, attempt.status) == ("monthly", after_reset_at, "succeeded")

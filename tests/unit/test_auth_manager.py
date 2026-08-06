@@ -584,33 +584,48 @@ async def test_ensure_fresh_old_failure_cannot_replace_successor(monkeypatch):
     monkeypatch.setattr(manager, "_ensure_chatgpt_account_id", lambda value: _identity(value))
 
     mode = {"calls": 0}
+    successor_started = asyncio.Event()
+    release_successor = asyncio.Event()
     async def fake_run(_account):
         mode["calls"] += 1
         if mode["calls"] == 1:
             raise RefreshError("invalid_grant", "old refresh failed", False)
+        successor_started.set()
+        await release_successor.wait()
         return refreshed
 
     monkeypatch.setattr(manager, "_run_refresh", fake_run)
-    completions: list[tuple[tuple[str, str], asyncio.Task[Account]]] = []
     singleflight = auth_manager_module._REFRESH_SINGLEFLIGHT
-    monkeypatch.setattr(
-        singleflight,
-        "_schedule_complete",
-        lambda key, task: completions.append((key, task)),
-    )
+    old_completion_started = asyncio.Event()
+    old_completion_finished = asyncio.Event()
+    release_old_completion = asyncio.Event()
+    original_complete = singleflight._complete
+
+    async def hold_old_completion(key, task):
+        old_completion_started.set()
+        await release_old_completion.wait()
+        await original_complete(key, task)
+        old_completion_finished.set()
+
+    monkeypatch.setattr(singleflight, "_complete", hold_old_completion)
 
     with pytest.raises(RefreshError, match="old refresh failed"):
         await manager.ensure_fresh(account, force=True)
-    await asyncio.sleep(0)
-    assert len(completions) == 1
-    key, failed_task = completions[0]
+    await old_completion_started.wait()
 
-    assert await manager.ensure_fresh(account, force=True) is refreshed
+    successor = asyncio.create_task(manager.ensure_fresh(account, force=True))
+    await successor_started.wait()
+    joined_successor = asyncio.create_task(manager.ensure_fresh(account, force=True))
+    await asyncio.sleep(0)
+    assert not joined_successor.done()
     assert mode["calls"] == 2
 
-    # The failed task's callback runs after the successor is installed.
-    await singleflight._complete(key, failed_task)
-    assert await manager.ensure_fresh(account, force=True) is refreshed
+    # The failed task's callback settles after the successor is installed.
+    release_old_completion.set()
+    await old_completion_finished.wait()
+    release_successor.set()
+    assert await successor is refreshed
+    assert await joined_successor is refreshed
     assert mode["calls"] == 2
 
 

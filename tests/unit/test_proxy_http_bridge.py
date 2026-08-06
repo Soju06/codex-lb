@@ -258,10 +258,13 @@ def test_http_bridge_eventless_precreated_deadline_survives_reasoning_prelude_wi
         'data: {"type":"response.output_item.added","item":{"type":"reasoning"}}\n\n'
     )
 
-    assert http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
-        request_state,
-        stuck_gate_retire_after_seconds=300.0,
-    ) == 150.0 + http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        == 150.0 + http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
+    )
 
 
 @pytest.mark.asyncio

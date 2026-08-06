@@ -93,14 +93,17 @@ async def test_cancelled_stream_settlement_task_releases_reservation(
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     scheduled: list[tuple[str, str]] = []
     cleanup_tasks: list[asyncio.Task[None]] = []
+    release_retry_flags: list[bool] = []
 
     async def release_unsettled(
         *,
         api_key: ApiKeyData,
         api_key_reservation: ApiKeyUsageReservationData,
         request_id: str,
+        retry_persistence_failures: bool = False,
     ) -> None:
         scheduled.append((api_key.id, api_key_reservation.reservation_id))
+        release_retry_flags.append(retry_persistence_failures)
 
     def schedule_cleanup(
         coro: Any,
@@ -133,6 +136,7 @@ async def test_cancelled_stream_settlement_task_releases_reservation(
 
     assert ("release_stream_api_key_reservation_after_cancelled_settlement", "req-cancel-settle") in scheduled
     assert ("key-cancel-settle", "res-cancel-settle") in scheduled
+    assert release_retry_flags == [True]
 
 
 @pytest.mark.asyncio

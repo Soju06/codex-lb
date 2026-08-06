@@ -1118,6 +1118,7 @@ class _WebSocketUpstreamControl:
     downstream_sequence_request_state: _WebSocketRequestState | None = None
     downstream_sequence_number: int | None = None
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
+    terminal_message_task: asyncio.Task[bool] | None = None
 
 
 @dataclass(slots=True)
@@ -1220,6 +1221,8 @@ def _websocket_request_can_replay_before_visible_output(
     allow_clean_close_retry: bool = False,
 ) -> bool:
     if not request_state.request_text:
+        return False
+    if request_state.transport == _REQUEST_TRANSPORT_WEBSOCKET and request_state.response_create_sent_at is None:
         return False
     if request_state.replay_count >= 1 and not (
         allow_clean_close_retry

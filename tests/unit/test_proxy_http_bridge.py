@@ -120,6 +120,29 @@ def _make_bridge_session(
     )
 
 
+def test_http_bridge_account_neutral_replay_rejects_namespaced_tool_call_history() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [
+                {"role": "user", "content": "old request"},
+                {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "call_id": "call_1",
+                    "name": "spawn_agent",
+                    "arguments": "{}",
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+                {"role": "user", "content": "next request"},
+            ],
+        }
+    )
+
+    assert http_bridge_streaming_module._http_bridge_payload_is_account_neutral_fresh_replay(payload) is False
+
+
 def _make_eventless_http_bridge_owner(
     *,
     request_id: str = "req-eventless-owner",
@@ -16431,7 +16454,7 @@ def test_websocket_admission_rejection_cancels_reservation_heartbeat_before_rele
     start_index = source.index("except ProxyResponseError as exc:", source.index("not request_state_registered"))
     branch = source[start_index : source.index("await proxy._emit_websocket_terminal_error", start_index)]
 
-    assert "proxy._release_websocket_request_state_reservation(request_state)" in branch
+    assert "proxy._release_websocket_request_state_reservation(response_create_request_state)" in branch
     assert "_release_websocket_reservation(request_state.api_key_reservation)" not in source
 
 

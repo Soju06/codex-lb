@@ -57,6 +57,7 @@ dependencies = [
     "segno>=1.6.6",
     "sqlalchemy>=2.0.45",
     "urllib3>=2.7.0",
+    "uvicorn>=0.47.0",
     "websockets>=16.0",
     "zstandard>=0.25.0",
     "aiohttp-socks>=0.10.1",

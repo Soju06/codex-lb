@@ -238,7 +238,7 @@ def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketR
 
 
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
-    return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
+    return responses_payload_is_account_neutral_fresh_replay(payload.to_replay_safety_payload())
 
 
 def _apply_http_bridge_downstream_turn_state(

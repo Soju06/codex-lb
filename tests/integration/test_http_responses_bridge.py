@@ -4485,7 +4485,11 @@ async def test_v1_responses_http_bridge_forks_incompatible_prompt_cache_waiter_w
     app_instance,
     monkeypatch,
 ):
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        admission_wait_timeout_seconds=1.0,
+    )
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_incompatible_prompt_cache_waiter",
@@ -11865,6 +11869,7 @@ async def test_retry_http_bridge_precreated_request_releases_pending_lock_before
         api_key_reservation=None,
         started_at=time.monotonic(),
         awaiting_response_created=True,
+        transport="http",
         response_create_gate_acquired=True,
         request_text=json.dumps({"type": "response.create", "model": "gpt-5.1", "input": []}),
     )
@@ -11937,6 +11942,7 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
         started_at=time.monotonic(),
         response_id="resp-existing",
         awaiting_response_created=False,
+        transport="http",
     )
     retry_request = proxy_module._WebSocketRequestState(
         request_id="req-precreated-race",
@@ -11946,6 +11952,7 @@ async def test_retry_http_bridge_precreated_request_ignores_existing_response_id
         api_key_reservation=None,
         started_at=time.monotonic(),
         awaiting_response_created=True,
+        transport="http",
         request_text=json.dumps({"type": "response.create", "model": "gpt-5.1", "input": ["retry"]}),
     )
     session.pending_requests.extend([existing_request, retry_request])

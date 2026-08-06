@@ -700,7 +700,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         return fleet_api_key
 
     async def _force_in_flight_timeout(*, timeout_seconds: float) -> bool:
-        assert timeout_seconds == 5
+        assert 0 <= timeout_seconds <= 5
         assert shutdown_state.get_in_flight() == 2
         return False
 

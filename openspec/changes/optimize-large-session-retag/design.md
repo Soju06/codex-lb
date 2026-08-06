@@ -41,7 +41,7 @@ A selected JSONL is opened once in binary mode and streamed to a temporary sibli
 
 ### Targeted verification
 
-After mutation, verification reads only the provider-bearing metadata record from JSONL files actually replaced and queries only SQLite databases selected by the plan. It asserts that no planned source-provider metadata remains and that the expected number of rows moved. It does not rescan unrelated JSONL transcript content, unrelated files, or unselected databases.
+After mutation, verification reads only the provider-bearing metadata record from JSONL files actually replaced and queries only SQLite databases selected by the plan. It asserts that no planned source-provider metadata remains and that the expected number of rows moved. It does not rescan unrelated JSONL transcript content, unrelated files, or unselected databases. Verification failures cross the CLI boundary as a controlled non-zero exit; the backup identity emitted before mutation remains available to the operator or supervisor.
 
 ### Structured progress protocol
 

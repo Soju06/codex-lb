@@ -486,6 +486,40 @@ def test_codex_sessions_retag_reports_file_access_errors(monkeypatch, tmp_path):
         )
 
 
+def test_codex_sessions_retag_reports_verification_failure_without_traceback(capsys, tmp_path):
+    state_db = tmp_path / "state_5.sqlite"
+    with sqlite3.connect(state_db) as conn:
+        conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)")
+        conn.execute("INSERT INTO threads (id, model_provider) VALUES ('thread-1', 'openai')")
+        conn.execute(
+            """
+            CREATE TRIGGER preserve_provider
+            AFTER UPDATE OF model_provider ON threads
+            BEGIN
+                UPDATE threads SET model_provider = 'openai' WHERE id = NEW.id;
+            END
+            """
+        )
+
+    with pytest.raises(SystemExit, match="SQLite verification failed"):
+        cli.main(
+            [
+                "codex-sessions",
+                "retag",
+                "--from",
+                "openai",
+                "--to",
+                "codex-lb",
+                "--codex-home",
+                str(tmp_path),
+                "--yes",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert "Created backup at " in captured.out
+
+
 def test_codex_sessions_retag_yes_updates_jsonl_and_sqlite(capsys, tmp_path):
     session_file = tmp_path / "sessions" / "session.jsonl"
     session_file.parent.mkdir(parents=True)

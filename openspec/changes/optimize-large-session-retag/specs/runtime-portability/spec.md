@@ -32,6 +32,7 @@ The `codex-lb` CLI SHALL provide a `codex-sessions retag` subcommand that rewrit
 - **AND** it verifies only SQLite databases selected by the plan
 - **AND** it MUST NOT perform a second full-home JSONL transcript scan or re-query unselected SQLite databases
 - **AND** it fails without reporting success if any planned source-provider metadata remains
+- **AND** the CLI reports verification failure as a controlled non-zero exit while retaining the already-emitted backup identity
 
 #### Scenario: Retag emits structured progress throughout long work
 

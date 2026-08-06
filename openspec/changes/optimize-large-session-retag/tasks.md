@@ -10,6 +10,7 @@
 - [x] 2.2 Implement hard-link-first JSONL backup with flushed copy fallback.
 - [x] 2.3 Implement single-pass atomic JSONL conversion and targeted post-verification.
 - [x] 2.4 Emit structured phase and byte/item progress events while preserving the human-readable CLI summary.
+- [x] 2.5 Translate verification failures into a controlled CLI error while retaining backup evidence.
 
 ## 3. Subprocess supervision contract
 

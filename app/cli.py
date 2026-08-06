@@ -250,7 +250,7 @@ def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
                 "Close Codex/Codex CLI and retry. The state_*.sqlite database can be locked while Codex is running."
             )
         raise SystemExit(message) from exc
-    except ValueError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     except OSError as exc:
         raise SystemExit(f"Unable to read or write Codex session files: {exc}") from exc

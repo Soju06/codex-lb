@@ -558,6 +558,67 @@ async def test_ensure_fresh_singleflights_concurrent_refreshes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ensure_fresh_old_failure_cannot_replace_successor(monkeypatch):
+    """A delayed failed completion must not evict a newer refresh task."""
+    encryptor = TokenEncryptor()
+    stale_refresh = utcnow().replace(year=utcnow().year - 1)
+    account = Account(
+        id="acc_sf_successor",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=stale_refresh,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+    )
+    refreshed_payload = {column.name: getattr(account, column.name) for column in Account.__table__.columns}
+    refreshed_payload.update(
+        access_token_encrypted=encryptor.encrypt("access-new"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-new"),
+    )
+    refreshed = Account(**refreshed_payload)
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+    monkeypatch.setattr(manager, "_ensure_chatgpt_account_id", lambda value: _identity(value))
+
+    mode = {"calls": 0}
+    async def fake_run(_account):
+        mode["calls"] += 1
+        if mode["calls"] == 1:
+            raise RefreshError("invalid_grant", "old refresh failed", False)
+        return refreshed
+
+    monkeypatch.setattr(manager, "_run_refresh", fake_run)
+    completions: list[tuple[tuple[str, str], asyncio.Task[Account]]] = []
+    singleflight = auth_manager_module._REFRESH_SINGLEFLIGHT
+    monkeypatch.setattr(
+        singleflight,
+        "_schedule_complete",
+        lambda key, task: completions.append((key, task)),
+    )
+
+    with pytest.raises(RefreshError, match="old refresh failed"):
+        await manager.ensure_fresh(account, force=True)
+    await asyncio.sleep(0)
+    assert len(completions) == 1
+    key, failed_task = completions[0]
+
+    assert await manager.ensure_fresh(account, force=True) is refreshed
+    assert mode["calls"] == 2
+
+    # The failed task's callback runs after the successor is installed.
+    await singleflight._complete(key, failed_task)
+    assert await manager.ensure_fresh(account, force=True) is refreshed
+    assert mode["calls"] == 2
+
+
+async def _identity(value):
+    return value
+
+
+@pytest.mark.asyncio
 async def test_ensure_fresh_singleflights_refresh_admission_for_same_account(monkeypatch):
     started = asyncio.Event()
     release = asyncio.Event()

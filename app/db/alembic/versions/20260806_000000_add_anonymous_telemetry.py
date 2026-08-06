@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260806_000000_add_anonymous_telemetry"
-down_revision = "20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads"
+down_revision = "20260727_000000_add_sticky_session_continuity_abandoned_at"
 branch_labels = None
 depends_on = None
 

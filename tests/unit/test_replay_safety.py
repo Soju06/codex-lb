@@ -676,6 +676,21 @@ def test_full_resend_suffix_rejects_missing_or_misordered_context(
             False,
             id="omitted-parallel-call",
         ),
+        pytest.param(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {"role": "developer", "content": "new control message"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "result"},
+            ],
+            {"call_1": "function_call"},
+            False,
+            id="inline-developer-message-in-fresh-suffix",
+        ),
     ],
 )
 def test_full_resend_suffix_accepts_only_self_contained_tool_loops(
@@ -697,6 +712,1352 @@ def test_full_resend_suffix_accepts_only_self_contained_tool_loops(
             pending_tool_calls=pending_tool_calls,
         )
         is expected
+    )
+
+
+def test_full_resend_tool_loop_manifest_tolerates_fresh_developer_interleave_after_historical_one() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_old",
+            "call_id": "call_old",
+            "name": "shell",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+            "content": [{"type": "input_text", "text": "historical control message"}],
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "ctco_old",
+            "call_id": "call_old",
+            "output": "/workspace",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_current",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+            "content": [{"type": "input_text", "text": "new control message"}],
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "ctco_current",
+            "call_id": "call_current",
+            "output": "/workspace",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is True
+    )
+
+
+def test_full_resend_tool_loop_manifest_rejects_response_owned_historical_developer() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_old",
+            "call_id": "call_old",
+            "name": "shell",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+        },
+        {
+            "type": "message",
+            "id": "msg_old_control",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+            "content": [{"type": "input_text", "text": "historical control message"}],
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "ctco_old",
+            "call_id": "call_old",
+            "output": "/workspace",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_old"},
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "id": "ctc_current",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+        },
+        {
+            "type": "custom_tool_call_output",
+            "id": "ctco_current",
+            "call_id": "call_current",
+            "output": "/workspace",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is False
+    )
+
+
+def test_full_resend_tool_loop_manifest_rejects_response_owned_fresh_developer() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "message",
+            "id": "msg_response_owned",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+            "content": [{"type": "input_text", "text": "new control message"}],
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "/workspace",
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        pending_tool_calls={"call_current": "custom_tool_call"},
+    )
+
+
+def test_full_resend_tool_loop_manifest_rejects_fresh_developer_inside_function_call_pair() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    suffix: list[JsonValue] = [
+        {
+            "type": "function_call",
+            "call_id": "call_current",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+            "content": [{"type": "input_text", "text": "unobserved function control"}],
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_current",
+            "output": "ok",
+        },
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "function_call"},
+        )
+        is False
+    )
+
+
+def test_full_resend_tool_loop_manifest_rejects_adjacent_pair_nested_in_parallel_batch() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    suffix: list[JsonValue] = [
+        {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": "pwd"},
+        {"type": "custom_tool_call", "call_id": "call_2", "name": "shell", "input": "whoami"},
+        {
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+            "content": [{"type": "input_text", "text": "control inside one matching parallel pair"}],
+        },
+        {"type": "custom_tool_call_output", "call_id": "call_2", "output": "worker"},
+        {"type": "custom_tool_call_output", "call_id": "call_1", "output": "/workspace"},
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_1": "custom_tool_call", "call_2": "custom_tool_call"},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        pytest.param(
+            [
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control before call"}],
+                },
+                {"type": "custom_tool_call", "call_id": "call_current", "name": "shell", "input": "pwd"},
+                {"type": "custom_tool_call_output", "call_id": "call_current", "output": "/workspace"},
+            ],
+            id="developer-before-call",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_current", "name": "shell", "input": "pwd"},
+                {"type": "custom_tool_call_output", "call_id": "call_current", "output": "/workspace"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control after output"}],
+                },
+            ],
+            id="developer-after-output",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_current", "name": "shell", "input": "pwd"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "first control"}],
+                },
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "second control"}],
+                },
+                {"type": "custom_tool_call_output", "call_id": "call_current", "output": "/workspace"},
+            ],
+            id="multiple-developer-messages",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_current", "name": "shell", "input": "pwd"},
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "control without turn id"}],
+                },
+                {"type": "custom_tool_call_output", "call_id": "call_current", "output": "/workspace"},
+            ],
+            id="developer-without-turn-id",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_current", "name": "shell", "input": "pwd"},
+                {
+                    "type": None,
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control with null type"}],
+                },
+                {"type": "custom_tool_call_output", "call_id": "call_current", "output": "/workspace"},
+            ],
+            id="developer-with-null-type",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "working"}],
+                },
+                {"type": "custom_tool_call", "call_id": "call_current", "name": "shell", "input": "pwd"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control"}],
+                },
+                {"type": "custom_tool_call_output", "call_id": "call_current", "output": "/workspace"},
+            ],
+            id="developer-with-leading-assistant-exception",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_current", "name": "shell", "input": "pwd"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control"}],
+                },
+                {"type": "custom_tool_call_output", "call_id": "call_current", "output": "/workspace"},
+                {"role": "user", "content": "follow up"},
+            ],
+            id="developer-with-trailing-user-exception",
+        ),
+    ],
+)
+def test_full_resend_tool_loop_manifest_rejects_unproven_fresh_developer_positions(
+    suffix: list[JsonValue],
+) -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("interleaved_item", "expected"),
+    [
+        pytest.param(
+            {"role": "developer", "content": "historical control"},
+            True,
+            id="implicit-developer-message",
+        ),
+        pytest.param(
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "historical control"}],
+            },
+            True,
+            id="explicit-developer-message",
+        ),
+        pytest.param(
+            {"type": None, "role": "developer", "content": "historical control"},
+            False,
+            id="null-type-developer-message",
+        ),
+        pytest.param(
+            {
+                "type": "bogus",
+                "role": "developer",
+                "id": "msg_owned",
+                "content": "historical control",
+            },
+            False,
+            id="malformed-type-response-owned-developer-message",
+        ),
+        pytest.param(
+            {
+                "type": "reasoning",
+                "role": "developer",
+                "content": "projection-omitted control",
+            },
+            False,
+            id="projection-omitted-developer-message",
+        ),
+        pytest.param(
+            {
+                "role": "developer",
+                "status": "completed",
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn_historical"},
+                "content": "historical control",
+            },
+            True,
+            id="completed-developer-message-with-neutral-metadata",
+        ),
+        pytest.param(
+            {"role": "developer", "id": "msg_owned", "content": "historical control"},
+            False,
+            id="response-owned-developer-message",
+        ),
+        pytest.param(
+            {"role": "developer", "id": "", "content": "historical control"},
+            False,
+            id="empty-response-owned-developer-message",
+        ),
+        pytest.param(
+            {"role": "developer", "content": "   "},
+            False,
+            id="malformed-developer-message",
+        ),
+        pytest.param(
+            {"role": "developer", "phase": "commentary", "content": "historical control"},
+            False,
+            id="phased-developer-message",
+        ),
+        pytest.param(
+            {"role": "developer", "status": "failed", "content": "historical control"},
+            False,
+            id="failed-developer-message",
+        ),
+        pytest.param(
+            {"role": "developer", "content": "historical control", "account_id": "account-scoped"},
+            False,
+            id="unknown-developer-field",
+        ),
+        pytest.param(
+            {
+                "role": "developer",
+                "content": "historical control",
+                "internal_chat_message_metadata_passthrough": {"turn_id": ""},
+            },
+            False,
+            id="invalid-developer-metadata",
+        ),
+        pytest.param(
+            {"role": "user", "content": "new user input"},
+            False,
+            id="user-message",
+        ),
+        pytest.param(
+            {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "assistant output"}],
+            },
+            False,
+            id="assistant-message",
+        ),
+        pytest.param(
+            {"role": "system", "content": "system control"},
+            False,
+            id="system-message",
+        ),
+    ],
+)
+def test_full_resend_exact_manifest_only_allows_historical_developer_interleaving(
+    interleaved_item: JsonValue,
+    expected: bool,
+) -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_old",
+            "name": "shell",
+            "input": "pwd",
+        },
+        interleaved_item,
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_old",
+            "output": "/workspace",
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "git status --short",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "",
+        },
+    ]
+
+    input_items = [*stored_input, *suffix]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_prefix_tail",
+    [
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "message", "role": "developer", "content": "historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+            ],
+            id="parallel-batch-around-interleaved-developer",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "message", "role": "developer", "content": "historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+            ],
+            id="developer-inside-window-that-held-parallel-calls",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "message", "role": "developer", "content": "first historical control message"},
+                {"type": "message", "role": "developer", "content": "second historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+            ],
+            id="duplicate-interleaved-developer-messages",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "message", "role": "developer", "content": "historical control message"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+            ],
+            id="parallel-call-opened-after-interleaved-developer",
+        ),
+    ],
+)
+def test_full_resend_exact_manifest_rejects_unbounded_historical_developer_interleave(
+    stored_prefix_tail: list[JsonValue],
+) -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}, *stored_prefix_tail]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "git status --short",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "",
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_prefix_tail",
+    [
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "message", "role": "developer", "content": "first historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "message", "role": "developer", "content": "second historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+            ],
+            id="sequential-single-call-windows",
+        ),
+        pytest.param(
+            [
+                {"type": "custom_tool_call", "call_id": "call_first", "name": "shell", "input": "pwd"},
+                {"type": "custom_tool_call", "call_id": "call_second", "name": "shell", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "call_first", "output": "/workspace"},
+                {"type": "custom_tool_call_output", "call_id": "call_second", "output": "README.md"},
+                {"type": "custom_tool_call", "call_id": "call_third", "name": "shell", "input": "git status"},
+                {"type": "message", "role": "developer", "content": "historical control message"},
+                {"type": "custom_tool_call_output", "call_id": "call_third", "output": ""},
+            ],
+            id="clean-window-after-drained-parallel-window",
+        ),
+    ],
+)
+def test_full_resend_exact_manifest_accepts_bounded_historical_developer_windows(
+    stored_prefix_tail: list[JsonValue],
+) -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}, *stored_prefix_tail]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "git status --short",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "",
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert (
+        responses_input_suffix_matches_pending_tool_calls(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+            pending_tool_calls={"call_current": "custom_tool_call"},
+        )
+        is True
+    )
+
+
+def test_full_resend_exact_manifest_accepts_canonical_lite_prefix_developer_without_pending_call() -> None:
+    stored_input: list[JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {"type": "message", "role": "developer", "content": "stored control"},
+        {"role": "user", "content": "first question"},
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "/workspace",
+        },
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert projection.canonical_lite_developer_index == 1
+    assert responses_input_suffix_matches_pending_tool_calls(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        pending_tool_calls={"call_current": "custom_tool_call"},
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_input",
+    [
+        pytest.param(
+            [
+                {"role": "user", "content": "first question"},
+                {"type": "message", "role": "developer", "content": "stored control"},
+            ],
+            id="nonadjacent-unowned-developer",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {
+                    "type": "message",
+                    "id": "msg_owned",
+                    "role": "developer",
+                    "content": "stored control",
+                },
+                {"role": "user", "content": "first question"},
+            ],
+            id="response-owned-canonical-position",
+        ),
+        pytest.param(
+            [
+                {"role": "user", "content": "first question"},
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "message", "role": "developer", "content": "stored control"},
+            ],
+            id="bundle-not-at-prefix-start",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "reasoning", "id": "rs_hidden", "summary": []},
+                {"type": "message", "role": "developer", "content": "stored control"},
+                {"role": "user", "content": "first question"},
+            ],
+            id="projection-collapsed-adjacency",
+        ),
+    ],
+)
+def test_full_resend_exact_manifest_rejects_unverified_stored_developer_without_pending_call(
+    stored_input: list[JsonValue],
+) -> None:
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "/workspace",
+        },
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        pending_tool_calls={"call_current": "custom_tool_call"},
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_input",
+    [
+        pytest.param(
+            [
+                {"role": "user", "content": "first question"},
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "message", "role": "developer", "content": "stored control"},
+            ],
+            id="bundle-not-at-prefix-start",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {"type": "reasoning", "id": "rs_hidden", "summary": []},
+                {"type": "message", "role": "developer", "content": "stored control"},
+                {"role": "user", "content": "first question"},
+            ],
+            id="projection-collapsed-adjacency",
+        ),
+    ],
+)
+def test_full_resend_retained_output_rejects_noncanonical_stored_lite_developer(
+    stored_input: list[JsonValue],
+) -> None:
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert projection.canonical_lite_developer_index is None
+    assert not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+@pytest.mark.parametrize(
+    "historical_output",
+    [
+        pytest.param(None, id="missing-output"),
+        pytest.param(
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_other",
+                "output": "/workspace",
+            },
+            id="mismatched-output",
+        ),
+    ],
+)
+def test_full_resend_exact_manifest_requires_historical_interleaved_call_output(
+    historical_output: JsonValue | None,
+) -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_old",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {"role": "developer", "content": "historical control"},
+    ]
+    if historical_output is not None:
+        stored_input.append(historical_output)
+    suffix: list[JsonValue] = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_current",
+            "name": "shell",
+            "input": "git status --short",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_current",
+            "output": "",
+        },
+    ]
+
+    assert not responses_input_suffix_matches_pending_tool_calls(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        pending_tool_calls={"call_current": "custom_tool_call"},
+    )
+
+
+def test_full_resend_retained_output_tolerates_fresh_developer_after_user() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "id": "msg_answer",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_previous"},
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {
+            "type": "message",
+            "id": "msg_user",
+            "role": "user",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+            "content": [{"type": "input_text", "text": "next question"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+            "content": [{"type": "input_text", "text": "new control message"}],
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+    assert projection is not None
+    assert (
+        responses_input_suffix_retains_prior_output(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+        )
+        is True
+    )
+
+
+def test_full_resend_retained_output_accepts_canonical_lite_prefix_developer_without_pending_call() -> None:
+    stored_input: list[JsonValue] = [
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {"type": "message", "role": "developer", "content": "stored control"},
+        {"role": "user", "content": "first question"},
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert projection.canonical_lite_developer_index == 1
+    assert responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+@pytest.mark.parametrize(
+    "stored_input",
+    [
+        pytest.param(
+            [
+                {"role": "user", "content": "first question"},
+                {"type": "message", "role": "developer", "content": "stored control"},
+            ],
+            id="nonadjacent-unowned-developer",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{"type": "custom", "name": "shell"}],
+                },
+                {
+                    "type": "message",
+                    "id": "msg_owned",
+                    "role": "developer",
+                    "content": "stored control",
+                },
+                {"role": "user", "content": "first question"},
+            ],
+            id="response-owned-canonical-position",
+        ),
+    ],
+)
+def test_full_resend_retained_output_rejects_unverified_stored_developer_without_pending_call(
+    stored_input: list[JsonValue],
+) -> None:
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "next question"}]},
+    ]
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+def test_full_resend_retained_output_rejects_response_owned_fresh_developer() -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "id": "msg_answer",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {
+            "type": "message",
+            "id": "msg_user",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "next question"}],
+        },
+        {
+            "type": "message",
+            "id": "msg_response_owned",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_current"},
+            "content": [{"type": "input_text", "text": "new control message"}],
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
+        preserve_developer_message_ids=True,
+    )
+
+    assert projection is not None
+    assert not responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control without user"}],
+                },
+            ],
+            id="developer-without-user",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"role": "user", "content": "next question"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control"}],
+                },
+                {"role": "user", "content": "later question"},
+            ],
+            id="developer-not-terminal",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"role": "user", "content": "next question"},
+                {
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "control without turn id"}],
+                },
+            ],
+            id="developer-without-turn-id",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"role": "user", "content": "next question"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {
+                        "turn_id": "turn-current",
+                        "account_id": "acc-1",
+                    },
+                    "content": [{"type": "input_text", "text": "account-bound control"}],
+                },
+            ],
+            id="developer-with-account-metadata",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"role": "user", "content": "next question"},
+                {
+                    "type": 7,
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control with malformed type"}],
+                },
+            ],
+            id="developer-with-nonstring-type",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"role": "user", "content": "next question"},
+                {
+                    "type": None,
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control with null type"}],
+                },
+            ],
+            id="developer-with-null-type",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"type": "input_text", "text": "raw next input"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control after raw input"}],
+                },
+            ],
+            id="developer-after-raw-input-part",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"type": "input_text", "text": "raw next input"},
+                {"role": "user", "content": "next question"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control after raw and user"}],
+                },
+            ],
+            id="developer-after-raw-input-and-user",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"role": "user", "content": "first next question"},
+                {"role": "user", "content": "second next question"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control after repeated users"}],
+                },
+            ],
+            id="developer-after-repeated-user-messages",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "prior answer"}],
+                },
+                {"role": "user", "content": "next question"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_file", "file_id": "file-account-bound"}],
+                },
+            ],
+            id="developer-with-account-bound-file-id",
+        ),
+        pytest.param(
+            [
+                {
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "still working"}],
+                },
+                {"role": "user", "content": "next question"},
+                {
+                    "role": "developer",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-current"},
+                    "content": [{"type": "input_text", "text": "control after commentary"}],
+                },
+            ],
+            id="developer-after-assistant-commentary",
+        ),
+    ],
+)
+def test_full_resend_retained_output_rejects_unproven_fresh_developer_followup(
+    suffix: list[JsonValue],
+) -> None:
+    stored_input: list[JsonValue] = [{"role": "user", "content": "first question"}]
+
+    assert (
+        responses_input_suffix_retains_prior_output(
+            [*stored_input, *suffix],
+            stored_count=len(stored_input),
+        )
+        is False
+    )
+
+
+def test_full_resend_retained_output_rejects_complete_tool_pair_between_output_and_user() -> None:
+    stored_prefix: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old"}],
+        }
+    ]
+    full_input: list[JsonValue] = [
+        *stored_prefix,
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "done"}],
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_extra",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_extra",
+            "output": "ok",
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "new"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "internal_chat_message_metadata_passthrough": {"turn_id": "turn_new"},
+            "content": [{"type": "input_text", "text": "control"}],
+        },
+    ]
+    projected_full_input = project_responses_input_for_account_neutral_fresh_replay(
+        full_input,
+        stored_count=len(stored_prefix),
+    )
+
+    assert projected_full_input is not None
+    assert (
+        responses_input_suffix_retains_prior_output(
+            projected_full_input.input_items,
+            stored_count=projected_full_input.stored_prefix_count,
+        )
+        is False
+    )
+
+
+def test_full_resend_retained_output_rejects_historical_developer_interleaving() -> None:
+    stored_input: list[JsonValue] = [
+        {"role": "user", "content": "first question"},
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_old",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {"role": "developer", "content": "historical control"},
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_old",
+            "output": "/workspace",
+        },
+    ]
+    suffix: list[JsonValue] = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {"role": "user", "content": "next question"},
+    ]
+
+    assert not responses_input_suffix_retains_prior_output(
+        [*stored_input, *suffix],
+        stored_count=len(stored_input),
     )
 
 

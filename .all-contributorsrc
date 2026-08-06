@@ -1132,6 +1132,26 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "mrnaturalmonopoly-prog",
+      "name": "mrnaturalmonopoly-prog",
+      "avatar_url": "https://avatars.githubusercontent.com/u/309156020?v=4",
+      "profile": "https://github.com/mrnaturalmonopoly-prog",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "mrunnaturalmonopoly-svg",
+      "name": "mrunnaturalmonopoly-svg",
+      "avatar_url": "https://avatars.githubusercontent.com/u/308138851?v=4",
+      "profile": "https://github.com/mrunnaturalmonopoly-svg",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

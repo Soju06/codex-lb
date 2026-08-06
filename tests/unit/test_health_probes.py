@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -117,6 +118,23 @@ async def test_health_ready_draining():
         with pytest.raises(HTTPException) as exc_info:
             await health_ready()
         assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_health_ready_uses_committed_shutdown_state_when_operator_flag_is_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core import shutdown as shutdown_state
+    from app.modules.health.api import health_ready
+
+    shutdown_state.commit_shutdown(timeout_seconds=30)
+    monkeypatch.setattr(shutdown_state, "_draining", False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await health_ready()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Service is draining"
 
 
 @pytest.mark.asyncio
@@ -343,6 +361,7 @@ async def test_health_ready_fails_when_bridge_durable_schema_is_not_ready():
 
 @pytest.mark.asyncio
 async def test_internal_drain_start_sets_draining_and_marks_bridge_sessions():
+    from app.core import shutdown as shutdown_state
     from app.modules.health.api import start_internal_drain
 
     proxy_service = SimpleNamespace(mark_http_bridge_draining=AsyncMock())
@@ -352,16 +371,148 @@ async def test_internal_drain_start_sets_draining_and_marks_bridge_sessions():
     )
 
     with (
-        patch("app.core.shutdown.set_bridge_drain_active") as set_bridge_drain_active,
-        patch("app.core.shutdown.set_draining") as set_draining,
+        patch("app.core.shutdown.time.monotonic", return_value=100),
+        patch("app.core.shutdown.begin_drain", wraps=shutdown_state.begin_drain) as begin_drain,
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(shutdown_drain_timeout_seconds=30),
+        ),
     ):
         response = await start_internal_drain(cast(Any, request))
 
-    set_bridge_drain_active.assert_called_once_with(True)
-    set_draining.assert_called_once_with(True)
+    begin_drain.assert_called_once_with(timeout_seconds=30)
     proxy_service.mark_http_bridge_draining.assert_awaited_once()
     assert response.status == "ok"
-    assert response.checks == {"draining": "ok"}
+    assert response.checks == {
+        "draining": "true",
+        "shutdown_committed": "false",
+        "deadline_monotonic": "130",
+    }
+
+
+@pytest.mark.asyncio
+async def test_internal_drain_start_uses_hook_deadline_without_extension() -> None:
+    from app.core import shutdown as shutdown_state
+    from app.modules.health.api import start_internal_drain, stop_internal_drain
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={"x-codex-lb-drain-deadline-monotonic": "110"},
+        app=SimpleNamespace(state=SimpleNamespace(proxy_service=None)),
+    )
+
+    with (
+        patch("app.core.shutdown.time.monotonic", return_value=102),
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(shutdown_drain_timeout_seconds=30),
+        ),
+    ):
+        response = await start_internal_drain(cast(Any, request))
+        assert shutdown_state.remaining_drain_timeout_seconds() == 8
+        assert shutdown_state.commit_shutdown(timeout_seconds=30) == 110
+
+    assert response.status == "ok"
+    assert response.checks == {
+        "draining": "true",
+        "shutdown_committed": "true",
+        "deadline_monotonic": "110",
+    }
+    assert shutdown_state.is_shutdown_committed() is True
+
+    with pytest.raises(HTTPException) as exc_info:
+        await stop_internal_drain(cast(Any, request))
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_internal_drain_start_rejects_invalid_hook_deadline() -> None:
+    from app.core import shutdown as shutdown_state
+    from app.modules.health.api import start_internal_drain
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={"x-codex-lb-drain-deadline-monotonic": "nan"},
+        app=SimpleNamespace(state=SimpleNamespace(proxy_service=None)),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await start_internal_drain(cast(Any, request))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Invalid drain deadline"
+    assert shutdown_state.is_draining() is False
+    assert shutdown_state.is_shutdown_committed() is False
+    assert shutdown_state.remaining_drain_timeout_seconds() is None
+
+
+@pytest.mark.asyncio
+async def test_headerless_internal_drain_remains_reversible() -> None:
+    from app.core import shutdown as shutdown_state
+    from app.modules.health.api import start_internal_drain, stop_internal_drain
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={},
+        app=SimpleNamespace(state=SimpleNamespace(proxy_service=None)),
+    )
+
+    with (
+        patch("app.core.shutdown.time.monotonic", return_value=100),
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(shutdown_drain_timeout_seconds=30),
+        ),
+    ):
+        response = await start_internal_drain(cast(Any, request))
+        stopped = await stop_internal_drain(cast(Any, request))
+
+    assert response.checks == {
+        "draining": "true",
+        "shutdown_committed": "false",
+        "deadline_monotonic": "130",
+    }
+    assert stopped.checks == {"draining": "false"}
+    assert shutdown_state.is_draining() is False
+    assert shutdown_state.remaining_drain_timeout_seconds() is None
+
+
+@pytest.mark.asyncio
+async def test_deadline_drain_commit_survives_route_cancellation() -> None:
+    from app.core import shutdown as shutdown_state
+    from app.modules.health.api import start_internal_drain
+
+    bridge_mark_started = asyncio.Event()
+    block_bridge_mark = asyncio.Event()
+
+    async def mark_http_bridge_draining() -> None:
+        bridge_mark_started.set()
+        await block_bridge_mark.wait()
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"),
+        headers={"x-codex-lb-drain-deadline-monotonic": "110"},
+        app=SimpleNamespace(
+            state=SimpleNamespace(proxy_service=SimpleNamespace(mark_http_bridge_draining=mark_http_bridge_draining))
+        ),
+    )
+
+    with (
+        patch("app.core.shutdown.time.monotonic", return_value=100),
+        patch(
+            "app.modules.health.api.get_settings",
+            return_value=SimpleNamespace(shutdown_drain_timeout_seconds=30),
+        ),
+    ):
+        start_task = asyncio.create_task(start_internal_drain(cast(Any, request)))
+        await asyncio.wait_for(bridge_mark_started.wait(), timeout=1)
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+
+    assert shutdown_state.is_shutdown_committed() is True
+    assert shutdown_state.is_draining() is True
+    assert shutdown_state.remaining_drain_timeout_seconds() is not None
 
 
 @pytest.mark.asyncio
@@ -385,16 +536,26 @@ async def test_internal_drain_stop_clears_draining_flags():
 
     request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
 
-    with (
-        patch("app.core.shutdown.set_bridge_drain_active") as set_bridge_drain_active,
-        patch("app.core.shutdown.set_draining") as set_draining,
-    ):
+    with patch("app.core.shutdown.stop_drain", return_value=True) as stop_drain:
         response = await stop_internal_drain(cast(Any, request))
 
-    set_draining.assert_called_once_with(False)
-    set_bridge_drain_active.assert_called_once_with(False)
+    stop_drain.assert_called_once_with()
     assert response.status == "ok"
     assert response.checks == {"draining": "false"}
+
+
+@pytest.mark.asyncio
+async def test_internal_drain_stop_rejects_committed_process_shutdown():
+    from app.modules.health.api import stop_internal_drain
+
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+    with patch("app.core.shutdown.stop_drain", return_value=False):
+        with pytest.raises(HTTPException) as exc_info:
+            await stop_internal_drain(cast(Any, request))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Process shutdown is already committed"
 
 
 @pytest.mark.asyncio

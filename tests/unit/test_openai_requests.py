@@ -115,6 +115,106 @@ def test_known_unsupported_upstream_fields_are_stripped():
     assert dumped["custom_field"] == "kept"
 
 
+def test_responses_to_payload_strips_replayed_tool_call_namespaces_only_on_wire():
+    replayed_calls = [
+        {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "namespace": "exec",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "continue",
+            "input": replayed_calls,
+        }
+    )
+
+    assert request.input == replayed_calls
+    assert request.to_payload()["input"] == [
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
+    assert request.input == replayed_calls
+
+
+def test_compact_to_payload_strips_replayed_tool_call_namespaces_only_on_wire():
+    replayed_calls = [
+        {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "namespace": "exec",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
+    request = ResponsesCompactRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "continue",
+            "input": replayed_calls,
+        }
+    )
+
+    assert request.input == replayed_calls
+    assert request.to_payload()["input"] == [
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
+    assert request.input == replayed_calls
+
+
+@pytest.mark.parametrize("invalid_type", [[], {}])
+def test_responses_to_payload_ignores_unhashable_replayed_item_types(invalid_type: JsonValue):
+    malformed_item = {"type": invalid_type, "namespace": "client-metadata", "value": "kept"}
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "continue",
+            "input": [malformed_item],
+        }
+    )
+
+    assert request.to_payload()["input"] == [malformed_item]
+
+
 def test_responses_preserves_service_tier():
     payload = {
         "model": "gpt-5.1",

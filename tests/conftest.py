@@ -164,6 +164,13 @@ def _disable_data_retention_scheduler_startup(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_telemetry_scheduler_startup(monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_telemetry_scheduler", lambda: _NoopScheduler())
+
+
+@pytest.fixture(autouse=True)
 def _disable_leader_election_startup(monkeypatch):
     """Replace the ambient app-lifespan leader election with a no-op.
 

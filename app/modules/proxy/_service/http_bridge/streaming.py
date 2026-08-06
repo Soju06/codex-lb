@@ -156,6 +156,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
+    _security_lineage_ids,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
     _ttft_event_visible_at,

@@ -123,7 +123,7 @@ class StickySessionsRepository:
             deleted_key = (await self._session.execute(statement)).scalar_one_or_none()
             if deleted_key is None:
                 current = cast(
-                    "tuple[str, datetime] | None",
+                    "tuple[str, datetime, datetime | None] | None",
                     (
                         await self._session.execute(
                             select(
@@ -540,7 +540,14 @@ class StickySessionsRepository:
             await self._session.commit()
         return tombstoned + deleted
 
-    def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
+    def _build_upsert_statement(
+        self,
+        key: str,
+        account_id: str | None,
+        kind: StickySessionKind,
+        *,
+        requires_security_work_authorized: bool = False,
+    ) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
             insert_fn = pg_insert

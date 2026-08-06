@@ -8,10 +8,11 @@ Sticky and hard-continuity paths deliberately preserve ownership and must not ga
 
 **Goals:**
 
-- Admit a usage-only draining `burn_first` account for a fresh request with no existing account assignment.
+- Admit a usage-only draining `burn_first` account for an owner-free fresh request.
 - Require a separately selectable healthy fallback after model, status, quota, account-cap, and other existing eligibility filters.
 - Reject error-induced draining accounts.
-- Preserve recovery-probe priority and all sticky/continuity ownership behavior.
+- Preserve recovery-probe priority and all sticky, continuity, and opportunistic routing behavior.
+- Preserve one authoritative weighted draw and return that draw's actual winner.
 
 **Non-Goals:**
 
@@ -25,7 +26,7 @@ Sticky and hard-continuity paths deliberately preserve ownership and must not ga
 
 ### Make the exception opt-in at the shared budget-safe selector
 
-Add a default-off selector option that is enabled by `run_unbound_selection_path` and by soft-sticky selection only when no mapping exists yet. Evaluate the exception after bounded recovery-probe admission but before best-health-tier narrowing in routing strategies that already honor `burn_first`; explicit sequential/reset/single-account strategies keep their established ordering. Existing sticky-owner and hard-continuity callers retain the default and therefore preserve current ownership behavior.
+Add a default-off selector option that is enabled by `run_unbound_selection_path` and by soft-sticky selection only when no mapping exists yet. Requests carrying an unresolved ownership requirement do not enable the option even when no owner row has resolved yet. Evaluate the exception after bounded recovery-probe admission but before best-health-tier narrowing in routing strategies that already honor `burn_first`; explicit sequential/reset/single-account strategies keep their established ordering. Existing sticky-owner and hard-continuity callers retain the default and therefore preserve current ownership behavior.
 
 Alternative considered: modify health-tier evaluation for every `burn_first` account. Rejected because it would also affect sticky paths and could drain the last usable account without proving a fallback.
 
@@ -35,17 +36,22 @@ A candidate qualifies only when it is active, `burn_first`, currently `DRAINING`
 
 Alternative considered: treat `error_count == 0` as sufficient. Rejected because recent error state and future health thresholds could diverge from that shortcut.
 
-### Prove both candidate and fallback selectability
+### Prove fallback eligibility without discarding a routing decision
 
-The selector first proves that at least one other healthy state can be selected with backoff fallback disabled and the request's existing eligibility context. It then selects only from qualifying usage-draining `burn_first` candidates. The usage-drain classifier excludes a candidate at 100%.
+Only after finding a qualifying usage-draining candidate, the selector uses cloned healthy states and deterministic `single_account` selection to prove that at least one other healthy state is eligible with backoff fallback disabled and the request's existing eligibility context. It then makes one authoritative selection from cloned healthy fallbacks plus the qualifying candidates normalized only for health-tier comparison, and returns the corresponding original state whether the winner is draining or healthy. This avoids a discarded weighted draw, duplicate winner logs, or returning a different account from the one routing selected. The usage-drain classifier excludes a candidate at 100%.
 
 Alternative considered: check only for another healthy row. Rejected because a healthy row can still fail quota, status, or request-class eligibility.
+
+For opportunistic traffic, failure to prove a separate healthy fallback does not remove the candidate from the original pool. The pre-existing emergency-floor policy remains authoritative and can still admit or reject that traffic independently of this foreground exception.
 
 ## Risks / Trade-offs
 
 - [A `burn_first` request can fail near quota exhaustion] → Require a separately selectable healthy fallback so ordinary retry/failover remains available.
 - [A draining account with active error evidence could be misclassified] → Derive the cause through canonical health evaluation and exclude any currently error-induced drain.
 - [Shared-selector changes could alter sticky routing] → Keep the option default-off and add regression coverage showing sticky callers do not opt in.
+- [An unresolved owner-bearing request could be mistaken for owner-free traffic] → Propagate the continuity requirement through both unbound and sticky selection and keep the exception disabled.
+- [A fallback probe could consume a weighted draw or emit a winner that is discarded] → Use a cloned deterministic eligibility probe, then return the original state corresponding to the single authoritative selection.
+- [The exception could suppress established opportunistic emergency-floor routing] → Preserve the original opportunistic pool when no separate fallback is eligible.
 - [Recovery probes could be starved] → Run the existing recovery-probe decision before the new exception.
 
 ## Migration Plan

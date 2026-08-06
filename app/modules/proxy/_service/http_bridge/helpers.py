@@ -12,6 +12,7 @@ from ipaddress import ip_address
 from typing import Any, Literal, Mapping, TypeVar, cast
 from urllib.parse import urlparse
 
+from app.core import shutdown as shutdown_state
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -753,6 +754,79 @@ def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
 def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> bool:
     return session.queued_request_count > 0 or any(
         _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
+    )
+
+
+async def _close_http_bridge_session(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    turn_state_lock_held: bool = False,
+    release_durable_session: bool = True,
+) -> None:
+    session.closed = True
+    if turn_state_lock_held:
+        service._unregister_http_bridge_turn_states_locked(session)
+        service._unregister_http_bridge_previous_response_ids_locked(session)
+    else:
+        await service._unregister_http_bridge_turn_states(session)
+        await service._unregister_http_bridge_previous_response_ids(session)
+    account_lease = getattr(session, "account_lease", None)
+    try:
+        await service._load_balancer.release_account_lease(account_lease)
+    except Exception:
+        logger.warning("Failed to release HTTP bridge account lease during close", exc_info=True)
+    finally:
+        session.account_lease = None
+    if release_durable_session and _http_bridge_durable_release_allowed(service, session):
+        try:
+            await service._durable_bridge.release_live_session(
+                session_id=session.durable_session_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=session.durable_owner_epoch,
+                draining=shutdown_state.is_bridge_drain_active(),
+            )
+        except Exception:
+            logger.warning("Failed to release durable HTTP bridge session", exc_info=True)
+    upstream_reader = session.upstream_reader
+    if upstream_reader is not None:
+        if upstream_reader is asyncio.current_task():
+            session.upstream_reader = None
+        else:
+            await _await_cancelled_task(
+                upstream_reader,
+                label="http bridge upstream reader",
+                cleanup_tasks=service._background_cleanup_tasks,
+            )
+            if session.upstream_reader is upstream_reader:
+                session.upstream_reader = None
+    try:
+        await session.upstream.close()
+    except Exception:
+        logger.debug("Failed to close HTTP bridge upstream websocket", exc_info=True)
+    pending_requests = getattr(session, "pending_requests", None)
+    pending_lock = getattr(session, "pending_lock", None)
+    response_create_gate = getattr(session, "response_create_gate", None)
+    if pending_requests is not None and pending_lock is not None:
+        async with pending_lock:
+            session.queued_request_count = 0
+        await service._fail_pending_websocket_requests(
+            account=session.account,
+            account_id_value=session.account.id,
+            pending_requests=pending_requests,
+            pending_lock=pending_lock,
+            error_code="stream_incomplete",
+            error_message="HTTP bridge session closed before response.completed",
+            api_key=None,
+            response_create_gate=response_create_gate,
+        )
+    _log_http_bridge_event(
+        "close",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )
 
 
@@ -1655,29 +1729,38 @@ async def _await_cancelled_task(
     *,
     timeout_seconds: float = _TASK_CANCEL_TIMEOUT_SECONDS,
     label: str,
+    cancel: bool = True,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
 ) -> bool:
-    caller_task = asyncio.current_task()
+    effective_timeout = max(float(timeout_seconds), 0.0)
+    remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
+    if remaining_drain_timeout is not None:
+        effective_timeout = min(effective_timeout, remaining_drain_timeout)
+
     # Give a new child one scheduling turn before cancellation so
     # cancellation-resistant tasks enter the deferred-drain path.
-    if not task.done():
+    if cancel and not task.done():
         try:
             await asyncio.sleep(0)
         except asyncio.CancelledError:
             _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks)
             raise
-    task.cancel()
+    if cancel:
+        task.cancel()
     try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        done, _ = await asyncio.wait({task}, timeout=effective_timeout)
     except asyncio.CancelledError:
-        if caller_task is not None and caller_task.cancelling():
+        if not task.done():
             _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
-            raise
-        return True
-    except TimeoutError:
+        raise
+    if task not in done:
         logger.warning("Timed out waiting for %s cancellation", label)
         _cancel_and_track_cancelled_task(task, label=label, cleanup_tasks=cleanup_tasks, cancel_task=False)
         return False
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return True
     return True
 
 
@@ -2330,6 +2413,8 @@ def _http_bridge_should_attempt_soft_affinity_reroute(
     error = payload.get("error")
     if not isinstance(error, dict):
         return False
+    # api_key_stream_fair_share is deliberately absent: the fair-share gate
+    # is per-key and pool-wide, so rerouting to another account cannot help.
     return error.get("code") in {
         "bridge_queue_full",
         "response_create_gate_timeout",

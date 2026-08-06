@@ -4,10 +4,11 @@ A `burn_first` account that is already above the soft-drain usage threshold is c
 
 ## What Changes
 
-- Allow a fresh request with no existing account assignment to select a `burn_first` account whose draining state is caused only by quota usage.
+- Allow an owner-free fresh request to select a `burn_first` account whose draining state is caused only by quota usage.
 - Require a separately selectable healthy fallback account before admitting that usage-draining `burn_first` account.
 - Continue excluding accounts draining because of errors or another health failure.
-- Preserve all existing soft-sticky and hard-continuity ownership behavior.
+- Preserve all existing soft-sticky, hard-continuity, unresolved owner-bearing, and opportunistic routing behavior.
+- Keep weighted routing to one actual selection so its winner and observability describe the account that is returned.
 - Keep the member-auth automatic transition threshold at 0% usage.
 
 ## Capabilities

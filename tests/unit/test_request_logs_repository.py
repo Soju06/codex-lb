@@ -52,7 +52,7 @@ async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_add_log_persists_request_kind(db_setup) -> None:
+async def test_add_log_persists_request_and_connection_kinds(db_setup) -> None:
     del db_setup
     async with SessionLocal() as session:
         repo = RequestLogsRepository(session)
@@ -67,11 +67,13 @@ async def test_add_log_persists_request_kind(db_setup) -> None:
             status="success",
             error_code=None,
             request_kind="warmup",
+            connection_request_kind="prewarm",
         )
 
         persisted = await session.scalar(select(RequestLog).where(RequestLog.id == saved.id))
         assert persisted is not None
         assert persisted.request_kind == "warmup"
+        assert persisted.connection_request_kind == "prewarm"
 
 
 @pytest.mark.asyncio

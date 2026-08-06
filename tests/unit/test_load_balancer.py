@@ -17,6 +17,7 @@ from app.core.balancer import (
     RATE_LIMIT_RESET_MAX_HORIZON_SECONDS,
     RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     ROUTING_POLICY_PRESERVE,
+    TRAFFIC_CLASS_OPPORTUNISTIC,
     AccountState,
     RoutingCost,
     handle_permanent_failure,
@@ -366,6 +367,204 @@ def test_fresh_selection_allows_usage_draining_burn_first_with_healthy_fallback(
         prefer_earlier_reset=False,
         routing_strategy="usage_weighted",
         budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+
+
+def test_usage_draining_fallback_probe_avoids_discarded_relative_availability_choice(monkeypatch):
+    choices = MagicMock(side_effect=lambda states, *, weights, k: [states[0]])
+    winner_log = MagicMock()
+    monkeypatch.setattr("app.core.balancer.logic.random.choices", choices)
+    monkeypatch.setattr("app.core.balancer.logic._log_relative_availability_winner", winner_log)
+    now = time.time()
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=98.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+            capacity_credits=100.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="relative_availability",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+    choices.assert_called_once()
+    winner_log.assert_called_once()
+
+
+def test_healthy_burn_first_fallback_winner_is_returned_without_redraw(monkeypatch):
+    choices = MagicMock(
+        side_effect=lambda states, *, weights, k: [next(state for state in states if state.account_id == "healthy-a")]
+    )
+    winner_log = MagicMock()
+    monkeypatch.setattr("app.core.balancer.logic.random.choices", choices)
+    monkeypatch.setattr("app.core.balancer.logic._log_relative_availability_winner", winner_log)
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy-a",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+        AccountState(
+            "healthy-b",
+            AccountStatus.ACTIVE,
+            used_percent=30.0,
+            secondary_used_percent=30.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+        AccountState(
+            "draining",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=98.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+            capacity_credits=100.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="relative_availability",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy-a"
+    assert result.account.health_tier == HEALTH_TIER_HEALTHY
+    choices.assert_called_once()
+    winner_log.assert_called_once()
+
+
+def test_no_usage_draining_candidate_skips_relative_availability_fallback_probe(monkeypatch):
+    choices = MagicMock(side_effect=lambda states, *, weights, k: [states[0]])
+    winner_log = MagicMock()
+    monkeypatch.setattr("app.core.balancer.logic.random.choices", choices)
+    monkeypatch.setattr("app.core.balancer.logic._log_relative_availability_winner", winner_log)
+    now = time.time()
+    states = [
+        AccountState(
+            "normal-a",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+        AccountState(
+            "normal-b",
+            AccountStatus.ACTIVE,
+            used_percent=30.0,
+            secondary_used_percent=30.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="relative_availability",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal-a"
+    choices.assert_called_once()
+    winner_log.assert_called_once()
+
+
+def test_opportunistic_fresh_selection_preserves_fallback_context_for_usage_draining_burn_first():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+    assert result.account.health_tier == HEALTH_TIER_DRAINING
+
+
+def test_opportunistic_single_usage_draining_burn_first_keeps_emergency_floor_policy():
+    states = [
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=86.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        )
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
         allow_usage_draining_burn_first=True,
     )
 
@@ -857,6 +1056,343 @@ def test_select_account_skips_rate_limited_until_reset():
     result = select_account(states, now=now)
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def test_select_account_reports_pool_wide_usage_exhaustion_structurally():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            reset_at=int(now + 600),
+            primary_reset_at=int(now + 60),
+        ),
+        AccountState(
+            "b",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 7200),
+            primary_reset_at=int(now + 3600),
+        ),
+        AccountState("paused", AccountStatus.PAUSED),
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.error_message == "Rate limit exceeded. Try again in 60s"
+    assert result.resets_at == int(now + 60)
+
+
+def test_select_account_fails_over_when_one_account_remains_usable():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("exhausted", AccountStatus.QUOTA_EXCEEDED, used_percent=100.0, reset_at=int(now + 3600)),
+        AccountState("usable", AccountStatus.ACTIVE, used_percent=40.0),
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is not None
+    assert result.account.account_id == "usable"
+    assert result.error_code is None
+    assert result.error_message is None
+
+
+def test_select_account_reports_secondary_usage_exhaustion_reset():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.RATE_LIMITED,
+            used_percent=10.0,
+            secondary_used_percent=100.0,
+            reset_at=int(now + 60),
+            secondary_reset_at=int(now + 3600),
+        )
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+    assert result.resets_at == int(now + 3600)
+
+
+def test_select_account_omits_synthesized_primary_usage_reset():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            reset_at=int(now + 60),
+            primary_reset_at=None,
+        )
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.error_message == "Usage limit reached"
+    assert result.resets_at is None
+
+
+def test_select_account_waits_for_latest_exhausted_window_per_account():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "a",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            secondary_used_percent=100.0,
+            reset_at=int(now + 600),
+            primary_reset_at=int(now + 60),
+            secondary_reset_at=int(now + 3600),
+        ),
+        AccountState(
+            "b",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 7200),
+            primary_reset_at=int(now + 7200),
+        ),
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+    assert result.resets_at == int(now + 3600)
+
+
+def test_select_account_requires_usage_window_evidence_for_quota_exhaustion():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.QUOTA_EXCEEDED, reset_at=int(now + 3600)),
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+
+
+def test_select_account_can_disable_pool_usage_exhaustion_for_owner_scope():
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "owner",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 3600),
+        )
+    ]
+
+    result = select_account(states, now=now, allow_usage_exhaustion_error=False)
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+
+
+def test_budget_safe_selection_uses_full_scope_for_usage_exhaustion() -> None:
+    now = time.time()
+    cap_filtered_states = [
+        AccountState(
+            "exhausted",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 3600),
+        )
+    ]
+    full_scope_states = [
+        AccountState(
+            "capped-but-usable",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            reset_at=int(now + 3600),
+        ),
+        *cap_filtered_states,
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        cap_filtered_states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        usage_exhaustion_states=full_scope_states,
+    )
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+
+
+def test_budget_safe_capacity_selection_forwards_usage_exhaustion_controls() -> None:
+    now = time.time()
+    owner_scope = [
+        AccountState(
+            "owner",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 600),
+            primary_reset_at=int(now + 3600),
+        )
+    ]
+    full_scope = [
+        *owner_scope,
+        AccountState(
+            "pool-usable",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        owner_scope,
+        prefer_earlier_reset=False,
+        routing_strategy="capacity_weighted",
+        budget_threshold_pct=95.0,
+        allow_usage_exhaustion_error=False,
+        usage_exhaustion_states=full_scope,
+    )
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+
+
+def test_opportunistic_budget_safe_selection_uses_full_scope_for_usage_exhaustion() -> None:
+    now = time.time()
+    cap_filtered_states = [
+        AccountState(
+            "exhausted",
+            AccountStatus.QUOTA_EXCEEDED,
+            used_percent=100.0,
+            reset_at=int(now + 3600),
+        )
+    ]
+    full_scope_states = [
+        AccountState(
+            "capped-but-usable",
+            AccountStatus.ACTIVE,
+            used_percent=50.0,
+            reset_at=int(now + 3600),
+        ),
+        *cap_filtered_states,
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        cap_filtered_states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        traffic_class="opportunistic",
+        usage_exhaustion_states=full_scope_states,
+    )
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "Rate limit exceeded. Try again in 300s"
+
+
+def test_select_account_uses_raw_priority_usage_for_exhaustion_evidence() -> None:
+    now = 1_700_000_000.0
+    states = [
+        AccountState(
+            "pressure-adjusted",
+            AccountStatus.RATE_LIMITED,
+            used_percent=100.0,
+            priority_used_percent=98.0,
+            reset_at=int(now + 60),
+        )
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "No available accounts"
+
+
+def test_select_account_does_not_treat_generic_rate_limit_as_usage_exhaustion():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("a", AccountStatus.RATE_LIMITED, used_percent=5.0, reset_at=int(now + 60)),
+        AccountState("b", AccountStatus.RATE_LIMITED, secondary_used_percent=10.0, reset_at=int(now + 120)),
+    ]
+
+    result = select_account(states, now=now)
+
+    assert result.account is None
+    assert result.error_code is None
+    assert result.error_message == "No available accounts"
+
+
+def test_select_account_does_not_misclassify_transient_backoff_as_usage_exhaustion():
+    now = 1_700_000_000.0
+    states = [
+        AccountState("quota", AccountStatus.QUOTA_EXCEEDED, reset_at=int(now + 3600)),
+        AccountState(
+            "transient",
+            AccountStatus.ACTIVE,
+            error_count=3,
+            last_error_at=now,
+        ),
+    ]
+
+    result = select_account(states, now=now, allow_backoff_fallback=False)
+
+    assert result.account is None
+    assert result.error_code is None
+
+
+def test_select_account_does_not_report_ignored_standard_quota_as_pool_exhaustion():
+    now = 1_700_000_000.0
+    state = AccountState("quota", AccountStatus.QUOTA_EXCEEDED, reset_at=int(now + 3600))
+
+    result = select_account([state], now=now, ignore_standard_quota=True)
+
+    assert result.account is not None
+    assert result.account.account_id == "quota"
+
+
+def test_select_account_excludes_per_account_standard_quota_bypass_from_pool_exhaustion():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "quota",
+        AccountStatus.QUOTA_EXCEEDED,
+        reset_at=int(now + 3600),
+        cooldown_until=now + 30,
+        ignore_standard_quota=True,
+    )
+
+    result = select_account([state], now=now)
+
+    assert result.account is None
+    assert result.error_code is None
+
+
+def test_select_account_excludes_scoped_standard_quota_bypass_from_pool_exhaustion():
+    now = 1_700_000_000.0
+    state = AccountState(
+        "quota",
+        AccountStatus.QUOTA_EXCEEDED,
+        reset_at=int(now + 3600),
+        cooldown_until=now + 30,
+    )
+
+    result = select_account([state], now=now, bypass_quota_exceeded_account_ids={"quota"})
+
+    assert result.account is None
+    assert result.error_code is None
 
 
 def test_select_account_reports_paused_and_deactivated_without_reauth_reason():
@@ -1474,12 +2010,14 @@ def test_select_account_caps_quota_exceeded_retry_hint():
             AccountStatus.QUOTA_EXCEEDED,
             used_percent=100.0,
             reset_at=far_future_reset,
+            primary_reset_at=far_future_reset,
         ),
         AccountState(
             "b",
             AccountStatus.QUOTA_EXCEEDED,
             used_percent=100.0,
             reset_at=int(now + 271_819),
+            primary_reset_at=int(now + 271_819),
         ),
     ]
     result = select_account(states, now=now)
@@ -1498,6 +2036,7 @@ def test_select_account_preserves_short_quota_exceeded_retry_hint():
             AccountStatus.QUOTA_EXCEEDED,
             used_percent=100.0,
             reset_at=int(now + 60),
+            primary_reset_at=int(now + 60),
         ),
     ]
     result = select_account(states, now=now)
@@ -2059,6 +2598,52 @@ def test_state_from_account_keeps_active_account_selectable_when_primary_usage_s
     selection = select_account([state], routing_strategy="single_account")
     assert selection.account is not None
     assert selection.account.account_id == state.account_id
+
+
+def test_state_from_account_keeps_raw_usage_evidence_separate_from_pressure(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.RATE_LIMITED, reset_at=future_reset, blocked_at=int(now)),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=98.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(inflight_streams=1),
+    )
+
+    assert state.used_percent == 100.0
+    assert state.priority_used_percent == 98.0
+
+
+def test_state_from_account_preserves_pressure_for_active_routing(monkeypatch):
+    now = 1_700_000_000.0
+    future_reset = int(now + 300)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+
+    state = _state_from_account(
+        account=_make_test_account(status=AccountStatus.ACTIVE),
+        primary_entry=_make_test_usage(
+            window="primary",
+            used_percent=94.0,
+            reset_at=future_reset,
+            recorded_at=_epoch_to_naive_utc(now - 30),
+        ),
+        secondary_entry=None,
+        runtime=RuntimeState(inflight_streams=1),
+    )
+
+    assert state.status == AccountStatus.ACTIVE
+    assert state.used_percent == 96.5
+    assert state.priority_used_percent is None
+    assert _state_above_sticky_budget_threshold(state, 95.0) is True
 
 
 def test_state_from_account_clears_stale_advisory_account_reset_for_active_account(monkeypatch):

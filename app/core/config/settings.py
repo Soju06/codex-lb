@@ -417,6 +417,9 @@ class Settings(BaseSettings):
     proxy_account_response_create_limit: int = Field(default=4, ge=0)
     proxy_account_stream_limit: int = Field(default=8, ge=0)
     proxy_account_stream_recovery_reserve: int = Field(default=1, ge=0)
+    # Pool-congestion utilization percentage at which per-API-key stream
+    # fair-share throttling engages; 0 disables the gate entirely.
+    proxy_api_key_fair_share_congestion_threshold_pct: int = Field(default=0, ge=0, le=100)
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)

@@ -212,11 +212,20 @@ class CodexClient:
                                 retryable_same_contract=False,
                             ) from None
                 return CodexRequestResult(response, candidate, index > 0)
-            except CodexTransportError:
-                if index == len(endpoints) - 1 or not allow_fallback:
+            except CodexTransportError as exc:
+                # A confirmed pre-dispatch connect failure proves the request
+                # never left for upstream, so trying the next endpoint in the
+                # same resolved pool is safe even for a non-idempotent POST.
+                # TLS verification failures are stable endpoint configuration
+                # errors rather than transient connect losses; they keep the
+                # idempotent-only rule.
+                if index == len(endpoints) - 1 or not (
+                    allow_fallback or (exc.retryable_same_contract and not exc.is_tls_verification_failure)
+                ):
                     raise
             except Exception as exc:
-                if index == len(endpoints) - 1 or not allow_fallback:
+                pre_dispatch = is_pre_dispatch_connection_failure(exc) and not isinstance(exc, aiohttp.ClientSSLError)
+                if index == len(endpoints) - 1 or not (allow_fallback or pre_dispatch):
                     raise _transport_error(
                         "request",
                         endpoint.id,

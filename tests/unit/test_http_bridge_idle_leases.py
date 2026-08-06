@@ -20,12 +20,15 @@ from app.db.models import AccountStatus
 from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
+from app.modules.proxy.load_balancer import LoadBalancer
 
 pytestmark = pytest.mark.unit
 
 
-def _make_bridge_session(*, queued_request_count: int = 0) -> proxy_service._HTTPBridgeSession:
-    session_key = proxy_service._HTTPBridgeSessionKey("session_header", "idle-lease-test", None)
+def _make_bridge_session(
+    *, queued_request_count: int = 0, api_key_id: str | None = None
+) -> proxy_service._HTTPBridgeSession:
+    session_key = proxy_service._HTTPBridgeSessionKey("session_header", "idle-lease-test", api_key_id)
     return proxy_service._HTTPBridgeSession(
         key=session_key,
         headers={"x-codex-session-id": "idle-lease-test"},
@@ -129,7 +132,11 @@ async def test_next_turn_reacquires_stream_lease() -> None:
 
     assert session.account_lease is lease
     fake_self._load_balancer.acquire_account_lease.assert_awaited_once_with(
-        "acc-bridge", kind="stream", estimated_tokens=0.0
+        "acc-bridge",
+        kind="stream",
+        estimated_tokens=0.0,
+        api_key_id=None,
+        api_key_stream_fair_share_threshold_pct=0,
     )
 
 
@@ -168,7 +175,67 @@ async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
         "acc-bridge",
         kind="stream",
         estimated_tokens=expected_tokens,
+        api_key_id=None,
+        api_key_stream_fair_share_threshold_pct=0,
     )
+
+
+@pytest.mark.asyncio
+async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Warm bridge session reacquires join per-key accounting and the fair-share gate.
+
+    Regression for the review P2: ``acquire_account_lease`` previously had no
+    ``api_key_id`` parameter, so keyed turns on reused bridge sessions took
+    uncounted stream capacity and bypassed the congestion gate entirely.
+    """
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    balancer = LoadBalancer(cast(Any, None))
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_service_get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(return_value=SimpleNamespace(proxy_api_key_fair_share_congestion_threshold_pct=50))
+        ),
+    )
+    # The reacquire is pinned to the session's account, so the fair-share
+    # pool is that single account: C = 8 (default stream cap). key-hot holds
+    # 4 and key-other holds 1 -> T = 5, 500 >= 400 -> congested;
+    # share = max(2, 8 // 2 active keys) = 4, so key-hot is at its share.
+    async with balancer._runtime_lock:
+        for _ in range(4):
+            balancer._acquire_account_lease_locked(
+                "acc-bridge", kind="stream", estimated_tokens=0.0, api_key_id="key-hot"
+            )
+        balancer._acquire_account_lease_locked(
+            "acc-bridge", kind="stream", estimated_tokens=0.0, api_key_id="key-other"
+        )
+    fake_self = SimpleNamespace(_load_balancer=balancer)
+
+    hot_session = _make_bridge_session(api_key_id="key-hot")
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async with hot_session.pending_lock:
+            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, hot_session)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.payload["error"]["code"] == "api_key_stream_fair_share"
+    assert hot_session.account_lease is None
+    runtime = balancer._runtime["acc-bridge"]
+    # The denial neither installed a lease nor perturbed the accounting.
+    assert runtime.inflight_streams == 5
+    assert runtime.stream_key_inflight == {"key-hot": 4, "key-other": 1}
+
+    # A light key on the same congested pool is under the minimum guarantee:
+    # its reacquire admits and is counted into the per-key map.
+    light_session = _make_bridge_session(api_key_id="key-light")
+    async with light_session.pending_lock:
+        await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, light_session)
+
+    assert light_session.account_lease is not None
+    assert light_session.account_lease.api_key_id == "key-light"
+    assert runtime.inflight_streams == 6
+    assert runtime.stream_key_inflight == {"key-hot": 4, "key-other": 1, "key-light": 1}
 
 
 @pytest.mark.asyncio
@@ -339,7 +406,13 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
         )
 
     assert exc_info.value.payload["error"]["code"] == "account_response_create_cap"
-    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream", estimated_tokens=0.0)
+    acquire_account_lease.assert_awaited_once_with(
+        "acc-bridge",
+        kind="stream",
+        estimated_tokens=0.0,
+        api_key_id=None,
+        api_key_stream_fair_share_threshold_pct=0,
+    )
     prewarm.assert_awaited_once()
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
@@ -477,7 +550,13 @@ async def test_stale_finalizer_cannot_release_lease_reacquired_for_new_turn(
 
     # One acquisition only: the stale finalizer never released the lease, so
     # the ensure at queue admission did not have to acquire a second time.
-    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream", estimated_tokens=0.0)
+    acquire_account_lease.assert_awaited_once_with(
+        "acc-bridge",
+        kind="stream",
+        estimated_tokens=0.0,
+        api_key_id=None,
+        api_key_stream_fair_share_threshold_pct=0,
+    )
     # The admission-failure cleanup settles the lease exactly once.
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
@@ -536,7 +615,13 @@ async def test_prewarm_failure_retires_closed_session_after_last_waiter(
             queue_limit=8,
         )
 
-    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream", estimated_tokens=0.0)
+    acquire_account_lease.assert_awaited_once_with(
+        "acc-bridge",
+        kind="stream",
+        estimated_tokens=0.0,
+        api_key_id=None,
+        api_key_stream_fair_share_threshold_pct=0,
+    )
     release_account_lease.assert_awaited_once_with(lease)
     assert session.admission_waiter_count == 0
     assert session.account_lease is None
@@ -619,7 +704,13 @@ async def test_prewarm_cancellation_cannot_interrupt_waiter_cleanup(
     with pytest.raises(asyncio.CancelledError):
         await submit_task
 
-    acquire_account_lease.assert_awaited_once_with("acc-bridge", kind="stream", estimated_tokens=0.0)
+    acquire_account_lease.assert_awaited_once_with(
+        "acc-bridge",
+        kind="stream",
+        estimated_tokens=0.0,
+        api_key_id=None,
+        api_key_stream_fair_share_threshold_pct=0,
+    )
     release_account_lease.assert_awaited_once_with(lease)
     assert session.admission_waiter_count == 0
     assert session.account_lease is None

@@ -17,7 +17,7 @@ from websockets.http11 import Response
 
 import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, is_confirmed_pre_dispatch_transport_error
 from app.core.clients.proxy_websocket import (
     CodexUpstreamWebSocket,
     RealtimeWebSocketProtocol,
@@ -683,6 +683,105 @@ async def test_connect_responses_websocket_routed_transport_error_maps_proxy_err
     assert exc_info.value.status_code == 502
     assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     assert "ep_1" in (_proxy_error_message(exc_info.value) or "")
+    # An ambiguous routed transport failure must not authorize replay.
+    assert exc_info.value.retryable_same_contract is False
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_routed_pre_dispatch_failure_carries_provenance(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    class _PreDispatchFailingCodexClient(_FailingCodexClient):
+        async def open_ws_with_route_metadata(
+            self,
+            url: str,
+            *,
+            route: ResolvedUpstreamRoute,
+            **kwargs: object,
+        ) -> CodexWebSocketResult:
+            del url, route, kwargs
+            raise CodexTransportError(
+                "Codex upstream websocket failed via proxy endpoint ep_1: ClientProxyConnectionError",
+                failure_phase="connect",
+                retryable_same_contract=True,
+            )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+            route=route,
+            codex_client=cast(Any, _PreDispatchFailingCodexClient()),
+        )
+
+    assert exc_info.value.status_code == 502
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
+    assert exc_info.value.retryable_same_contract is True
+    assert exc_info.value.failure_phase == "connect"
+    assert exc_info.value.failure_detail == "proxy_connect_pre_dispatch"
+    assert is_confirmed_pre_dispatch_transport_error(exc_info.value) is True
+
+
+@pytest.mark.asyncio
+async def test_connect_responses_websocket_routed_tls_verification_failure_is_not_replayable(monkeypatch):
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    class _TLSFailingCodexClient(_FailingCodexClient):
+        async def open_ws_with_route_metadata(
+            self,
+            url: str,
+            *,
+            route: ResolvedUpstreamRoute,
+            **kwargs: object,
+        ) -> CodexWebSocketResult:
+            del url, route, kwargs
+            raise CodexTransportError(
+                "Codex upstream websocket failed via proxy endpoint ep_1: ClientConnectorCertificateError",
+                failure_phase="connect",
+                retryable_same_contract=True,
+                is_tls_verification_failure=True,
+            )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+            route=route,
+            codex_client=cast(Any, _TLSFailingCodexClient()),
+        )
+
+    assert exc_info.value.retryable_same_contract is False
+    assert is_confirmed_pre_dispatch_transport_error(exc_info.value) is False
 
 
 @pytest.mark.asyncio

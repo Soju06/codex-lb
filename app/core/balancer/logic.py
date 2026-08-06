@@ -91,6 +91,7 @@ DRAIN_PRIMARY_THRESHOLD_PCT = 85.0
 DRAIN_SECONDARY_THRESHOLD_PCT = 90.0
 DRAIN_ERROR_WINDOW_SECONDS = 60.0
 DRAIN_ERROR_COUNT_THRESHOLD = 2
+ERROR_BACKOFF_THRESHOLD = 3
 PROBE_QUIET_SECONDS = 60.0
 PROBE_SUCCESS_STREAK_REQUIRED = 3
 ROUTING_POLICY_NORMAL = "normal"
@@ -145,6 +146,90 @@ class AccountState:
 class SelectionResult:
     account: AccountState | None
     error_message: str | None
+    error_code: str | None = None
+    resets_at: int | None = None
+
+
+USAGE_LIMIT_REACHED = "usage_limit_reached"
+
+
+def pool_usage_exhaustion(
+    states: Iterable[AccountState],
+    *,
+    current: float,
+    ignore_standard_quota: bool = False,
+    ignore_standard_quota_account_ids: Collection[str] | None = None,
+) -> SelectionResult | None:
+    """Describe pool-wide subscription exhaustion without parsing retry text."""
+    if ignore_standard_quota:
+        return None
+    ignored_account_ids = set(ignore_standard_quota_account_ids or ())
+
+    def _primary_usage_evidence(state: AccountState) -> float | None:
+        return state.priority_used_percent if state.priority_used_percent is not None else state.used_percent
+
+    def _secondary_usage_evidence(state: AccountState) -> float | None:
+        if state.limit_scoped_usage and state.priority_secondary_used_percent is None:
+            return _primary_usage_evidence(state)
+        return (
+            state.priority_secondary_used_percent
+            if state.priority_secondary_used_percent is not None
+            else state.secondary_used_percent
+        )
+
+    def _usage_exhausted(state: AccountState) -> bool:
+        if state.status not in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED):
+            return False
+        usage_values = (_primary_usage_evidence(state), _secondary_usage_evidence(state))
+        return any(value is not None and float(value) >= 100.0 for value in usage_values)
+
+    def _usage_exhausted_reset_at(state: AccountState) -> float | None:
+        if state.status not in (AccountStatus.QUOTA_EXCEEDED, AccountStatus.RATE_LIMITED):
+            return None
+        candidates: list[float] = []
+        primary_evidence = _primary_usage_evidence(state)
+        secondary_evidence = _secondary_usage_evidence(state)
+        if primary_evidence is not None and float(primary_evidence) >= 100.0 and state.primary_reset_at is not None:
+            candidates.append(float(state.primary_reset_at))
+        if (
+            secondary_evidence is not None
+            and float(secondary_evidence) >= 100.0
+            and state.secondary_reset_at is not None
+        ):
+            candidates.append(float(state.secondary_reset_at))
+        if not candidates:
+            return None
+        return max(candidates)
+
+    eligible = [
+        state
+        for state in states
+        if not state.ignore_standard_quota
+        and state.account_id not in ignored_account_ids
+        and state.status
+        not in (
+            AccountStatus.PAUSED,
+            AccountStatus.REAUTH_REQUIRED,
+            AccountStatus.DEACTIVATED,
+        )
+    ]
+    if not eligible or any(not _usage_exhausted(state) for state in eligible):
+        return None
+
+    # Only usage-proven exhausted accounts reach this branch; surface the
+    # earliest reset for an actually exhausted window so the structured 429
+    # does not retry a secondary-window exhaustion at the primary reset time.
+    reset_candidates = [reset_at for state in eligible if (reset_at := _usage_exhausted_reset_at(state)) is not None]
+    resets_at = int(min(reset_candidates)) if reset_candidates else None
+    message = "Usage limit reached"
+    if resets_at is not None:
+        message = _format_retry_hint(max(0.0, resets_at - current))
+    return SelectionResult(
+        account=None,
+        error_message=message,
+        error_code=USAGE_LIMIT_REACHED,
+        resets_at=resets_at,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +464,8 @@ def select_account(
     primary_first_usage_weighted: bool = False,
     routing_costs: RoutingCostsByAccount | None = None,
     replica_salt: str | None = None,
+    allow_usage_exhaustion_error: bool = True,
+    usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> SelectionResult:
     """Select an eligible account by applying availability checks and routing strategy.
 
@@ -446,6 +533,7 @@ def select_account(
     available: list[AccountState] = []
     in_error_backoff: list[AccountState] = []
     all_states = list(states)
+    usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else all_states
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
 
     for state in all_states:
@@ -481,8 +569,8 @@ def select_account(
             state.error_count = 0
         if state.cooldown_until and current < state.cooldown_until:
             continue
-        if state.error_count >= 3:
-            backoff = min(300, 30 * (2 ** (state.error_count - 3)))
+        if state.error_count >= ERROR_BACKOFF_THRESHOLD:
+            backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
             if state.last_error_at and current - state.last_error_at < backoff:
                 in_error_backoff.append(state)
                 continue
@@ -519,7 +607,7 @@ def select_account(
         if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
 
             def _backoff_expires_at(s: AccountState) -> float:
-                backoff = min(300, 30 * (2 ** (s.error_count - 3)))
+                backoff = min(300, 30 * (2 ** (s.error_count - ERROR_BACKOFF_THRESHOLD)))
                 return (s.last_error_at or 0.0) + backoff
 
             available.append(min(in_error_backoff, key=_backoff_expires_at))
@@ -529,6 +617,15 @@ def select_account(
                     return SelectionResult(None, f"opportunistic burn window closed: {reason}")
                 available = opportunistic_available
         else:
+            if allow_usage_exhaustion_error:
+                usage_exhaustion = pool_usage_exhaustion(
+                    usage_exhaustion_state_list,
+                    current=current,
+                    ignore_standard_quota=ignore_standard_quota or bypass_quota_exceeded,
+                    ignore_standard_quota_account_ids=bypass_account_ids,
+                )
+                if usage_exhaustion is not None:
+                    return usage_exhaustion
             reauth_required = [s for s in all_states if s.status == AccountStatus.REAUTH_REQUIRED]
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]

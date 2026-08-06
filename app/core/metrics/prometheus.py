@@ -244,6 +244,17 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    api_key_fair_share_rejections_total = Counter(
+        "codex_lb_api_key_fair_share_rejections_total",
+        "Total stream selections denied by the per-API-key fair-share gate",
+        registry=REGISTRY,
+    )
+    stream_pool_inflight = Gauge(
+        "codex_lb_stream_pool_inflight",
+        "In-flight stream leases over the fair-share gate's last candidate pool",
+        registry=REGISTRY,
+        **_gauge_kwargs,
+    )
     _replica_gauge_kwargs: dict[str, str] = {}
     if MULTIPROCESS_MODE:
         # Sibling workers share one instance identity and compute the same
@@ -257,6 +268,15 @@ if PROMETHEUS_AVAILABLE:
         "Live replica count currently used for account cap partitioning",
         registry=REGISTRY,
         **_replica_gauge_kwargs,
+    )
+    # Sibling workers enforce independent lease counters, so each worker can
+    # admit its own pool capacity. Sum capacity across live workers (like the
+    # inflight gauge) so the exported utilization ratio stays comparable.
+    stream_pool_capacity = Gauge(
+        "codex_lb_stream_pool_capacity",
+        "Stream capacity of the fair-share gate's last candidate pool",
+        registry=REGISTRY,
+        **_gauge_kwargs,
     )
     proxy_phase_latency_seconds = Histogram(
         "codex_lb_proxy_phase_latency_seconds",
@@ -357,6 +377,9 @@ else:
     account_lease_stale_reclaimed_total: CounterLike | None = None
     account_inflight_leases: GaugeLike | None = None
     account_cap_rejections_total: CounterLike | None = None
+    api_key_fair_share_rejections_total: CounterLike | None = None
+    stream_pool_capacity: GaugeLike | None = None
+    stream_pool_inflight: GaugeLike | None = None
     cap_partition_replicas: GaugeLike | None = None
     proxy_phase_latency_seconds: HistogramLike | None = None
     http_bridge_prewarm_total: CounterLike | None = None
@@ -385,6 +408,7 @@ __all__ = [
     "account_lease_released_total",
     "account_lease_stale_reclaimed_total",
     "accounts_total",
+    "api_key_fair_share_rejections_total",
     "bridge_instance_mismatch_total",
     "bridge_forward_latency_seconds",
     "bridge_durable_recover_total",
@@ -420,6 +444,8 @@ __all__ = [
     "rate_limit_hits_total",
     "request_duration_seconds",
     "requests_total",
+    "stream_pool_capacity",
+    "stream_pool_inflight",
     "upstream_request_duration_seconds",
     "upstream_requests_total",
     "upstream_transport_decisions_total",

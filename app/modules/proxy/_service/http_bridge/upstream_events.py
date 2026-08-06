@@ -5,6 +5,8 @@ import logging
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
+import anyio
+
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
@@ -610,6 +612,45 @@ async def _cancel_http_bridge_reader_child(
         return task.done()
 
 
+async def _clear_durable_http_bridge_response_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+) -> None:
+    """Invalidate a durable proxy-injected anchor that proved eventless.
+
+    Runs while ``session`` still owns the durable row (before retirement
+    releases the lease), so the fenced write lands under the session's own
+    owner epoch instead of silently losing the fence to a released owner.
+    """
+    if session.durable_session_id is None or session.durable_owner_epoch is None:
+        return
+    try:
+        lookup = await service._durable_bridge.clear_live_session_response_anchor(
+            session_id=session.durable_session_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+        )
+    except Exception:
+        logger.warning("Failed to clear durable HTTP bridge response anchor after stuck timeout", exc_info=True)
+        return
+    if lookup is None or lookup.owner_epoch != session.durable_owner_epoch or lookup.latest_response_id is not None:
+        # None means the durable row is gone entirely (e.g. purged); an
+        # epoch or anchor mismatch means a newer owner already claimed the
+        # session before this fenced write executed. Either way, the anchor
+        # was never actually cleared, so do not report an invalidation that
+        # did not happen.
+        return
+    _log_http_bridge_event(
+        "durable_anchor_invalidated",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
@@ -817,8 +858,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                             async with session.pending_lock:
                                 if receive_task is not None and receive_task.done():
                                     continue
-                                expired_owner = any(
-                                    deadline is not None and deadline <= now
+                                expired_request_states = [
+                                    request_state
                                     for request_state in session.pending_requests
                                     if (
                                         deadline := _http_bridge_eventless_precreated_deadline(
@@ -827,10 +868,42 @@ class _HTTPBridgeUpstreamEventsMixin:
                                         )
                                     )
                                     is not None
-                                )
-                                if not expired_owner:
+                                    and deadline <= now
+                                ]
+                                if not expired_request_states:
                                     continue
                                 pending_count = len(session.pending_requests)
+                                # A delta-only request has no other way to
+                                # convey prior context once its anchor is
+                                # cleared, so only clear anchors codex-lb
+                                # injected onto a full-resend-shaped payload.
+                                expired_proxy_injected_anchor = any(
+                                    request_state.proxy_injected_previous_response_id
+                                    and request_state.proxy_injected_anchor_had_full_resend_payload
+                                    for request_state in expired_request_states
+                                )
+
+                            # Do not mutate durable continuity while a receive
+                            # may still deliver the response event that proves
+                            # this timeout stale. The non-cancellable branch
+                            # remains fail-closed, so it clears immediately
+                            # before its forced retirement.
+                            force_retire = False
+                            if receive_task is not None:
+                                receive_cancelled = await _cancel_http_bridge_reader_child(
+                                    receive_task,
+                                    label="HTTP bridge upstream receive after missing response.created",
+                                    cleanup_tasks=self._background_cleanup_tasks,
+                                )
+                                if receive_task.done() and not receive_task.cancelled():
+                                    # A response (or a typed receive failure)
+                                    # won the race with timeout handling. Let
+                                    # the normal reader path settle it.
+                                    continue
+                                force_retire = not receive_cancelled and not receive_task.cancelled()
+                                if not force_retire:
+                                    receive_task = None
+                            async with session.pending_lock:
                                 for request_state in session.pending_requests:
                                     if request_state.failure_phase_override is None:
                                         request_state.failure_phase_override = "upstream"
@@ -838,31 +911,30 @@ class _HTTPBridgeUpstreamEventsMixin:
                                         request_state.failure_detail_override = (
                                             _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
                                         )
-                            if receive_task is not None:
-                                receive_cancelled = await _cancel_http_bridge_reader_child(
-                                    receive_task,
-                                    label="HTTP bridge upstream receive after missing response.created",
-                                    cleanup_tasks=self._background_cleanup_tasks,
+                            if force_retire:
+                                # Do not reconnect while the old receive task
+                                # still owns the superseded socket. The ordinary
+                                # timeout path takes the same fail-closed branch;
+                                # retain the explicit account-neutral timeout
+                                # classification rather than routing through the
+                                # generic reader-crash account penalty path.
+                                if expired_proxy_injected_anchor:
+                                    await _clear_durable_http_bridge_response_anchor(self, session)
+                                session.closed = True
+                                await self._fail_http_bridge_reader_and_maybe_retire(
+                                    session,
+                                    error_code="upstream_request_timeout",
+                                    error_message=receive_timeout.error_message,
+                                    penalize_account=False,
+                                    retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                    force_retire=True,
                                 )
-                                if not receive_cancelled:
-                                    # Do not reconnect while the old receive
-                                    # task still owns the superseded socket.
-                                    # The ordinary timeout path takes the same
-                                    # fail-closed branch; retain the explicit
-                                    # account-neutral timeout classification
-                                    # rather than routing through the generic
-                                    # reader-crash account penalty path.
-                                    session.closed = True
-                                    await self._fail_http_bridge_reader_and_maybe_retire(
-                                        session,
-                                        error_code="upstream_request_timeout",
-                                        error_message=receive_timeout.error_message,
-                                        penalize_account=False,
-                                        retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
-                                        force_retire=True,
-                                    )
-                                    break
-                                receive_task = None
+                                break
+                            # A successfully cancelled receive cannot deliver
+                            # a late response event, so this is the safe point
+                            # to persist the durable-anchor invalidation.
+                            if expired_proxy_injected_anchor:
+                                await _clear_durable_http_bridge_response_anchor(self, session)
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,
@@ -1031,6 +1103,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         event = parse_sse_event_payload(payload)
         event_type = _event_type_from_payload(event, payload)
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
+        claimed_terminal_request_states: list[_WebSocketRequestState] = []
         try:
             await self._process_parsed_http_bridge_upstream_event(
                 session,
@@ -1040,10 +1113,79 @@ class _HTTPBridgeUpstreamEventsMixin:
                 event=event,
                 event_type=event_type,
                 completed_delivery_scope=completed_delivery_scope,
+                claimed_terminal_request_states=claimed_terminal_request_states,
             )
+        except BaseException:
+            # Includes CancelledError. A terminal request popped from
+            # session.pending_requests is owned exclusively by this
+            # bookkeeping continuation: the reader's failure path and the
+            # downstream detach backstop only settle requests still in
+            # pending ownership, so an abort here would otherwise leak the
+            # API-key reservation and its heartbeat forever (issue #1594).
+            await self._settle_aborted_http_bridge_terminal_states(
+                session,
+                claimed_terminal_request_states,
+            )
+            raise
+        else:
+            for claimed_request_state in claimed_terminal_request_states:
+                claimed_request_state.terminal_settlement_phase = None
         finally:
             if completed_delivery_scope is not None:
                 completed_delivery_scope.active = False
+
+    async def _settle_aborted_http_bridge_terminal_states(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_states: list[_WebSocketRequestState],
+    ) -> None:
+        """Settle claimed-but-unfinalized terminal requests after an abort.
+
+        Once terminal-event bookkeeping pops a request from
+        ``session.pending_requests`` it is the sole owner of that request's
+        reservation settlement. If the bookkeeping continuation raises or is
+        cancelled before ``_finalize_websocket_request_state`` transfers the
+        settlement, nothing else can reach the request: the orphaned
+        reservation heartbeat would keep refreshing ``updated_at`` and defeat
+        the stale-reservation janitor permanently. Settle those requests here
+        under a shielded scope. Requests a retry branch restored to pending
+        ownership are skipped; they are reachable by ordinary cleanup again.
+        Settlement is idempotent (release only flips ``status == "reserved"``),
+        so overlapping with an already-transferred finalize is safe.
+        """
+        if not request_states:
+            return
+        with anyio.CancelScope(shield=True):
+            for request_state in request_states:
+                if request_state.terminal_settlement_phase is None:
+                    continue
+                async with session.pending_lock:
+                    if request_state in session.pending_requests:
+                        request_state.terminal_settlement_phase = None
+                        continue
+                request_state.terminal_settlement_phase = "abandoned"
+                try:
+                    self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+                    await self._release_websocket_request_state_reservation(request_state)
+                    request_state.api_key_reservation = None
+                    request_state.terminal_settlement_phase = None
+                except Exception:
+                    # Leave the "abandoned" marker so the downstream detach
+                    # backstop can retry the settlement later.
+                    logger.warning(
+                        "Failed to settle aborted HTTP bridge terminal request request_id=%s account_id=%s",
+                        request_state.request_log_id or request_state.request_id,
+                        session.account.id,
+                        exc_info=True,
+                    )
+                # Best effort: unblock the downstream waiter so it observes
+                # end-of-stream instead of waiting for its idle timeout.
+                event_queue = request_state.event_queue
+                if event_queue is not None:
+                    try:
+                        event_queue.put_nowait(None)
+                    except asyncio.QueueFull:
+                        pass
 
     async def _process_parsed_http_bridge_upstream_event(
         self: Any,
@@ -1055,6 +1197,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         event: OpenAIEvent | None,
         event_type: str | None,
         completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None,
+        claimed_terminal_request_states: list[_WebSocketRequestState],
     ) -> None:
         original_text = text
         response_id = _websocket_response_id(event, payload)
@@ -1123,6 +1266,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 release_create_gate = False
 
             _archive_http_bridge_upstream_text(session, original_text, matched_request_state)
+            pending_request_count = len(session.pending_requests)
 
             if matched_request_state is not None:
                 now = _service_time().monotonic()
@@ -1287,6 +1431,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                         completed_delivery_scope.active = True
                         terminal_request_state.completed_delivery_scope = completed_delivery_scope
 
+            # Every request popped from pending ownership above is now owned
+            # exclusively by this bookkeeping continuation. Record the claim
+            # (still under pending_lock) so an abort before finalization can
+            # settle the reservation instead of leaking it (issue #1594).
+            for claimed_request_state in (terminal_request_state, *grouped_previous_response_request_states):
+                if claimed_request_state is not None and claimed_request_state not in session.pending_requests:
+                    claimed_request_state.terminal_settlement_phase = "claimed"
+                    if claimed_request_state not in claimed_terminal_request_states:
+                        claimed_terminal_request_states.append(claimed_request_state)
+
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
             grouped_error_reason = (
@@ -1345,6 +1499,22 @@ class _HTTPBridgeUpstreamEventsMixin:
         if status_request_state is None and is_previous_response_not_found_event:
             session.upstream_control.reconnect_requested = True
             return
+
+        if status_request_state is None and pending_request_count:
+            # The bridge multiplexes one upstream connection across pending
+            # requests. An event that reaches none of them is dropped here, and
+            # whatever was waiting for it waits until a timeout fires, so the
+            # drop needs to be visible rather than inferred from a missing
+            # downstream response.
+            logger.warning(
+                "HTTP bridge upstream event matched no pending request account_id=%s bridge_kind=%s "
+                "event_type=%s has_response_id=%s pending_count=%d",
+                session.account.id,
+                session.key.affinity_kind,
+                event_type or "unknown",
+                response_id is not None,
+                pending_request_count,
+            )
 
         if status_request_state is not None and event_type not in {
             "response.completed",

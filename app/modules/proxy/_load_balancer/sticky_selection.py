@@ -15,6 +15,7 @@ from app.core.balancer import (
     ROUTING_POLICY_BURN_FIRST,
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
+    TRAFFIC_CLASS_OPPORTUNISTIC,
     AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
@@ -34,6 +35,11 @@ from app.modules.proxy._load_balancer.types import (
     ProbeReservation,
 )
 from app.modules.proxy.affinity import _CodexSessionSource
+from app.modules.proxy.fair_share import (
+    API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
+    FairShareDecision,
+    fair_share_denial_message,
+)
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
@@ -114,7 +120,20 @@ class StickySelectionOwner(Protocol):
         kind: AccountLeaseKind,
         estimated_tokens: float,
         record_selection: bool = True,
+        api_key_id: str | None = None,
     ) -> AccountLease: ...
+
+    def _api_key_stream_fair_share_denial_locked(
+        self,
+        *,
+        api_key_id: str | None,
+        lease_kind: AccountLeaseKind | None,
+        candidate_account_ids: Collection[str],
+        caps: AccountConcurrencyCaps,
+        stream_reserve_slots: int,
+        threshold_pct: int,
+        redact_sensitive_details: bool = False,
+    ) -> FairShareDecision | None: ...
 
     def _reserve_due_probe_locked(
         self,
@@ -157,6 +176,7 @@ class StickySelectionOwner(Protocol):
         sticky_key: str | None,
         sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
+        require_unambiguous_account: bool,
         sticky_max_age_seconds: int | None,
         budget_threshold_pct: float,
         secondary_budget_threshold_pct: float,
@@ -171,6 +191,8 @@ class StickySelectionOwner(Protocol):
         preserve_existing_mapping_on_fallback: bool,
         traffic_class: TrafficClass,
         ignore_standard_quota: bool,
+        allow_usage_exhaustion_error: bool = True,
+        usage_exhaustion_states: Iterable[AccountState] | None = None,
     ) -> _StickySelectionOutcome: ...
 
     async def release_account_lease(self, lease: AccountLease | None) -> None: ...
@@ -205,6 +227,9 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     selection_inputs: SelectionInputsT
     reload_inputs: Callable[[], Awaitable[SelectionInputsT]]
     record_account_cap_rejection: AccountCapRejectionCallback
+    allow_usage_exhaustion_error: bool = True
+    api_key_id: str | None = None
+    api_key_stream_fair_share_threshold_pct: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +252,7 @@ class StickySelectionOutcome(Generic[SelectionInputsT]):
     selected_lease: AccountLease | None
     error_message: str | None
     error_code: str | None
+    resets_at: int | None = None
     disposition: StickySelectionDisposition = "shared_result"
 
 
@@ -262,11 +288,15 @@ async def run_sticky_selection_path(
     redact_sensitive_details = request.redact_sensitive_details
     load_selection_inputs = request.reload_inputs
     _record_account_cap_rejection = request.record_account_cap_rejection
+    allow_usage_exhaustion_error = request.allow_usage_exhaustion_error
+    api_key_id = request.api_key_id
+    fair_share_threshold_pct = request.api_key_stream_fair_share_threshold_pct
 
     selected_snapshot: Account | None = None
     selected_lease: AccountLease | None = None
     error_message: str | None = None
     selection_error_code: str | None = None
+    selection_resets_at: int | None = None
 
     def _direct_error(
         *,
@@ -285,6 +315,7 @@ async def run_sticky_selection_path(
         )
 
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
+    sticky_continuity_abandoned = False
     attempt = 0
     suppress_recovery_probe_candidates = False
     while True:
@@ -294,17 +325,26 @@ async def run_sticky_selection_path(
             async with owner._runtime_lock:
                 pass
             async with owner._repo_factory() as repos:
-                sticky_existing_account_id = await repos.sticky_sessions.get_account_id(
+                sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
                     sticky_key,
                     kind=sticky_kind,
                     max_age_seconds=sticky_max_age_seconds,
                 )
+                sticky_existing_account_id = sticky_owner_lookup.account_id
+                # `is True` (not a truthy check): an un-configured test double
+                # for sticky_sessions may return an object whose attribute
+                # access auto-vivifies to a mock rather than a real bool, and
+                # that must fail safe as "not abandoned", the same as it
+                # always has, rather than silently bypassing the ambiguous
+                # owner check below.
+                sticky_continuity_abandoned = sticky_owner_lookup.continuity_abandoned is True
             if sticky_kind == StickySessionKind.CODEX_SESSION and sticky_existing_is_legacy:
                 # Mixed-version replicas can create both rows on
                 # different accounts. The raw row was loaded before
                 # branch selection and always wins as possible hard
                 # turn-state ownership.
                 sticky_existing_account_id = legacy_existing_account_id
+                sticky_continuity_abandoned = False
         async with owner._runtime_lock:
             states, account_map = owner._prepare_sticky_selection_states(
                 selection_inputs,
@@ -344,9 +384,19 @@ async def run_sticky_selection_path(
                 )
             # A resolved hard row proves ownership. Without one, use the
             # same pre-health/pre-cap pool as the no-sticky path above.
+            #
+            # A tombstoned row (sticky_continuity_abandoned — see
+            # purge_stale_hard_codex_session_mappings) is exempted from this
+            # fail-closed check even though it's just as pool-ambiguous as a
+            # never-seen key: unlike a never-seen key, we know this session's
+            # owner was durably unavailable and continuity was deliberately
+            # abandoned, so picking a fresh owner here is what lets the
+            # request recover instead of failing closed forever with no path
+            # back to a resolved hard row.
             if (
                 require_unambiguous_account
                 and not hard_sticky
+                and not sticky_continuity_abandoned
                 and len(selection_inputs.effective_continuity_owner_candidates) != 1
             ):
                 return _direct_error(
@@ -354,6 +404,18 @@ async def run_sticky_selection_path(
                     error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                     error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
                 )
+            # Fair share is measured against the full candidate pool, before
+            # hard-sticky narrows selection to the owner account.
+            fair_share_candidate_ids = [state.account_id for state in states]
+            fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
+                api_key_id=api_key_id,
+                lease_kind=lease_kind,
+                candidate_account_ids=fair_share_candidate_ids,
+                caps=caps,
+                stream_reserve_slots=stream_reserve_slots,
+                threshold_pct=fair_share_threshold_pct,
+                redact_sensitive_details=redact_sensitive_details,
+            )
             if hard_sticky:
                 # A resolved hard Codex mapping is an ownership
                 # constraint, not a preference. Scope, exclusions,
@@ -404,11 +466,19 @@ async def run_sticky_selection_path(
                 )
             probe_reservation: ProbeReservation | None = None
         sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
-        if hard_sticky and not selection_states:
+        if fair_share_denial is not None:
+            # Denial parks in the transport capacity-wait loop like a cap
+            # denial. Sticky DB work, mapping mutation, and probe
+            # reservation are all skipped so mappings are preserved.
+            selection_error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
+            result = SelectionResult(None, fair_share_denial_message(fair_share_denial))
+        elif hard_sticky and not selection_states:
             selection_error_code = "hard_affinity_saturated"
+            selection_resets_at = None
             result = SelectionResult(None, "Hard affinity owner account is unavailable")
         elif not selection_states and states:
             selection_error_code = _account_cap_error_code(lease_kind)
+            selection_resets_at = None
             result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
             logger.warning(
                 "Account cap exhausted during sticky selection lease_kind=%s reason=%s candidates=%s",
@@ -433,17 +503,22 @@ async def run_sticky_selection_path(
                 traffic_class=traffic_class,
                 ignore_standard_quota=False,
                 routing_costs_by_account_id=effective_routing_costs,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                usage_exhaustion_states=states,
             )
             if result.account is None:
                 selection_error_code = "hard_affinity_saturated"
+                selection_resets_at = None
                 result = SelectionResult(
                     None,
                     result.error_message or "Hard affinity owner account is unavailable",
                 )
             else:
                 selection_error_code = None
+                selection_resets_at = None
         else:
             selection_error_code = None
+            selection_resets_at = None
             try:
                 async with owner._repo_factory() as repos:
                     sticky_outcome = await owner._select_with_stickiness(
@@ -452,6 +527,7 @@ async def run_sticky_selection_path(
                         sticky_key=sticky_key,
                         sticky_kind=sticky_kind,
                         reallocate_sticky=reallocate_sticky,
+                        require_unambiguous_account=require_unambiguous_account,
                         sticky_max_age_seconds=sticky_max_age_seconds,
                         budget_threshold_pct=budget_threshold_pct,
                         secondary_budget_threshold_pct=secondary_budget_threshold_pct,
@@ -466,8 +542,25 @@ async def run_sticky_selection_path(
                         traffic_class=traffic_class,
                         ignore_standard_quota=False,
                         routing_costs_by_account_id=effective_routing_costs,
+                        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                        usage_exhaustion_states=states,
                     )
                     result = sticky_outcome.selection
+                    if (
+                        result.account is None
+                        and result.error_code is None
+                        and lease_kind is not None
+                        and len(selection_states) < len(states)
+                        and any(
+                            state.status == AccountStatus.ACTIVE for state in states if state not in selection_states
+                        )
+                    ):
+                        selection_error_code = _account_cap_error_code(lease_kind)
+                        result = SelectionResult(
+                            None,
+                            _account_cap_error_message(lease_kind, caps),
+                            error_code=selection_error_code,
+                        )
             except BaseException:
                 async with owner._runtime_lock:
                     owner._release_due_probe_reservation_locked(probe_reservation)
@@ -526,6 +619,8 @@ async def run_sticky_selection_path(
                     probe_reservation_invalidated = True
             if result.account is None:
                 error_message = result.error_message
+                selection_error_code = result.error_code or selection_error_code
+                selection_resets_at = result.resets_at or selection_resets_at
             elif probe_reservation_invalidated:
                 selected = None
             else:
@@ -553,6 +648,26 @@ async def run_sticky_selection_path(
                 ):
                     selection_error_code = _account_cap_error_code(lease_kind)
                     error_message = _account_cap_error_message(lease_kind, caps)
+                elif (
+                    lease_kind is not None
+                    and (
+                        fair_share_recheck := owner._api_key_stream_fair_share_denial_locked(
+                            api_key_id=api_key_id,
+                            lease_kind=lease_kind,
+                            candidate_account_ids=fair_share_candidate_ids,
+                            caps=caps,
+                            stream_reserve_slots=stream_reserve_slots,
+                            threshold_pct=fair_share_threshold_pct,
+                            redact_sensitive_details=redact_sensitive_details,
+                        )
+                    )
+                    is not None
+                ):
+                    # Sticky DB work runs between the filter-phase gate and
+                    # this commit section; concurrent selections for one key
+                    # could otherwise overshoot the share.
+                    selection_error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
+                    error_message = fair_share_denial_message(fair_share_recheck)
                 else:
                     selection_admitted = True
                     if lease_kind is not None:
@@ -563,6 +678,7 @@ async def run_sticky_selection_path(
                             # Keep the reservation token intact until
                             # persistence commits the recovery admission.
                             record_selection=not selected_reserved_probe,
+                            api_key_id=api_key_id,
                         )
 
             if not probe_reservation_invalidated:
@@ -857,6 +973,7 @@ async def run_sticky_selection_path(
         selected_lease=selected_lease,
         error_message=error_message,
         error_code=selection_error_code,
+        resets_at=selection_resets_at,
     )
 
 
@@ -867,6 +984,7 @@ async def _select_with_stickiness(
     sticky_key: str | None,
     sticky_kind: StickySessionKind | None,
     reallocate_sticky: bool,
+    require_unambiguous_account: bool = False,
     sticky_max_age_seconds: int | None,
     budget_threshold_pct: float = 95.0,
     secondary_budget_threshold_pct: float = 100.0,
@@ -881,6 +999,8 @@ async def _select_with_stickiness(
     preserve_existing_mapping_on_fallback: bool = False,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
+    allow_usage_exhaustion_error: bool = True,
+    usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> _StickySelectionOutcome:
     if not sticky_key or not sticky_repo:
         return _StickySelectionOutcome(
@@ -895,6 +1015,8 @@ async def _select_with_stickiness(
                 traffic_class=traffic_class,
                 ignore_standard_quota=ignore_standard_quota,
                 routing_costs_by_account_id=routing_costs_by_account_id,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                usage_exhaustion_states=usage_exhaustion_states,
             )
         )
     if sticky_kind is None:
@@ -1020,6 +1142,8 @@ async def _select_with_stickiness(
                         traffic_class=traffic_class,
                         ignore_standard_quota=ignore_standard_quota,
                         routing_costs_by_account_id=routing_costs_by_account_id,
+                        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                        usage_exhaustion_states=usage_exhaustion_states,
                     )
                     pool_also_exhausted = pool_best.account is not None and (
                         pool_best.account.account_id == pinned.account_id
@@ -1106,7 +1230,9 @@ async def _select_with_stickiness(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs_by_account_id=routing_costs_by_account_id,
-        allow_usage_draining_burn_first=existing is None,
+        allow_usage_draining_burn_first=(existing is None and not require_unambiguous_account),
+        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+        usage_exhaustion_states=usage_exhaustion_states,
     )
     if persist_fallback and chosen.account is not None and chosen.account.account_id in account_map:
         return finish_selection(chosen, persist_account_id=chosen.account.account_id)
@@ -1311,6 +1437,8 @@ def _select_account_preferring_budget_safe(
     ignore_standard_quota: bool = False,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     allow_usage_draining_burn_first: bool = False,
+    allow_usage_exhaustion_error: bool = True,
+    usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> SelectionResult:
     state_list = list(states)
     if routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
@@ -1329,6 +1457,7 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=False,
         )
         if recovery_probe.account is not None:
             return recovery_probe
@@ -1341,39 +1470,49 @@ def _select_account_preferring_budget_safe(
         usage_draining_burn_first = [
             state for state in state_list if _is_usage_only_draining_burn_first(state, now=now)
         ]
-        healthy_fallbacks = [state for state in state_list if state.health_tier == HEALTH_TIER_HEALTHY]
-        fallback = select_account(
-            healthy_fallbacks,
-            prefer_earlier_reset=prefer_earlier_reset,
-            prefer_earlier_reset_window=prefer_earlier_reset_window,
-            routing_strategy=routing_strategy,
-            allow_backoff_fallback=False,
-            deterministic_probe=deterministic_probe,
-            relative_availability_power=relative_availability_power,
-            relative_availability_top_k=relative_availability_top_k,
-            traffic_class=traffic_class,
-            ignore_standard_quota=ignore_standard_quota,
-            routing_costs=routing_costs_by_account_id,
-        )
-        if usage_draining_burn_first and fallback.account is not None:
-            burn_first = select_account(
-                usage_draining_burn_first,
-                prefer_earlier_reset=prefer_earlier_reset,
-                prefer_earlier_reset_window=prefer_earlier_reset_window,
-                routing_strategy=routing_strategy,
+        if usage_draining_burn_first:
+            healthy_fallbacks = [state for state in state_list if state.health_tier == HEALTH_TIER_HEALTHY]
+            fallback = select_account(
+                (replace(state) for state in healthy_fallbacks),
+                now=now,
+                routing_strategy="single_account",
                 allow_backoff_fallback=False,
-                deterministic_probe=deterministic_probe,
-                relative_availability_power=relative_availability_power,
-                relative_availability_top_k=relative_availability_top_k,
                 traffic_class=traffic_class,
                 ignore_standard_quota=ignore_standard_quota,
-                routing_costs=routing_costs_by_account_id,
+                allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                usage_exhaustion_states=usage_exhaustion_states,
             )
-            if burn_first.account is not None:
-                return burn_first
-        elif usage_draining_burn_first:
-            excluded_account_ids = {state.account_id for state in usage_draining_burn_first}
-            state_list = [state for state in state_list if state.account_id not in excluded_account_ids]
+            if fallback.account is not None:
+                selection_state_by_id = {
+                    state.account_id: state for state in (*usage_draining_burn_first, *healthy_fallbacks)
+                }
+                selection_context = [
+                    *(replace(state, health_tier=HEALTH_TIER_HEALTHY) for state in usage_draining_burn_first),
+                    *(replace(state) for state in healthy_fallbacks),
+                ]
+                burn_first = select_account(
+                    selection_context,
+                    now=now,
+                    prefer_earlier_reset=prefer_earlier_reset,
+                    prefer_earlier_reset_window=prefer_earlier_reset_window,
+                    routing_strategy=routing_strategy,
+                    allow_backoff_fallback=False,
+                    deterministic_probe=deterministic_probe,
+                    relative_availability_power=relative_availability_power,
+                    relative_availability_top_k=relative_availability_top_k,
+                    traffic_class=traffic_class,
+                    ignore_standard_quota=ignore_standard_quota,
+                    routing_costs=routing_costs_by_account_id,
+                    allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                    usage_exhaustion_states=usage_exhaustion_states,
+                )
+                if burn_first.account is not None:
+                    selected_state = selection_state_by_id.get(burn_first.account.account_id)
+                    if selected_state is not None:
+                        return SelectionResult(selected_state, burn_first.error_message)
+            elif traffic_class != TRAFFIC_CLASS_OPPORTUNISTIC:
+                excluded_account_ids = {state.account_id for state in usage_draining_burn_first}
+                state_list = [state for state in state_list if state.account_id not in excluded_account_ids]
     state_budget_threshold = (
         (
             lambda state: _state_above_sticky_budget_threshold(
@@ -1403,6 +1542,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
 
     best_health_states = _best_health_tier_states(state_list)
@@ -1420,6 +1561,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
         if burn_first.account is not None:
             return burn_first
@@ -1443,6 +1586,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
         if preferred.account is not None:
             return preferred
@@ -1460,6 +1605,8 @@ def _select_account_preferring_budget_safe(
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             routing_costs=routing_costs_by_account_id,
+            allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+            usage_exhaustion_states=usage_exhaustion_states,
         )
     return select_account(
         state_list,
@@ -1473,6 +1620,8 @@ def _select_account_preferring_budget_safe(
         traffic_class=traffic_class,
         ignore_standard_quota=ignore_standard_quota,
         routing_costs=routing_costs_by_account_id,
+        allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+        usage_exhaustion_states=usage_exhaustion_states,
     )
 
 

@@ -92,6 +92,7 @@ type RoutingSettingsDraft = {
   proxyAccountResponseCreateLimit: string;
   proxyAccountStreamLimit: string;
   proxyAccountStreamRecoveryReserve: string;
+  proxyApiKeyFairShareCongestionThresholdPct: string;
   relativeAvailabilityPower: string;
   relativeAvailabilityTopK: string;
   stickyPrimaryThreshold: string;
@@ -112,6 +113,7 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
     proxyAccountResponseCreateLimit: String(settings.proxyAccountResponseCreateLimit),
     proxyAccountStreamLimit: String(settings.proxyAccountStreamLimit),
     proxyAccountStreamRecoveryReserve: String(settings.proxyAccountStreamRecoveryReserve),
+    proxyApiKeyFairShareCongestionThresholdPct: String(settings.proxyApiKeyFairShareCongestionThresholdPct),
     relativeAvailabilityPower: String(settings.relativeAvailabilityPower),
     relativeAvailabilityTopK: String(settings.relativeAvailabilityTopK),
     stickyPrimaryThreshold: String(settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95),
@@ -188,17 +190,24 @@ export function RoutingSettings({
   const parsedProxyAccountStreamRecoveryReserve = parseNonnegativeInteger(
     draft.proxyAccountStreamRecoveryReserve,
   );
+  const parsedProxyApiKeyFairShareCongestionThresholdPct = parseNonnegativeInteger(
+    draft.proxyApiKeyFairShareCongestionThresholdPct,
+  );
   const accountCapacityLimitsValid =
     parsedProxyAccountResponseCreateLimit !== null &&
     parsedProxyAccountStreamLimit !== null &&
     parsedProxyAccountStreamRecoveryReserve !== null &&
+    parsedProxyApiKeyFairShareCongestionThresholdPct !== null &&
+    parsedProxyApiKeyFairShareCongestionThresholdPct <= 100 &&
     (parsedProxyAccountStreamLimit === 0 ||
       parsedProxyAccountStreamRecoveryReserve <= parsedProxyAccountStreamLimit);
   const accountCapacityLimitsChanged =
     accountCapacityLimitsValid &&
     (parsedProxyAccountResponseCreateLimit !== settings.proxyAccountResponseCreateLimit ||
       parsedProxyAccountStreamLimit !== settings.proxyAccountStreamLimit ||
-      parsedProxyAccountStreamRecoveryReserve !== settings.proxyAccountStreamRecoveryReserve);
+      parsedProxyAccountStreamRecoveryReserve !== settings.proxyAccountStreamRecoveryReserve ||
+      parsedProxyApiKeyFairShareCongestionThresholdPct !==
+        settings.proxyApiKeyFairShareCongestionThresholdPct);
   const warmupModelChanged = draft.warmupModel.trim() !== settings.warmupModel;
   const warmupModelValid = draft.warmupModel.trim().length > 0 && draft.warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(draft.limitWarmupCooldown);
@@ -744,6 +753,28 @@ export function RoutingSettings({
                   {t("settings.routing.accountCapacity.streamRecoveryReserveDescription")}
                 </span>
               </label>
+              <label className="block space-y-1">
+                <span className="block text-[11px] font-medium text-muted-foreground">
+                  {t("settings.routing.accountCapacity.fairShareThresholdLabel")}
+                </span>
+                <Input
+                  aria-label={t("settings.routing.accountCapacity.fairShareThresholdLabel")}
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={1}
+                  inputMode="numeric"
+                  value={draft.proxyApiKeyFairShareCongestionThresholdPct}
+                  disabled={busy}
+                  onChange={(event) =>
+                    updateDraft({ proxyApiKeyFairShareCongestionThresholdPct: event.target.value })
+                  }
+                  className="h-8 text-xs"
+                />
+                <span className="block text-[11px] text-muted-foreground">
+                  {t("settings.routing.accountCapacity.fairShareThresholdDescription")}
+                </span>
+              </label>
             </div>
             <Button
               type="button"
@@ -756,6 +787,8 @@ export function RoutingSettings({
                   proxyAccountResponseCreateLimit: parsedProxyAccountResponseCreateLimit!,
                   proxyAccountStreamLimit: parsedProxyAccountStreamLimit!,
                   proxyAccountStreamRecoveryReserve: parsedProxyAccountStreamRecoveryReserve!,
+                  proxyApiKeyFairShareCongestionThresholdPct:
+                    parsedProxyApiKeyFairShareCongestionThresholdPct!,
                 })
               }
             >

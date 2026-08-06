@@ -14,6 +14,7 @@ import pytest
 
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core.balancer import (
+    ERROR_BACKOFF_THRESHOLD,
     HEALTH_TIER_DRAINING,
     HEALTH_TIER_HEALTHY,
     HEALTH_TIER_PROBING,
@@ -32,6 +33,7 @@ from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.sticky_repository import StickyOwnerLookup
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
 
@@ -120,6 +122,28 @@ async def test_account_lease_uses_explicit_dashboard_cap_snapshot_not_startup_en
     assert third is None
 
 
+@pytest.mark.asyncio
+async def test_opportunistic_selection_preserves_usage_limit_exhaustion_error() -> None:
+    account = _make_account("acc-opportunistic-usage-exhausted")
+    account.status = AccountStatus.QUOTA_EXCEEDED
+    reset_at = int(time.time() + 300)
+    account.reset_at = reset_at
+    usage_repo = _StubUsageRepository(
+        {account.id: _usage_row_with_percent(1, account.id, used_percent=100.0, reset_at=reset_at)},
+        {},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), usage_repo))
+
+    result = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        traffic_class=load_balancer_module.TRAFFIC_CLASS_OPPORTUNISTIC,
+    )
+
+    assert result.account is None
+    assert result.error_code == "usage_limit_reached"
+    assert result.resets_at == reset_at
+
+
 class _StubAccountsRepository:
     def __init__(self, accounts: list[Account]) -> None:
         self._accounts = accounts
@@ -192,14 +216,27 @@ class _StubStickySessionsRepository:
     def __init__(self) -> None:
         self.account_id: str | None = None
         self.account_ids_by_key: dict[str, str] | None = None
+        # Keys reported as purge tombstones (see
+        # purge_stale_hard_codex_session_mappings): get_account_id_and_abandonment
+        # reports these as ownerless, same as a missing row, but flags them as
+        # abandoned so run_sticky_selection_path can bypass the
+        # ambiguous-owner check for them.
+        self.abandoned_keys: set[str] = set()
         self.deleted: list[tuple[str, StickySessionKind | None]] = []
         self.upserts: list[tuple[str, str, StickySessionKind | None]] = []
 
     async def get_account_id(self, *args: Any, **kwargs: Any) -> str | None:
+        lookup = await self.get_account_id_and_abandonment(*args, **kwargs)
+        return lookup.account_id
+
+    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
+        key = cast(str, args[0])
+        if key in self.abandoned_keys:
+            return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
         if self.account_ids_by_key is not None:
-            return self.account_ids_by_key.get(cast(str, args[0]))
-        del args, kwargs
-        return self.account_id
+            return StickyOwnerLookup(account_id=self.account_ids_by_key.get(key), continuity_abandoned=False)
+        del kwargs
+        return StickyOwnerLookup(account_id=self.account_id, continuity_abandoned=False)
 
     async def upsert(self, *args: Any, **kwargs: Any) -> Any:
         sticky_key = cast(str, args[0])
@@ -240,13 +277,13 @@ class _ConcurrentUnboundStickySessionsRepository(_StubStickySessionsRepository):
         self._lookup_count = 0
         self._all_lookups_started = asyncio.Event()
 
-    async def get_account_id(self, *args: Any, **kwargs: Any) -> None:
+    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
         del args, kwargs
         self._lookup_count += 1
         if self._lookup_count >= self._expected_lookups:
             self._all_lookups_started.set()
         await self._all_lookups_started.wait()
-        return None
+        return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
 
 
 class _ConcurrentBoundStickySessionsRepository(_StubStickySessionsRepository):
@@ -258,13 +295,13 @@ class _ConcurrentBoundStickySessionsRepository(_StubStickySessionsRepository):
         self._lookup_count = 0
         self._all_lookups_started = asyncio.Event()
 
-    async def get_account_id(self, *args: Any, **kwargs: Any) -> str:
+    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
         del args, kwargs
         self._lookup_count += 1
         if self._lookup_count >= self._expected_lookups:
             self._all_lookups_started.set()
         await self._all_lookups_started.wait()
-        return self._initial_account_id
+        return StickyOwnerLookup(account_id=self._initial_account_id, continuity_abandoned=False)
 
 
 class _FailingUpsertStickySessionsRepository(_StubStickySessionsRepository):
@@ -386,6 +423,24 @@ async def test_record_error_updates_are_atomic_with_per_account_lock() -> None:
     runtime = balancer._runtime[account.id]
     assert runtime.error_count == 50
     assert runtime.last_error_at is not None
+
+
+@pytest.mark.asyncio
+async def test_record_error_backoff_enters_floor_without_adding_full_threshold() -> None:
+    account = _make_account("acc-error-backoff")
+    accounts_repo = _StubAccountsRepository([account])
+    usage_repo = _StubUsageRepository(primary={}, secondary={})
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+
+    await balancer.record_error_backoff(account)
+
+    runtime = balancer._runtime[account.id]
+    assert runtime.error_count == ERROR_BACKOFF_THRESHOLD
+    assert runtime.last_error_at is not None
+
+    await balancer.record_error_backoff(account)
+
+    assert runtime.error_count == ERROR_BACKOFF_THRESHOLD + 1
 
 
 @pytest.mark.asyncio
@@ -799,6 +854,57 @@ async def test_account_stream_cap_returns_stable_local_reason_until_released() -
     assert recovered.account is not None
     assert recovered.account.id == account.id
     assert recovered.lease is not None
+
+
+@pytest.mark.asyncio
+async def test_stream_cap_takes_precedence_over_remaining_quota_exhausted_account() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    capped = _make_account("acc-stream-cap-mixed-capped")
+    exhausted = _make_account("acc-stream-cap-mixed-exhausted")
+    exhausted.status = AccountStatus.QUOTA_EXCEEDED
+    exhausted.reset_at = now_epoch + 3600
+    accounts_repo = _StubAccountsRepository([capped, exhausted])
+    usage_repo = _StubUsageRepository(
+        primary={
+            capped.id: _usage_row_with_percent(
+                203,
+                capped.id,
+                used_percent=50.0,
+                reset_at=now_epoch + 300,
+            ),
+            exhausted.id: _usage_row_with_percent(
+                204,
+                exhausted.id,
+                used_percent=100.0,
+                reset_at=now_epoch + 3600,
+            ),
+        },
+        secondary={},
+    )
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo))
+    leases = [
+        (
+            await balancer.select_account(
+                routing_strategy="usage_weighted",
+                lease_kind="stream",
+            )
+        ).lease
+        for _ in range(8)
+    ]
+
+    selected = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is None
+    assert selected.error_code == "account_stream_cap"
+    assert selected.error_message is not None
+    assert "Account stream capacity is exhausted" in selected.error_message
+    assert selected.resets_at is None
+
+    for lease in leases:
+        await balancer.release_account_lease(lease)
 
 
 @pytest.mark.asyncio
@@ -2700,6 +2806,37 @@ async def test_bare_session_mapping_does_not_prove_ambiguous_conversation_owner(
 
 
 @pytest.mark.asyncio
+async def test_tombstoned_hard_owner_lets_conversation_continuity_reselect() -> None:
+    """A purge-tombstoned mapping (see purge_stale_hard_codex_session_mappings)
+    must not permanently strand a `conversation`-continuity request just
+    because the pool has more than one account. Unlike a key that was never
+    seen, we know this key's owner was durably unavailable and continuity was
+    deliberately abandoned, so a fresh account may be selected and a new hard
+    mapping re-established — otherwise the request could never recover even
+    after the original owner comes back, since nothing on this path would
+    ever re-create the very row needed to stop failing closed."""
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("conversation-tombstoned")
+    assert alternate is not None
+    turn_state_key = "conversation-tombstoned-turn-state"
+    sticky_repo.abandoned_keys = {turn_state_key}
+
+    selected = await balancer.select_account(
+        sticky_key=turn_state_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="turn_state",
+        require_unambiguous_account=True,
+        lease_kind="response_create",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id in {owner.id, alternate.id}
+    assert selected.error_code is None
+    assert sticky_repo.upserts
+    assert sticky_repo.upserts[-1][0] == turn_state_key
+    assert sticky_repo.upserts[-1][1] == selected.account.id
+
+
+@pytest.mark.asyncio
 async def test_conversation_owner_stays_ambiguous_when_one_account_is_capped() -> None:
     balancer, owner, _, _ = _make_cap_spillover_balancer("conversation-capped-candidate")
     saturated_leases = [await balancer.acquire_account_lease(owner.id, kind="response_create") for _ in range(4)]
@@ -3248,3 +3385,434 @@ async def test_partitioned_caps_bound_aggregate_streams_across_two_replicas(
         assert error_message is not None
         assert "this replica's share is 4" in error_message
         assert "across 2 replicas" in error_message
+
+
+# ---------------------------------------------------------------------------
+# Congestion-aware per-API-key stream fair share
+# ---------------------------------------------------------------------------
+
+# Small pool for exact fair-share arithmetic: 2 accounts x 2 stream slots = 4.
+_FAIR_SHARE_CAPS = load_balancer_module.AccountConcurrencyCaps(
+    response_create_limit=4,
+    stream_limit=2,
+)
+
+
+def _make_fair_share_pool(
+    prefix: str,
+    *,
+    account_count: int = 2,
+    sticky_repo: _StubStickySessionsRepository | None = None,
+) -> tuple[LoadBalancer, list[Account], _StubStickySessionsRepository]:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    accounts = [_make_account(f"{prefix}-{index}") for index in range(account_count)]
+    primary = {
+        account.id: _usage_row(400 + index, account.id, window="primary", reset_at=now_epoch + 300)
+        for index, account in enumerate(accounts)
+    }
+    secondary = {
+        account.id: _usage_row(500 + index, account.id, window="secondary", reset_at=now_epoch + 3600)
+        for index, account in enumerate(accounts)
+    }
+    sticky_repo = sticky_repo or _StubStickySessionsRepository()
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository(accounts),
+            _StubUsageRepository(primary, secondary),
+            sticky_repo,
+        )
+    )
+    return balancer, accounts, sticky_repo
+
+
+async def _grab_stream(balancer: LoadBalancer, account_id: str, api_key_id: str | None) -> Any:
+    """Deterministically pin a stream lease for a key onto one account."""
+    async with balancer._runtime_lock:
+        return balancer._acquire_account_lease_locked(
+            account_id,
+            kind="stream",
+            estimated_tokens=0.0,
+            api_key_id=api_key_id,
+        )
+
+
+async def _fair_share_select(
+    balancer: LoadBalancer,
+    api_key_id: str | None,
+    *,
+    threshold_pct: int = 50,
+    lease_kind: Literal["stream", "response_create"] = "stream",
+) -> Any:
+    return await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind=lease_kind,
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        api_key_id=api_key_id,
+        api_key_stream_fair_share_threshold_pct=threshold_pct,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_lease_api_key_accounting_tracks_acquire_release_and_deletes_at_zero() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-accounting", account_count=1)
+    account = accounts[0]
+
+    first = await _fair_share_select(balancer, "k1", threshold_pct=0)
+    second = await _fair_share_select(balancer, "k1", threshold_pct=0)
+
+    assert first.lease is not None
+    assert first.lease.api_key_id == "k1"
+    assert second.lease is not None
+    assert second.lease.api_key_id == "k1"
+    runtime = balancer._runtime[account.id]
+    assert runtime.stream_key_inflight == {"k1": 2}
+
+    await balancer.release_account_lease(first.lease)
+    assert runtime.stream_key_inflight == {"k1": 1}
+
+    await balancer.release_account_lease(second.lease)
+    assert not runtime.stream_key_inflight
+    assert runtime.inflight_streams == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_lease_api_key_stale_reclaim_decrements_per_key_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        proxy_account_lease_ttl_seconds=1.0,
+        proxy_request_budget_seconds=1.0,
+        http_responses_stream_request_budget_seconds=1.0,
+        http_responses_session_bridge_request_budget_seconds=1.0,
+        proxy_account_stream_limit=2,
+        proxy_account_response_create_limit=2,
+    )
+    monkeypatch.setattr(load_balancer_module, "get_settings", lambda: settings)
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-stale", account_count=1)
+    account = accounts[0]
+
+    stale_lease = await _grab_stream(balancer, account.id, "k1")
+    runtime = balancer._runtime[account.id]
+    assert runtime.stream_key_inflight == {"k1": 1}
+    # Stream TTL is the max request budget (1.0s) plus the 60s stale grace.
+    object.__setattr__(stale_lease, "acquired_at", time.monotonic() - 120.0)
+
+    replacement = await balancer.acquire_account_lease(account.id, kind="response_create")
+
+    assert replacement is not None
+    assert not runtime.stream_key_inflight
+    assert runtime.inflight_streams == 0
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_default_threshold_keeps_saturation_outcomes_identical() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-default", account_count=1)
+    account = accounts[0]
+
+    keyed_leases = [(await _fair_share_select(balancer, "k1", threshold_pct=0)).lease for _ in range(2)]
+    assert all(lease is not None for lease in keyed_leases)
+    assert balancer._runtime[account.id].stream_key_inflight == {"k1": 2}
+
+    # Even with per-key accounting active and the pool saturated by one key,
+    # the default threshold of zero must reproduce the pre-feature outcome:
+    # the plain per-account stream cap denial, never a fair-share denial.
+    denied_keyed = await _fair_share_select(balancer, "k1", threshold_pct=0)
+    denied_keyless = await _fair_share_select(balancer, None, threshold_pct=0)
+
+    assert denied_keyed.account is None
+    assert denied_keyless.account is None
+    assert denied_keyed.error_code == denied_keyless.error_code == "account_stream_cap"
+    assert denied_keyed.error_message == denied_keyless.error_message
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_denies_over_share_key_and_admits_light_key_under_congestion() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-congested")
+    account_a, account_b = accounts
+    # C = 2 accounts * 2 slots = 4; heavy holds 2, light holds 1 -> T = 3.
+    # threshold 50: 3 * 100 >= 4 * 50 -> congested; share = max(2, 4 // 2) = 2.
+    await _grab_stream(balancer, account_a.id, "heavy")
+    await _grab_stream(balancer, account_b.id, "heavy")
+    await _grab_stream(balancer, account_a.id, "light")
+
+    denied = await _fair_share_select(balancer, "heavy")
+
+    assert denied.account is None
+    assert denied.lease is None
+    assert denied.error_code == "api_key_stream_fair_share"
+    assert denied.error_message is not None
+    assert "fair share" in denied.error_message
+    # A denial must not perturb the per-key accounting it read.
+    assert balancer._runtime[account_a.id].stream_key_inflight == {"heavy": 1, "light": 1}
+    assert balancer._runtime[account_b.id].stream_key_inflight == {"heavy": 1}
+
+    admitted = await _fair_share_select(balancer, "light")
+
+    assert admitted.account is not None
+    assert admitted.lease is not None
+    assert admitted.lease.api_key_id == "light"
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_readmits_heavy_key_after_release_below_share() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-readmit")
+    account_a, account_b = accounts
+    heavy_lease = await _grab_stream(balancer, account_a.id, "heavy")
+    await _grab_stream(balancer, account_b.id, "heavy")
+    await _grab_stream(balancer, account_a.id, "light")
+
+    denied = await _fair_share_select(balancer, "heavy")
+    assert denied.error_code == "api_key_stream_fair_share"
+
+    await balancer.release_account_lease(heavy_lease)
+    # T = 2 keeps the pool congested (2 * 100 >= 4 * 50), but heavy now holds
+    # 1 < share 2, so the freed capacity flows back to it.
+    readmitted = await _fair_share_select(balancer, "heavy")
+
+    assert readmitted.account is not None
+    assert readmitted.lease is not None
+    assert readmitted.lease.api_key_id == "heavy"
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_keyless_request_bypasses_gate_under_congestion() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-keyless-bypass")
+    account_a, account_b = accounts
+    await _grab_stream(balancer, account_a.id, "heavy")
+    await _grab_stream(balancer, account_b.id, "heavy")
+    # T = 2, C = 4, threshold 50 -> congested.
+
+    keyless = await _fair_share_select(balancer, None)
+
+    assert keyless.account is not None
+    assert keyless.lease is not None
+    assert keyless.lease.api_key_id is None
+    # Keyless streams never join the per-key map.
+    runtime = balancer._runtime[keyless.account.id]
+    assert runtime.stream_key_inflight == {"heavy": 1}
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_counts_keyless_streams_toward_pool_inflight() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-keyless-counted")
+    account_a, account_b = accounts
+    await _grab_stream(balancer, account_a.id, "heavy")
+    await _grab_stream(balancer, account_b.id, "heavy")
+    await _grab_stream(balancer, account_a.id, "light")
+    # T = 3, C = 4, threshold 80: 300 < 320 -> not congested, heavy admits.
+
+    uncongested = await _fair_share_select(balancer, "heavy", threshold_pct=80)
+    assert uncongested.account is not None
+    await balancer.release_account_lease(uncongested.lease)
+
+    # One keyless stream tips the pool over: T = 4, 400 >= 320 -> congested,
+    # and heavy (2 >= share 2) is now denied.
+    await _grab_stream(balancer, account_b.id, None)
+    congested = await _fair_share_select(balancer, "heavy", threshold_pct=80)
+
+    assert congested.account is None
+    assert congested.error_code == "api_key_stream_fair_share"
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_response_create_leases_never_touch_stream_key_inflight() -> None:
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-response-create")
+    account_a, account_b = accounts
+    await _grab_stream(balancer, account_a.id, "heavy")
+    await _grab_stream(balancer, account_b.id, "heavy")
+    await _grab_stream(balancer, account_a.id, "light")
+    # The stream pool is congested, but non-stream leases bypass the gate
+    # entirely -- even for the over-share key.
+    selection = await _fair_share_select(balancer, "heavy", lease_kind="response_create")
+
+    assert selection.account is not None
+    assert selection.lease is not None
+    assert selection.lease.kind == "response_create"
+    assert balancer._runtime[account_a.id].stream_key_inflight == {"heavy": 1, "light": 1}
+    assert balancer._runtime[account_b.id].stream_key_inflight == {"heavy": 1}
+    assert balancer._runtime[selection.account.id].inflight_response_creates == 1
+
+    await balancer.release_account_lease(selection.lease)
+    assert balancer._runtime[account_a.id].stream_key_inflight == {"heavy": 1, "light": 1}
+    assert balancer._runtime[account_b.id].stream_key_inflight == {"heavy": 1}
+
+
+@pytest.mark.asyncio
+async def test_direct_acquire_counts_api_key_and_enforces_fair_share_under_congestion() -> None:
+    """``acquire_account_lease`` joins per-key accounting and the fair-share gate.
+
+    Regression for the warm HTTP bridge session reacquire path (review P2):
+    direct account-pinned acquires previously ignored ``api_key_id``, so keyed
+    turns on reused bridge sessions took uncounted stream capacity and were
+    never congestion-gated. The pinned account is the key's whole usable pool
+    here, so fair share is measured against that single account.
+    """
+    direct_caps = load_balancer_module.AccountConcurrencyCaps(response_create_limit=4, stream_limit=4)
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-direct", account_count=1)
+    account = accounts[0]
+    # C = 1 account * 4 slots = 4; heavy holds 2, other holds 1 -> T = 3.
+    # threshold 50: 300 >= 200 -> congested; share = max(2, 4 // 2) = 2.
+    await _grab_stream(balancer, account.id, "heavy")
+    await _grab_stream(balancer, account.id, "heavy")
+    await _grab_stream(balancer, account.id, "other")
+    runtime = balancer._runtime[account.id]
+
+    with pytest.raises(load_balancer_module.ApiKeyFairShareDenialError) as exc_info:
+        await balancer.acquire_account_lease(
+            account.id,
+            kind="stream",
+            concurrency_caps=direct_caps,
+            api_key_id="heavy",
+            api_key_stream_fair_share_threshold_pct=50,
+        )
+
+    assert exc_info.value.decision.congested is True
+    assert "fair share" in str(exc_info.value)
+    # The denial neither installed a lease nor perturbed the accounting.
+    assert runtime.inflight_streams == 3
+    assert runtime.stream_key_inflight == {"heavy": 2, "other": 1}
+
+    # A key under the minimum guarantee admits despite the congestion and is
+    # counted into the per-key map; release returns its count symmetrically.
+    light = await balancer.acquire_account_lease(
+        account.id,
+        kind="stream",
+        concurrency_caps=direct_caps,
+        api_key_id="light",
+        api_key_stream_fair_share_threshold_pct=50,
+    )
+    assert light is not None
+    assert light.api_key_id == "light"
+    assert runtime.stream_key_inflight == {"heavy": 2, "other": 1, "light": 1}
+    await balancer.release_account_lease(light)
+    assert runtime.stream_key_inflight == {"heavy": 2, "other": 1}
+
+    # A zero threshold disables the gate (pre-feature outcome) but keyed
+    # direct acquires still join the accounting.
+    ungated = await balancer.acquire_account_lease(
+        account.id,
+        kind="stream",
+        concurrency_caps=direct_caps,
+        api_key_id="heavy",
+        api_key_stream_fair_share_threshold_pct=0,
+    )
+    assert ungated is not None
+    assert runtime.stream_key_inflight == {"heavy": 3, "other": 1}
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_sticky_path_denies_with_stable_code_and_preserves_mapping() -> None:
+    sticky_repo = _StubStickySessionsRepository()
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-sticky", sticky_repo=sticky_repo)
+    account_a, account_b = accounts
+    sticky_repo.account_id = account_a.id
+    await _grab_stream(balancer, account_a.id, "heavy")
+    await _grab_stream(balancer, account_b.id, "heavy")
+    await _grab_stream(balancer, account_a.id, "light")
+
+    denied = await balancer.select_account(
+        sticky_key="fair-share-sticky-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        api_key_id="heavy",
+        api_key_stream_fair_share_threshold_pct=50,
+    )
+
+    assert denied.account is None
+    assert denied.lease is None
+    assert denied.error_code == "api_key_stream_fair_share"
+    assert denied.error_message is not None
+    assert "fair share" in denied.error_message
+    assert sticky_repo.account_id == account_a.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_sticky_commit_recheck_denies_when_share_fills_during_sticky_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    balancer, accounts, sticky_repo = _make_fair_share_pool("acc-fair-share-recheck")
+    account_a, account_b = accounts
+    sticky_repo.account_id = account_a.id
+    # heavy holds 1 (one below its share of 2); light keeps the pool congested:
+    # T = 2, C = 4, threshold 50 -> 200 >= 200, share = max(2, 4 // 2) = 2.
+    await _grab_stream(balancer, account_b.id, "heavy")
+    await _grab_stream(balancer, account_b.id, "light")
+
+    original_select_with_stickiness = balancer._select_with_stickiness
+
+    async def racing_select_with_stickiness(*args: Any, **kwargs: Any) -> Any:
+        # A concurrent selection for the same key wins the race inside the
+        # window between the filter-phase gate and the commit lock section.
+        async with balancer._runtime_lock:
+            balancer._acquire_account_lease_locked(
+                account_a.id,
+                kind="stream",
+                estimated_tokens=0.0,
+                api_key_id="heavy",
+            )
+        return await original_select_with_stickiness(*args, **kwargs)
+
+    monkeypatch.setattr(balancer, "_select_with_stickiness", racing_select_with_stickiness)
+
+    denied = await balancer.select_account(
+        sticky_key="fair-share-recheck-session",
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_max_age_seconds=600,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        api_key_id="heavy",
+        api_key_stream_fair_share_threshold_pct=50,
+    )
+
+    assert denied.account is None
+    assert denied.lease is None
+    assert denied.error_code == "api_key_stream_fair_share"
+    heavy_total = sum((runtime.stream_key_inflight or {}).get("heavy", 0) for runtime in balancer._runtime.values())
+    assert heavy_total == 2  # setup lease + racing winner; the loser added nothing
+
+
+@pytest.mark.asyncio
+async def test_api_key_fair_share_concurrent_sticky_selections_cannot_overshoot_share() -> None:
+    sticky_repo = _ConcurrentBoundStickySessionsRepository(
+        account_id="acc-fair-share-race-0",
+        expected_lookups=2,
+    )
+    balancer, accounts, _ = _make_fair_share_pool("acc-fair-share-race", sticky_repo=sticky_repo)
+    account_a, account_b = accounts
+    assert account_a.id == "acc-fair-share-race-0"
+    # heavy holds 1 (one below its share of 2) and light keeps the pool
+    # congested: T = 2, C = 4, threshold 50 -> 200 >= 200.
+    await _grab_stream(balancer, account_b.id, "heavy")
+    await _grab_stream(balancer, account_b.id, "light")
+
+    results = await asyncio.gather(
+        *(
+            balancer.select_account(
+                sticky_key="fair-share-race-session",
+                sticky_kind=StickySessionKind.CODEX_SESSION,
+                routing_strategy="usage_weighted",
+                lease_kind="stream",
+                concurrency_caps=_FAIR_SHARE_CAPS,
+                api_key_id="heavy",
+                api_key_stream_fair_share_threshold_pct=50,
+            )
+            for _ in range(2)
+        )
+    )
+
+    admitted = [result for result in results if result.account is not None]
+    denied = [result for result in results if result.account is None]
+    assert len(admitted) == 1
+    assert admitted[0].account is not None
+    assert admitted[0].account.id == account_a.id
+    assert admitted[0].lease is not None
+    assert len(denied) == 1
+    assert denied[0].error_code == "api_key_stream_fair_share"
+    # The commit re-check kept heavy at exactly its share across both paths.
+    heavy_total = sum((runtime.stream_key_inflight or {}).get("heavy", 0) for runtime in balancer._runtime.values())
+    assert heavy_total == 2

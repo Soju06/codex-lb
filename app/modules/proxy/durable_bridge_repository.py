@@ -756,6 +756,35 @@ class DurableBridgeRepository:
             values=values,
         )
 
+    async def clear_latest_response_anchor(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> DurableBridgeSessionSnapshot | None:
+        """Invalidate a stuck eventless anchor with a single fenced UPDATE.
+
+        Clears only the response-id anchor and the state bound to it
+        (input fingerprint/count, pending tool-call manifest). Leaves
+        ``latest_turn_state`` and aliases untouched so the durable session
+        remains reattachable without the stale anchor. Fenced-out callers
+        mutate nothing and receive the current owner snapshot.
+        """
+
+        values: dict[str, object] = {
+            "latest_response_id": None,
+            "latest_input_item_count": None,
+            "latest_input_full_fingerprint": None,
+            "latest_pending_tool_calls_json": None,
+        }
+        return await self._execute_fenced_session_update(
+            session_id=session_id,
+            instance_id=instance_id,
+            owner_epoch=owner_epoch,
+            values=values,
+        )
+
     async def record_recovery_attempt(
         self,
         *,

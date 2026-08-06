@@ -2,7 +2,7 @@
 
 ### Requirement: Fresh requests may exhaust usage-draining burn-first accounts
 
-For a request with no existing account owner, including a fresh soft-sticky key with no mapping, the load balancer SHALL prefer a `burn_first` account that is `DRAINING` solely because of quota usage when that account remains selectable, at least one separate healthy fallback account is selectable for the same request, and the routing strategy already honors `burn_first` policy. The load balancer MUST NOT apply this exception to an account with current error-based drain evidence, to a request with an existing soft-sticky owner, to a request with a hard-continuity owner, or to explicit sequential/reset/single-account routing. Recovery-probe admission SHALL retain precedence over this exception.
+For an owner-free request, including a fresh soft-sticky key with no mapping, the load balancer SHALL include a `burn_first` account that is `DRAINING` solely because of quota usage in the authoritative routing selection when that account remains selectable, at least one separate healthy fallback account is selectable for the same request, and the routing strategy already honors `burn_first` policy. The load balancer MUST NOT apply this exception to an account with current error-based drain evidence, to a request with an existing soft-sticky owner, to a request with a hard-continuity owner, to a request carrying an unresolved ownership requirement, or to explicit sequential/reset/single-account routing. Recovery-probe admission SHALL retain precedence over this exception. Eligibility probing MUST NOT consume or log a weighted routing winner, and the load balancer SHALL return the original account state corresponding to the one authoritative routing winner.
 
 #### Scenario: Fresh request consumes remaining burn-first quota
 
@@ -38,6 +38,28 @@ For a request with no existing account owner, including a fresh soft-sticky key 
 - **AND** another `burn_first` account is draining solely because of quota usage
 - **WHEN** account selection occurs
 - **THEN** the required owner remains the only eligible owner
+
+#### Scenario: Unresolved owner-bearing request is not fresh routing
+
+- **GIVEN** a request requires an unambiguous account owner but no persisted owner has resolved yet
+- **WHEN** unbound or fresh soft-sticky selection occurs
+- **THEN** the load balancer does not enable the usage-drain exception
+- **AND** existing continuity resolution remains authoritative
+
+#### Scenario: Weighted routing winner is returned without redraw
+
+- **GIVEN** a usage-only draining `burn_first` candidate and separately selectable healthy fallbacks
+- **WHEN** a weighted routing strategy performs selection
+- **THEN** fallback eligibility checking does not consume or log a weighted winner
+- **AND** the account returned is the original state corresponding to the single weighted winner
+
+#### Scenario: Opportunistic emergency policy remains authoritative
+
+- **GIVEN** opportunistic traffic and a usage-only draining `burn_first` account
+- **AND** no separate healthy fallback is selectable
+- **WHEN** account selection occurs
+- **THEN** the load balancer preserves the original candidate pool
+- **AND** the existing opportunistic emergency-floor policy decides whether the account is eligible
 
 #### Scenario: Zero-percent transition contract is unchanged
 

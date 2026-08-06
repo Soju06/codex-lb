@@ -4,8 +4,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
-from sqlalchemy import BigInteger, Integer, cast, delete, func, select, true, update
+from sqlalchemy import BigInteger, Integer, cast, delete, func, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 
@@ -758,17 +759,29 @@ class ApiKeysRepository:
         self,
         *,
         cutoff: datetime,
+        max_age_cutoff: datetime | None = None,
         batch_size: int = _STALE_USAGE_RESERVATION_RELEASE_BATCH_SIZE,
     ) -> int:
         released_count = 0
+
+        # ``cutoff`` reclaims reservations whose heartbeat stopped refreshing
+        # ``updated_at``. ``max_age_cutoff`` is the backstop for orphaned
+        # heartbeats (issue #1594): a leaked heartbeat task keeps touching
+        # ``updated_at`` forever, so reservations older than this hard ceiling
+        # on ``created_at`` are reclaimed regardless of heartbeat activity.
+        def _stale_clause(query: Any) -> Any:
+            stale = ApiKeyUsageReservation.updated_at < cutoff
+            if max_age_cutoff is not None:
+                stale = or_(stale, ApiKeyUsageReservation.created_at < max_age_cutoff)
+            return query.where(stale)
 
         try:
             while True:
                 async with sqlite_writer_section():
                     result = await self._session.execute(
-                        select(ApiKeyUsageReservation.id)
-                        .where(ApiKeyUsageReservation.status == "reserved")
-                        .where(ApiKeyUsageReservation.updated_at < cutoff)
+                        _stale_clause(
+                            select(ApiKeyUsageReservation.id).where(ApiKeyUsageReservation.status == "reserved")
+                        )
                         .order_by(ApiKeyUsageReservation.updated_at.asc())
                         .limit(batch_size)
                     )
@@ -802,10 +815,11 @@ class ApiKeysRepository:
 
                     for reservation_id in reservation_ids:
                         claimed = await self._session.execute(
-                            update(ApiKeyUsageReservation)
-                            .where(ApiKeyUsageReservation.id == reservation_id)
-                            .where(ApiKeyUsageReservation.status == "reserved")
-                            .where(ApiKeyUsageReservation.updated_at < cutoff)
+                            _stale_clause(
+                                update(ApiKeyUsageReservation)
+                                .where(ApiKeyUsageReservation.id == reservation_id)
+                                .where(ApiKeyUsageReservation.status == "reserved")
+                            )
                             .values(
                                 status="released",
                                 input_tokens=None,

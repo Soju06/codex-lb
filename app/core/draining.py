@@ -7,5 +7,5 @@ shutdown_state = import_module("app.core.shutdown")
 
 def __getattr__(name: str) -> bool:
     if name == "_draining":
-        return bool(getattr(shutdown_state, "_draining"))
+        return shutdown_state.is_draining()
     raise AttributeError(name)

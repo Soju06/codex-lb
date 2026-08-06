@@ -50,7 +50,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
 )
-from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -204,6 +204,19 @@ class StubStickySessionsRepository(StickySessionsRepository):
         max_age_seconds: int | None = None,
     ) -> str | None:
         return None
+
+    async def get_account_id_and_abandonment(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+    ) -> StickyOwnerLookup:
+        # Delegates to get_account_id (rather than duplicating its logic) so
+        # a test that only overrides get_account_id — the common pattern in
+        # this file — is still observed here.
+        account_id = await self.get_account_id(key, kind=kind, max_age_seconds=max_age_seconds)
+        return StickyOwnerLookup(account_id=account_id, continuity_abandoned=False)
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
         row = self._build_row(key, account_id, kind)
@@ -549,6 +562,52 @@ async def test_required_continuity_owner_ignores_usage_draining_burn_first() -> 
 
     assert selection.account is not None
     assert selection.account.id == owner.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sticky_key", [None, "unresolved-conversation"])
+async def test_unresolved_single_owner_continuity_ignores_fresh_usage_drain(sticky_key: str | None) -> None:
+    burn = _make_account("acc-burn", "burn@example.com")
+    burn.routing_policy = "burn_first"
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+    primary = {
+        burn.id: UsageHistory(
+            id=1,
+            account_id=burn.id,
+            recorded_at=now,
+            window="primary",
+            used_percent=98.0,
+            reset_at=now_epoch + 300,
+            window_minutes=5,
+        )
+    }
+    secondary = {
+        burn.id: UsageHistory(
+            id=2,
+            account_id=burn.id,
+            recorded_at=now,
+            window="secondary",
+            used_percent=98.0,
+            reset_at=now_epoch + 3600,
+            window_minutes=60,
+        )
+    }
+    accounts_repo = StubAccountsRepository([burn])
+    usage_repo = StubUsageRepository(primary=primary, secondary=secondary)
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selection = await balancer.select_account(
+        sticky_key=sticky_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION if sticky_key is not None else None,
+        require_unambiguous_account=True,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == burn.id
 
 
 @pytest.mark.asyncio

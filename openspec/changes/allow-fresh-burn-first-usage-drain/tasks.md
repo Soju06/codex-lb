@@ -3,12 +3,16 @@
 - [x] 1.1 Add a failing fresh-selection test for a usage-only draining `burn_first` account with a selectable healthy fallback.
 - [x] 1.2 Add exclusion tests for current error drain evidence, missing healthy fallback, and 100% exhausted candidates.
 - [x] 1.3 Add regression coverage proving sticky and hard-continuity owner behavior is unchanged.
+- [x] 1.4 Add regression coverage for unresolved owner-bearing requests in both unbound and sticky paths.
+- [x] 1.5 Add regressions for opportunistic routing and single-draw weighted selection.
 
 ## 2. Selection Implementation
 
 - [x] 2.1 Implement canonical usage-only drain classification without duplicating health thresholds.
 - [x] 2.2 Add a default-off fresh-selection exception after recovery-probe admission and before health-tier narrowing.
 - [x] 2.3 Enable the exception only for unbound selection and fresh soft-sticky keys with no existing mapping.
+- [x] 2.4 Prove fallback eligibility without consuming a weighted draw and return the authoritative winner.
+- [x] 2.5 Propagate unresolved ownership context and preserve opportunistic fallback behavior.
 
 ## 3. Verification
 

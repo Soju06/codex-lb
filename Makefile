@@ -12,6 +12,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_repositories.py::test_accounts_upsert_with_merge_enabled_serializes_concurrent_same_email \
 	tests/integration/test_sticky_sessions_api.py::test_durable_bridge_owned_alias_registration_is_epoch_fenced \
 	tests/integration/test_proxy_api_extended.py::test_proxy_stream_usage_limit_returns_http_error \
+	tests/integration/test_api_keys_api.py::test_rate_limit_header_failure_releases_reservation_once \
 	tests/integration/test_codex_usage_api.py::test_codex_usage_aggregates_windows \
 	tests/integration/test_proxy_compact.py::test_proxy_compact_headers_include_monthly_only_credits \
 	tests/integration/test_repositories.py::test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgresql \
@@ -21,7 +22,16 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_request_usage_time_rollup.py \
 	tests/integration/test_request_usage_rollup_parity.py \
 	tests/integration/test_migrations.py::test_request_usage_time_rollups_migration_upgrade_and_downgrade \
-	tests/integration/test_data_retention.py
+	tests/integration/test_migrations.py::test_conversation_presence_rollup_migration_upgrade_and_downgrade \
+	tests/integration/test_data_retention.py \
+	tests/integration/test_plan_downgrade_observation_store.py \
+	tests/integration/test_accounts_api_probe.py::test_force_probe_confirms_paid_to_free_plan_downgrade \
+	tests/integration/test_accounts_api_probe.py::test_force_probe_keeps_paid_plan_for_unrecognized_payload_plan \
+	tests/integration/test_accounts_api_probe.py::test_pending_downgrade_evidence_is_persisted_for_all_replicas \
+	tests/integration/test_accounts_api_probe.py::test_reimport_clears_pending_downgrade_evidence \
+	tests/integration/test_repositories.py::test_replace_reauthorized_discards_pending_downgrade_evidence \
+	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport \
+	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade
 SHELL := /bin/bash
 
 .PHONY: help

@@ -18,6 +18,44 @@ The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica
 
 In multi-replica setups, replicas must share the same encryption key (the Helm chart default) for bootstrap-token restart recovery and encrypted-data access to work.
 
+## Graceful shutdown
+
+The chart's preStop hook commits one process drain deadline before Uvicorn
+closes HTTP or WebSocket connections. It first allows the configured routing
+dwell to elapse, then returns as soon as tracked work reaches zero; otherwise
+it waits only until the same application deadline. A later SIGTERM reuses that
+deadline instead of starting another drain period.
+
+During that bounded window, new WebSocket connections and new Responses turns
+are rejected. An admitted Responses turn may finish terminal delivery,
+request-log persistence, and API-key settlement; an idle admitted connection
+closes promptly. Kubernetes' `terminationGracePeriodSeconds` starts before the
+preStop helper, so it must also reserve time for helper startup and bounded
+post-drain process cleanup. If that cleanup ignores cancellation at its bound,
+the launcher forces the captured signal (or SIGTERM for programmatic shutdown)
+instead of returning an unbounded task to asyncio runner teardown.
+
+**Upgrade warning:** this release adds a render-time timing guard. Existing
+values files, `--set` overrides, or values retained by
+`helm upgrade --reuse-values` with
+`terminationGracePeriodSeconds < config.shutdownDrainTimeoutSeconds + 32`
+make `helm template`, `helm install`, and `helm upgrade` fail before resources
+are applied. With the default `config.shutdownDrainTimeoutSeconds: 30`, the
+minimum is `62`; the chart default is `65`. Raise every retained low value
+explicitly to at least the computed minimum (`65` preserves the chart's default
+headroom for a 30-second drain). Omitting the key does not clear its stored
+value when `--reuse-values` is used. To adopt the chart default instead, use an
+intentional non-reuse or `--reset-values` upgrade with the key absent. Production
+overrides should retain additional helper-launch headroom.
+
+The defaults satisfy the chart's timing guards. When tuning them, keep
+`preStopSleepSeconds <= config.shutdownDrainTimeoutSeconds` and
+`terminationGracePeriodSeconds >= config.shutdownDrainTimeoutSeconds + 32`.
+See the owning
+[deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation)
+contract and [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)
+operational context.
+
 ## Gateway API path filters
 
 Set `gatewayApi.rules` when different request paths need different Gateway API

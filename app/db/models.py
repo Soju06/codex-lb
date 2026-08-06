@@ -232,6 +232,15 @@ class AccountUsageRollupState(Base):
         nullable=False,
         server_default=text("'1970-01-01 00:00:00'"),
     )
+    # Watermark for the conversation presence satellite. Separate from
+    # `hourly_folded_through` (same alignment invariant, same state row and
+    # row lock) so the satellite added later backfills from epoch without
+    # rewinding — and without being gated on — the other time-axis rollups.
+    conversation_folded_through: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
 
 
 class RequestUsageHourlyRollup(Base):
@@ -339,6 +348,34 @@ class RequestDemandQuarterRollup(Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
 
 
+class RequestConversationHourlyRollup(Base):
+    """Hour-bucketed conversation presence (distinct-conversation satellite).
+
+    One row means "this conversation had ``request_count`` countable requests
+    in this UTC hour under this (account, is_deleted) attribution". Distinct
+    conversation counts are not additive across buckets, so the reads UNION
+    the folded ``conversation_id`` values with the raw live tail and count
+    distinct over the merge; ``request_count`` stays additive for the
+    conversation-request totals.
+
+    ``conversation_id`` is the normalized value (whitespace-trimmed,
+    non-empty — NULL/blank rows are excluded by the fold filter, matching
+    every reader). ``is_deleted`` is a dimension because the dashboard
+    conversation reads exclude soft-deleted rows while the reports reads
+    include them; ``account_id`` (NULL-sentinel encoded) is carried only so
+    the account lifecycle mirrors can re-attribute or remove folded presence
+    exactly as the raw mutation does. No FKs: rows must outlive accounts.
+    """
+
+    __tablename__ = "request_conversation_hourly_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+
+
 class AdditionalUsageHistory(Base):
     __tablename__ = "additional_usage_history"
 
@@ -383,6 +420,7 @@ class RequestLog(Base):
         server_default=text("'normal'"),
         nullable=False,
     )
+    connection_request_kind: Mapped[str | None] = mapped_column(String, nullable=True)
     requested_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
@@ -717,6 +755,17 @@ class StickySession(Base):
         onupdate=func.now(),
         nullable=False,
     )
+    # Set only by purge_stale_hard_codex_session_mappings's first pass. A hard
+    # codex_session row normally proves ownership for `conversation`-continuity
+    # requests (see affinity.py's require_unambiguous_account), which have no
+    # other owner index. Once the durably-unavailable owner's proof is this
+    # stale, we stop treating the row as a live pin (so a fresh account can be
+    # selected) but keep it around with this marker set instead of deleting it
+    # outright, so selection can tell "this key was deliberately abandoned,
+    # picking a new owner is authorized" apart from "this key was never seen,
+    # ambiguity must fail closed." The row is only ever hard-deleted once it
+    # has sat abandoned past a further grace window with nobody claiming it.
+    continuity_abandoned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
 
 
 class CapabilityLineageMarker(Base):
@@ -768,6 +817,10 @@ class DashboardSettings(Base):
         nullable=True,
     )
     proxy_account_stream_recovery_reserve: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    proxy_api_key_fair_share_congestion_threshold_pct: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
     )
@@ -1666,6 +1719,48 @@ class AccountRefreshClaim(Base):
     claim_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
+class AccountPlanDowngradeObservation(Base):
+    """Pending workspace-less paid -> free plan-downgrade evidence per account.
+
+    A workspace-less usage payload reporting ``free`` for a paid account is only
+    trusted once two consecutive refreshes agree (issue #1456). The observation
+    count lives here rather than in process memory so the sequence is coherent
+    across replicas sharing one database: an intervening paid payload observed by
+    any replica clears the evidence for all of them, and two ``free`` samples
+    split across replicas still converge.
+
+    ``credential_fingerprint`` pins the evidence to the credential lineage that
+    produced it: a fixed-salt digest over the account's stable seat identity
+    (workspace and principal identifiers, email, ``codex_installation_id``),
+    deliberately not over token material -- refresh tokens rotate on every
+    token refresh, and rotation must not read as a credential replacement.
+    Account ids are deterministic, so a delete-and-re-import or an in-place
+    reauthentication reuses the same id with new credentials; those replacements
+    discard this row explicitly (the accounts repository deletes it in the same
+    transaction that applies the fresh credentials), and the fingerprint
+    comparison restarts the count for any remaining path that rebinds the row's
+    seat identity.
+
+    The row holds no secrets: a count, a plan value, timestamps, and the
+    non-reversible identity digest, stored outside the encrypted token columns.
+    It is deleted as soon as the downgrade is applied or the evidence is
+    invalidated. ``ondelete="CASCADE"`` drops it with the account.
+    """
+
+    __tablename__ = "account_plan_downgrade_observations"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    observations: Mapped[int] = mapped_column(Integer, nullable=False)
+    credential_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_plan_type: Mapped[str] = mapped_column(String, nullable=False)
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class BridgeRingMember(Base):
     __tablename__ = "bridge_ring_members"
 
@@ -2073,6 +2168,24 @@ Index(
 Index(
     "ix_additional_usage_quota_window_latest",
     AdditionalUsageHistory.quota_key,
+    AdditionalUsageHistory.window,
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.recorded_at.desc(),
+    AdditionalUsageHistory.used_percent.desc(),
+    AdditionalUsageHistory.id.desc(),
+)
+Index(
+    "ix_additional_usage_alias_limit_latest",
+    func.lower(AdditionalUsageHistory.limit_name),
+    AdditionalUsageHistory.window,
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.recorded_at.desc(),
+    AdditionalUsageHistory.used_percent.desc(),
+    AdditionalUsageHistory.id.desc(),
+)
+Index(
+    "ix_additional_usage_alias_feature_latest",
+    func.lower(AdditionalUsageHistory.metered_feature),
     AdditionalUsageHistory.window,
     AdditionalUsageHistory.account_id,
     AdditionalUsageHistory.recorded_at.desc(),

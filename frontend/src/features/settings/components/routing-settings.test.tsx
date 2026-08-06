@@ -52,6 +52,8 @@ describe("RoutingSettings", () => {
     await user.type(screen.getByRole("spinbutton", { name: "Stream limit" }), "12");
     await user.clear(screen.getByRole("spinbutton", { name: "Stream recovery reserve" }));
     await user.type(screen.getByRole("spinbutton", { name: "Stream recovery reserve" }), "2");
+    await user.clear(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" }));
+    await user.type(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" }), "80");
     await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
 
     expect(onSave).toHaveBeenCalledWith({
@@ -59,6 +61,7 @@ describe("RoutingSettings", () => {
       proxyAccountResponseCreateLimit: 0,
       proxyAccountStreamLimit: 12,
       proxyAccountStreamRecoveryReserve: 2,
+      proxyApiKeyFairShareCongestionThresholdPct: 80,
     });
   });
 
@@ -68,6 +71,9 @@ describe("RoutingSettings", () => {
 
     const streamLimit = screen.getByRole("spinbutton", { name: "Stream limit" });
     const recoveryReserve = screen.getByRole("spinbutton", { name: "Stream recovery reserve" });
+    const fairShareThreshold = screen.getByRole("spinbutton", {
+      name: "API key fair-share threshold (%)",
+    });
     const saveButton = screen.getByRole("button", { name: "Save capacity limits" });
 
     await user.clear(streamLimit);
@@ -78,6 +84,14 @@ describe("RoutingSettings", () => {
 
     await user.clear(recoveryReserve);
     await user.type(recoveryReserve, "1.5");
+    expect(saveButton).toBeDisabled();
+
+    await user.clear(recoveryReserve);
+    await user.type(recoveryReserve, "1");
+    expect(saveButton).toBeEnabled();
+
+    await user.clear(fairShareThreshold);
+    await user.type(fairShareThreshold, "101");
     expect(saveButton).toBeDisabled();
   });
 

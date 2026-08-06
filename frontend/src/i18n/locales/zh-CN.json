@@ -1107,6 +1107,8 @@
   "settings.routing.accountCapacity.streamDescription": "每个账户允许的最大并发流数；0 表示不限量。",
   "settings.routing.accountCapacity.streamRecoveryReserveLabel": "流恢复预留",
   "settings.routing.accountCapacity.streamRecoveryReserveDescription": "为恢复和重新连接工作预留流槽位。0 表示不预留；预留不能超过非零的流限制。",
+  "settings.routing.accountCapacity.fairShareThresholdLabel": "API 密钥公平份额阈值 (%)",
+  "settings.routing.accountCapacity.fairShareThresholdDescription": "当进行中的流达到账户池流容量的此百分比时，持有超过公平份额的 API 密钥将被限流，直到池不再拥塞。0 表示禁用。",
   "settings.routing.accountCapacity.save": "保存容量限制",
   "settings.routing.stickyThresholds.primaryLabel": "粘性主阈值",
   "settings.routing.stickyThresholds.primaryDescription": "当主配额使用率高于此百分比时重新分配粘性会话。",

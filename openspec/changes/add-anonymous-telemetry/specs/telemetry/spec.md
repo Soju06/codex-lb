@@ -4,17 +4,22 @@
 
 ### Requirement: Telemetry payload field allowlist
 
-The service MUST transmit only fields defined in the telemetry payload schema in this capability's `context.md`, and MUST NOT transmit account emails, workspace identifiers, client IP addresses, API keys, request or response content, raw user-agent strings, per-account records, or free-text error messages in any telemetry payload.
+The service MUST transmit only fields defined for each outbound body (registration,
+activation, and snapshot envelope including its nested metrics) in this capability's
+`context.md`, and MUST NOT transmit account emails, workspace identifiers, client IP
+addresses, API keys, request or response content, raw user-agent strings, per-account
+records, or free-text error messages in any telemetry payload.
 
-The payload schema is versioned (`schema_version`). Adding a field requires a spec change to
-this capability; the payload builder test suite MUST fail when the built payload contains a
-field not present in the documented schema.
+The snapshot metrics schema is versioned (`schema_version`). Adding a field to any transmitted
+body requires a spec change to this capability; the outbound wire-schema test suite MUST fail
+when registration, activation, the snapshot envelope, or nested metrics contain a field not
+present in the documented schema.
 
-#### Scenario: Snapshot contains only allowlisted fields
+#### Scenario: Every outbound body contains only allowlisted fields
 
-- **WHEN** the telemetry snapshot builder produces a payload
-- **THEN** every top-level and nested field is present in the documented schema, and a
-  schema-snapshot regression test rejects any undeclared field
+- **WHEN** the sender serializes registration, activation, and snapshot requests
+- **THEN** every top-level and nested field is present in the documented schemas, and an
+  outbound wire-schema regression test rejects any undeclared field in any body
 
 #### Scenario: Identifying data never serialized
 
@@ -44,10 +49,18 @@ users get the same informed default-on treatment as new installs).
 
 ### Requirement: One-time consent dialog with exact payload preview
 
-The dashboard MUST present a one-time consent dialog on first entry while consent is `undecided`, and the dialog MUST display the exact JSON payload the instance would transmit at that moment.
+The dashboard MUST present a one-time consent dialog on first entry while consent is
+`undecided`, and the dialog MUST display the exact snapshot envelope the instance would
+transmit at that moment. Preview and sender MUST use one shared envelope constructor. The
+preview timestamp MUST record preview generation time as a representative current timestamp;
+the actual send MUST regenerate that value at transmission time.
 
 A decision (enable or disable) MUST be persisted and the dialog MUST NOT be shown again after
 any decision. The dialog MUST offer disabling with no fewer clicks than enabling.
+
+The consent API MUST build the preview only while the undecided dialog is eligible or when an
+operator explicitly requests it for the settings view. The response MUST retain the `preview`
+field and set it to `null` when the preview was not requested and is not dialog-relevant.
 
 #### Scenario: Undecided operator sees payload preview
 
@@ -60,6 +73,16 @@ any decision. The dialog MUST offer disabling with no fewer clicks than enabling
 - **WHEN** the operator chooses disable in the dialog
 - **THEN** consent persists as `disabled`, no snapshot is transmitted afterward, and the
   dialog never reappears
+
+#### Scenario: Decided consent status is a cheap read
+
+- **WHEN** the dashboard reads consent after a persisted decision without requesting a preview
+- **THEN** the response contains `preview: null` and no snapshot aggregation query runs
+
+#### Scenario: Settings explicitly requests collected data
+
+- **WHEN** the settings view requests a preview for any consent state
+- **THEN** the response contains a current snapshot envelope built with the same schema as the sender
 
 ### Requirement: Settings toggle and environment kill switch
 
@@ -78,7 +101,9 @@ The dashboard settings MUST expose a telemetry toggle reflecting the resolved co
 
 ### Requirement: Startup notice while undecided
 
-While consent is `undecided`, the service MUST emit a single startup log line stating that anonymous telemetry is active, where the collected-field documentation lives, and how to disable it.
+While consent is `undecided`, the elected leader MUST emit a single startup log line stating
+that anonymous telemetry is active, where the collected-field documentation lives, and how to
+disable it. Non-leader replicas MUST NOT duplicate the notice.
 
 #### Scenario: Headless operator is informed
 
@@ -144,6 +169,17 @@ Telemetry model statistics MUST include only model names present in the official
 - **THEN** each model entry carries its own reasoning-effort share map and no global
   reasoning mix field exists
 
+### Requirement: Fail-honest request-family attribution
+
+Request-family telemetry MUST be derived only from an authoritative persisted route-family
+signal. Rows without such a signal MUST be attributed to `unknown`; the service MUST NOT infer
+Chat, Responses, Images, or Audio families from upstream `source` or model name.
+
+#### Scenario: Ambiguous persisted rows remain unknown
+
+- **WHEN** persisted request rows identify only workload kind, upstream source, or model name
+- **THEN** their request-family share is reported as `unknown` rather than a named route family
+
 ### Requirement: Random instance identity
 
 The telemetry instance identifier MUST be a UUID generated randomly on first run, MUST NOT be derived from hardware, network, account, or operating-system identity, and MUST be regenerated if deleted.
@@ -156,7 +192,16 @@ The telemetry instance identifier MUST be a UUID generated randomly on first run
 
 ### Requirement: Transmission cadence and failure isolation
 
-The service SHALL transmit one snapshot at startup and one per 24-hour interval thereafter, and telemetry transmission failures MUST NOT affect proxy operation, MUST use a bounded timeout, MUST NOT retry more than once per interval, and MUST log failures at debug level only.
+The service SHALL transmit one snapshot at startup and one per 24-hour interval thereafter.
+In a multi-replica deployment sharing a database, snapshot construction and transmission MUST
+run only under the existing leader-election gate so at most one replica performs each tick.
+Telemetry transmission failures MUST NOT affect proxy operation, MUST use a bounded timeout,
+MUST NOT retry more than once per interval, and MUST log failures at debug level only.
+
+#### Scenario: Non-leader replica skips telemetry work
+
+- **WHEN** a telemetry tick runs in a process that does not hold the scheduler leader lease
+- **THEN** that process neither builds a snapshot nor attempts a transmission
 
 #### Scenario: Collection endpoint outage is invisible
 
@@ -167,6 +212,8 @@ The service SHALL transmit one snapshot at startup and one per 24-hour interval 
 ### Requirement: Bucketed sensitive aggregates
 
 Account pool size, per-plan account counts, API key count, database size, and cost aggregates MUST be transmitted as documented buckets, never as exact values.
+
+An unmeasurable database size MUST be reported as `unknown`, not as a plausible size bucket.
 
 #### Scenario: Pool size is a bucket
 

@@ -32,5 +32,12 @@
 - [x] T11: Migration smoke — new columns/defaults present (SQLite + Postgres).
 - [x] T12: Privacy quick check from context.md reproduced as a test (identifying strings
   absent from serialized payload).
-- [ ] T13: `openspec validate add-anonymous-telemetry` → valid; `make lint`; targeted +
+- [x] T14: Review remediation — shared preview/sender envelope, typed allowlisted bodies,
+  preview-on-demand consent API, and wire-schema regressions.
+- [x] T15: Review remediation — leader-gated telemetry ticks plus real lifespan wiring and
+  non-leader regression coverage.
+- [x] T16: Review remediation — fail-honest request kinds, derived routing/client allowlists,
+  honest database-size failure reporting, and typed query expressions.
+- [x] T17: Publish anonymous telemetry documentation and register it in the docs navigation.
+- [x] T13: `openspec validate add-anonymous-telemetry` → valid; `make lint`; targeted +
   broader pytest sweeps.

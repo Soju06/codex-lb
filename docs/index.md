@@ -19,6 +19,7 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 - [Getting Started](getting-started.md) — Docker / uvx quick start, remote bootstrap token
 - [Client Setup](client-setup.md) — Codex CLI, OpenCode, OpenClaw, Python SDK
 - [Configuration](configuration.md) — the few settings that matter
+- [Anonymous Telemetry](telemetry.md) — collected fields, consent, disabling, and retention
 - [Authentication](authentication.md) — dashboard auth modes
 - [Conversations](conversations.md) — dashboard view and conversation APIs
 - [API Keys](api-keys.md) — protecting proxy routes

@@ -604,7 +604,7 @@ def test_fresh_selection_excludes_error_draining_burn_first():
     assert result.account.account_id == "normal"
 
 
-def test_fresh_selection_requires_healthy_fallback_to_drain_burn_first():
+def test_fresh_selection_without_healthy_fallback_preserves_last_resort_behavior():
     states = [
         AccountState(
             "burn",
@@ -623,7 +623,8 @@ def test_fresh_selection_requires_healthy_fallback_to_drain_burn_first():
         allow_usage_draining_burn_first=True,
     )
 
-    assert result.account is None
+    assert result.account is not None
+    assert result.account.account_id == "burn"
 
 
 def test_fresh_selection_excludes_fully_exhausted_burn_first():

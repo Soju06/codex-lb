@@ -23,6 +23,7 @@ For an owner-free request, including a fresh soft-sticky key with no mapping, th
 - **AND** no separate healthy account is selectable for the same request
 - **WHEN** a fresh request with no existing account assignment selects an account
 - **THEN** the load balancer does not admit that account through the usage-drain exception
+- **AND** the original candidate pool proceeds through the pre-existing routing path unchanged
 
 #### Scenario: Existing soft-sticky owner remains selected
 
@@ -53,13 +54,13 @@ For an owner-free request, including a fresh soft-sticky key with no mapping, th
 - **THEN** fallback eligibility checking does not consume or log a weighted winner
 - **AND** the account returned is the original state corresponding to the single weighted winner
 
-#### Scenario: Opportunistic emergency policy remains authoritative
+#### Scenario: Existing last-resort and opportunistic policies remain authoritative
 
-- **GIVEN** opportunistic traffic and a usage-only draining `burn_first` account
+- **GIVEN** a usage-only draining `burn_first` account
 - **AND** no separate healthy fallback is selectable
 - **WHEN** account selection occurs
 - **THEN** the load balancer preserves the original candidate pool
-- **AND** the existing opportunistic emergency-floor policy decides whether the account is eligible
+- **AND** the existing last-resort or opportunistic emergency-floor policy decides whether the account is eligible
 
 #### Scenario: Zero-percent transition contract is unchanged
 

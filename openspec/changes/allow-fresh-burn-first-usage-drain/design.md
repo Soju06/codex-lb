@@ -42,7 +42,7 @@ Only after finding a qualifying usage-draining candidate, the selector uses clon
 
 Alternative considered: check only for another healthy row. Rejected because a healthy row can still fail quota, status, or request-class eligibility.
 
-For opportunistic traffic, failure to prove a separate healthy fallback does not remove the candidate from the original pool. The pre-existing emergency-floor policy remains authoritative and can still admit or reject that traffic independently of this foreground exception.
+Failure to prove a separate healthy fallback does not remove any candidate from the original pool. The exception is skipped, then the pre-existing routing path remains authoritative. This preserves foreground last-resort availability and opportunistic emergency-floor behavior without admitting the candidate through the new exception.
 
 ## Risks / Trade-offs
 
@@ -51,7 +51,7 @@ For opportunistic traffic, failure to prove a separate healthy fallback does not
 - [Shared-selector changes could alter sticky routing] → Keep the option default-off and add regression coverage showing sticky callers do not opt in.
 - [An unresolved owner-bearing request could be mistaken for owner-free traffic] → Propagate the continuity requirement through both unbound and sticky selection and keep the exception disabled.
 - [A fallback probe could consume a weighted draw or emit a winner that is discarded] → Use a cloned deterministic eligibility probe, then return the original state corresponding to the single authoritative selection.
-- [The exception could suppress established opportunistic emergency-floor routing] → Preserve the original opportunistic pool when no separate fallback is eligible.
+- [A failed fallback proof could suppress established last-resort or opportunistic routing] → Preserve the original pool and fall through to baseline routing unchanged.
 - [Recovery probes could be starved] → Run the existing recovery-probe decision before the new exception.
 
 ## Migration Plan

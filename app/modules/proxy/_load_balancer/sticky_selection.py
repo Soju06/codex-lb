@@ -15,7 +15,6 @@ from app.core.balancer import (
     ROUTING_POLICY_BURN_FIRST,
     ROUTING_POLICY_PRESERVE,
     TRAFFIC_CLASS_FOREGROUND,
-    TRAFFIC_CLASS_OPPORTUNISTIC,
     AccountState,
     ResetPreferenceWindow,
     RoutingCostsByAccount,
@@ -1510,9 +1509,6 @@ def _select_account_preferring_budget_safe(
                     selected_state = selection_state_by_id.get(burn_first.account.account_id)
                     if selected_state is not None:
                         return SelectionResult(selected_state, burn_first.error_message)
-            elif traffic_class != TRAFFIC_CLASS_OPPORTUNISTIC:
-                excluded_account_ids = {state.account_id for state in usage_draining_burn_first}
-                state_list = [state for state in state_list if state.account_id not in excluded_account_ids]
     state_budget_threshold = (
         (
             lambda state: _state_above_sticky_budget_threshold(

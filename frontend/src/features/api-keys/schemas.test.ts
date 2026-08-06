@@ -189,6 +189,24 @@ describe("ApiKeyCreateRequestSchema", () => {
     expect(parsed.enforcedReasoningEffort).toBe("ultra");
   });
 
+  it("accepts a non-empty allowed reasoning effort list", () => {
+    const parsed = ApiKeyCreateRequestSchema.parse({
+      name: "Selectable reasoning key",
+      allowedReasoningEfforts: ["low", "high", "xhigh"],
+    });
+
+    expect(parsed.allowedReasoningEfforts).toEqual(["low", "high", "xhigh"]);
+  });
+
+  it("rejects an empty allowed reasoning effort list", () => {
+    const result = ApiKeyCreateRequestSchema.safeParse({
+      name: "Empty reasoning key",
+      allowedReasoningEfforts: [],
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it("rejects invalid traffic class in create payload", () => {
     const result = ApiKeyCreateRequestSchema.safeParse({
       name: "Bad Key",

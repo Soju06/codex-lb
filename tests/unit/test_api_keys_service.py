@@ -146,6 +146,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
+        allowed_reasoning_efforts: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
@@ -168,6 +169,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             "apply_to_codex_model": apply_to_codex_model,
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
+            "allowed_reasoning_efforts": allowed_reasoning_efforts,
             "enforced_service_tier": enforced_service_tier,
             "traffic_class": traffic_class,
             "transport_policy_override": transport_policy_override,
@@ -701,6 +703,76 @@ async def test_create_key_normalizes_enforced_reasoning_effort() -> None:
     )
 
     assert created.enforced_reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_create_key_normalizes_allowed_reasoning_efforts() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="selectable-reasoning-policy",
+            allowed_models=None,
+            allowed_reasoning_efforts=["XHIGH", "low", "high", "low"],
+        )
+    )
+
+    assert created.allowed_reasoning_efforts == ["low", "high", "xhigh"]
+    stored = await repo.get_by_id(created.id)
+    assert stored is not None
+    assert stored.allowed_reasoning_efforts == '["low", "high", "xhigh"]'
+
+
+@pytest.mark.asyncio
+async def test_create_key_rejects_empty_or_conflicting_reasoning_policies() -> None:
+    service = ApiKeysService(_FakeApiKeysRepository())
+
+    with pytest.raises(ApiKeyValidationError, match="must not be empty"):
+        await service.create_key(
+            ApiKeyCreateData(name="empty-reasoning-policy", allowed_models=None, allowed_reasoning_efforts=[])
+        )
+
+    with pytest.raises(ApiKeyValidationError, match="cannot be configured together"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="conflicting-reasoning-policy",
+                allowed_models=None,
+                enforced_reasoning_effort="low",
+                allowed_reasoning_efforts=["low"],
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_key_validates_effective_reasoning_policy() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(name="switchable-reasoning-policy", allowed_models=None, enforced_reasoning_effort="low")
+    )
+
+    with pytest.raises(ApiKeyValidationError, match="cannot be configured together"):
+        await service.update_key(
+            created.id,
+            ApiKeyUpdateData(
+                allowed_reasoning_efforts=["low", "medium"],
+                allowed_reasoning_efforts_set=True,
+            ),
+        )
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            enforced_reasoning_effort=None,
+            enforced_reasoning_effort_set=True,
+            allowed_reasoning_efforts=["low", "medium"],
+            allowed_reasoning_efforts_set=True,
+        ),
+    )
+
+    assert updated.enforced_reasoning_effort is None
+    assert updated.allowed_reasoning_efforts == ["low", "medium"]
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,7 @@ import logging
 from pydantic import ValidationError
 
 from app.core.errors import OpenAIErrorEnvelope, openai_error
-from app.core.exceptions import ProxyModelNotAllowed
+from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
 from app.core.openai.requests import (
@@ -125,6 +125,49 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
 
+def validate_reasoning_effort_access(api_key: ApiKeyData | None, effort: str | None) -> None:
+    if api_key is None:
+        return
+    allowed_reasoning_efforts = getattr(api_key, "allowed_reasoning_efforts", None)
+    if allowed_reasoning_efforts is None or effort is None:
+        return
+    normalized_effort = effort.strip().lower()
+    if normalized_effort in allowed_reasoning_efforts:
+        return
+    logger.info(
+        "api_key_reasoning_effort_not_allowed request_id=%s key_id=%s reasoning_effort=%s",
+        get_request_id(),
+        api_key.id,
+        normalized_effort,
+    )
+    raise ProxyReasoningEffortNotAllowed(
+        f"This API key does not have access to reasoning effort '{normalized_effort}'",
+        param="reasoning.effort",
+    )
+
+
+def _client_reasoning_effort(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    """Return the effort selected by the client before wire normalization.
+
+    Cursor encodes its effort in an accepted model alias, where ``xhigh`` is
+    later lowered to the upstream's ``high`` value. API-key policies are an
+    operator-facing client-plane control, so they must compare against the
+    original selection rather than that wire representation.
+    """
+    alias = _resolve_model_alias_parts(payload.model)
+    if alias is not None:
+        normalized_model = payload.model.strip().lower() if isinstance(payload.model, str) else ""
+        suffix = normalized_model[len(alias[0]) + 1 :]
+        tokens = {token for token in suffix.split("-") if token}
+        if "xhigh" in tokens or "extra" in tokens:
+            return "xhigh"
+        if alias[1] is not None:
+            return alias[1]
+    if payload.reasoning is None or payload.reasoning.effort is None:
+        return None
+    return payload.reasoning.effort.strip().lower()
+
+
 def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
@@ -139,6 +182,7 @@ def apply_api_key_enforcement(
     equal the enforced value (including after ``fast`` canonicalizes to
     ``priority``).
     """
+    client_reasoning_effort = _client_reasoning_effort(payload)
     normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
 
     if api_key is None:
@@ -156,6 +200,7 @@ def apply_api_key_enforcement(
                 api_key.enforced_model,
             )
         payload.model = api_key.enforced_model
+        client_reasoning_effort = _client_reasoning_effort(payload)
         normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
         if (
             responses_input_uses_lite_tools(payload.input)
@@ -185,6 +230,8 @@ def apply_api_key_enforcement(
                 api_key.enforced_reasoning_effort,
             )
 
+    if client_reasoning_effort is not None:
+        validate_reasoning_effort_access(api_key, client_reasoning_effort)
     normalize_unsupported_reasoning_effort(payload)
 
     service_tier_was_enforced = False
@@ -301,6 +348,8 @@ def sanitize_source_chat_payload(
 def apply_api_key_enforcement_to_chat_payload(
     payload: dict[str, JsonValue],
     api_key: ApiKeyData | None,
+    *,
+    allowed_reasoning_effort: str | None = None,
 ) -> None:
     """Mirror :func:`apply_api_key_enforcement` onto a chat-completions wire payload.
 
@@ -309,6 +358,39 @@ def apply_api_key_enforcement_to_chat_payload(
     applied to the outbound dict as well or the upstream receives the
     caller's values while accounting uses the enforced ones.
     """
+    # Source-routed chat requests preserve their chat-shaped payload, while
+    # Responses traffic resolves ``ultra`` to ``max`` before it reaches an
+    # upstream. Keep the wire contract identical for both routes.
+    for key in ("reasoning_effort", "reasoningEffort", "thinking"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            payload[key] = resolve_wire_reasoning_effort(value)
+        elif key == "thinking" and isinstance(value, dict) and isinstance(value.get("effort"), str):
+            payload[key] = {**value, "effort": resolve_wire_reasoning_effort(value["effort"])}
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
+        payload["reasoning"] = {
+            **reasoning,
+            "effort": resolve_wire_reasoning_effort(reasoning["effort"]),
+        }
+
+    if allowed_reasoning_effort is not None:
+        wire_effort = resolve_wire_reasoning_effort(allowed_reasoning_effort)
+        # Chat requests can express the same setting through several provider
+        # aliases. Once the Responses conversion has authorized one effective
+        # choice, make every retained alias agree so a source cannot honor a
+        # conflicting, disallowed value from the original payload.
+        payload["reasoning_effort"] = wire_effort
+        if "reasoningEffort" in payload:
+            payload["reasoningEffort"] = wire_effort
+        if "thinking" in payload:
+            payload["thinking"] = wire_effort
+        payload.pop("enable_thinking", None)
+        reasoning = payload.get("reasoning")
+        payload["reasoning"] = (
+            {**reasoning, "effort": wire_effort} if isinstance(reasoning, dict) else {"effort": wire_effort}
+        )
+
     if api_key is None:
         return
 

@@ -5,11 +5,15 @@ from typing import cast
 
 import pytest
 
-from app.core.exceptions import ProxyModelNotAllowed
+from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.model_registry import ModelRegistry
 from app.core.openai.requests import ResponsesRequest
 from app.modules.api_keys.service import ApiKeyData
-from app.modules.proxy.request_policy import apply_api_key_enforcement, validate_model_access
+from app.modules.proxy.request_policy import (
+    apply_api_key_enforcement,
+    apply_api_key_enforcement_to_chat_payload,
+    validate_model_access,
+)
 
 
 @pytest.mark.parametrize(
@@ -243,3 +247,204 @@ def test_model_access_rejects_alias_when_canonical_model_not_allowed() -> None:
 
     with pytest.raises(ProxyModelNotAllowed):
         validate_model_access(api_key, "gpt-5.5-extra")
+
+
+def test_reasoning_effort_allowlist_rejects_max_before_wire_normalization() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "reasoning": {"effort": "max"},
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-reasoning-policy",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["minimal", "low", "medium", "high", "xhigh"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed, match="max") as raised:
+        apply_api_key_enforcement(request, api_key)
+
+    assert raised.value.code == "reasoning_effort_not_allowed"
+    assert raised.value.param == "reasoning.effort"
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "max"
+
+
+def test_reasoning_effort_allowlist_uses_client_plane_model_alias() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol-xhigh",
+            "instructions": "",
+            "input": [],
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-alias-reasoning-policy",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["xhigh"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.model == "gpt-5.6-sol"
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "high"
+
+
+def test_reasoning_effort_allowlist_checks_explicit_effort_with_fast_model_alias() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol-fast",
+            "instructions": "",
+            "input": [],
+            "reasoning": {"effort": "max"},
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-fast-alias-reasoning-policy",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["low"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed, match="max"):
+        apply_api_key_enforcement(request, api_key)
+
+
+def test_reasoning_effort_allowlist_checks_alias_effort_from_enforced_model() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-enforced-model-reasoning-policy",
+            enforced_model="gpt-5.6-sol-xhigh",
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["low"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed, match="xhigh"):
+        apply_api_key_enforcement(request, api_key)
+
+
+def test_reasoning_effort_allowlist_allows_alias_effort_from_enforced_model() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-enforced-model-allowed-reasoning-policy",
+            enforced_model="gpt-5.6-sol-xhigh",
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["xhigh"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.model == "gpt-5.6-sol"
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "high"
+
+
+@pytest.mark.parametrize(
+    ("requested_effort", "allowed_effort"),
+    [
+        ("xhigh", "high"),
+        ("high", "xhigh"),
+        ("ultra", "max"),
+        ("max", "ultra"),
+    ],
+)
+def test_reasoning_effort_allowlist_keeps_client_plane_efforts_distinct(
+    requested_effort: str,
+    allowed_effort: str,
+) -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "reasoning": {"effort": requested_effort},
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-ultra-reasoning-policy",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=[allowed_effort],
+            enforced_service_tier=None,
+        ),
+    )
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed, match=requested_effort):
+        apply_api_key_enforcement(request, api_key)
+
+
+def test_source_chat_reasoning_aliases_use_wire_safe_ultra_alias() -> None:
+    payload = {
+        "reasoning_effort": "ultra",
+        "reasoningEffort": "ultra",
+        "thinking": {"effort": "ultra", "summary": "auto"},
+        "reasoning": {"effort": "ultra", "summary": "auto"},
+    }
+
+    apply_api_key_enforcement_to_chat_payload(payload, None)
+
+    assert payload == {
+        "reasoning_effort": "max",
+        "reasoningEffort": "max",
+        "thinking": {"effort": "max", "summary": "auto"},
+        "reasoning": {"effort": "max", "summary": "auto"},
+    }
+
+
+def test_source_chat_reasoning_policy_aligns_conflicting_aliases() -> None:
+    payload = {
+        "reasoning_effort": "low",
+        "reasoningEffort": "low",
+        "thinking": {"effort": "ultra", "summary": "auto"},
+        "enable_thinking": True,
+        "reasoning": {"effort": "ultra", "summary": "auto"},
+    }
+
+    apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="low")
+
+    assert payload == {
+        "reasoning_effort": "low",
+        "reasoningEffort": "low",
+        "thinking": "low",
+        "reasoning": {"effort": "low", "summary": "auto"},
+    }

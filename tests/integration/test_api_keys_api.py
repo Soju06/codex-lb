@@ -2208,6 +2208,63 @@ async def test_api_key_update_accepts_extended_enforced_reasoning(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_reasoning_effort_allowlist_is_normalized_and_enforced(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "bounded-reasoning-key",
+            "allowedReasoningEfforts": ["XHIGH", "low", "high", "low"],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+    key = created.json()["key"]
+    assert created.json()["allowedReasoningEfforts"] == ["low", "high", "xhigh"]
+
+    conflicting_update = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"enforcedReasoningEffort": "low"},
+    )
+    assert conflicting_update.status_code == 400
+    assert conflicting_update.json()["error"]["code"] == "invalid_api_key_payload"
+
+    empty_create = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "empty-reasoning-key", "allowedReasoningEfforts": []},
+    )
+    assert empty_create.status_code == 400
+
+    enabled = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enabled.status_code == 200
+
+    blocked = await async_client.post(
+        "/v1/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "model-alpha",
+            "instructions": "hello",
+            "input": [],
+            "reasoning": {"effort": "max"},
+        },
+    )
+    assert blocked.status_code == 403
+    assert blocked.json()["error"] == {
+        "message": "This API key does not have access to reasoning effort 'max'",
+        "type": "permission_error",
+        "code": "reasoning_effort_not_allowed",
+        "param": "reasoning.effort",
+    }
+
+
+@pytest.mark.asyncio
 async def test_stream_usage_logs_actual_service_tier(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

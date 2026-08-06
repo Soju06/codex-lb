@@ -3868,6 +3868,13 @@ async def v1_chat_completions(
             source=source,
             model=request_model,
             api_key=api_key,
+            allowed_reasoning_effort=(
+                responses_payload.reasoning.effort
+                if api_key is not None
+                and api_key.allowed_reasoning_efforts is not None
+                and responses_payload.reasoning is not None
+                else None
+            ),
             reservation=reservation,
             rate_limit_headers=rate_limit_headers,
         )
@@ -4514,13 +4521,18 @@ async def _source_chat_completion_response(
     source: ModelSource,
     model: str,
     api_key: ApiKeyData | None,
+    allowed_reasoning_effort: str | None,
     reservation: ApiKeyUsageReservationData | None,
     rate_limit_headers: Mapping[str, str],
 ) -> Response:
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
     source_payload["stream"] = bool(payload.stream)
-    apply_api_key_enforcement_to_chat_payload(source_payload, api_key)
+    apply_api_key_enforcement_to_chat_payload(
+        source_payload,
+        api_key,
+        allowed_reasoning_effort=allowed_reasoning_effort,
+    )
     sanitize_source_chat_payload(
         source_payload,
         allow_reasoning=source_model_supports_reasoning(source, model),

@@ -13,7 +13,8 @@ describe("ApiKeyInfo", () => {
 					keyPrefix: "sk-special",
 					allowedModels: ["gpt-5.1", "gpt-4o-mini"],
 					enforcedModel: "gpt-5.1",
-					enforcedReasoningEffort: "high",
+					enforcedReasoningEffort: null,
+					allowedReasoningEfforts: ["low", "high", "xhigh"],
 				})}
 			/>,
 		);
@@ -23,7 +24,8 @@ describe("ApiKeyInfo", () => {
     expect(screen.getByText("gpt-5.1, gpt-4o-mini")).toBeInTheDocument();
     expect(screen.getByText("Foreground")).toBeInTheDocument();
     expect(screen.getByText("Enforced Model")).toBeInTheDocument();
-    expect(screen.getByText("Enforced Effort")).toBeInTheDocument();
+    expect(screen.getByText("Allowed efforts")).toBeInTheDocument();
+    expect(screen.getByText("Low, High, Extra high")).toBeInTheDocument();
   });
 
   it("renders opportunistic traffic class when set", () => {

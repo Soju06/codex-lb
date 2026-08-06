@@ -1823,16 +1823,33 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 detail=retry_circuit_detail or detail,
             )
-        session.closed = True
+
+        should_close = False
         async with self._http_bridge_lock:
-            if self._http_bridge_sessions.get(session.key) is session:
-                self._http_bridge_sessions.pop(session.key, None)
-                self._unregister_http_bridge_turn_states_locked(session)
-                self._unregister_http_bridge_previous_response_ids_locked(session)
-        async with session.pending_lock:
-            should_close = not session.upstream_close_attempted
-            if should_close:
-                session.upstream_close_attempted = True
+            async with session.pending_lock:
+                current_response_events_seen = max(
+                    (getattr(request_state, "response_event_count", 0) for request_state in session.pending_requests),
+                    default=0,
+                )
+                current_response_created = any(
+                    request_state.response_id is not None or request_state.latency_response_created_ms is not None
+                    for request_state in session.pending_requests
+                )
+                caller_response_events_seen = response_events_seen or 0
+                became_healthy_during_suspend = current_response_events_seen > caller_response_events_seen or (
+                    caller_response_events_seen == 0 and current_response_created
+                )
+                if became_healthy_during_suspend:
+                    return
+
+                session.closed = True
+                if self._http_bridge_sessions.get(session.key) is session:
+                    self._http_bridge_sessions.pop(session.key, None)
+                    self._unregister_http_bridge_turn_states_locked(session)
+                    self._unregister_http_bridge_previous_response_ids_locked(session)
+                should_close = not session.upstream_close_attempted
+                if should_close:
+                    session.upstream_close_attempted = True
         if should_close:
             await self._close_http_bridge_session_bounded(session, reason="retire_stale_pending")
         _log_http_bridge_event(

@@ -576,6 +576,7 @@ from app.modules.proxy._service.support import (
     _request_log_useragent_fields,  # noqa: F401
     _RequestLogFailureMetadata,
     _RetryableStreamError,  # noqa: F401
+    _security_lineage_ids,
     _selection_api_key_fair_share_threshold_pct,
     _stream_settlement_error_payload,  # noqa: F401
     _StreamSettlement,  # noqa: F401

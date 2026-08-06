@@ -17,7 +17,7 @@ from typing import Any, Protocol, cast
 from urllib.parse import urlparse
 
 import aiohttp
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
@@ -707,6 +707,13 @@ def create_app() -> FastAPI:
     add_app_version_middleware(app)
     add_exception_handlers(app)
     add_trusted_proxy_headers_middleware(app)
+
+    @app.middleware("http")
+    async def codex_alpha_search_cors_middleware(request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        if request.url.path == "/backend-api/codex/alpha/search":
+            response.headers.update(proxy_api._codex_alpha_search_cors_headers(request))
+        return response
 
     app.include_router(proxy_api.realtime_call_router)
     app.include_router(proxy_api.codex_preflight_router)

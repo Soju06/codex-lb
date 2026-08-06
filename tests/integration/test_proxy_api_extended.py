@@ -983,6 +983,22 @@ async def test_codex_alpha_search_preserves_normalized_control_error_contract(as
 
 
 @pytest.mark.asyncio
+async def test_codex_alpha_search_cors_survives_auth_rejection(async_client):
+    response = await async_client.post(
+        "/backend-api/codex/alpha/search",
+        json={"query": "OpenAI official website"},
+        headers={
+            "origin": "https://chatgpt.com",
+            "authorization": "Bearer definitely-invalid-for-this-request",
+        },
+    )
+
+    assert response.status_code in {401, 403, 503}
+    assert response.headers["access-control-allow-origin"] == "https://chatgpt.com"
+    assert response.headers["vary"] == "Origin"
+
+
+@pytest.mark.asyncio
 async def test_codex_realtime_call_normalizes_upstream_control_error(
     async_client,
     monkeypatch: pytest.MonkeyPatch,

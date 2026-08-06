@@ -18,6 +18,7 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from tests.simulation.virtual_time import VirtualClock, VirtualScheduler
 
 pytestmark = pytest.mark.unit
 
@@ -264,6 +265,7 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
 
     finalize_request = AsyncMock()
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", block_after_terminal_claim)
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
     monkeypatch.setattr(
@@ -535,7 +537,9 @@ async def test_http_bridge_detach_reclaims_abandoned_terminal_settlement(
 async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()), clock=clock, scheduler=scheduler)
     queue_waiting = asyncio.Event()
 
     class ObservedQueue(asyncio.Queue[str | None]):
@@ -591,6 +595,7 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
     finalize_request = AsyncMock()
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(service, "_detach_http_bridge_request", fake_detach_http_bridge_request)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock(return_value=True))
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
     monkeypatch.setattr(
@@ -617,9 +622,11 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
             )
         ]
 
-    stream_task = asyncio.create_task(consume_stream())
-    await asyncio.wait_for(queue_waiting.wait(), timeout=1.0)
-    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+    stream_task = scheduler.create_task(consume_stream())
+    await scheduler.drain()
+    await scheduler.advance(0.001)
+    assert queue_waiting.is_set()
+    event_blocks = await stream_task
 
     assert queue_revoked_before_lock_release is True
     assert request_state.event_queue is None
@@ -638,7 +645,9 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
 async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    clock = VirtualClock()
+    scheduler = VirtualScheduler(clock)
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()), clock=clock, scheduler=scheduler)
     recovery_started = asyncio.Event()
     release_recovery = asyncio.Event()
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -699,8 +708,10 @@ async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait
             )
         ]
 
-    stream_task = asyncio.create_task(consume_stream())
-    await asyncio.wait_for(recovery_started.wait(), timeout=1.0)
+    stream_task = scheduler.create_task(consume_stream())
+    await scheduler.drain()
+    await scheduler.advance(0.001)
+    assert recovery_started.is_set()
 
     terminal_text = (
         '{"type":"response.completed","response":{"id":"resp-completed-during-recovery","status":"completed"}}'
@@ -711,7 +722,8 @@ async def test_http_bridge_completed_delivery_stays_dominant_after_recovery_wait
     assert request_state.completed_delivery_scope.active is False
     assert request_state.completed_delivery_scope.terminal_enqueued is True
     release_recovery.set()
-    event_blocks = await asyncio.wait_for(stream_task, timeout=1.0)
+    await scheduler.drain()
+    event_blocks = await stream_task
 
     event_types = [
         payload["type"]

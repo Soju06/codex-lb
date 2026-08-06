@@ -316,6 +316,7 @@ def preview_session_metadata_mismatches(
     it does not inspect transcript records or make any filesystem changes.
     """
     active_provider = _normalize_provider(active_provider)
+    _validate_active_provider(active_provider)
     codex_home = codex_home.expanduser().resolve()
     jsonl_sessions = tuple(_discover_jsonl_session(path) for path in _find_jsonl_session_files(codex_home / "sessions"))
     sqlite_dbs = _find_state_dbs(codex_home)
@@ -515,6 +516,12 @@ def _validate_providers(source_provider: str, target_provider: str) -> None:
     if unknown:
         supported = ", ".join(sorted(_SUPPORTED_PROVIDERS))
         raise ValueError(f"unsupported provider {', '.join(sorted(unknown))}; expected one of: {supported}")
+
+
+def _validate_active_provider(active_provider: str) -> None:
+    if active_provider not in _SUPPORTED_PROVIDERS:
+        supported = ", ".join(sorted(_SUPPORTED_PROVIDERS))
+        raise ValueError(f"unsupported active provider {active_provider}; expected one of: {supported}")
 
 
 def _running_in_container() -> bool:

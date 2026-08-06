@@ -590,6 +590,21 @@ def test_codex_sessions_metadata_mismatches_returns_only_conflicting_session_as_
     assert payload["mismatches"][0]["sqlite_db_paths"] == [str(tmp_path / "state_5.sqlite")]
 
 
+def test_codex_sessions_metadata_mismatches_rejects_unsupported_active_provider(tmp_path):
+    with pytest.raises(SystemExit, match="unsupported active provider bogus"):
+        cli.main(
+            [
+                "codex-sessions",
+                "metadata-mismatches",
+                "--provider",
+                "bogus",
+                "--codex-home",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+
+
 def test_codex_sessions_repair_metadata_streams_progress_to_stderr_with_json(capsys, tmp_path):
     session_id = "019f7249-90ee-74c0-a0e6-42117e80bc7f"
     sessions_dir = tmp_path / "sessions"

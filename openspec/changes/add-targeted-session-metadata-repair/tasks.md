@@ -3,6 +3,7 @@
 - [x] 1.1 Add typed mismatch preview and session-ID-scoped retag support to the Codex session metadata module.
 - [x] 1.2 Expose read-only preview and confirmed repair subcommands without altering existing whole-home retag behavior.
 - [x] 1.3 Thread structured progress through targeted backup, rewrite, SQLite update, and verification work.
+- [x] 1.4 Reject unsupported active providers before mismatch discovery.
 
 ## 2. Machine-readable CLI workflow
 

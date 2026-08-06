@@ -14,6 +14,11 @@ The system SHALL inspect bounded JSONL session metadata and SQLite thread provid
 - **WHEN** both the JSONL metadata and SQLite thread row are tagged `openai` while `codex-lb` is active
 - **THEN** the preview SHALL exclude the session
 
+#### Scenario: Active provider is unsupported
+
+- **WHEN** preview is requested with an active provider other than `openai` or `codex-lb`
+- **THEN** the CLI SHALL reject the request instead of reporting an empty successful preview
+
 ### Requirement: Repair only previewed mismatched session metadata
 
 The system SHALL require an explicit confirmation before changing metadata and SHALL retag only the previewed eligible session IDs to the active provider. The system SHALL preserve unrelated JSONL segments, SQLite rows, and `config.toml`.

@@ -39,6 +39,7 @@ from app.core.balancer import (
     select_account as select_account,
 )
 from app.core.balancer.types import UpstreamError
+from app.core.clock import REAL_CLOCK, Clock
 from app.core.config import settings as config_settings
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -269,8 +270,9 @@ SelectionInputs = _SelectionInputs
 
 
 class LoadBalancer:
-    def __init__(self, repo_factory: ProxyRepoFactory) -> None:
+    def __init__(self, repo_factory: ProxyRepoFactory, *, clock: Clock = REAL_CLOCK) -> None:
         self._repo_factory = repo_factory
+        self._clock = clock
         self._runtime: dict[str, RuntimeState] = {}
         self._runtime_lock = asyncio.Lock()
         self._account_locks: dict[str, asyncio.Lock] = {}
@@ -355,7 +357,7 @@ class LoadBalancer:
             lease_id=uuid4().hex,
             account_id=account_id,
             kind=kind,
-            acquired_at=time.monotonic(),
+            acquired_at=self._clock.monotonic(),
             estimated_tokens=max(0.0, estimated_tokens),
             api_key_id=api_key_id,
         )
@@ -372,7 +374,7 @@ class LoadBalancer:
                 runtime.stream_key_inflight[api_key_id] = runtime.stream_key_inflight.get(api_key_id, 0) + 1
         runtime.leased_tokens += lease.estimated_tokens
         if record_selection:
-            runtime.last_selected_at = time.time()
+            runtime.last_selected_at = self._clock.time()
             runtime.version += 1
         _record_account_lease_acquired(kind)
         _record_account_inflight_leases(account_id, runtime)
@@ -487,7 +489,7 @@ class LoadBalancer:
                 "Reclaimed stale account lease account_id=%s kind=%s age_seconds=%.3f",
                 "<redacted>" if redact_sensitive_details else current.account_id,
                 current.kind,
-                time.monotonic() - current.acquired_at,
+                self._clock.monotonic() - current.acquired_at,
             )
         return True
 
@@ -497,7 +499,7 @@ class LoadBalancer:
         redact_sensitive_details: bool = False,
     ) -> None:
         settings = get_settings()
-        now = time.monotonic()
+        now = self._clock.monotonic()
         for runtime in self._runtime.values():
             if not runtime.leases:
                 continue

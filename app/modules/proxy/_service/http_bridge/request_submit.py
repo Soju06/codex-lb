@@ -2134,7 +2134,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.request_id,
                     retry_jitter_seconds,
                 )
-                await asyncio.sleep(retry_jitter_seconds)
+                await self._scheduler.sleep(retry_jitter_seconds)
                 request_deadline = request_state.bridge_request_deadline
                 if request_deadline is None:
                     request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(
@@ -2216,7 +2216,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     await self._release_request_state_account_response_create_lease(request_state)
                     return False
                 try:
-                    request_state.response_create_admission = await asyncio.wait_for(
+                    request_state.response_create_admission = await self._scheduler.wait_for(
                         self._get_work_admission().acquire_response_create(),
                         timeout=remaining_retry_budget_seconds,
                     )

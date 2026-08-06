@@ -1439,7 +1439,7 @@ class _WebSocketMixin:
                                 break
                     message: Any | None = None
                     try:
-                        message = await asyncio.wait_for(
+                        message = await proxy._scheduler.wait_for(
                             websocket.receive(),
                             timeout=min(
                                 downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
@@ -2150,7 +2150,7 @@ class _WebSocketMixin:
                     upstream_requires_security_work_authorized = request_state.require_security_work_authorized
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
-                    upstream_reader = asyncio.create_task(
+                    upstream_reader = proxy._scheduler.create_task(
                         proxy._relay_upstream_websocket_messages(
                             websocket,
                             upstream,

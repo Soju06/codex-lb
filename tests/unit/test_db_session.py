@@ -411,6 +411,8 @@ async def test_close_session_outlives_caller_cancellation() -> None:
         await rollback_started.wait()
         task.cancel()
         await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
         assert calls == ["rollback-start"]
         assert not cleanup_done.is_set()
         rollback_release.set()

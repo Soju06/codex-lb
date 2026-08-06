@@ -1493,10 +1493,14 @@ class ProxyService(
             account,
             force=force,
             deadline=deadline,
-            remaining_budget_seconds=_remaining_budget_seconds,
+            remaining_budget_seconds=self._remaining_budget_seconds,
             request_id=get_request_id(),
             privacy_policy=privacy_policy,
         )
+
+    def _remaining_budget_seconds(self, deadline: float) -> float:
+        """Read freshness budgets from the injected clock used by simulations."""
+        return max(0.0, deadline - self._clock.monotonic())
 
     async def _ensure_previsible_unary_fresh_with_failover(
         self,

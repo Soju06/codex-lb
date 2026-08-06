@@ -68,7 +68,8 @@ async def test_import_and_list_accounts(async_client):
     list_response = await async_client.get("/api/accounts")
     assert list_response.status_code == 200
     accounts = list_response.json()["accounts"]
-    assert any(account["accountId"] == expected_account_id for account in accounts)
+    account = next(account for account in accounts if account["accountId"] == expected_account_id)
+    assert "usageRefreshedAt" not in account
 
 
 @pytest.mark.asyncio

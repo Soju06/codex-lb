@@ -318,12 +318,11 @@ def preview_session_metadata_mismatches(
 
     jsonl_by_session: dict[str, list[_JsonlSessionPlan]] = {}
     for session in jsonl_sessions:
-        if session.session_id is not None and session.provider in _SUPPORTED_PROVIDERS:
+        if session.session_id is not None and session.provider is not None:
             jsonl_by_session.setdefault(session.session_id, []).append(session)
     sqlite_by_session: dict[str, list[_SqliteThreadPlan]] = {}
     for thread in sqlite_threads:
-        if thread.provider in _SUPPORTED_PROVIDERS:
-            sqlite_by_session.setdefault(thread.session_id, []).append(thread)
+        sqlite_by_session.setdefault(thread.session_id, []).append(thread)
 
     mismatches: list[SessionMetadataMismatch] = []
     for session_id in sorted(set(jsonl_by_session) | set(sqlite_by_session)):
@@ -757,9 +756,7 @@ def _sqlite_thread_plans(db_path: Path) -> tuple[_SqliteThreadPlan, ...]:
         with closing(_connect_sqlite(db_path, read_only=True)) as conn:
             if not _sqlite_has_threads_table(conn) or not _sqlite_has_model_provider_column(conn):
                 return ()
-            rows = conn.execute(
-                "SELECT id, model_provider FROM threads WHERE model_provider IN ('openai', 'codex-lb')",
-            ).fetchall()
+            rows = conn.execute("SELECT id, model_provider FROM threads").fetchall()
             return tuple(
                 _SqliteThreadPlan(db_path=db_path, session_id=session_id, provider=provider)
                 for session_id, provider in rows

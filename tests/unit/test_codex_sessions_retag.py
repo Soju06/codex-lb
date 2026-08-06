@@ -82,6 +82,47 @@ def test_targeted_metadata_repair_updates_only_sqlite_mismatch_and_preserves_unr
     assert json.loads(unrelated_jsonl.read_text(encoding="utf-8"))["payload"]["model_provider"] == "openai"
 
 
+def test_targeted_metadata_preview_rejects_unsupported_jsonl_provider_tag(tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    session_id = "019f7249-90ee-74c0-a0e6-42117e80bc7f"
+    _write_jsonl(
+        codex_home / "sessions" / "2026" / "active.jsonl",
+        [{"type": "session_meta", "payload": {"id": session_id, "model_provider": "codex-lb"}}],
+    )
+    _write_jsonl(
+        codex_home / "sessions" / "2026" / "unsupported.jsonl",
+        [{"type": "session_meta", "payload": {"id": session_id, "model_provider": "codex-lb-ws"}}],
+    )
+    state_db = codex_home / "state_5.sqlite"
+    _create_state_db(state_db, ["openai"])
+    with closing(sqlite3.connect(state_db)) as conn:
+        conn.execute("UPDATE threads SET id = ?", (session_id,))
+        conn.commit()
+
+    preview = preview_session_metadata_mismatches(codex_home=codex_home, active_provider="codex-lb")
+
+    assert preview.mismatches == ()
+
+
+def test_targeted_metadata_preview_rejects_unsupported_sqlite_provider_tag(tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    session_id = "019f7249-90ee-74c0-a0e6-42117e80bc7f"
+    _write_jsonl(
+        codex_home / "sessions" / "2026" / "active.jsonl",
+        [{"type": "session_meta", "payload": {"id": session_id, "model_provider": "codex-lb"}}],
+    )
+    for db_name, provider in (("state_5.sqlite", "openai"), ("state_6.sqlite", "codex-lb-ws")):
+        state_db = codex_home / db_name
+        _create_state_db(state_db, [provider])
+        with closing(sqlite3.connect(state_db)) as conn:
+            conn.execute("UPDATE threads SET id = ?", (session_id,))
+            conn.commit()
+
+    preview = preview_session_metadata_mismatches(codex_home=codex_home, active_provider="codex-lb")
+
+    assert preview.mismatches == ()
+
+
 def test_dry_run_reports_jsonl_and_sqlite_without_writing(tmp_path: Path) -> None:
     codex_home = tmp_path / ".codex"
     session_file = codex_home / "sessions" / "2026" / "session.jsonl"

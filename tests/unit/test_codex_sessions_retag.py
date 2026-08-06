@@ -375,6 +375,31 @@ def test_retag_emits_structured_progress_for_each_work_phase(tmp_path: Path) -> 
         assert final["completed"] == final["total"]
 
 
+def test_retag_emits_intermediate_progress_while_updating_large_sqlite_database(tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    state_db = codex_home / "state_5.sqlite"
+    codex_home.mkdir()
+    _create_state_db(state_db, ["openai"] * 2_501)
+    output: list[str] = []
+
+    result = retag_codex_sessions(
+        codex_home=codex_home,
+        source_provider="openai",
+        target_provider="codex-lb",
+        progress_logger=output.append,
+    )
+
+    progress = [
+        json.loads(line.removeprefix(codex_sessions_retag.PROGRESS_PREFIX))
+        for line in output
+        if line.startswith(codex_sessions_retag.PROGRESS_PREFIX)
+    ]
+    sqlite_progress = [event for event in progress if event["phase"] == "sqlite_update"]
+    assert result.sqlite_rows_updated == 2_501
+    assert any(0 < event["completed"] < event["total"] for event in sqlite_progress)
+    assert sqlite_progress[-1]["completed"] == sqlite_progress[-1]["total"] == 2_501
+
+
 def test_retag_updates_jsonl_and_sqlite_with_backup(tmp_path: Path) -> None:
     codex_home = tmp_path / ".codex"
     session_file = codex_home / "sessions" / "2026" / "session.jsonl"
@@ -672,7 +697,12 @@ def test_sqlite_copy_fallback_uses_atomic_consolidated_replacement(
 
     try:
         assert _read_state_providers(temp_path) == ["openai"]
-        codex_sessions_retag._update_sqlite_provider_in_place(temp_path, "openai", "codex-lb")
+        codex_sessions_retag._update_sqlite_provider_in_place(
+            temp_path,
+            "openai",
+            "codex-lb",
+            expected_rows=1,
+        )
         Path(f"{state_db}-wal").write_bytes(b"stale wal")
         Path(f"{state_db}-shm").write_bytes(b"stale shm")
         replacements: list[tuple[Path, Path]] = []

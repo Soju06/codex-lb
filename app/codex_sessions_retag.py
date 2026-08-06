@@ -24,6 +24,7 @@ _SUPPORTED_PROVIDERS = {"openai", "codex-lb"}
 _STATE_DB_PATTERN = "state_*.sqlite"
 _STATE_DB_NAME_PATTERN = re.compile(r"state_(\d+)\.sqlite")
 _COPY_CHUNK_SIZE = 4 * 1024 * 1024
+_SQLITE_UPDATE_BATCH_SIZE = 1_000
 _MAX_SESSION_METADATA_BYTES = 1024 * 1024
 _UTF8_BOM = b"\xef\xbb\xbf"
 
@@ -242,7 +243,21 @@ def retag_codex_sessions(
         if plan.sqlite_targets:
             emit_progress("sqlite_update", 0, plan.sqlite_rows_matched, "rows", "Starting SQLite update")
         for target in plan.sqlite_targets:
-            sqlite_rows_updated += _update_sqlite_provider(target.path, source_provider, target_provider)
+            expected_rows = _provider_count(target.provider_counts, source_provider)
+            base_updated = sqlite_rows_updated
+            sqlite_rows_updated += _update_sqlite_provider(
+                target.path,
+                source_provider,
+                target_provider,
+                expected_rows=expected_rows,
+                progress_callback=lambda completed, _total, message, base=base_updated: emit_progress(
+                    "sqlite_update",
+                    min(base + completed, plan.sqlite_rows_matched),
+                    plan.sqlite_rows_matched,
+                    "rows",
+                    message,
+                ),
+            )
             emit_progress(
                 "sqlite_update",
                 sqlite_rows_updated,
@@ -775,16 +790,35 @@ def _sqlite_thread_plans(db_path: Path) -> tuple[_SqliteThreadPlan, ...]:
             temp_path.unlink(missing_ok=True)
 
 
-def _update_sqlite_provider(db_path: Path, source_provider: str, target_provider: str) -> int:
+def _update_sqlite_provider(
+    db_path: Path,
+    source_provider: str,
+    target_provider: str,
+    *,
+    expected_rows: int,
+    progress_callback: ByteProgress | None = None,
+) -> int:
     try:
-        return _update_sqlite_provider_in_place(db_path, source_provider, target_provider)
+        return _update_sqlite_provider_in_place(
+            db_path,
+            source_provider,
+            target_provider,
+            expected_rows=expected_rows,
+            progress_callback=progress_callback,
+        )
     except sqlite3.OperationalError as exc:
         if "unable to open database file" not in str(exc).casefold():
             raise
         # Some bind mounts reject direct SQLite writes from inside a container.
         # Updating a sibling copy and moving it back keeps the operation scoped
         # to the mounted Codex home.
-        return _update_sqlite_provider_via_copy(db_path, source_provider, target_provider)
+        return _update_sqlite_provider_via_copy(
+            db_path,
+            source_provider,
+            target_provider,
+            expected_rows=expected_rows,
+            progress_callback=progress_callback,
+        )
 
 
 def _update_sqlite_thread_provider(
@@ -825,22 +859,56 @@ def _update_sqlite_thread_provider_in_place(
         return int(cursor.rowcount if cursor.rowcount != -1 else 0)
 
 
-def _update_sqlite_provider_in_place(db_path: Path, source_provider: str, target_provider: str) -> int:
+def _update_sqlite_provider_in_place(
+    db_path: Path,
+    source_provider: str,
+    target_provider: str,
+    *,
+    expected_rows: int,
+    progress_callback: ByteProgress | None = None,
+) -> int:
     with closing(_connect_sqlite(db_path)) as conn:
-        if not _sqlite_has_threads_table(conn):
+        if not _sqlite_has_threads_table(conn) or not _sqlite_has_model_provider_column(conn):
             return 0
-        cursor = conn.execute(
-            "UPDATE threads SET model_provider = ? WHERE model_provider = ?",
-            (target_provider, source_provider),
-        )
+        updated = 0
+        while updated < expected_rows:
+            batch_size = min(_SQLITE_UPDATE_BATCH_SIZE, expected_rows - updated)
+            cursor = conn.execute(
+                """
+                UPDATE threads
+                SET model_provider = ?
+                WHERE id IN (
+                    SELECT id FROM threads WHERE model_provider = ? LIMIT ?
+                )
+                """,
+                (target_provider, source_provider, batch_size),
+            )
+            batch_updated = int(cursor.rowcount if cursor.rowcount != -1 else 0)
+            if batch_updated <= 0:
+                break
+            updated += batch_updated
+            _report_progress(progress_callback, updated, expected_rows, f"Updating {db_path.name}")
         conn.commit()
-        return int(cursor.rowcount if cursor.rowcount != -1 else 0)
+        return updated
 
 
-def _update_sqlite_provider_via_copy(db_path: Path, source_provider: str, target_provider: str) -> int:
+def _update_sqlite_provider_via_copy(
+    db_path: Path,
+    source_provider: str,
+    target_provider: str,
+    *,
+    expected_rows: int,
+    progress_callback: ByteProgress | None = None,
+) -> int:
     temp_path = _copy_sqlite_to_temp(db_path)
     try:
-        updated = _update_sqlite_provider_in_place(temp_path, source_provider, target_provider)
+        updated = _update_sqlite_provider_in_place(
+            temp_path,
+            source_provider,
+            target_provider,
+            expected_rows=expected_rows,
+            progress_callback=progress_callback,
+        )
         if updated:
             _replace_sqlite_db(temp_path, db_path)
         return updated

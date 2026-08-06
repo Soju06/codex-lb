@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -8,7 +9,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
+from app.codex_sessions_retag import (
+    RetagResult,
+    default_codex_home,
+    preview_session_metadata_mismatches,
+    repair_session_metadata_mismatches,
+    retag_codex_sessions,
+)
 
 if TYPE_CHECKING:
     from app.core.runtime_logging import LogConfig
@@ -54,6 +61,29 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Confirm that Codex/Codex CLI is closed and allow a non-interactive write.",
     )
+    mismatches = codex_sessions_subparsers.add_parser(
+        "metadata-mismatches",
+        help="Preview individual openai/codex-lb session metadata disagreements without writing files.",
+        formatter_class=_CliHelpFormatter,
+    )
+    _add_targeted_metadata_arguments(mismatches, include_session_ids=False)
+    mismatches.add_argument("--json", action="store_true", help="Write the preview as JSON for ProviderSwitcher.")
+    repair_metadata = codex_sessions_subparsers.add_parser(
+        "repair-metadata",
+        help="Repair only explicitly supplied metadata mismatch session IDs.",
+        formatter_class=_CliHelpFormatter,
+    )
+    _add_targeted_metadata_arguments(repair_metadata, include_session_ids=True)
+    repair_metadata.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm Codex/Codex CLI is closed before writing metadata.",
+    )
+    repair_metadata.add_argument(
+        "--json",
+        action="store_true",
+        help="Write the repair result as JSON for ProviderSwitcher.",
+    )
 
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     parser.add_argument("--port", default=os.getenv("PORT", "2455"))
@@ -89,6 +119,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "codex-sessions":
         if args.codex_sessions_command == "retag":
             _run_codex_sessions_retag(args)
+            return
+        if args.codex_sessions_command == "metadata-mismatches":
+            _run_session_metadata_mismatch_preview(args)
+            return
+        if args.codex_sessions_command == "repair-metadata":
+            _run_session_metadata_repair(args)
             return
         raise SystemExit("codex-sessions requires a subcommand")
 
@@ -220,6 +256,92 @@ def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
         raise SystemExit(f"Unable to read or write Codex session files: {exc}") from exc
 
     _print_retag_summary(result)
+
+
+def _add_targeted_metadata_arguments(parser: argparse.ArgumentParser, *, include_session_ids: bool) -> None:
+    parser.add_argument("--provider", required=True, metavar="PROVIDER", help="Currently active provider tag.")
+    parser.add_argument(
+        "--codex-home",
+        type=Path,
+        metavar="PATH",
+        default=None,
+        help="Codex data directory. Defaults to CODEX_HOME, /codex-home in Docker, or ~/.codex.",
+    )
+    if include_session_ids:
+        parser.add_argument(
+            "--session-id",
+            dest="session_ids",
+            metavar="ID",
+            action="append",
+            required=True,
+            help="Session ID returned from metadata-mismatches. Repeat for each session.",
+        )
+
+
+def _run_session_metadata_mismatch_preview(args: argparse.Namespace) -> None:
+    try:
+        preview = preview_session_metadata_mismatches(
+            codex_home=args.codex_home or default_codex_home(),
+            active_provider=args.provider,
+        )
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        raise SystemExit(str(exc)) from exc
+    payload = {
+        "codex_home": str(preview.codex_home),
+        "active_provider": preview.active_provider,
+        "jsonl_files_scanned": preview.jsonl_files_scanned,
+        "sqlite_dbs_scanned": preview.sqlite_dbs_scanned,
+        "mismatches": [
+            {
+                "session_id": item.session_id,
+                "active_provider": item.active_provider,
+                "opposite_provider": item.opposite_provider,
+                "jsonl_paths": [str(path) for path in item.jsonl_paths],
+                "sqlite_db_paths": [str(path) for path in item.sqlite_db_paths],
+            }
+            for item in preview.mismatches
+        ],
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return
+    print(f"Found {len(preview.mismatches)} targeted session metadata mismatch(es).")
+    for item in preview.mismatches:
+        components = []
+        if item.jsonl_paths:
+            components.append(f"JSONL {len(item.jsonl_paths)}")
+        if item.sqlite_db_paths:
+            components.append(f"SQLite {len(item.sqlite_db_paths)}")
+        print(f"- {item.session_id}: {item.opposite_provider} -> {item.active_provider} ({', '.join(components)})")
+
+
+def _run_session_metadata_repair(args: argparse.Namespace) -> None:
+    _confirm_retag_write(args.yes)
+    try:
+        result = repair_session_metadata_mismatches(
+            codex_home=args.codex_home or default_codex_home(),
+            active_provider=args.provider,
+            session_ids=args.session_ids,
+        )
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        raise SystemExit(str(exc)) from exc
+    payload = {
+        "codex_home": str(result.codex_home),
+        "active_provider": result.active_provider,
+        "session_ids": list(result.session_ids),
+        "backup_path": str(result.backup_path) if result.backup_path is not None else None,
+        "jsonl_files_updated": result.jsonl_files_updated,
+        "sqlite_rows_updated": result.sqlite_rows_updated,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return
+    print("Targeted session metadata repair completed.")
+    print(f"- Session IDs: {', '.join(result.session_ids)}")
+    print(f"- Updated JSONL files: {result.jsonl_files_updated}")
+    print(f"- Updated SQLite rows: {result.sqlite_rows_updated}")
+    if result.backup_path is not None:
+        print(f"- Backup: {result.backup_path}")
 
 
 def _confirm_retag_write(yes: bool) -> None:

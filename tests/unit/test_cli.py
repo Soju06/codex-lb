@@ -517,6 +517,44 @@ def test_codex_sessions_retag_yes_updates_jsonl_and_sqlite(capsys, tmp_path):
         assert conn.execute("SELECT model_provider FROM threads").fetchone()[0] == "codex-lb"
 
 
+def test_codex_sessions_metadata_mismatches_returns_only_conflicting_session_as_json(capsys, tmp_path):
+    target_id = "019f7249-90ee-74c0-a0e6-42117e80bc7f"
+    unrelated_id = "019f7249-90ee-74c0-a0e6-42117e80bc70"
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "target.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": target_id, "model_provider": "codex-lb"}}) + "\n",
+        encoding="utf-8",
+    )
+    (sessions_dir / "unrelated.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": unrelated_id, "model_provider": "openai"}}) + "\n",
+        encoding="utf-8",
+    )
+    with sqlite3.connect(tmp_path / "state_5.sqlite") as conn:
+        conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)")
+        conn.executemany(
+            "INSERT INTO threads (id, model_provider) VALUES (?, ?)",
+            [(target_id, "openai"), (unrelated_id, "openai")],
+        )
+
+    cli.main(
+        [
+            "codex-sessions",
+            "metadata-mismatches",
+            "--provider",
+            "codex-lb",
+            "--codex-home",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["session_id"] for item in payload["mismatches"]] == [target_id]
+    assert payload["mismatches"][0]["jsonl_paths"] == []
+    assert payload["mismatches"][0]["sqlite_db_paths"] == [str(tmp_path / "state_5.sqlite")]
+
+
 def test_utc_default_formatter_formats_without_converter_binding_error():
     formatter = UtcDefaultFormatter(
         fmt="%(asctime)s %(message)s",

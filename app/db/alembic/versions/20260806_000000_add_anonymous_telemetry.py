@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260806_000000_add_anonymous_telemetry"
-down_revision = "20260727_000000_add_sticky_session_continuity_abandoned_at"
+down_revision = "20260730_000000_add_api_key_fair_share_threshold"
 branch_labels = None
 depends_on = None
 

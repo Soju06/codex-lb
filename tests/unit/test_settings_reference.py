@@ -45,17 +45,7 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # number when fields are removed; never raise it without a simplicity-budget
 # discussion — every new CODEX_LB_* setting needs a why-not-a-default
 # justification per CONTRIBUTING.md's simplicity gates.
-<<<<<<< HEAD
-# 115 -> 116: http_responses_session_bridge_clean_close_retry_jitter_max_seconds
-# (http-bridge clean-close recovery, #1394).
-# 116 -> 117: proxy_api_key_fair_share_congestion_threshold_pct (fair-share
-# gate, issue #1535). Not a hardcoded default because the right congestion
-# threshold depends on pool size and workload mix, and 0-means-off is the P1
-# default-off switch; the companion min-guarantee constant stayed hardcoded.
-MAX_SETTINGS_FIELDS = 117
-=======
-MAX_SETTINGS_FIELDS = 118
->>>>>>> a21837a8 (feat(telemetry): add anonymous telemetry with informed opt-out consent)
+MAX_SETTINGS_FIELDS = 119
 
 
 def test_generated_settings_reference_matches_code() -> None:

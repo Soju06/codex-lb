@@ -1005,7 +1005,8 @@ class _StreamingMixin(_StreamingRetryMixin):
         except _TerminalStreamError:
             raise
         except (asyncio.CancelledError, GeneratorExit):
-            status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
+            if not terminal_event_seen:
+                status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
             raise
         except Exception:
             if settlement.downstream_visible:

@@ -192,11 +192,18 @@ def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None
 
 async def _shielded(awaitable: Awaitable[object]) -> None:
     task = asyncio.ensure_future(awaitable)
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
+    cancellation: asyncio.CancelledError | None = None
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancellation = cancellation or exc
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _safe_rollback(session: AsyncSession) -> None:
@@ -216,9 +223,12 @@ async def _safe_close(session: AsyncSession) -> None:
 
 
 async def close_session(session: AsyncSession) -> None:
-    if session.in_transaction():
-        await _safe_rollback(session)
-    await _safe_close(session)
+    async def _close() -> None:
+        if session.in_transaction():
+            await _safe_rollback(session)
+        await _safe_close(session)
+
+    await _shielded(_close())
 
 
 def detach_session_objects(session: AsyncSession) -> None:

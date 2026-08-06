@@ -1107,6 +1107,8 @@
   "settings.routing.accountCapacity.streamDescription": "Maximum concurrent streams per account; 0 is unlimited.",
   "settings.routing.accountCapacity.streamRecoveryReserveLabel": "Stream recovery reserve",
   "settings.routing.accountCapacity.streamRecoveryReserveDescription": "Keep stream slots for recovery and reattach work. 0 disables the reserve; it cannot exceed a nonzero stream limit.",
+  "settings.routing.accountCapacity.fairShareThresholdLabel": "API key fair-share threshold (%)",
+  "settings.routing.accountCapacity.fairShareThresholdDescription": "When in-flight streams reach this percentage of pool stream capacity, keys holding more than their fair share are throttled until the pool decongests. 0 disables.",
   "settings.routing.accountCapacity.save": "Save capacity limits",
   "settings.routing.stickyThresholds.primaryLabel": "Sticky primary threshold",
   "settings.routing.stickyThresholds.primaryDescription": "Reallocate sticky sessions above this primary usage percent.",

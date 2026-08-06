@@ -6,26 +6,33 @@ import hashlib
 import json
 import logging
 import threading
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 from httpx import Headers
+from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.client import connect as websocket_connect
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
+from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     WebsocketsUpstreamWebSocket,
 )
 from app.core.utils.request_id import get_request_id
-from app.modules.api_keys.service import ApiKeyData
+from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
+from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.capability_routing import (
@@ -34,6 +41,8 @@ from app.modules.proxy.capability_routing import (
 )
 
 pytestmark = pytest.mark.integration
+
+_REAL_WRITE_REQUEST_LOG = proxy_module.ProxyService._write_request_log
 
 
 @pytest.mark.asyncio
@@ -235,11 +244,334 @@ def _websocket_settings(**overrides):
         "proxy_token_refresh_limit": 32,
         "proxy_upstream_websocket_connect_limit": 64,
         "proxy_account_stream_recovery_reserve": 1,
+        "proxy_api_key_fair_share_congestion_threshold_pct": 0,
         "proxy_response_create_limit": 64,
         "proxy_compact_response_create_limit": 16,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_responses_websocket_route_drain_preserves_terminal_ownership_and_rejects_late_admission(
+    app_instance,
+    monkeypatch,
+):
+    terminal_release = threading.Event()
+    terminal_waiting = threading.Event()
+    settlement_started = threading.Event()
+    settlement_release = threading.Event()
+    cleanup_timer = threading.Timer(
+        5.0,
+        lambda: (terminal_release.set(), settlement_release.set()),
+    )
+    cleanup_timer.daemon = True
+
+    class _ControlledUpstreamWebSocket:
+        def __init__(self) -> None:
+            self.request_sent = asyncio.Event()
+            self.receive_count = 0
+            self.sent_text: list[str] = []
+            self.closed = False
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            self.request_sent.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def receive(self) -> _FakeUpstreamMessage:
+            await self.request_sent.wait()
+            self.receive_count += 1
+            if self.receive_count == 1:
+                return _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": "resp_route_drain",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            if self.receive_count == 2:
+                terminal_waiting.set()
+                await asyncio.to_thread(terminal_release.wait)
+                return _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_route_drain",
+                                "status": "completed",
+                                "usage": {
+                                    "input_tokens": 3,
+                                    "output_tokens": 2,
+                                    "total_tokens": 5,
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def close(self) -> None:
+            self.closed = True
+
+    upstream = _ControlledUpstreamWebSocket()
+    api_key: ApiKeyData | None = None
+    reservation: ApiKeyUsageReservationData | None = None
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings(
+                proxy_downstream_websocket_idle_timeout_seconds=0.2,
+            )
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(
+        _authorization: str | None,
+        *,
+        request: object | None = None,
+    ):
+        del request
+        assert api_key is not None
+        return api_key
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return SimpleNamespace(id="acct_route_drain"), upstream
+
+    async def fake_refresh_api_key(self, current_api_key):
+        del self
+        assert api_key is not None
+        assert current_api_key is api_key
+        return api_key
+
+    async def fake_reserve_api_key(self, current_api_key, **kwargs):
+        del self, kwargs
+        assert api_key is not None
+        assert reservation is not None
+        assert current_api_key is api_key
+        return reservation
+
+    original_finalize_usage_reservation = ApiKeysService.finalize_usage_reservation
+
+    async def gated_finalize_usage_reservation(
+        self: ApiKeysService,
+        reservation_id: str,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int = 0,
+        service_tier: str | None = None,
+        cost_microdollars: int | None = None,
+    ) -> None:
+        settlement_started.set()
+        await asyncio.to_thread(settlement_release.wait)
+        await original_finalize_usage_reservation(
+            self,
+            reservation_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_input_tokens,
+            service_tier=service_tier,
+            cost_microdollars=cost_microdollars,
+        )
+
+    async def prepare_persistence_rows() -> tuple[ApiKeyData, ApiKeyUsageReservationData]:
+        async with SessionLocal() as session:
+            session.add(
+                Account(
+                    id="acct_route_drain",
+                    chatgpt_account_id="acct_route_drain",
+                    email="route-drain@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=b"access",
+                    refresh_token_encrypted=b"refresh",
+                    id_token_encrypted=b"id",
+                    last_refresh=proxy_module.utcnow(),
+                    status=AccountStatus.ACTIVE,
+                )
+            )
+            await session.commit()
+
+        async with SessionLocal() as session:
+            service = ApiKeysService(ApiKeysRepository(session))
+            created_key = await service.create_key(
+                ApiKeyCreateData(
+                    name="route drain",
+                    allowed_models=None,
+                )
+            )
+            usage_reservation = await service.enforce_limits_for_request(
+                created_key.id,
+                request_model="gpt-5.6-sol",
+            )
+        return created_key, usage_reservation
+
+    async def read_persisted_results(
+        reservation_id: str,
+    ) -> tuple[RequestLog | None, ApiKeyUsageReservation | None]:
+        async with SessionLocal() as session:
+            request_log = await session.scalar(select(RequestLog).where(RequestLog.request_id == "resp_route_drain"))
+            reservation_row = await session.get(ApiKeyUsageReservation, reservation_id)
+            return request_log, reservation_row
+
+    async def fake_record_success(_self, _account):
+        return None
+
+    def no_api_key_heartbeat(self, request_state, **kwargs):
+        del self, request_state, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module,
+        "get_settings",
+        lambda: _websocket_settings(
+            proxy_downstream_websocket_idle_timeout_seconds=0.2,
+        ),
+    )
+    monkeypatch.setattr(proxy_module, "_DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_refresh_websocket_api_key_policy", fake_refresh_api_key)
+    monkeypatch.setattr(proxy_module.ProxyService, "_reserve_websocket_api_key_usage", fake_reserve_api_key)
+    monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", gated_finalize_usage_reservation)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", _REAL_WRITE_REQUEST_LOG)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_start_request_state_api_key_reservation_heartbeat",
+        no_api_key_heartbeat,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_cancel_request_state_api_key_reservation_heartbeat",
+        no_api_key_heartbeat,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_success", fake_record_success)
+
+    cleanup_timer.start()
+    shutdown_state.reset()
+    try:
+        with TestClient(app_instance) as client:
+            assert client.portal is not None
+            api_key, reservation = client.portal.call(prepare_persistence_rows)
+            with client.websocket_connect("/backend-api/codex/responses") as websocket:
+                assert shutdown_state.get_in_flight() == 1
+                websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "response.create",
+                            "model": "gpt-5.6-sol",
+                            "input": "finish during drain",
+                            "stream": True,
+                        }
+                    )
+                )
+                created = json.loads(websocket.receive_text())
+                assert created["type"] == "response.created"
+                assert terminal_waiting.wait(timeout=1)
+
+                shutdown_state.set_draining(True)
+                assert shutdown_state.get_in_flight() == 1
+                terminal_release.set()
+                assert settlement_started.wait(timeout=1)
+
+                with pytest.raises(WebSocketDisconnect) as late_disconnect:
+                    with client.websocket_connect("/backend-api/codex/responses"):
+                        pytest.fail("late websocket admission unexpectedly succeeded")
+                assert late_disconnect.value.code == 1013
+                assert shutdown_state.get_in_flight() == 1
+
+                settlement_release.set()
+                completed = json.loads(websocket.receive_text())
+                assert completed["type"] == "response.completed"
+
+                with pytest.raises(WebSocketDisconnect) as drained_disconnect:
+                    websocket.receive_text()
+                assert drained_disconnect.value.code == 1012
+        assert shutdown_state.get_in_flight() == 0
+        assert reservation is not None
+        persisted_log, persisted_reservation = asyncio.run(read_persisted_results(reservation.reservation_id))
+    finally:
+        terminal_release.set()
+        settlement_release.set()
+        cleanup_timer.cancel()
+        shutdown_state.reset()
+
+    assert upstream.closed is True
+    assert api_key is not None
+    assert persisted_reservation is not None
+    assert persisted_reservation.api_key_id == api_key.id
+    assert persisted_reservation.status == "finalized"
+    assert persisted_reservation.input_tokens == 3
+    assert persisted_reservation.output_tokens == 2
+    assert persisted_log is not None
+    assert persisted_log.account_id == "acct_route_drain"
+    assert persisted_log.api_key_id == api_key.id
+    assert persisted_log.status == "success"
+    assert persisted_log.transport == "websocket"
+    assert persisted_log.input_tokens == 3
+    assert persisted_log.output_tokens == 2
+
+
+def test_responses_websocket_route_drain_interrupts_blocked_idle_receive(
+    app_instance,
+    monkeypatch,
+):
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings(
+                proxy_downstream_websocket_idle_timeout_seconds=0.05,
+            )
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(
+        _authorization: str | None,
+        *,
+        request: object | None = None,
+    ):
+        del request
+        return None
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module,
+        "get_settings",
+        lambda: _websocket_settings(
+            proxy_downstream_websocket_idle_timeout_seconds=0.05,
+        ),
+    )
+    monkeypatch.setattr(proxy_module, "_DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS", 0.01)
+
+    shutdown_state.reset()
+    try:
+        with TestClient(app_instance) as client:
+            with client.websocket_connect("/backend-api/codex/responses") as websocket:
+                assert shutdown_state.get_in_flight() == 1
+                shutdown_state.set_draining(True)
+                with pytest.raises(WebSocketDisconnect) as disconnect:
+                    websocket.receive_text()
+                assert disconnect.value.code == 1012
+        assert shutdown_state.get_in_flight() == 0
+    finally:
+        shutdown_state.reset()
 
 
 def _capability_test_api_key(key_id: str) -> ApiKeyData:
@@ -298,6 +630,149 @@ def _websocket_response_create(text: str) -> dict[str, object]:
         "input": text,
         "stream": True,
     }
+
+
+def test_backend_responses_websocket_fails_over_confirmed_proxy_connect_before_dispatch(
+    app_instance,
+    monkeypatch,
+):
+    upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_proxy_failover", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_ws_proxy_failover",
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+    accounts = [SimpleNamespace(id="acct_ws_proxy_a"), SimpleNamespace(id="acct_ws_proxy_b")]
+    selection_exclusions: list[set[str]] = []
+    connect_accounts: list[str] = []
+    backed_off_accounts: list[str] = []
+    settlement_order: list[str] = []
+    settlement_wait_flags: list[bool] = []
+    handle_connect_error = AsyncMock()
+    reservation = proxy_module.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_proxy_failover",
+        key_id="key_ws_proxy_failover",
+        model="gpt-5.4",
+    )
+    proxy_connect_error = proxy_module.ProxyResponseError(
+        502,
+        proxy_module.openai_error("upstream_unavailable", "sanitized websocket proxy failure"),
+        failure_phase="connect",
+        retryable_same_contract=True,
+        failure_detail="proxy_connect_pre_dispatch",
+        failure_exception_type="ClientProxyConnectionError",
+    )
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fake_select_websocket_connect_account(self, deadline, **kwargs):
+        del self, deadline
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        selection_exclusions.append(excluded)
+        return accounts[1] if accounts[0].id in excluded else accounts[0]
+
+    async def fake_try_open_websocket_connect_attempt(self, account, headers, **kwargs):
+        del self, headers, kwargs
+        connect_accounts.append(account.id)
+        if account.id == accounts[0].id:
+            raise proxy_connect_error
+        return account, upstream
+
+    async def fake_record_error_backoff(self, account):
+        del self
+        assert settlement_order == ["settle"]
+        settlement_order.append("backoff")
+        backed_off_accounts.append(account.id)
+
+    async def fake_reserve_websocket_api_key_usage(self, *_args, **_kwargs):
+        del self
+        return reservation
+
+    async def fake_settle_stream_api_key_usage(self, *_args, **kwargs):
+        del self
+        settlement_wait_flags.append(bool(kwargs.get("wait_for_settlement")))
+        settlement_order.append("settle")
+        return True
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_try_open_websocket_connect_attempt",
+        fake_try_open_websocket_connect_attempt,
+    )
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_websocket_connect_error", handle_connect_error)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_reserve_websocket_api_key_usage",
+        fake_reserve_websocket_api_key_usage,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_settle_stream_api_key_usage",
+        fake_settle_stream_api_key_usage,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_error_backoff", fake_record_error_backoff)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "retry safely"}]}],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            first_event = json.loads(websocket.receive_text())
+            second_event = json.loads(websocket.receive_text())
+
+    assert first_event["type"] == "response.created"
+    assert second_event["type"] == "response.completed"
+    assert connect_accounts == [accounts[0].id, accounts[1].id]
+    assert selection_exclusions == [set(), {accounts[0].id}]
+    assert backed_off_accounts == [accounts[0].id]
+    assert settlement_order == ["settle", "backoff"]
+    assert settlement_wait_flags == [True]
+    # The confirmed dead route skips the generic single-error health write.
+    handle_connect_error.assert_not_awaited()
 
 
 def test_backend_responses_websocket_session_ended_auth_failure_fails_over_before_visible_output(
@@ -1761,6 +2236,108 @@ def test_backend_responses_websocket_forwards_client_tools_byte_identical(app_in
     frame = fake_upstream.sent_text[0]
     expected_tools_bytes = '"tools":' + json.dumps(client_tools, ensure_ascii=True, separators=(",", ":"))
     assert expected_tools_bytes in frame
+
+
+def test_backend_responses_websocket_strips_replayed_tool_call_namespaces(app_instance, monkeypatch):
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_ws_replayed_namespaced_call",
+                        "object": "response",
+                        "status": "in_progress",
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_replayed_namespaced_call",
+                        "object": "response",
+                        "status": "completed",
+                        "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
+        del authorization, request
+        return None
+
+    async def fake_connect_proxy_websocket(self, headers, **kwargs):
+        del self, headers, kwargs
+        return SimpleNamespace(id="acct_ws_namespaced_call", codex_installation_id=None), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.6-sol",
+        "instructions": "continue",
+        "input": [
+            {
+                "type": "function_call",
+                "namespace": "collaboration",
+                "name": "spawn_agent",
+                "arguments": '{"message":"same task"}',
+                "call_id": "call_123",
+            },
+            {
+                "type": "custom_tool_call",
+                "namespace": "exec",
+                "name": "exec",
+                "input": "git status --short",
+                "call_id": "call_456",
+            },
+        ],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+    assert len(fake_upstream.sent_text) == 1
+    upstream_frame = json.loads(fake_upstream.sent_text[0])
+    assert upstream_frame["type"] == "response.create"
+    assert upstream_frame["input"] == [
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
 
 
 def test_backend_responses_websocket_lite_marker_requires_previous_response_linkage(app_instance, monkeypatch):
@@ -5659,6 +6236,20 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
             failed_event = json.loads(websocket.receive_text())
             completed_event = json.loads(websocket.receive_text())
 
+            # Deliver the client disconnect explicitly and wait for the
+            # session teardown to retire the upstream socket before leaving
+            # the context. Relying on ``WebSocketTestSession.__exit__`` is
+            # racy: it cancels the application's cancel scope right after
+            # queueing the disconnect, so the session cleanup can be
+            # cancelled between the reader-task shutdown and
+            # ``upstream.close()``, leaving ``fake_upstream.closed`` unset.
+            # Real servers deliver client disconnects without cancelling the
+            # handler mid-cleanup.
+            websocket.close(1000)
+            deadline = time.monotonic() + 5.0
+            while not fake_upstream.closed and time.monotonic() < deadline:
+                time.sleep(0.01)
+
     assert created_event["type"] == "response.created"
     assert created_event["response"]["id"] == "resp_ws_inflight"
     assert failed_event["type"] == "response.failed"
@@ -9130,7 +9721,9 @@ def test_backend_responses_websocket_emits_no_accounts_error(app_instance, monke
     assert event["error"]["code"] == "no_accounts"
 
 
-def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_instance, monkeypatch):
+def test_backend_responses_websocket_attributes_generated_turns_on_prewarm_connection_as_normal(
+    app_instance, monkeypatch
+):
     fake_upstream = _SequencedUpstreamWebSocket(
         [],
         deferred_message_batches=[
@@ -9254,8 +9847,15 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
         "stream": True,
     }
 
+    headers = {
+        "x-codex-turn-metadata": json.dumps(
+            {"request_kind": "prewarm", "turn_id": "turn_connection_prewarm"},
+            separators=(",", ":"),
+        )
+    }
+
     with TestClient(app_instance) as client:
-        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+        with client.websocket_connect("/backend-api/codex/responses", headers=headers) as websocket:
             websocket.send_text(json.dumps(first_request))
             websocket.send_text(json.dumps(second_request))
             events = [json.loads(websocket.receive_text()) for _ in range(4)]
@@ -9270,9 +9870,13 @@ def test_backend_responses_websocket_matches_terminal_events_by_response_id(app_
     assert log_calls[0]["request_id"] == "resp_ws_b"
     assert log_calls[0]["model"] == "gpt-5.2"
     assert log_calls[0]["input_tokens"] == 7
+    assert log_calls[0]["request_kind"] == "normal"
+    assert log_calls[0]["connection_request_kind"] == "prewarm"
     assert log_calls[1]["request_id"] == "resp_ws_a"
     assert log_calls[1]["model"] == "gpt-5.1"
     assert log_calls[1]["input_tokens"] == 3
+    assert log_calls[1]["request_kind"] == "normal"
+    assert log_calls[1]["connection_request_kind"] == "prewarm"
 
 
 def test_backend_responses_websocket_emits_response_failed_before_close_on_upstream_eof(app_instance, monkeypatch):
@@ -9624,6 +10228,7 @@ def test_backend_responses_websocket_recovers_created_only_sequenced_prewarm(
     assert json.loads(replay_upstream.sent_text[0])["generate"] is False
     assert len(log_calls) == 1
     assert log_calls[0]["request_kind"] == "prewarm"
+    assert log_calls[0]["connection_request_kind"] == "prewarm"
 
     if expect_recovery:
         assert terminal_event is not None
@@ -9776,7 +10381,11 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     with TestClient(app_instance) as client:
         with client.websocket_connect(
             "/backend-api/codex/responses",
-            headers={"Authorization": "Bearer external-token", "session_id": "sid-client-stale"},
+            headers={
+                "Authorization": "Bearer external-token",
+                "session_id": "sid-client-stale",
+                "x-codex-turn-metadata": json.dumps({"request_kind": "prewarm"}, separators=(",", ":")),
+            },
         ) as websocket:
             websocket.send_text(
                 json.dumps(
@@ -9797,6 +10406,8 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     _assert_previous_response_not_found_error(event["error"])
     error_logs = [call for call in log_calls if call.get("status") == "error"]
     assert len(error_logs) == 1
+    assert error_logs[0]["request_kind"] == "normal"
+    assert error_logs[0]["connection_request_kind"] == "prewarm"
     failure_detail = error_logs[0]["failure_detail"]
     assert isinstance(failure_detail, str)
     assert failure_detail.startswith("previous_response_not_found ")

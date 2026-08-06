@@ -239,6 +239,28 @@ def _disable_default_refresh_claims():
 
 
 @pytest.fixture(autouse=True)
+def _scope_plan_downgrade_observation_store(request):
+    """Keep the cross-replica downgrade-observation store test-local.
+
+    The process default persists observations through the real database so the
+    paid -> free confirmation sequence stays coherent across replicas. Pure unit
+    tests drive ``UsageUpdater`` against stub repositories with no migrated
+    schema, so they get an isolated in-memory store that preserves
+    single-process semantics. Integration tests keep the database-backed default
+    (that is the behavior under test), and simply get a clean table per test.
+    """
+    from app.modules.usage import plan_downgrade_observations as observations_module
+
+    is_unit_test = "/tests/unit/" in request.path.as_posix() if hasattr(request, "path") else False
+    if is_unit_test:
+        observations_module.set_plan_downgrade_observation_store(
+            observations_module.InMemoryPlanDowngradeObservationStore()
+        )
+    yield
+    observations_module.reset_plan_downgrade_observation_store()
+
+
+@pytest.fixture(autouse=True)
 def temp_key_file(monkeypatch):
     key_path = TEST_DB_DIR / f"encryption-{uuid4().hex}.key"
     monkeypatch.setenv("CODEX_LB_ENCRYPTION_KEY_FILE", str(key_path))
@@ -313,6 +335,24 @@ def _reset_global_state() -> None:
         from app.core.upstream_proxy.cache import get_upstream_route_cache
 
         get_upstream_route_cache().clear()
+    except Exception:
+        pass
+    try:
+        # Pending workspace-less plan-downgrade confirmations live in a
+        # process-global fallback store when persistence is disabled, so a test
+        # that leaves one behind would otherwise give the next test a head start
+        # toward a downgrade (issue #1456).
+        from app.modules.usage.updater import _FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS
+
+        _FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS.clear_all()
+    except Exception:
+        pass
+    try:
+        # Pending last-used touches would otherwise leak a previous test's key
+        # ids into the next test's flush (harmless guarded UPDATEs, but noisy).
+        from app.modules.api_keys.last_used_coalescer import get_api_key_last_used_coalescer
+
+        get_api_key_last_used_coalescer().clear()
     except Exception:
         pass
     try:

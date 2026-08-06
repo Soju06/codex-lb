@@ -18,6 +18,7 @@ from app.core.auth.refresh import RefreshError, is_transient_refresh_contention,
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
@@ -82,7 +83,9 @@ _ACCOUNT_SELECTION_RECOVERY_DEFAULT_SLEEP_SECONDS = 30.0
 _ACCOUNT_SELECTION_RECOVERY_MAX_SLEEP_SECONDS = 300.0
 _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS = 10.0
 _ACCOUNT_SELECTION_RETRY_HINT_RE = re.compile(r"try again in\s+([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
-_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset({"account_response_create_cap", "account_stream_cap"})
+_LOCAL_ACCOUNT_CAP_ERROR_CODES = frozenset(
+    {"account_response_create_cap", "account_stream_cap", "api_key_stream_fair_share"}
+)
 _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE = "account_model_unsupported"
 _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_wait",
@@ -753,6 +756,19 @@ class _HTTPBridgeCompletedDeliveryScope:
     terminal_enqueued: bool = False
 
 
+@dataclass(slots=True)
+class _DeferredAccountBackoffLifecycle:
+    reservation: ApiKeyUsageReservationData | None
+    pending_backoffs: dict[str, Account] = field(default_factory=dict)
+    settlement_owned: bool = False
+    settlement_confirmed: bool = False
+
+
+@dataclass(slots=True)
+class _DeferredAccountBackoffTracker:
+    current_lifecycle: _DeferredAccountBackoffLifecycle | None = None
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -795,6 +811,7 @@ class _WebSocketRequestState:
     enforce_openai_sdk_contract: bool = True
     propagate_http_errors: bool = False
     request_kind: str = "normal"
+    connection_request_kind: str | None = None
     generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
@@ -824,6 +841,18 @@ class _WebSocketRequestState:
     # explicit turn-state header guarantees continuity for stale recovery.
     hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
+    # True only when the client's own incoming payload (before this anchor was
+    # injected or trimmed) already looked like a full conversation resend
+    # (``_http_bridge_payload_looks_like_full_resend``). Deliberately weaker
+    # than ``fresh_upstream_request_is_retry_safe``: it does not require the
+    # exact-manifest/retained-output proof that field needs for an in-place
+    # same-request replay, only that the client is a resend-capable client at
+    # all. Used to decide whether it is safe to invalidate a durable session's
+    # stored anchor after this request proves eventless -- a client that
+    # already resends full history on its own can recover unanchored; a
+    # genuine delta-only client has no other way to convey prior context and
+    # must stay anchored.
+    proxy_injected_anchor_had_full_resend_payload: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
@@ -907,11 +936,25 @@ class _WebSocketRequestState:
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None
+    # Confirmed pre-dispatch account-route failures must not mutate account
+    # health while this request's API-key reservation is still live. The
+    # account objects are keyed by id so repeated connect attempts cannot
+    # stack the same backoff floor more than once before settlement.
+    deferred_account_error_backoffs: dict[str, Account] = field(default_factory=dict)
+    deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None
+    deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
     draining_until_terminal: bool = False
     completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
+    # Exactly-once reservation settlement for terminal HTTP bridge events
+    # (issue #1594). "claimed" marks a request popped from pending ownership
+    # whose in-flight terminal bookkeeping continuation exclusively owns
+    # settlement; "abandoned" marks a claim whose continuation aborted and
+    # whose shielded abort settlement also failed, allowing a later detach to
+    # reclaim settlement; None means unclaimed or settled.
+    terminal_settlement_phase: Literal["claimed", "abandoned"] | None = None
     account_capacity_waiting: bool = False
     account_capacity_wait_suppress_keepalive: bool = False
     account_capacity_wait_reason: str | None = None
@@ -1136,17 +1179,7 @@ class _WebSocketUpstreamControl:
     downstream_sequence_request_state: _WebSocketRequestState | None = None
     downstream_sequence_number: int | None = None
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
-    # One watchdog expiry can wake receive() while the concurrent send also
-    # fails. Claim synchronously, before either path awaits settlement: the
-    # winner owns the whole pending deque and the loser must not cancel it.
-    # A control object belongs to one upstream generation, so this never resets.
-    liveness_settlement_owner: Literal["send", "receive"] | None = None
-    liveness_settlement_done: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def claim_liveness_settlement(self, owner: Literal["send", "receive"]) -> bool:
-        if self.liveness_settlement_owner is None:
-            self.liveness_settlement_owner = owner
-        return self.liveness_settlement_owner == owner
+    terminal_message_task: asyncio.Task[bool] | None = None
 
 
 @dataclass(slots=True)
@@ -1249,6 +1282,8 @@ def _websocket_request_can_replay_before_visible_output(
     allow_clean_close_retry: bool = False,
 ) -> bool:
     if not request_state.request_text:
+        return False
+    if request_state.transport == _REQUEST_TRANSPORT_WEBSOCKET and request_state.response_create_sent_at is None:
         return False
     if request_state.replay_count >= 1 and not (
         allow_clean_close_retry
@@ -1416,7 +1451,37 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
 
 
 def _is_local_account_cap_code(code: str | None) -> bool:
-    return code in {"account_response_create_cap", "account_stream_cap"}
+    return code in _LOCAL_ACCOUNT_CAP_ERROR_CODES
+
+
+def _api_key_fair_share_threshold_pct_from_settings(settings: object) -> int:
+    """Resolve the fair-share congestion threshold, tolerating stale snapshots.
+
+    Cached settings snapshots taken before the field existed lack it; fall
+    back to the live settings object the same way the stream recovery reserve
+    resolution in ``ProxyService`` does.
+    """
+    threshold = getattr(settings, "proxy_api_key_fair_share_congestion_threshold_pct", None)
+    if threshold is None:
+        return get_settings().proxy_api_key_fair_share_congestion_threshold_pct
+    return int(threshold)
+
+
+def _selection_api_key_fair_share_threshold_pct(
+    settings: object,
+    *,
+    lease_kind: str | None,
+    request_stage: str,
+) -> int:
+    """Fair-share threshold for one account selection; 0 disables the gate.
+
+    Only stream leases are fair-share gated. Reattach resumes an existing
+    in-flight response; denying it would strand running work, so it bypasses
+    the fair-share gate the same way it bypasses the recovery reserve.
+    """
+    if lease_kind != "stream" or request_stage == "reattach":
+        return 0
+    return _api_key_fair_share_threshold_pct_from_settings(settings)
 
 
 def _http_error_status_from_payload(payload: dict[str, JsonValue] | None) -> int | None:

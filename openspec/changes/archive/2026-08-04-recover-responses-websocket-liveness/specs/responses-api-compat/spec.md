@@ -37,6 +37,13 @@ The proxy MUST configure direct and routed upstream Responses WebSocket transpor
 - **THEN** the reader settles every pending request with `upstream_websocket_liveness_timeout`
 - **AND** the selected account receives no failure-health signal
 
+#### Scenario: Claimed bridge settlement survives submitter cancellation
+
+- **GIVEN** an HTTP bridge submitter claims liveness-settlement ownership after its send fails
+- **WHEN** the submitter is cancelled before whole-deque settlement completes
+- **THEN** settlement continues until every pending sibling is finalized exactly once
+- **AND** the submitter cancellation is preserved after settlement completes
+
 ## MODIFIED Requirements
 
 ### Requirement: Upstream websocket drops penalize affected accounts

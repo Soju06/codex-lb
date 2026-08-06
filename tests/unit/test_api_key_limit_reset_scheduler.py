@@ -50,3 +50,12 @@ async def test_reset_once_resets_expired_limits(monkeypatch: pytest.MonkeyPatch)
     assert gate_calls == 1
     repo.reset_expired_limits.assert_awaited_once()
     repo.release_stale_usage_reservations.assert_awaited_once()
+    release_await_args = repo.release_stale_usage_reservations.await_args
+    assert release_await_args is not None
+    release_kwargs = release_await_args.kwargs
+    # The hard age ceiling must accompany the heartbeat cutoff so an orphaned
+    # heartbeat cannot exempt its reservation forever (issue #1594).
+    assert (
+        release_kwargs["cutoff"] - release_kwargs["max_age_cutoff"]
+        == reset_scheduler._MAX_USAGE_RESERVATION_AGE - reset_scheduler._STALE_USAGE_RESERVATION_AGE
+    )

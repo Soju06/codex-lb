@@ -85,11 +85,12 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
     lifetime account totals. No watermark (fold never ran) means skip.
 
     The effective watermark is the MIN of the lifetime fold watermark and the
-    hourly time-axis watermark: a raw row is only prunable once EVERY rollup
-    that must outlive it has folded it. While the hourly backfill is catching
-    up (its watermark starts at the epoch), the min fails the currency check
-    below and pruning pauses entirely — the pre-existing "never delete what
-    is not folded" invariant extended to the time-axis rollups.
+    hourly and conversation time-axis watermarks: a raw row is only prunable
+    once EVERY rollup that must outlive it has folded it. While either
+    time-axis backfill is catching up (each watermark starts at the epoch),
+    the min fails the currency check below and pruning pauses entirely — the
+    pre-existing "never delete what is not folded" invariant extended to the
+    time-axis rollups.
 
     Pruning also requires the fold to be CURRENT (watermark within two fold
     lags of now) and stays a full fold lag below it. Summary reads load the
@@ -121,6 +122,7 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                         select(
                             AccountUsageRollupState.folded_through,
                             AccountUsageRollupState.hourly_folded_through,
+                            AccountUsageRollupState.conversation_folded_through,
                         )
                         .where(AccountUsageRollupState.id == 1)
                         .with_for_update()
@@ -139,8 +141,16 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                         )
                     return total
                 effective_cutoff = min(cutoff, watermark - FOLD_LAG)
+                # Oldest-first batches keep min(requested_at) a contiguous
+                # retention frontier: an interrupted pass never leaves
+                # deleted holes above the oldest surviving row, which the
+                # rollup-served listing count relies on when clamping its
+                # folded window to listable history.
                 batch_ids = (
-                    select(RequestLog.id).where(RequestLog.requested_at < effective_cutoff).limit(BATCH_SIZE)
+                    select(RequestLog.id)
+                    .where(RequestLog.requested_at < effective_cutoff)
+                    .order_by(RequestLog.requested_at.asc(), RequestLog.id.asc())
+                    .limit(BATCH_SIZE)
                 ).scalar_subquery()
                 result = await session.execute(
                     delete(RequestLog).where(RequestLog.id.in_(batch_ids)).returning(RequestLog.id)

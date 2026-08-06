@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from sqlalchemy import event as sa_event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -831,3 +832,48 @@ async def test_safe_rollback_outlives_caller_cancellation() -> None:
 
     assert rolled_back.is_set()
     assert cleanup_done.is_set()
+
+
+@pytest.mark.asyncio
+async def test_relax_commit_durability_is_noop_for_sqlite_sessions() -> None:
+    statements: list[str] = []
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=NullPool)
+
+    @sa_event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def _record(conn, cursor, statement, parameters, context, executemany) -> None:  # type: ignore[no-untyped-def]
+        del conn, cursor, parameters, context, executemany
+        statements.append(statement)
+
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            await session_module.relax_commit_durability(session)
+            # The no-op must not even open a transaction: on SQLite the helper
+            # returns before touching the connection.
+            assert not session.in_transaction()
+    finally:
+        await engine.dispose()
+
+    assert all("synchronous_commit" not in statement for statement in statements)
+
+
+@pytest.mark.asyncio
+async def test_relax_commit_durability_emits_set_local_for_postgresql_sessions() -> None:
+    executed: list[str] = []
+
+    class _FakeDialect:
+        name = "postgresql"
+
+    class _FakeBind:
+        dialect = _FakeDialect()
+
+    class _FakeSession:
+        def get_bind(self) -> _FakeBind:
+            return _FakeBind()
+
+        async def execute(self, statement: object) -> None:
+            executed.append(str(statement))
+
+    await session_module.relax_commit_durability(cast(session_module.AsyncSession, _FakeSession()))
+
+    assert executed == ["SET LOCAL synchronous_commit = off"]

@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 _API_KEY_LIMIT_RESET_INTERVAL_SECONDS = 3600
 _STALE_USAGE_RESERVATION_AGE = timedelta(hours=6)
+# Hard ceiling on reservation lifetime regardless of heartbeat activity. This
+# is the backstop for orphaned reservation heartbeats (issue #1594): a leaked
+# heartbeat keeps refreshing ``updated_at`` forever, which would otherwise
+# exempt its reservation from the stale cutoff above. No legitimate request
+# holds a usage reservation anywhere near this long.
+_MAX_USAGE_RESERVATION_AGE = timedelta(hours=24)
 
 
 _T = TypeVar("_T")
@@ -77,7 +83,8 @@ class ApiKeyLimitResetScheduler:
                     if reset_count > 0:
                         logger.info("Reset expired API key limits reset_count=%s", reset_count)
                     released_count = await repo.release_stale_usage_reservations(
-                        cutoff=now - _STALE_USAGE_RESERVATION_AGE
+                        cutoff=now - _STALE_USAGE_RESERVATION_AGE,
+                        max_age_cutoff=now - _MAX_USAGE_RESERVATION_AGE,
                     )
                     if released_count > 0:
                         logger.info("Released stale API key usage reservations released_count=%s", released_count)

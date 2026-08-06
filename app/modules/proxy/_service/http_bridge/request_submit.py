@@ -134,7 +134,9 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
+    _REQUEST_TRANSPORT_WEBSOCKET,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
+    _api_key_fair_share_threshold_pct_from_settings,
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
@@ -188,6 +190,10 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
     durable_bridge_hash,
+)
+from app.modules.proxy.fair_share import (
+    API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
+    ApiKeyFairShareDenialError,
 )
 from app.modules.proxy.helpers import (
     _normalize_error_code,
@@ -243,6 +249,26 @@ async def _send_http_bridge_request_text_with_archive_id(
             raise
     finally:
         reset_request_id(token)
+
+
+async def _settle_claimed_http_bridge_liveness_failure(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    error_message: str,
+) -> None:
+    """Finish the pending-deque settlement claimed beside a failed send."""
+
+    if session.liveness_settlement_owner != "send":
+        raise RuntimeError("HTTP bridge liveness settlement started without the send claim")
+    async with session.lifecycle_lock:
+        await service._fail_http_bridge_reader_and_maybe_retire(
+            session,
+            error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+            error_message=error_message,
+            penalize_account=False,
+            force_retire=True,
+        )
 
 
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
@@ -402,7 +428,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 input_full_fingerprint = _fingerprint_input_items(payload_input_list)
 
         resolved_request_id = request_id or f"ws_{uuid4().hex}"
-        request_kind = _request_kind_from_headers(headers)
+        header_request_kind = _request_kind_from_headers(headers)
+        generate_false_prewarm = header_request_kind == "prewarm" and upstream_payload.get("generate") is False
+        connection_request_kind = header_request_kind if transport == _REQUEST_TRANSPORT_WEBSOCKET else None
+        request_kind = (
+            "normal" if connection_request_kind == "prewarm" and not generate_false_prewarm else header_request_kind
+        )
         request_state = _WebSocketRequestState(
             request_id=resolved_request_id,
             request_log_id=request_log_id,
@@ -428,7 +459,8 @@ class _HTTPBridgeRequestSubmitMixin:
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
             request_kind=request_kind,
-            generate_false_prewarm=request_kind == "prewarm" and upstream_payload.get("generate") is False,
+            connection_request_kind=connection_request_kind,
+            generate_false_prewarm=generate_false_prewarm,
         )
         if deduped_replayed_input_count is not None:
             request_state.input_item_count = deduped_replayed_input_count
@@ -1255,14 +1287,20 @@ class _HTTPBridgeRequestSubmitMixin:
                 # holding lifecycle_lock. It therefore owns the entire session
                 # deque, including older in-flight requests; settling only this
                 # request would strand its siblings after the reader yields.
-                async with session.lifecycle_lock:
-                    await self._fail_http_bridge_reader_and_maybe_retire(
+                # Publish the cleanup task before the first await after the
+                # claim. Shielding it makes cancellation wait for settlement,
+                # so the claim can never outlive its exactly-once owner.
+                settlement_task = asyncio.create_task(
+                    _settle_claimed_http_bridge_liveness_failure(
+                        self,
                         session,
-                        error_code=error_code,
                         error_message=str(exc) or "Upstream websocket liveness failed",
-                        penalize_account=False,
-                        force_retire=True,
-                    )
+                    ),
+                    name="http-bridge-liveness-send-settlement",
+                )
+                _, settlement_cancellation = await _await_task_deferring_cancellation(settlement_task)
+                if settlement_cancellation is not None:
+                    raise settlement_cancellation
             else:
                 await self._cleanup_http_bridge_submit_interruption(
                     session,
@@ -1584,22 +1622,46 @@ class _HTTPBridgeRequestSubmitMixin:
         another, because those turns multiplex over the session's single
         upstream WebSocket — unchanged from the pre-existing per-session
         lease lifecycle.
+
+        Keyed sessions thread their API key through the reacquire so the
+        turn joins the per-key stream accounting and passes the same
+        congestion-gated fair-share admission as initial selection; a
+        fair-share denial raises the standard local-cap envelope with the
+        fair-share code so the recoverable capacity wait applies.
         """
         if session.account_lease is not None or session.closed:
             return
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
             return
-        lease = await load_balancer.acquire_account_lease(
-            session.account.id,
-            kind="stream",
-            # Carry the turn's usage-budget estimate like initial selection
-            # and reconnect do, so capacity-weighted routing pressure still
-            # sees large turns on reused warm sessions.
-            estimated_tokens=_estimated_lease_tokens_from_request_usage_budget(
-                request_state.request_usage_budget if request_state is not None else None
-            ),
-        )
+        api_key_id = session.key.api_key_id
+        fair_share_threshold_pct = 0
+        if api_key_id is not None:
+            fair_share_threshold_pct = _api_key_fair_share_threshold_pct_from_settings(
+                await _service_get_settings_cache().get()
+            )
+        try:
+            lease = await load_balancer.acquire_account_lease(
+                session.account.id,
+                kind="stream",
+                # Carry the turn's usage-budget estimate like initial selection
+                # and reconnect do, so capacity-weighted routing pressure still
+                # sees large turns on reused warm sessions.
+                estimated_tokens=_estimated_lease_tokens_from_request_usage_budget(
+                    request_state.request_usage_budget if request_state is not None else None
+                ),
+                api_key_id=api_key_id,
+                api_key_stream_fair_share_threshold_pct=fair_share_threshold_pct,
+            )
+        except ApiKeyFairShareDenialError as denial:
+            raise ProxyResponseError(
+                429,
+                openai_error(
+                    API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
+                    str(denial),
+                    error_type="rate_limit_error",
+                ),
+            ) from None
         if lease is None:
             raise ProxyResponseError(
                 429,
@@ -1696,6 +1758,16 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.event_queue = None
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
+            if request_state.terminal_settlement_phase == "abandoned":
+                # Belt-and-braces for issue #1594: terminal bookkeeping
+                # claimed this request out of pending ownership, aborted, and
+                # its shielded abort settlement also failed. Nothing else owns
+                # the reservation any more, so reclaim settlement here instead
+                # of keying solely on pending-deque membership.
+                self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+                await self._release_websocket_request_state_reservation(request_state)
+                request_state.api_key_reservation = None
+                request_state.terminal_settlement_phase = None
             return False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         await self._release_websocket_request_state_reservation(request_state)

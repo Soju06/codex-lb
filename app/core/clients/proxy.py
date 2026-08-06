@@ -492,6 +492,24 @@ class ProxyResponseError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+def is_confirmed_pre_dispatch_transport_error(exc: ProxyResponseError) -> bool:
+    """Return whether the transport proved the upstream request never dispatched.
+
+    Only this provenance authorizes replaying a movable request on another
+    account: a typed connector failure while reaching the account's routed
+    proxy endpoint, before any request bytes could leave for upstream.
+    Host-wide network loss (``proxy_network_unavailable``) stays on its
+    account-neutral process recovery path instead of penalizing the selected
+    account, and ambiguous dispatch outcomes remain non-replayable.
+    """
+
+    if not (exc.retryable_same_contract and exc.failure_phase == "connect"):
+        return False
+    error = exc.payload.get("error")
+    error_code = error.get("code") if isinstance(error, dict) else None
+    return error_code != PROCESS_NETWORK_UNAVAILABLE_CODE
+
+
 def _process_network_failure_error(
     message: str,
     exc: Exception,
@@ -2780,14 +2798,32 @@ async def _stream_responses_with_session(
         pre_request_started_at,
         time.monotonic(),
     )
+    # sock_read carries the idle budget into the phase before response headers
+    # exist. Without it, a connection that is established but never answered is
+    # bounded only by the request budget, which is hours long, while it holds a
+    # per-session response-create gate that later turns queue behind.
     timeout = aiohttp.ClientTimeout(
         total=remaining_request_timeout,
         sock_connect=effective_connect_timeout,
-        sock_read=None,
+        sock_read=effective_idle_timeout,
     )
     started_at = time.monotonic()
 
     async def _stream_via_http(
+        current_headers: Mapping[str, str],
+        current_timeout: aiohttp.ClientTimeout,
+    ) -> AsyncIterator[str]:
+        try:
+            async for event_block in _stream_via_http_attempt(current_headers, current_timeout):
+                yield event_block
+        except aiohttp.SocketTimeoutError as exc:
+            # A socket read timeout means the connection was established and
+            # then produced nothing. That is an idle stream, not a transport
+            # failure, so it joins the idle-timeout path instead of being
+            # reported as an unavailable upstream.
+            raise StreamIdleTimeoutError() from exc
+
+    async def _stream_via_http_attempt(
         current_headers: Mapping[str, str],
         current_timeout: aiohttp.ClientTimeout,
     ) -> AsyncIterator[str]:
@@ -3051,7 +3087,7 @@ async def _stream_responses_with_session(
         timeout = aiohttp.ClientTimeout(
             total=remaining_request_timeout,
             sock_connect=effective_connect_timeout,
-            sock_read=None,
+            sock_read=effective_idle_timeout,
         )
         started_at = time.monotonic()
         _maybe_log_upstream_request_start(

@@ -1,4 +1,23 @@
 {{- /*
+Graceful shutdown uses one application drain deadline beginning when the
+Python preStop helper starts. Keep the routing dwell inside that budget and
+reserve a conservative post-deadline cleanup window before kubelet can send
+SIGKILL. Kubelet's grace begins earlier, so the default retains extra helper
+launch headroom above the enforced arithmetic minimum.
+*/}}
+{{- $shutdownDrainTimeoutSeconds := int .Values.config.shutdownDrainTimeoutSeconds }}
+{{- $preStopSleepSeconds := int .Values.preStopSleepSeconds }}
+{{- if lt $shutdownDrainTimeoutSeconds $preStopSleepSeconds }}
+{{- fail "config.shutdownDrainTimeoutSeconds must be greater than or equal to preStopSleepSeconds so routing dwell fits inside the shared drain deadline." }}
+{{- end }}
+{{- $preStopStartFailureBudgetSeconds := 2 }}
+{{- $postDrainCleanupBufferSeconds := 30 }}
+{{- $minimumTerminationGraceSeconds := add (add $shutdownDrainTimeoutSeconds $preStopStartFailureBudgetSeconds) $postDrainCleanupBufferSeconds }}
+{{- if lt (int .Values.terminationGracePeriodSeconds) $minimumTerminationGraceSeconds }}
+{{- fail "terminationGracePeriodSeconds must cover preStop start fallback and bounded post-drain cleanup: set it to at least config.shutdownDrainTimeoutSeconds + 32." }}
+{{- end }}
+
+{{- /*
 Static bridge ring guard: a manual config.sessionBridgeInstanceRing must list exactly
 the StatefulSet pod names or Settings validation crashloops pods at startup (each pod
 requires its own $(POD_NAME) to appear literally in the ring). Fail loudly at render
@@ -309,8 +328,14 @@ spec:
               exec:
                 command:
                   - python
-                  - -c
-                  - "import json, time, urllib.error, urllib.request\nbase = 'http://127.0.0.1:{{ $httpPort }}'\ntry:\n    urllib.request.urlopen(urllib.request.Request(base + '/internal/drain/start', method='POST'), timeout=2).read()\nexcept Exception:\n    pass\ndeadline = time.monotonic() + {{ .Values.preStopSleepSeconds }}\nwhile time.monotonic() < deadline:\n    try:\n        json.loads(urllib.request.urlopen(base + '/internal/drain/status', timeout=2).read() or b'{}')\n    except Exception:\n        pass\n    time.sleep(1)"
+                  - -m
+                  - app.core.prestop
+                  - --base-url
+                  - "http://127.0.0.1:{{ $httpPort }}"
+                  - --routing-dwell-seconds
+                  - {{ .Values.preStopSleepSeconds | toString | quote }}
+                  - --drain-timeout-seconds
+                  - {{ .Values.config.shutdownDrainTimeoutSeconds | toString | quote }}
           startupProbe:
             httpGet:
               path: /health/startup

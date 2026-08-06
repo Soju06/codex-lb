@@ -24,6 +24,7 @@ class RequestLogEntry(DashboardModel):
     request_id: str
     archive_request_id: str | None = None
     request_kind: str = "normal"
+    connection_request_kind: str | None = None
     model: str
     source: str | None = None
     model_source_id: str | None = None

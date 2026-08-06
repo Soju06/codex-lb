@@ -38,6 +38,7 @@ async def test_migrated_null_account_caps_inherit_environment(monkeypatch: pytes
                 "proxy_account_response_create_limit": 24,
                 "proxy_account_stream_limit": 32,
                 "proxy_account_stream_recovery_reserve": 4,
+                "proxy_api_key_fair_share_congestion_threshold_pct": 0,
                 "request_log_retention_days": 0,
                 "usage_history_retention_days": 0,
             },
@@ -49,6 +50,49 @@ async def test_migrated_null_account_caps_inherit_environment(monkeypatch: pytes
     assert settings.proxy_account_response_create_limit == 24
     assert settings.proxy_account_stream_limit == 32
     assert settings.proxy_account_stream_recovery_reserve == 4
+
+
+@pytest.mark.asyncio
+async def test_migrated_null_api_key_fair_share_threshold_inherits_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = DashboardSettings()
+    row.proxy_api_key_fair_share_congestion_threshold_pct = None
+
+    class _Repository:
+        async def get_or_create(self) -> DashboardSettings:
+            return row
+
+    monkeypatch.setattr(
+        settings_service_module,
+        "get_settings",
+        lambda: type(
+            "_StartupSettings",
+            (),
+            {
+                "proxy_account_response_create_limit": 24,
+                "proxy_account_stream_limit": 32,
+                "proxy_account_stream_recovery_reserve": 4,
+                "proxy_api_key_fair_share_congestion_threshold_pct": 55,
+                "request_log_retention_days": 0,
+                "usage_history_retention_days": 0,
+            },
+        )(),
+    )
+    service = SettingsService(cast(SettingsRepository, _Repository()))
+
+    # NULL migrated rows inherit the environment default.
+    settings = await service.get_settings()
+    assert settings.proxy_api_key_fair_share_congestion_threshold_pct == 55
+
+    # A non-NULL dashboard value wins, including 0 (explicitly disabled).
+    row.proxy_api_key_fair_share_congestion_threshold_pct = 80
+    settings = await service.get_settings()
+    assert settings.proxy_api_key_fair_share_congestion_threshold_pct == 80
+
+    row.proxy_api_key_fair_share_congestion_threshold_pct = 0
+    settings = await service.get_settings()
+    assert settings.proxy_api_key_fair_share_congestion_threshold_pct == 0
 
 
 @pytest.mark.asyncio
@@ -71,6 +115,7 @@ async def test_null_retention_inherits_environment_and_dashboard_value_wins(
                 "proxy_account_response_create_limit": 24,
                 "proxy_account_stream_limit": 32,
                 "proxy_account_stream_recovery_reserve": 4,
+                "proxy_api_key_fair_share_congestion_threshold_pct": 0,
                 "request_log_retention_days": 90,
                 "usage_history_retention_days": 45,
             },

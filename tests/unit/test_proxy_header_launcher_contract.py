@@ -12,26 +12,28 @@ def _read(relative_path: str) -> str:
     return (_REPO_ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_development_compose_disables_server_proxy_projection() -> None:
+def test_development_compose_uses_owned_launcher_and_restarts_synced_source() -> None:
     compose = yaml.safe_load(_read("docker-compose.yml"))
-    command = compose["services"]["server"]["command"]
+    server = compose["services"]["server"]
+    command = server["command"]
 
-    assert command[:2] == ["uvicorn", "app.main:app"]
-    assert command.count("--no-proxy-headers") == 1
+    assert command[:3] == ["python", "-m", "app.cli"]
+    app_watch = next(item for item in server["develop"]["watch"] if item["path"] == "./app")
+    assert app_watch["action"] == "sync+restart"
 
 
 @pytest.mark.parametrize(
     ("relative_path", "command"),
     [
-        ("README.md", "uv run fastapi run app/main.py --reload --no-proxy-headers"),
-        ("README.zh-CN.md", "uv run fastapi run app/main.py --reload --no-proxy-headers"),
+        ("README.md", "uv run codex-lb"),
+        ("README.zh-CN.md", "uv run codex-lb"),
         (
             "openspec/specs/responses-api-compat/ops.md",
-            ".venv/bin/fastapi run app/main.py --host 127.0.0.1 --port 2460 --no-proxy-headers",
+            ".venv/bin/python -m app.cli --host 127.0.0.1 --port 2460",
         ),
     ],
 )
-def test_documented_direct_launchers_disable_server_proxy_projection(
+def test_documented_launchers_delegate_to_app_cli(
     relative_path: str,
     command: str,
 ) -> None:

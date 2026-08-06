@@ -73,6 +73,8 @@ _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
             "idx_usage_window_account_latest",
             "idx_usage_window_account_time",
             "idx_usage_window_raw_account_latest",
+            "idx_usage_window_account_time_covering",
+            "idx_usage_window_raw_account_time_covering",
         }
     ),
     "request_logs": frozenset(
@@ -86,7 +88,13 @@ _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
             "idx_logs_dash_usage_covering",
         }
     ),
-    "additional_usage_history": frozenset({"ix_additional_usage_distinct_labels"}),
+    "additional_usage_history": frozenset(
+        {
+            "ix_additional_usage_distinct_labels",
+            "ix_additional_usage_alias_limit_latest",
+            "ix_additional_usage_alias_feature_latest",
+        }
+    ),
     "account_limit_warmups": frozenset(
         {
             "idx_account_limit_warmups_account_attempted",
@@ -144,7 +152,16 @@ def _script_location() -> str:
 def _build_alembic_config(database_url: str) -> Config:
     config = Config()
     config.set_main_option("script_location", _script_location())
-    config.set_main_option("sqlalchemy.url", to_sync_database_url(database_url))
+    sync_database_url = to_sync_database_url(database_url)
+    # `to_sync_database_url` routes the URL through `make_url().render_as_string()`,
+    # which percent-encodes the path on Windows (e.g.
+    # `sqlite:///C%3A%5CUsers%5C...%5Cstore.db`). Alembic stores option values in
+    # a `configparser` using `BasicInterpolation`, which treats a bare `%` as
+    # interpolation syntax and raises `ValueError: invalid interpolation syntax`
+    # from `set_main_option`. Escape `%` -> `%%` so ConfigParser keeps the value
+    # verbatim; `get_main_option` decodes `%%` back to `%`, so the URL handed to
+    # SQLAlchemy is unchanged.
+    config.set_main_option("sqlalchemy.url", sync_database_url.replace("%", "%%"))
     config.attributes["configure_logger"] = False
     return config
 

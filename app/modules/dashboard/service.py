@@ -279,8 +279,16 @@ async def _load_projection_histories(
             if acct_since < sec_since:
                 sec_since = acct_since
 
-    all_pri_rows = await repo.bulk_usage_history_since(pri_fetch_ids, "primary", pri_since) if pri_fetch_ids else {}
-    all_sec_rows = await repo.bulk_usage_history_since(sec_fetch_ids, "secondary", sec_since) if sec_fetch_ids else {}
+    all_pri_rows = (
+        await repo.bulk_usage_history_since(pri_fetch_ids, "primary", pri_since, cutoffs=pri_cutoffs)
+        if pri_fetch_ids
+        else {}
+    )
+    all_sec_rows = (
+        await repo.bulk_usage_history_since(sec_fetch_ids, "secondary", sec_since, cutoffs=sec_cutoffs)
+        if sec_fetch_ids
+        else {}
+    )
 
     primary_history: dict[str, list[UsageHistory]] = {}
     secondary_history: dict[str, list[UsageHistory]] = {}

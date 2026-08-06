@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import cast as typing_cast
 
 import anyio
@@ -21,21 +21,33 @@ from app.core.usage.types import (
 )
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountUsageRollupState, ApiKey, RequestKind, RequestLog, RequestUsageHourlyRollup
-from app.db.session import sqlite_writer_section
+from app.db.models import (
+    Account,
+    AccountUsageRollupState,
+    ApiKey,
+    RequestDemandQuarterRollup,
+    RequestKind,
+    RequestLog,
+    RequestUsageHourlyRollup,
+)
+from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.modules.accounts.usage_rollup import lock_fold_state
 from app.modules.accounts.usage_time_rollup import (
     HOURLY_BUCKET_SECONDS,
     WARMUP_REQUEST_KINDS,
+    conversation_id_expr,
     floor_to_hour,
     from_dimension,
+    to_dimension,
 )
 from app.modules.accounts.usage_time_rollup_read import (
     RawWindow,
+    conversation_presence_union,
     earliest_hourly_bucket_at,
     raw_windows_clause,
     read_errors_window,
     read_hourly_window,
+    sum_demand_window,
 )
 
 
@@ -43,6 +55,41 @@ from app.modules.accounts.usage_time_rollup_read import (
 class _RequestLogFilters:
     conditions: list
     needs_related_search_joins: bool
+
+
+# Earliest representable listing lower bound for the rollup-count window.
+_ROLLUP_EPOCH = datetime(1970, 1, 1)
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """FastAPI parses ISO `Z` query bounds as offset-aware datetimes;
+    ``requested_at`` and the rollup grid are naive UTC, so normalize before
+    any window arithmetic (the SQL filter comparisons already coerce)."""
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+@dataclass(frozen=True, slots=True)
+class _DemandCountParams:
+    """Listing filters that map losslessly onto demand-rollup dimensions.
+
+    Built only when the listing carries no free-text search and no
+    error-code splits — the demand grain has no error_code dimension, and
+    search reaches related tables. Everything else (time bounds, accounts,
+    api keys, model/effort pairs, statuses, soft-delete exclusion) is a
+    demand dimension, so the folded window can be counted from the rollup.
+    """
+
+    since: datetime | None
+    until: datetime | None
+    account_ids: list[str] | None
+    api_key_ids: list[str] | None
+    model_options: list[tuple[str, str | None]] | None
+    models: list[str] | None
+    reasoning_efforts: list[str] | None
+    include_success: bool
+    include_error_other: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,11 +212,7 @@ class RequestLogsRepository:
 
     @staticmethod
     def _conversation_id_expr() -> ColumnElement:
-        trimmed = func.ltrim(
-            func.rtrim(RequestLog.conversation_id, _CONVERSATION_WHITESPACE),
-            _CONVERSATION_WHITESPACE,
-        )
-        return func.nullif(trimmed, "")
+        return conversation_id_expr()
 
     def _conversation_output_expr(self) -> ColumnElement:
         return func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
@@ -618,22 +661,40 @@ class RequestLogsRepository:
         since: datetime,
         bucket_seconds: int = 21600,
     ) -> list[BucketConversationAggregate]:
-        bucket_expr = self._bucket_epoch_expr(bucket_seconds)
-        bucket_col = bucket_expr.label("bucket_epoch")
-        conversation_id = self._conversation_id_expr()
-        stmt = (
-            select(
-                bucket_col,
-                func.count(func.distinct(conversation_id)).label("conversation_count"),
+        # Hour-multiple display buckets merge the conversation satellite with
+        # the raw tail in one UNION statement: COUNT(DISTINCT) over the merge
+        # dedups a conversation present on both sides of the fold boundary
+        # within one display bucket. Any other granularity degrades to the
+        # legacy full-raw scan (a display bucket would split a folded hour).
+        if bucket_seconds > 0 and bucket_seconds % HOURLY_BUCKET_SECONDS == 0:
+            union = conversation_presence_union(
+                self._session,
+                since,
+                include_deleted=False,
+                raw_conditions=self._eligible_conversation_row_conditions(),
+                display_bucket_seconds=bucket_seconds,
+            ).subquery()
+            stmt = (
+                select(union.c.bucket_epoch, func.count(func.distinct(union.c.cid)).label("conversation_count"))
+                .group_by(union.c.bucket_epoch)
+                .order_by(union.c.bucket_epoch)
             )
-            .where(
-                RequestLog.requested_at >= since,
-                *self._eligible_conversation_row_conditions(),
-                conversation_id.is_not(None),
+        else:
+            bucket_col = self._bucket_epoch_expr(bucket_seconds).label("bucket_epoch")
+            conversation_id = self._conversation_id_expr()
+            stmt = (
+                select(
+                    bucket_col,
+                    func.count(func.distinct(conversation_id)).label("conversation_count"),
+                )
+                .where(
+                    RequestLog.requested_at >= since,
+                    *self._eligible_conversation_row_conditions(),
+                    conversation_id.is_not(None),
+                )
+                .group_by(bucket_col)
+                .order_by(bucket_col)
             )
-            .group_by(bucket_col)
-            .order_by(bucket_col)
-        )
         result = await self._session.execute(stmt)
         return [
             BucketConversationAggregate(
@@ -689,20 +750,23 @@ class RequestLogsRepository:
             cost_usd += float(row.cost_usd or 0.0)
 
         # Distinct conversation counts are not additive across the fold
-        # boundary, so they always come from raw over the FULL window (a
-        # documented non-goal: they only reach as far back as retention keeps
-        # raw rows). This splits the legacy single-statement read in two —
+        # boundary, so they merge the conversation satellite with the raw
+        # tail via UNION ALL in one statement: COUNT(DISTINCT) dedups a
+        # conversation straddling the boundary, SUM(request_count) stays
+        # additive. This keeps the legacy read split in two statements —
         # totals and conversation metrics can straddle a concurrent insert,
         # which the periodically-polled dashboard tolerates.
+        union = conversation_presence_union(
+            self._session,
+            since,
+            until,
+            include_deleted=False,
+            raw_conditions=self._eligible_conversation_row_conditions(),
+        ).subquery()
         conversation_stmt = select(
-            func.count(func.distinct(self._conversation_id_expr())).label("conversation_count"),
-            func.count(self._conversation_id_expr()).label("conversation_request_count"),
-        ).where(
-            RequestLog.requested_at >= since,
-            *self._eligible_conversation_row_conditions(),
+            func.count(func.distinct(union.c.cid)).label("conversation_count"),
+            func.coalesce(func.sum(union.c.request_count), 0).label("conversation_request_count"),
         )
-        if until is not None:
-            conversation_stmt = conversation_stmt.where(RequestLog.requested_at < until)
         conversation_row = (await self._session.execute(conversation_stmt)).one()
 
         return RequestActivityAggregate(
@@ -896,6 +960,7 @@ class RequestLogsRepository:
         cost_usd: float | None = None,
         bridge_stage: str | None = None,
         request_kind: str = RequestKind.NORMAL.value,
+        connection_request_kind: str | None = None,
         upstream_proxy_route_mode: str | None = None,
         upstream_proxy_pool_id: str | None = None,
         upstream_proxy_endpoint_id: str | None = None,
@@ -904,6 +969,9 @@ class RequestLogsRepository:
         archive_request_id: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
+            # Telemetry write: this transaction only appends one request-log
+            # row, so its commit may skip the synchronous WAL flush.
+            await relax_commit_durability(self._session)
             resolved_request_id = ensure_request_id(request_id)
             resolved_archive_request_id = (archive_request_id or "").strip() or resolved_request_id
             resolved_plan_type = plan_type
@@ -929,6 +997,7 @@ class RequestLogsRepository:
                 transport=transport,
                 upstream_transport=upstream_transport,
                 request_kind=request_kind,
+                connection_request_kind=connection_request_kind,
                 useragent=resolved_useragent,
                 useragent_group=resolved_useragent_group,
                 conversation_id=resolved_conversation_id,
@@ -1007,7 +1076,9 @@ class RequestLogsRepository:
         A matching row below the watermarks can only be a client-reused
         request id colliding with unrelated old traffic — the rewrite's
         target is the row the caller inserted moments ago. The fold-state
-        lock serializes this against an in-flight fold slice.
+        lock serializes this against an in-flight fold slice. The
+        conversation satellite needs no bound here: neither ``model`` nor
+        ``cost_usd`` is folded into it.
 
         Returns the number of rows that were updated.
         """
@@ -1078,6 +1149,8 @@ class RequestLogsRepository:
         *,
         include_sensitive_metadata: bool = True,
     ) -> RequestLogsResult:
+        since = _naive_utc(since) if since is not None else None
+        until = _naive_utc(until) if until is not None else None
         filters = self._build_filters(
             search=search,
             since=since,
@@ -1111,9 +1184,23 @@ class RequestLogsRepository:
             total, aggregated_cost_usd = await self._count_and_sum_recent(filters)
             return RequestLogsResult(logs=logs, total=total, aggregated_cost_usd=aggregated_cost_usd)
 
+        demand_params: _DemandCountParams | None = None
+        if search is None and not error_codes_in and not error_codes_excluding:
+            demand_params = _DemandCountParams(
+                since=since,
+                until=until,
+                account_ids=account_ids,
+                api_key_ids=api_key_ids,
+                model_options=model_options,
+                models=models,
+                reasoning_efforts=reasoning_efforts,
+                include_success=include_success,
+                include_error_other=include_error_other,
+            )
+
         ttl_seconds = _COUNT_CACHE_TTL_SECONDS
         if ttl_seconds <= 0:
-            return RequestLogsResult(logs=logs, total=await self._count_recent(filters))
+            return RequestLogsResult(logs=logs, total=await self._count_recent(filters, demand_params))
         cache_key = (
             search,
             since,
@@ -1132,7 +1219,7 @@ class RequestLogsRepository:
         )
         total = _cached_recent_count(cache_key)
         if total is None:
-            total = await self._count_recent(filters)
+            total = await self._count_recent(filters, demand_params)
             _store_recent_count(cache_key, total, ttl_seconds)
         return RequestLogsResult(logs=logs, total=total)
 
@@ -1148,13 +1235,111 @@ class RequestLogsRepository:
         request_count, aggregated_cost_usd = result.one()
         return int(request_count), float(aggregated_cost_usd)
 
-    async def _count_recent(self, filters: _RequestLogFilters) -> int:
+    async def _count_recent(
+        self,
+        filters: _RequestLogFilters,
+        demand_params: _DemandCountParams | None = None,
+    ) -> int:
+        if demand_params is not None:
+            return await self._count_recent_from_demand_rollup(filters, demand_params)
         count_stmt = select(func.count(RequestLog.id)).select_from(RequestLog)
         count_stmt = self._apply_related_search_joins(count_stmt, filters.needs_related_search_joins)
         if filters.conditions:
             count_stmt = count_stmt.where(and_(*filters.conditions))
         result = await self._session.execute(count_stmt)
         return int(result.scalar_one())
+
+    async def _count_recent_from_demand_rollup(
+        self,
+        filters: _RequestLogFilters,
+        params: _DemandCountParams,
+    ) -> int:
+        """Serve the listing total from the demand rollup plus the raw tail.
+
+        Every filter the listing exposes except free-text search and
+        error-code splits maps onto a demand-rollup dimension (status is a
+        dimension there, unlike the hourly rollup), so the folded part of
+        the window is one indexed SUM instead of a scan that grows with
+        history. The un-folded complement is counted from raw with the
+        exact listing conditions. With no watermark the folded sum is 0 and
+        the raw windows cover the whole range, which is the legacy count —
+        no kill switch needed.
+        """
+        rollup_filters: list = [RequestDemandQuarterRollup.is_deleted.is_(False)]
+        if params.account_ids:
+            rollup_filters.append(
+                RequestDemandQuarterRollup.account_id.in_([to_dimension(value) for value in params.account_ids])
+            )
+        if params.api_key_ids:
+            rollup_filters.append(
+                RequestDemandQuarterRollup.api_key_id.in_([to_dimension(value) for value in params.api_key_ids])
+            )
+        if params.model_options:
+            pair_filters = []
+            for model, effort in params.model_options:
+                base = (model or "").strip()
+                if not base:
+                    continue
+                pair_filters.append(
+                    and_(
+                        RequestDemandQuarterRollup.model == base,
+                        RequestDemandQuarterRollup.reasoning_effort == to_dimension(effort),
+                    )
+                )
+            if pair_filters:
+                rollup_filters.append(or_(*pair_filters))
+        else:
+            if params.models:
+                rollup_filters.append(RequestDemandQuarterRollup.model.in_(params.models))
+            if params.reasoning_efforts:
+                rollup_filters.append(
+                    RequestDemandQuarterRollup.reasoning_effort.in_(
+                        [to_dimension(value) for value in params.reasoning_efforts]
+                    )
+                )
+        statuses = []
+        if params.include_success:
+            statuses.append("success")
+        if params.include_error_other:
+            statuses.append("error")
+        if statuses:
+            rollup_filters.append(RequestDemandQuarterRollup.status.in_(statuses))
+
+        # Retention prunes raw rows but keeps their folded counts; the
+        # listing total must track listable rows, so clamp the rollup window
+        # to the earliest surviving live row (the slot containing it stays
+        # raw-served, excluding any partially pruned slot). A prune
+        # committing between this read and the sum can transiently overcount
+        # — the same cross-statement exposure every rollup reader accepts.
+        earliest_live = (
+            await self._session.execute(
+                select(func.min(RequestLog.requested_at)).where(RequestLog.deleted_at.is_(None))
+            )
+        ).scalar_one_or_none()
+        rollup_since = params.since if params.since is not None else _ROLLUP_EPOCH
+        if earliest_live is None:
+            rollup_since = utcnow().replace(tzinfo=None)
+        else:
+            rollup_since = max(rollup_since, earliest_live)
+        # The listing's `until` bound is inclusive; the rollup window is
+        # half-open, so shift by the smallest representable step
+        # (datetime.max cannot be shifted — treat it as unbounded).
+        rollup_until = (
+            None if params.until is None or params.until == datetime.max else params.until + timedelta(microseconds=1)
+        )
+        folded_total, raw_windows = await sum_demand_window(
+            self._session,
+            rollup_since,
+            rollup_until,
+            filters=rollup_filters,
+        )
+        if not raw_windows:
+            return folded_total
+        tail_stmt = select(func.count(RequestLog.id)).select_from(RequestLog).where(raw_windows_clause(raw_windows))
+        if filters.conditions:
+            tail_stmt = tail_stmt.where(and_(*filters.conditions))
+        tail_total = (await self._session.execute(tail_stmt)).scalar_one()
+        return folded_total + int(tail_total)
 
     async def _resolve_account_plan_type(self, account_id: str) -> str | None:
         result = await self._session.execute(select(Account.plan_type).where(Account.id == account_id).limit(1))

@@ -130,6 +130,7 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
         proxy_account_stream_limit=settings.proxy_account_stream_limit,
         proxy_account_stream_recovery_reserve=settings.proxy_account_stream_recovery_reserve,
+        proxy_api_key_fair_share_congestion_threshold_pct=(settings.proxy_api_key_fair_share_congestion_threshold_pct),
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
@@ -650,6 +651,11 @@ async def update_settings(
                     if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
                     else None
                 ),
+                proxy_api_key_fair_share_congestion_threshold_pct=(
+                    payload.proxy_api_key_fair_share_congestion_threshold_pct
+                    if "proxy_api_key_fair_share_congestion_threshold_pct" in payload.model_fields_set
+                    else None
+                ),
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
                     if payload.upstream_proxy_routing_enabled is not None
@@ -842,6 +848,7 @@ async def update_settings(
             "proxy_account_response_create_limit",
             "proxy_account_stream_limit",
             "proxy_account_stream_recovery_reserve",
+            "proxy_api_key_fair_share_congestion_threshold_pct",
             "upstream_proxy_routing_enabled",
             "upstream_proxy_default_pool_id",
             "prefer_earlier_reset_accounts",

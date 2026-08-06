@@ -135,6 +135,77 @@ async def test_accounts_upsert_reauthorized_heals_deactivated_identity_even_when
 
 
 @pytest.mark.asyncio
+async def test_replace_reauthorized_discards_pending_downgrade_evidence(db_setup):
+    """In-place reauthentication must reset pending plan-downgrade evidence.
+
+    Regression for the replaced-credential half of #1456's review: account ids
+    are deterministic, so reauthenticating a row in place reuses the id with new
+    token material — and without the replacement-time discard, the new
+    credential's very first `free` payload would count as the second observation
+    and land a downgrade on a single sample.
+    """
+    from app.modules.usage.plan_downgrade_observations import PlanDowngradeObservationStore
+
+    store = PlanDowngradeObservationStore()
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_make_account("acc_reauth_evidence", "reauth-evidence@example.com"))
+
+        assert (
+            await store.observe(
+                "acc_reauth_evidence",
+                credential_fingerprint="fp-previous-credential",
+                observed_plan_type="free",
+            )
+            == 1
+        )
+
+        incoming = _make_account("acc_reauth_evidence", "reauth-evidence@example.com")
+        replaced = await repo.replace_reauthorized("acc_reauth_evidence", incoming)
+        assert replaced is not None
+
+    assert await store.get("acc_reauth_evidence") is None, (
+        "fresh credential material must discard evidence gathered under the previous credential"
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport(db_setup):
+    """Re-importing an account in place must reset pending downgrade evidence.
+
+    The delete-then-re-import flow is covered by ``ondelete="CASCADE"``; this
+    pins the other replacement shape, where the import lands on the existing row
+    through ``upsert_account_slot`` without any deletion.
+    """
+    from app.modules.usage.plan_downgrade_observations import PlanDowngradeObservationStore
+
+    store = PlanDowngradeObservationStore()
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        original = _make_account("acc_reimport_evidence", "reimport-evidence@example.com")
+        original.chatgpt_account_id = "upstream_reimport"
+        await repo.upsert_account_slot(original)
+
+        assert (
+            await store.observe(
+                "acc_reimport_evidence",
+                credential_fingerprint="fp-previous-credential",
+                observed_plan_type="free",
+            )
+            == 1
+        )
+
+        reimported = _make_account("acc_reimport_evidence", "reimport-evidence@example.com")
+        reimported.chatgpt_account_id = "upstream_reimport"
+        saved = await repo.upsert_account_slot(reimported)
+        assert saved.id == "acc_reimport_evidence"
+
+    assert await store.get("acc_reimport_evidence") is None, (
+        "an in-place re-import must discard evidence gathered under the previous credential"
+    )
+
+
+@pytest.mark.asyncio
 async def test_accounts_upsert_with_merge_enabled_raises_conflict_on_ambiguous_email(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)

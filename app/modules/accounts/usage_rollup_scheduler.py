@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Protocol, TypeVar, cast
 
 from app.modules.accounts.usage_rollup import run_fold_pass
-from app.modules.accounts.usage_time_rollup import run_hourly_fold_pass
+from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +67,17 @@ class AccountUsageRollupScheduler:
                 await run_fold_pass()
             except Exception:
                 logger.exception("Account usage rollup fold pass failed")
-            # Separate try-block on purpose: an hourly-aggregation bug must
-            # not stop the lifetime fold (and vice versa) — retention only
-            # ever pauses, because its prune gate takes the MIN of the two
-            # watermarks.
+            # Separate try-blocks on purpose: a bug in any one fold must not
+            # stop the others — retention only ever pauses, because its prune
+            # gate takes the MIN of every watermark.
             try:
                 await run_hourly_fold_pass()
             except Exception:
                 logger.exception("Hourly usage rollup fold pass failed")
+            try:
+                await run_conversation_fold_pass()
+            except Exception:
+                logger.exception("Conversation rollup fold pass failed")
 
 
 def build_account_usage_rollup_scheduler() -> AccountUsageRollupScheduler:

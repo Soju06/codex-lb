@@ -2069,6 +2069,55 @@ def test_capability_lineage_migration_is_additive_reversible_and_single_head(tmp
         engine.dispose()
 
 
+def test_connection_request_kind_migration_is_additive_without_backfill(tmp_path: Path) -> None:
+    db_path = tmp_path / "connection-request-kind.db"
+    url = _db_url(db_path)
+    parent_revision = "20260727_000000_add_sticky_session_continuity_abandoned_at"
+    target_revision = "20260804_230000_add_request_log_connection_request_kind"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO request_logs (request_id, model, status, request_kind, output_tokens)
+                    VALUES ('req_existing_prewarm', 'gpt-5.6-sol', 'success', 'prewarm', 42)
+                    """
+                )
+            )
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("request_logs")}
+            assert columns["connection_request_kind"]["nullable"] is True
+            row = connection.execute(
+                text(
+                    """
+                    SELECT request_kind, connection_request_kind
+                    FROM request_logs
+                    WHERE request_id = 'req_existing_prewarm'
+                    """
+                )
+            ).one()
+            assert row == ("prewarm", None)
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("request_logs")}
+            assert "connection_request_kind" not in columns
+            assert (
+                connection.execute(
+                    text("SELECT request_kind FROM request_logs WHERE request_id = 'req_existing_prewarm'")
+                ).scalar_one()
+                == "prewarm"
+            )
+    finally:
+        engine.dispose()
+
+
 def test_check_schema_drift_detects_missing_dashboard_hot_path_indexes(tmp_path: Path) -> None:
     db_path = tmp_path / "missing-hot-path-indexes.db"
     url = _db_url(db_path)

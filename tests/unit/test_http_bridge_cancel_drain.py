@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import deque
 from types import SimpleNamespace
@@ -93,14 +94,17 @@ async def test_cancelled_stream_settlement_task_releases_reservation(
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     scheduled: list[tuple[str, str]] = []
     cleanup_tasks: list[asyncio.Task[None]] = []
+    release_retry_flags: list[bool] = []
 
     async def release_unsettled(
         *,
         api_key: ApiKeyData,
         api_key_reservation: ApiKeyUsageReservationData,
         request_id: str,
+        retry_persistence_failures: bool = False,
     ) -> None:
         scheduled.append((api_key.id, api_key_reservation.reservation_id))
+        release_retry_flags.append(retry_persistence_failures)
 
     def schedule_cleanup(
         coro: Any,
@@ -133,6 +137,7 @@ async def test_cancelled_stream_settlement_task_releases_reservation(
 
     assert ("release_stream_api_key_reservation_after_cancelled_settlement", "req-cancel-settle") in scheduled
     assert ("key-cancel-settle", "res-cancel-settle") in scheduled
+    assert release_retry_flags == [True]
 
 
 @pytest.mark.asyncio
@@ -332,6 +337,198 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
     assert "request_id=req-terminal-race" in suppression_messages[0]
     assert "response_id=resp-terminal-race" in suppression_messages[0]
     assert "elapsed_seconds=" in suppression_messages[0]
+
+
+def _attach_reservation_with_heartbeat(
+    service: proxy_service.ProxyService,
+    request_state: proxy_service._WebSocketRequestState,
+    *,
+    reservation_id: str,
+) -> asyncio.Task[None]:
+    request_state.api_key = _make_api_key()
+    request_state.api_key_reservation = ApiKeyUsageReservationData(
+        reservation_id=reservation_id,
+        key_id="key-cancel-settle",
+        model="gpt-5.5",
+    )
+    service._start_request_state_api_key_reservation_heartbeat(
+        request_state,
+        api_key=request_state.api_key,
+        surface="http_bridge",
+    )
+    heartbeat_task = request_state.api_key_reservation_heartbeat_task
+    assert heartbeat_task is not None
+    return heartbeat_task
+
+
+async def _assert_heartbeat_finished(heartbeat_task: asyncio.Task[None]) -> None:
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(heartbeat_task, timeout=1.0)
+    assert heartbeat_task.done()
+
+
+@pytest.mark.parametrize("abort_kind", ["exception", "cancellation"])
+@pytest.mark.asyncio
+async def test_http_bridge_aborted_completed_bookkeeping_settles_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    abort_kind: str,
+) -> None:
+    """Issue #1594: an abort after the completed pending pop must still settle.
+
+    Once completed-event processing pops the terminal request from
+    ``session.pending_requests``, neither the reader failure path nor the
+    downstream detach reaches it any more. An exception or cancellation in the
+    bookkeeping continuation must cancel the reservation heartbeat and release
+    the API-key reservation exactly once instead of leaking both forever.
+    """
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+    touch_reservation = AsyncMock(return_value=1.0)
+    monkeypatch.setattr(service, "_maybe_touch_api_key_reservation", touch_reservation)
+
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = _make_request_state(
+        "req-aborted-completed",
+        response_id="resp-aborted-completed",
+        awaiting_response_created=False,
+        event_queue=event_queue,
+    )
+    heartbeat_task = _attach_reservation_with_heartbeat(
+        service,
+        request_state,
+        reservation_id="res-aborted-completed",
+    )
+    reservation = request_state.api_key_reservation
+    session = _make_http_bridge_session(deque([request_state]), queued_request_count=1)
+
+    bookkeeping_started = asyncio.Event()
+
+    async def abort_bookkeeping(*args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        assert request_state not in session.pending_requests
+        assert request_state.terminal_settlement_phase == "claimed"
+        bookkeeping_started.set()
+        if abort_kind == "exception":
+            raise RuntimeError("continuity bookkeeping failed")
+        await asyncio.Event().wait()
+        return True
+
+    finalize_request = AsyncMock()
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", abort_bookkeeping)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
+
+    terminal_text = '{"type":"response.completed","response":{"id":"resp-aborted-completed","status":"completed"}}'
+    terminal_task = asyncio.create_task(service._process_http_bridge_upstream_text(session, terminal_text))
+    await asyncio.wait_for(bookkeeping_started.wait(), timeout=1.0)
+    if abort_kind == "exception":
+        with pytest.raises(RuntimeError, match="continuity bookkeeping failed"):
+            await asyncio.wait_for(terminal_task, timeout=1.0)
+    else:
+        terminal_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(terminal_task, timeout=1.0)
+
+    release_reservation.assert_awaited_once_with(reservation)
+    assert request_state.api_key_reservation is None
+    assert request_state.terminal_settlement_phase is None
+    await _assert_heartbeat_finished(heartbeat_task)
+    assert request_state.api_key_reservation_heartbeat_task is None
+    touch_reservation.assert_not_awaited()
+    finalize_request.assert_not_awaited()
+    # The downstream waiter is unblocked instead of waiting for idle timeout.
+    assert event_queue.get_nowait() is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_aborted_grouped_previous_response_bookkeeping_settles_remainder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1594, grouped variant: abort mid-loop settles the popped remainder."""
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+
+    request_states = []
+    heartbeat_tasks = []
+    for index in range(2):
+        request_state = _make_request_state(
+            f"req-grouped-{index}",
+            response_id=None,
+            awaiting_response_created=True,
+            event_queue=asyncio.Queue(),
+        )
+        request_state.previous_response_id = "resp-anchor"
+        heartbeat_tasks.append(
+            _attach_reservation_with_heartbeat(
+                service,
+                request_state,
+                reservation_id=f"res-grouped-{index}",
+            )
+        )
+        request_states.append(request_state)
+    reservations = [request_state.api_key_reservation for request_state in request_states]
+    session = _make_http_bridge_session(deque(request_states), queued_request_count=2)
+
+    finalize_request = AsyncMock(side_effect=[None, RuntimeError("grouped finalize failed")])
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
+
+    terminal_text = (
+        '{"type":"error","error_type":"invalid_request_error","code":"previous_response_not_found",'
+        '"message":"Previous response with id \'resp-anchor\' not found.","param":"previous_response_id"}'
+    )
+    with pytest.raises(RuntimeError, match="grouped finalize failed"):
+        await service._process_http_bridge_upstream_text(session, terminal_text)
+
+    assert finalize_request.await_count == 2
+    assert not session.pending_requests
+    assert release_reservation.await_count == 2
+    released = {call.args[0].reservation_id for call in release_reservation.await_args_list}
+    assert released == {reservation.reservation_id for reservation in reservations if reservation is not None}
+    for request_state, heartbeat_task in zip(request_states, heartbeat_tasks, strict=True):
+        assert request_state.api_key_reservation is None
+        assert request_state.terminal_settlement_phase is None
+        await _assert_heartbeat_finished(heartbeat_task)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_detach_reclaims_abandoned_terminal_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1594 backstop: detach settles a claim whose abort settlement failed."""
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    release_reservation = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
+
+    request_state = _make_request_state(
+        "req-abandoned-detach",
+        response_id="resp-abandoned-detach",
+        awaiting_response_created=False,
+        event_queue=None,
+    )
+    heartbeat_task = _attach_reservation_with_heartbeat(
+        service,
+        request_state,
+        reservation_id="res-abandoned-detach",
+    )
+    reservation = request_state.api_key_reservation
+    session = _make_http_bridge_session(deque(), queued_request_count=0)
+
+    # A live claim still belongs to the bookkeeping continuation: detach must
+    # not settle it out from under an in-flight finalize.
+    request_state.terminal_settlement_phase = "claimed"
+    assert await service._detach_http_bridge_request(session, request_state=request_state) is False
+    release_reservation.assert_not_awaited()
+    assert request_state.terminal_settlement_phase == "claimed"
+
+    # An abandoned claim (abort settlement failed) has no owner left; detach
+    # is the backstop that reclaims settlement.
+    request_state.terminal_settlement_phase = "abandoned"
+    assert await service._detach_http_bridge_request(session, request_state=request_state) is False
+    release_reservation.assert_awaited_once_with(reservation)
+    assert request_state.api_key_reservation is None
+    assert request_state.terminal_settlement_phase is None
+    await _assert_heartbeat_finished(heartbeat_task)
 
 
 @pytest.mark.asyncio

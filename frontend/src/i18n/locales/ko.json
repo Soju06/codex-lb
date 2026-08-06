@@ -1095,6 +1095,8 @@
   "settings.password.verifyDialog.totpPlaceholder": "6자리 code",
   "settings.password.verifyDialog.totpTitle": "TOTP 확인",
   "settings.routing.accountCapacity.description": "각 Account에서 동시에 실행되는 Responses 작업 수를 제한합니다. 0은 무제한입니다.",
+  "settings.routing.accountCapacity.fairShareThresholdDescription": "Pool의 in-flight stream이 stream capacity의 이 비율에 도달하면, fair share를 초과해 점유한 API 키를 혼잡이 해소될 때까지 제한합니다. 0은 비활성화합니다.",
+  "settings.routing.accountCapacity.fairShareThresholdLabel": "API 키 공정 점유 임계값 (%)",
   "settings.routing.accountCapacity.responseCreateDescription": "Account별 동시 response create 최대값입니다. 0은 무제한입니다.",
   "settings.routing.accountCapacity.responseCreateLabel": "Response-create limit",
   "settings.routing.accountCapacity.save": "capacity limit 저장",

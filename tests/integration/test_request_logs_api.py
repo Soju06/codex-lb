@@ -80,6 +80,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
             requested_at=now,
             api_key_id="key_logs_1",
             transport="websocket",
+            connection_request_kind="prewarm",
         )
 
     response = await async_client.get("/api/request-logs?limit=2")
@@ -112,6 +113,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     }
     assert latest["transport"] == "websocket"
     assert latest["requestKind"] == "normal"
+    assert latest["connectionRequestKind"] == "prewarm"
 
     older = payload[1]
     assert older["status"] == "ok"
@@ -131,6 +133,7 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
     }
     assert older["transport"] == "http"
     assert older["requestKind"] == "normal"
+    assert older["connectionRequestKind"] is None
 
 
 @pytest.mark.asyncio

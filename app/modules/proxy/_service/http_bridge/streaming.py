@@ -151,6 +151,8 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _account_capacity_wait_payload,
     _account_selection_recovery_sleep_seconds_from_message,
+    _DeferredAccountBackoffLifecycle,
+    _DeferredAccountBackoffTracker,
     _event_type_from_payload,
     _HTTPBridgeOwnerForward,
     _HTTPBridgeSession,
@@ -237,8 +239,163 @@ def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketR
     )
 
 
+class _VerifiedDurableFullResend:
+    """Immutable proof that one payload contains a durable turn's complete context."""
+
+    _durable_session_id: str
+    _full_input_fingerprint: str
+    _latest_response_id: str
+    _owner_account_id: str
+    _pending_tool_calls: tuple[tuple[str, str], ...] | None
+    _stored_input_fingerprint: str
+    _stored_input_item_count: int
+    __slots__ = (
+        "_durable_session_id",
+        "_full_input_fingerprint",
+        "_latest_response_id",
+        "_owner_account_id",
+        "_pending_tool_calls",
+        "_stored_input_fingerprint",
+        "_stored_input_item_count",
+    )
+    __construction_token = object()
+
+    def __init__(
+        self,
+        *,
+        _token: object,
+        durable_session_id: str,
+        owner_account_id: str,
+        latest_response_id: str,
+        stored_input_item_count: int,
+        stored_input_fingerprint: str,
+        full_input_fingerprint: str,
+        pending_tool_calls: tuple[tuple[str, str], ...] | None,
+    ) -> None:
+        if _token is not self.__construction_token:
+            raise TypeError("verified durable full resend proofs are created only by the verifier")
+        object.__setattr__(self, "_durable_session_id", durable_session_id)
+        object.__setattr__(self, "_owner_account_id", owner_account_id)
+        object.__setattr__(self, "_latest_response_id", latest_response_id)
+        object.__setattr__(self, "_stored_input_item_count", stored_input_item_count)
+        object.__setattr__(self, "_stored_input_fingerprint", stored_input_fingerprint)
+        object.__setattr__(self, "_full_input_fingerprint", full_input_fingerprint)
+        object.__setattr__(self, "_pending_tool_calls", pending_tool_calls)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("verified durable full resend proofs are immutable")
+
+    def __copy__(self) -> "_VerifiedDurableFullResend":
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, object]) -> "_VerifiedDurableFullResend":
+        return self
+
+    def __reduce_ex__(self, _protocol: object) -> str | tuple[Any, ...]:
+        raise TypeError("verified durable full resend proofs cannot be serialized")
+
+    @property
+    def stored_input_item_count(self) -> int:
+        return self._stored_input_item_count
+
+    def matches(
+        self,
+        payload: ResponsesRequest,
+        durable_lookup: DurableBridgeLookup | None,
+    ) -> bool:
+        input_items = payload.input
+        return (
+            isinstance(input_items, list)
+            and durable_lookup is not None
+            and durable_lookup.session_id == self._durable_session_id
+            and durable_lookup.account_id == self._owner_account_id
+            and durable_lookup.latest_response_id == self._latest_response_id
+            and durable_lookup.latest_input_item_count == self._stored_input_item_count
+            and durable_lookup.latest_input_full_fingerprint == self._stored_input_fingerprint
+            and _pending_tool_calls_identity(durable_lookup.latest_pending_tool_calls) == self._pending_tool_calls
+            and _fingerprint_input_items(cast(list[JsonValue], input_items)) == self._full_input_fingerprint
+        )
+
+    @classmethod
+    def _verify(
+        cls,
+        payload: ResponsesRequest,
+        durable_lookup: DurableBridgeLookup,
+    ) -> "_VerifiedDurableFullResend | None":
+        owner_account_id = durable_lookup.account_id
+        latest_response_id = durable_lookup.latest_response_id
+        stored_count = durable_lookup.latest_input_item_count
+        stored_fingerprint = durable_lookup.latest_input_full_fingerprint
+        if (
+            owner_account_id is None
+            or latest_response_id is None
+            or stored_count is None
+            or stored_fingerprint is None
+            or not _http_bridge_payload_looks_like_full_resend(payload)
+            or not isinstance(payload.input, list)
+            or not _input_prefix_matches_stored_context(
+                payload.input,
+                stored_count=stored_count,
+                stored_fingerprint=stored_fingerprint,
+            )
+        ):
+            return None
+        input_items = cast(list[JsonValue], payload.input)
+        replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+            input_items,
+            stored_count=stored_count,
+            # Classification only, mirroring classify_durable_full_resend:
+            # inline Responses-Lite developer IDs must remain visible until
+            # the exact-manifest check rejects response-owned messages.
+            preserve_developer_message_ids=True,
+        )
+        pending_tool_calls = durable_lookup.latest_pending_tool_calls
+        if replay_projection is None:
+            return None
+        safe_fresh_context = responses_input_suffix_retains_prior_output(
+            replay_projection.input_items,
+            stored_count=replay_projection.stored_prefix_count,
+            canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+        ) or (
+            pending_tool_calls is not None
+            and responses_input_suffix_matches_pending_tool_calls(
+                replay_projection.input_items,
+                stored_count=replay_projection.stored_prefix_count,
+                pending_tool_calls=pending_tool_calls,
+                canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+            )
+        )
+        if not safe_fresh_context:
+            return None
+        return cls(
+            _token=cls.__construction_token,
+            durable_session_id=durable_lookup.session_id,
+            owner_account_id=owner_account_id,
+            latest_response_id=latest_response_id,
+            stored_input_item_count=stored_count,
+            stored_input_fingerprint=stored_fingerprint,
+            full_input_fingerprint=_fingerprint_input_items(input_items),
+            pending_tool_calls=_pending_tool_calls_identity(pending_tool_calls),
+        )
+
+
+def _pending_tool_calls_identity(
+    pending_tool_calls: Mapping[str, str] | None,
+) -> tuple[tuple[str, str], ...] | None:
+    return None if pending_tool_calls is None else tuple(sorted(pending_tool_calls.items()))
+
+
+def _verify_durable_full_resend(
+    payload: ResponsesRequest,
+    durable_lookup: DurableBridgeLookup | None,
+) -> _VerifiedDurableFullResend | None:
+    if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
+        return None
+    return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+
+
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
-    return responses_payload_is_account_neutral_fresh_replay(payload.to_payload())
+    return responses_payload_is_account_neutral_fresh_replay(payload.to_replay_safety_payload())
 
 
 def _apply_http_bridge_downstream_turn_state(
@@ -704,6 +861,7 @@ class _HTTPBridgeStreamingMixin:
             return
 
         request_scope_id = ensure_request_scope_id()
+        deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
         try:
             async for line in self._stream_via_http_bridge(
                 payload,
@@ -731,14 +889,40 @@ class _HTTPBridgeStreamingMixin:
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 capacity_startup_wait_event=capacity_startup_wait_event,
                 capacity_startup_ready_event=capacity_startup_ready_event,
+                deferred_account_backoff_tracker=deferred_account_backoff_tracker,
             ):
                 yield line
         finally:
             with anyio.CancelScope(shield=True):
-                await _release_http_bridge_unanchored_handoffs_for_request(
-                    self,
-                    request_scope_id=request_scope_id,
-                )
+                try:
+                    lifecycle = deferred_account_backoff_tracker.current_lifecycle
+                    if lifecycle is not None:
+                        pending_backoffs = lifecycle.pending_backoffs
+                        if lifecycle.settlement_confirmed:
+                            await self._drain_deferred_account_error_backoffs(pending_backoffs)
+                        elif not lifecycle.settlement_owned and (
+                            pending_backoffs or lifecycle.reservation != api_key_reservation
+                        ):
+                            # Session creation can fail before the request is
+                            # submitted. Until submit returns, this wrapper owns
+                            # the current lifecycle and may release exactly that
+                            # reservation. Once ownership transfers, the request
+                            # finalizer is the only safe settlement owner.
+                            try:
+                                await self._release_websocket_reservation(lifecycle.reservation)
+                            except Exception:
+                                logger.warning(
+                                    "Failed to release HTTP bridge API key reservation before deferred backoff",
+                                    exc_info=True,
+                                )
+                            else:
+                                lifecycle.settlement_confirmed = True
+                                await self._drain_deferred_account_error_backoffs(pending_backoffs)
+                finally:
+                    await _release_http_bridge_unanchored_handoffs_for_request(
+                        self,
+                        request_scope_id=request_scope_id,
+                    )
 
     async def _stream_via_http_bridge(
         self: Any,
@@ -768,11 +952,14 @@ class _HTTPBridgeStreamingMixin:
         enforce_openai_sdk_contract: bool = True,
         capacity_startup_wait_event: asyncio.Event | None = None,
         capacity_startup_ready_event: asyncio.Event | None = None,
+        deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
+        if deferred_account_backoff_tracker is None:
+            deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
         bridge_payload = payload.to_payload()
         bridge_client_metadata = _response_create_client_metadata(
             bridge_payload,
@@ -784,6 +971,33 @@ class _HTTPBridgeStreamingMixin:
         )
         if bridge_client_metadata is not None or "client_metadata" in bridge_payload:
             payload = payload.model_copy(update={"client_metadata": bridge_client_metadata})
+
+        def begin_bridge_lifecycle(
+            reservation: ApiKeyUsageReservationData | None,
+        ) -> _DeferredAccountBackoffLifecycle:
+            previous_lifecycle = deferred_account_backoff_tracker.current_lifecycle
+            same_reservation = bool(
+                previous_lifecycle is not None
+                and (
+                    previous_lifecycle.reservation is reservation
+                    or (
+                        previous_lifecycle.reservation is not None
+                        and reservation is not None
+                        and previous_lifecycle.reservation.reservation_id == reservation.reservation_id
+                    )
+                )
+            )
+            pending_backoffs = (
+                previous_lifecycle.pending_backoffs
+                if previous_lifecycle is not None and not previous_lifecycle.settlement_owned and same_reservation
+                else {}
+            )
+            lifecycle = _DeferredAccountBackoffLifecycle(
+                reservation=reservation,
+                pending_backoffs=pending_backoffs,
+            )
+            deferred_account_backoff_tracker.current_lifecycle = lifecycle
+            return lifecycle
 
         def prepare_bridge_request(
             request_payload: ResponsesRequest,
@@ -811,7 +1025,24 @@ class _HTTPBridgeStreamingMixin:
                 )
             request_state.capacity_startup_wait_event = capacity_startup_wait_event
             request_state.capacity_startup_ready_event = capacity_startup_ready_event
+            lifecycle = begin_bridge_lifecycle(request_state.api_key_reservation)
+            request_state.deferred_account_error_backoffs = lifecycle.pending_backoffs
+            request_state.deferred_account_backoff_tracker = deferred_account_backoff_tracker
+            request_state.deferred_account_backoff_lifecycle = lifecycle
             return request_state, text_data
+
+        async def release_unowned_bridge_lifecycle(
+            lifecycle: _DeferredAccountBackoffLifecycle | None,
+            request_state: _WebSocketRequestState | None,
+        ) -> None:
+            if lifecycle is None or lifecycle.settlement_owned:
+                return
+            if request_state is not None:
+                await self._release_websocket_request_state_reservation(request_state)
+                return
+            await self._release_websocket_reservation(lifecycle.reservation)
+            lifecycle.settlement_confirmed = True
+            await self._drain_deferred_account_error_backoffs(lifecycle.pending_backoffs)
 
         incoming_turn_state_header = _sticky_key_from_turn_state_header(headers) if not forwarded_request else None
         incoming_session_header = _sticky_key_from_session_header(headers) if not forwarded_request else None
@@ -959,6 +1190,8 @@ class _HTTPBridgeStreamingMixin:
         durable_recovery_attempt_claimed = False
         durable_recovery_attempt_session_id: str | None = None
         durable_recovery_attempt_owner_epoch: int | None = None
+        durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
+        durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
 
@@ -980,18 +1213,25 @@ class _HTTPBridgeStreamingMixin:
             replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                 cast(list[JsonValue], payload.input),
                 stored_count=stored_count,
+                # Classification only: inline Responses-Lite developer IDs
+                # must remain visible until the exact-manifest check rejects
+                # response-owned messages. Cross-account replay uses the
+                # default ID-stripping projection below.
+                preserve_developer_message_ids=True,
             )
             safe_fresh_context = False
             if replay_projection is not None:
                 safe_fresh_context = responses_input_suffix_retains_prior_output(
                     replay_projection.input_items,
                     stored_count=replay_projection.stored_prefix_count,
+                    canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
                 ) or (
                     lookup.latest_pending_tool_calls is not None
                     and responses_input_suffix_matches_pending_tool_calls(
                         replay_projection.input_items,
                         stored_count=replay_projection.stored_prefix_count,
                         pending_tool_calls=lookup.latest_pending_tool_calls,
+                        canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
                     )
                 )
             return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context
@@ -1015,6 +1255,7 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_retains_prior_output = responses_input_suffix_retains_prior_output(
                     replay_projection.input_items,
                     stored_count=replay_projection.stored_prefix_count,
+                    canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
                 )
                 durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
                     payload
@@ -1175,17 +1416,36 @@ class _HTTPBridgeStreamingMixin:
                 and payload_looks_like_full_resend
                 and durable_full_resend_has_safe_fresh_context
             ):
-                # The client already supplied a complete fresh request. Adding
-                # a durable anchor here can strand it on the new WebSocket.
-                _log_http_bridge_event(
-                    "fresh_reattach_full_resend_preserved",
-                    bridge_session_key,
-                    account_id=durable_lookup.account_id,
-                    model=payload.model,
-                    detail="outcome=client_unanchored_full_resend",
-                    cache_key_family=bridge_session_key.affinity_kind,
-                    model_class=_extract_model_class(payload.model) if payload.model else None,
-                )
+                if durable_full_resend_proof is not None and durable_full_resend_proof.matches(payload, durable_lookup):
+                    durable_full_resend_fresh_bridge_proof = durable_full_resend_proof
+                    # The client already supplied a proved complete fresh
+                    # request. Adding a durable anchor here can strand it on
+                    # the new WebSocket.
+                    _log_http_bridge_event(
+                        "fresh_reattach_full_resend_preserved",
+                        bridge_session_key,
+                        account_id=durable_lookup.account_id,
+                        model=payload.model,
+                        detail="outcome=client_unanchored_full_resend",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
+                else:
+                    effective_payload = payload.model_copy(
+                        update={"previous_response_id": durable_lookup.latest_response_id}
+                    )
+                    proxy_injected_previous_response_id = True
+                    _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
+                    del _fresh_request_state
+                    _log_http_bridge_event(
+                        "fresh_reattach_anchor_injected",
+                        bridge_session_key,
+                        account_id=None,
+                        model=payload.model,
+                        detail=f"response_id={durable_lookup.latest_response_id}",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
             elif fresh_reattach_can_use_durable_anchor:
                 effective_payload = payload.model_copy(
                     update={"previous_response_id": durable_lookup.latest_response_id}
@@ -1210,6 +1470,30 @@ class _HTTPBridgeStreamingMixin:
             affinity = _AffinityPolicy()
             incoming_turn_state_header = None
             session_header_fallback_key = None
+        owner_bound_full_resend_ignores_broad_session = (
+            not forwarded_request
+            and durable_full_resend_fresh_bridge_proof is not None
+            and durable_full_resend_fresh_bridge_proof.matches(payload, durable_lookup)
+            and affinity.codex_session_source == "session_header"
+        )
+        if owner_bound_full_resend_ignores_broad_session:
+            # The durable owner remains required through request_state below.
+            # Remove only the broad client alias that can resolve a stale raw
+            # compatibility row; keep CODEX_SESSION semantics so the new
+            # bridge can anchor later incremental turns to its fresh response.
+            affinity = _AffinityPolicy(kind=StickySessionKind.CODEX_SESSION)
+            incoming_session_header = None
+            session_header_fallback_key = None
+            _log_http_bridge_event(
+                "fresh_reattach_broad_session_owner_ignored",
+                bridge_session_key,
+                account_id=durable_lookup.account_id if durable_lookup is not None else None,
+                model=payload.model,
+                detail=(f"stored_items={durable_full_resend_fresh_bridge_proof.stored_input_item_count}"),
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
         if effective_payload.previous_response_id is not None and isinstance(effective_payload.input, list):
             previous_response_input_items = cast(list[JsonValue], effective_payload.input)
             trimmed_input_items = _trim_http_bridge_previous_response_input_items(previous_response_input_items)
@@ -1324,13 +1608,13 @@ class _HTTPBridgeStreamingMixin:
         file_required_preferred_account = rewritten_file_account_id is not None
         if proxy_injected_previous_response_id:
             request_state.proxy_injected_previous_response_id = True
+            request_state.proxy_injected_anchor_had_full_resend_payload = payload_looks_like_full_resend
             request_state.fresh_upstream_request_text = fresh_upstream_request_text or text_data
-            # Durable-anchor injection actually runs when the incoming
-            # payload is *not* a full resend (see the
-            # ``not _http_bridge_payload_looks_like_full_resend(payload)``
-            # guard above), so the captured unanchored text is typically
-            # just a short follow-up. Replaying it as a fresh turn would
-            # drop the conversational context the anchor was pointing at.
+            # Durable-anchor injection runs when the incoming payload is
+            # *not* a full resend, or when a full resend failed the sealed
+            # owner-bound proof (missing owner metadata or fingerprint), so
+            # the captured unanchored text cannot be assumed to carry the
+            # complete conversational context the anchor was pointing at.
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
@@ -1355,7 +1639,9 @@ class _HTTPBridgeStreamingMixin:
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
         session_creation_headers = (
-            without_http_bridge_session_affinity_headers(headers) if account_neutral_recovery else dict(headers)
+            without_http_bridge_session_affinity_headers(headers)
+            if account_neutral_recovery or owner_bound_full_resend_ignores_broad_session
+            else dict(headers)
         )
         fresh_replay_excluded_account_ids: set[str] = set()
         unanchored_fork_spill_attempted = False
@@ -1376,6 +1662,20 @@ class _HTTPBridgeStreamingMixin:
             if durable_full_resend_fresh_payload is None:
                 if not isinstance(payload.input, list):
                     return False
+                eligibility_projection = project_responses_input_for_account_neutral_fresh_replay(
+                    cast(list[JsonValue], payload.input),
+                    stored_count=durable_full_resend_anchor_count,
+                    preserve_developer_message_ids=True,
+                )
+                if eligibility_projection is None:
+                    return False
+                durable_full_resend_retains_prior_output = responses_input_suffix_retains_prior_output(
+                    eligibility_projection.input_items,
+                    stored_count=eligibility_projection.stored_prefix_count,
+                    canonical_lite_developer_index=eligibility_projection.canonical_lite_developer_index,
+                )
+                if not durable_full_resend_retains_prior_output:
+                    return False
                 replay_projection = project_responses_input_for_account_neutral_fresh_replay(
                     cast(list[JsonValue], payload.input),
                     stored_count=durable_full_resend_anchor_count,
@@ -1385,10 +1685,6 @@ class _HTTPBridgeStreamingMixin:
                 durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(
                     payload
                 ).model_copy(update={"input": replay_projection.input_items})
-                durable_full_resend_retains_prior_output = responses_input_suffix_retains_prior_output(
-                    replay_projection.input_items,
-                    stored_count=replay_projection.stored_prefix_count,
-                )
             if not durable_full_resend_retains_prior_output:
                 return False
             if durable_full_resend_is_account_neutral is None:
@@ -1529,6 +1825,8 @@ class _HTTPBridgeStreamingMixin:
                     request_deadline=request_deadline,
                     session_header_fallback_key=session_header_fallback_key,
                     exclude_account_ids=fresh_replay_excluded_account_ids or None,
+                    deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                    defer_account_health_writes=request_state.api_key_reservation is not None,
                 )
             except ProxyResponseError as exc:
                 if not owner_unavailable_allows_account_neutral_replay(exc):
@@ -1803,6 +2101,8 @@ class _HTTPBridgeStreamingMixin:
                             session_header_fallback_key=session_header_fallback_key,
                             request_deadline=request_deadline,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                            defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
                         if owner_unavailable_allows_account_neutral_replay(capacity_exc):
@@ -1910,6 +2210,7 @@ class _HTTPBridgeStreamingMixin:
                         request_scope_id=owner_recovery_scope_id,
                     )
                 retry_request_state: _WebSocketRequestState | None = None
+                retry_unowned_lifecycle: _DeferredAccountBackoffLifecycle | None = None
                 try:
                     retry_api_key_reservation = api_key_reservation
                     retry_reservation_reacquired = False
@@ -1923,6 +2224,7 @@ class _HTTPBridgeStreamingMixin:
                             request_usage_budget=estimate_api_key_request_usage(recovery_payload),
                         )
                         retry_reservation_reacquired = True
+                        retry_unowned_lifecycle = begin_bridge_lifecycle(retry_api_key_reservation)
 
                     retry_request_state, retry_text_data = prepare_bridge_request(
                         recovery_payload,
@@ -1945,6 +2247,12 @@ class _HTTPBridgeStreamingMixin:
                         retry_request_state.input_item_count = recovery_anchor_input_count
                         retry_request_state.input_full_fingerprint = recovery_anchor_input_fingerprint
                         retry_request_state.proxy_injected_previous_response_id = True
+                        # ``recovery_anchor_input_count`` is only set when
+                        # ``durable_full_resend_anchor_count`` is not None,
+                        # which itself requires the incoming payload to have
+                        # classified as a full resend (see
+                        # ``classify_durable_full_resend`` above).
+                        retry_request_state.proxy_injected_anchor_had_full_resend_payload = True
                         retry_request_state.fresh_upstream_request_is_retry_safe = False
 
                     async for event_block in self._stream_http_bridge_session_events(
@@ -1959,7 +2267,18 @@ class _HTTPBridgeStreamingMixin:
                         yield event_block
                 except BaseException:
                     if retry_reservation_reacquired and retry_api_key_reservation is not None:
-                        await self._release_websocket_reservation(retry_api_key_reservation)
+                        retry_lifecycle = (
+                            retry_request_state.deferred_account_backoff_lifecycle
+                            if retry_request_state is not None
+                            else retry_unowned_lifecycle
+                        )
+                        try:
+                            await release_unowned_bridge_lifecycle(retry_lifecycle, retry_request_state)
+                        except Exception:
+                            logger.warning(
+                                "Failed to release owner-recovery HTTP bridge reservation",
+                                exc_info=True,
+                            )
                     raise
                 finally:
                     if owner_recovery_scope_id is not None:
@@ -2026,6 +2345,9 @@ class _HTTPBridgeStreamingMixin:
             and (session_anchor_trimmable or recovery_session_can_anchor)
         ):
             fresh_upstream_request_text = text_data
+            session_level_payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(
+                effective_payload
+            )
             effective_payload = effective_payload.model_copy(
                 update={"previous_response_id": session.last_completed_response_id}
             )
@@ -2042,6 +2364,7 @@ class _HTTPBridgeStreamingMixin:
             request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
             request_state.proxy_injected_previous_response_id = True
+            request_state.proxy_injected_anchor_had_full_resend_payload = session_level_payload_looks_like_full_resend
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
             # Session-level anchor injection may be attached to a payload
             # that relied on the anchor for context (for example a
@@ -2136,6 +2459,16 @@ class _HTTPBridgeStreamingMixin:
                 request_state.input_full_fingerprint = previous_response_trimmed_input_fingerprint
             if proxy_injected_previous_response_id:
                 request_state.proxy_injected_previous_response_id = True
+                # Unlike ``fresh_upstream_request_is_retry_safe`` below, this
+                # flag only asks whether the client's payload looked like a
+                # full resend, which cannot change between the original
+                # injection and this re-prepare: ``store_context_trim_applied``
+                # requires ``len(incoming_input) > stored_count > 0``, which
+                # already implies a full-resend-shaped payload, so a plain
+                # carry-forward is sufficient.
+                request_state.proxy_injected_anchor_had_full_resend_payload = (
+                    previous_request_state.proxy_injected_anchor_had_full_resend_payload
+                )
                 request_state.fresh_upstream_request_text = fresh_upstream_request_text
                 # The trim branch only fires when the untrimmed payload
                 # is a true full resend whose prefix exactly matches the
@@ -2268,6 +2601,8 @@ class _HTTPBridgeStreamingMixin:
                             request_deadline=request_deadline,
                             session_header_fallback_key=session_header_fallback_key,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                            defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2372,6 +2707,8 @@ class _HTTPBridgeStreamingMixin:
                             request_usage_budget=request_state.request_usage_budget,
                             request_deadline=request_deadline,
                             exclude_account_ids=request_state.excluded_account_ids or None,
+                            deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                            defer_account_health_writes=request_state.api_key_reservation is not None,
                         )
                     except ProxyResponseError as capacity_exc:
                         wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2620,6 +2957,8 @@ class _HTTPBridgeStreamingMixin:
                         request_usage_budget=estimate_api_key_request_usage(retry_payload),
                         request_deadline=request_deadline,
                         exclude_account_ids=request_state.excluded_account_ids or None,
+                        deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                        defer_account_health_writes=request_state.api_key_reservation is not None,
                     )
                 except ProxyResponseError as capacity_exc:
                     wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
@@ -2656,6 +2995,8 @@ class _HTTPBridgeStreamingMixin:
                     session,
                     request_scope_id=local_recovery_scope_id,
                 )
+            retry_request_state: _WebSocketRequestState | None = None
+            retry_unowned_lifecycle: _DeferredAccountBackoffLifecycle | None = None
             try:
                 retry_api_key_reservation = api_key_reservation
                 retry_reservation_reacquired = False
@@ -2669,6 +3010,7 @@ class _HTTPBridgeStreamingMixin:
                         request_usage_budget=estimate_api_key_request_usage(retry_payload),
                     )
                     retry_reservation_reacquired = True
+                    retry_unowned_lifecycle = begin_bridge_lifecycle(retry_api_key_reservation)
 
                 retry_request_state, retry_text_data = prepare_bridge_request(
                     retry_payload,
@@ -2710,7 +3052,18 @@ class _HTTPBridgeStreamingMixin:
             except BaseException:
                 await rollback_pre_dispatch_recovery_claim()
                 if retry_reservation_reacquired and retry_api_key_reservation is not None:
-                    await self._release_websocket_reservation(retry_api_key_reservation)
+                    retry_lifecycle = (
+                        retry_request_state.deferred_account_backoff_lifecycle
+                        if retry_request_state is not None
+                        else retry_unowned_lifecycle
+                    )
+                    try:
+                        await release_unowned_bridge_lifecycle(retry_lifecycle, retry_request_state)
+                    except Exception:
+                        logger.warning(
+                            "Failed to release local-recovery HTTP bridge reservation",
+                            exc_info=True,
+                        )
                 raise
             finally:
                 if local_recovery_scope_id is not None:
@@ -2911,6 +3264,9 @@ class _HTTPBridgeStreamingMixin:
                         text_data=text_data,
                         queue_limit=queue_limit,
                     )
+                lifecycle = request_state.deferred_account_backoff_lifecycle
+                if lifecycle is not None:
+                    lifecycle.settlement_owned = True
             except ProxyResponseError as exc:
                 if request_state.bridge_soft_capacity_reroute_allowed:
                     raise

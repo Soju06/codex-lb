@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable, Collection, Hashable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, cast
+from typing import Final, Mapping, Protocol, cast
 
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
@@ -35,6 +35,12 @@ from app.modules.accounts.repository import AccountsRepository as SessionAccount
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
+from app.modules.usage.plan_downgrade_observations import (
+    InMemoryPlanDowngradeObservationStore,
+    PlanDowngradeObservationStorePort,
+    credential_fingerprint,
+    get_plan_downgrade_observation_store,
+)
 from app.modules.usage.repository import AdditionalUsageRepository, UsageWindowWrite
 from app.modules.usage.repository import UsageRepository as SessionUsageRepository
 
@@ -146,6 +152,22 @@ class _MergedAdditionalWindow:
 # process. Updated only after a successful refresh that wrote data.
 _last_successful_refresh: dict[str, datetime] = {}
 _usage_refresh_auth_cooldowns: dict[str, float] = {}
+
+# Fallback for consecutive workspace-less "free" observations (issue #1456) used
+# only when persistence is explicitly disabled -- the DB-less unit-test harness.
+# The process default is the database-backed
+# :class:`PlanDowngradeObservationStore`, so the observation sequence stays
+# coherent across replicas sharing one database; this fallback preserves
+# single-process behavior instead of dropping the guard when no database is
+# available.
+_FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS = InMemoryPlanDowngradeObservationStore()
+
+# Number of consecutive agreeing observations required before a workspace-less
+# paid -> free downgrade is persisted. Deliberately a constant rather than a
+# CODEX_LB_* setting: two observations is the minimum that distinguishes a real
+# expiry from a single degraded response, and operators gain nothing from tuning
+# it (PRINCIPLES.md P2, settings-surface ratchet in issue #1340).
+_FREE_PLAN_DOWNGRADE_CONFIRMATIONS: Final[int] = 2
 
 
 class _UsageRefreshSingleflight:
@@ -586,7 +608,7 @@ class UsageUpdater:
         if payload is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
-        if _payload_mismatches_account_slot(account, payload):
+        if await _payload_mismatches_account_slot(account, payload):
             logger.warning(
                 "Usage refresh payload identity mismatch; skipping account mutation "
                 "account_id=%s stored_workspace_id=%s payload_workspace_id=%s stored_plan_type=%s "
@@ -928,11 +950,13 @@ def _credits_snapshot(payload: UsagePayload) -> tuple[bool | None, bool | None, 
     return credits_has, credits_unlimited, _parse_credits_balance(balance_value)
 
 
-def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
+async def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) -> bool:
     payload_workspace_id = _clean_optional(payload.workspace_id)
     if account.workspace_id and payload_workspace_id and account.workspace_id != payload_workspace_id:
         # The payload reports a different workspace slot than the one this
         # account is bound to; refuse to write another workspace's usage/plan.
+        # This guard is unconditional: repetition never makes a conflicting
+        # workspace identity trustworthy.
         return True
     if not payload_workspace_id and payload.plan_type:
         payload_plan_type = coerce_account_plan_type(payload.plan_type, account.plan_type or "free")
@@ -956,8 +980,107 @@ def _payload_mismatches_account_slot(account: Account, payload: UsagePayload) ->
                 and payload_plan_type in recognized_paid_plans
             )
         ):
+            # A subscription that expires reports "free" every cycle from that
+            # account's own token, so an agreeing repeat observation is no
+            # longer the single-sample degraded signature above. Persist the
+            # downgrade only once it has been confirmed (issue #1456).
+            if await _free_plan_downgrade_is_confirmed(
+                account,
+                stored_plan_type=stored_plan_type,
+                normalized_payload_plan_type=normalized_payload_plan_type,
+            ):
+                return False
             return True
+        if normalize_account_plan_type(payload.plan_type) in (ACCOUNT_PLAN_TYPES - {"free"}):
+            # The account reports a recognized paid plan, which is positive
+            # evidence that it is still paid, so any pending downgrade evidence
+            # is discarded. An unrecognized value is absence of evidence and
+            # deliberately does not reach here.
+            await _clear_workspace_less_free_plan_observations(account.id)
     return False
+
+
+async def _free_plan_downgrade_is_confirmed(
+    account: Account,
+    *,
+    stored_plan_type: str,
+    normalized_payload_plan_type: str | None,
+) -> bool:
+    """Record a workspace-less paid -> free observation and report confirmation.
+
+    Only a recognized ``free`` payload against a recognized paid stored plan on a
+    workspace-less account is confirmable. Unrecognized plan values never
+    accumulate, so a degraded response reporting garbage can never downgrade an
+    account no matter how often it repeats.
+    """
+    if normalized_payload_plan_type != "free":
+        return False
+    if stored_plan_type not in (ACCOUNT_PLAN_TYPES - {"free"}):
+        return False
+    if account.workspace_id:
+        # The account is bound to a workspace, so a payload that omits
+        # ``workspace_id`` cannot establish that it describes this slot. A
+        # workspace-bound seat (Team/Business/Enterprise) must not be demoted to
+        # free on the strength of a payload that never names its workspace,
+        # however many times it repeats.
+        return False
+    fingerprint = credential_fingerprint(account)
+    store = _plan_downgrade_observation_store()
+    # One atomic step records the observation and returns the resulting count.
+    # The fingerprint digests the account's stable seat identity, not token
+    # material, so routine token rotation between two observations does not
+    # restart the sequence and a real expiry still converges (#1456). Credential
+    # replacement (re-import or in-place reauthentication) resets pending
+    # evidence at the replacement site itself -- the accounts repository
+    # discards it in the same transaction that applies the fresh material --
+    # while the fingerprint comparison here restarts the count for any
+    # remaining path that rebinds the row's seat identity. Doing this as a read
+    # followed by a write would leave an await between the two halves, letting
+    # concurrent refreshes for one account lose an increment.
+    observations = await store.observe(
+        account.id,
+        credential_fingerprint=fingerprint,
+        observed_plan_type="free",
+    )
+    if observations < _FREE_PLAN_DOWNGRADE_CONFIRMATIONS:
+        logger.info(
+            "Usage refresh observed a workspace-less downgrade to free; awaiting confirmation "
+            "account_id=%s stored_plan_type=%s observations=%s required=%s request_id=%s",
+            account.id,
+            stored_plan_type,
+            observations,
+            _FREE_PLAN_DOWNGRADE_CONFIRMATIONS,
+            get_request_id(),
+        )
+        return False
+    await store.clear(account.id)
+    logger.info(
+        "Usage refresh confirmed a workspace-less downgrade to free; persisting plan change "
+        "account_id=%s stored_plan_type=%s observations=%s request_id=%s",
+        account.id,
+        stored_plan_type,
+        observations,
+        get_request_id(),
+    )
+    return True
+
+
+def _plan_downgrade_observation_store() -> PlanDowngradeObservationStorePort:
+    """Resolve the shared store, falling back to process-local state.
+
+    The database-backed store is the process default so the observation sequence
+    is coherent across replicas. When persistence is explicitly disabled (the
+    DB-less unit-test harness), the fallback preserves the previous
+    single-process behavior rather than losing the guard entirely.
+    """
+    store = get_plan_downgrade_observation_store()
+    if store is not None:
+        return store
+    return _FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS
+
+
+async def _clear_workspace_less_free_plan_observations(account_id: str) -> None:
+    await _plan_downgrade_observation_store().clear(account_id)
 
 
 def _clean_optional(value: str | None) -> str | None:
@@ -1278,4 +1401,5 @@ def _prune_usage_refresh_auth_cooldowns() -> None:
 def _clear_usage_refresh_state() -> None:
     _usage_refresh_auth_cooldowns.clear()
     _last_successful_refresh.clear()
+    _FALLBACK_PLAN_DOWNGRADE_OBSERVATIONS.clear_all()
     _USAGE_REFRESH_SINGLEFLIGHT.clear()

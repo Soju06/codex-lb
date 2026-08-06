@@ -13,6 +13,7 @@ from app.db.models import (
     Account,
     AccountStatus,
     AccountUsageRollupState,
+    RequestConversationHourlyRollup,
     RequestLog,
     RequestUsageHourlyRollup,
 )
@@ -31,9 +32,11 @@ from app.modules.accounts.usage_time_rollup import (
     floor_to_hour,
     from_dimension,
     mirror_account_soft_delete_into_time_rollups,
+    run_conversation_fold_pass,
     run_hourly_fold_pass,
     to_dimension,
 )
+from app.modules.reports.repository import ReportsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 
 pytestmark = pytest.mark.integration
@@ -114,6 +117,7 @@ async def test_bootstrap_state_defaults_hourly_watermark_to_epoch(db_setup):
             await session.execute(select(AccountUsageRollupState).where(AccountUsageRollupState.id == 1))
         ).scalar_one()
         assert state.hourly_folded_through == _EPOCH
+        assert state.conversation_folded_through == _EPOCH
 
         repo = RequestUsageTimeRollupRepository(session)
         rows, watermark = await repo.read_hourly()
@@ -377,6 +381,7 @@ async def _add_log(
     service_tier: str | None = None,
     api_key_id: str | None = None,
     model: str = "gpt-5.1-codex",
+    conversation_id: str | None = None,
 ):
     return await logs_repo.add_log(
         account_id=account_id,
@@ -394,6 +399,7 @@ async def _add_log(
         request_kind=request_kind,
         service_tier=service_tier,
         api_key_id=api_key_id,
+        conversation_id=conversation_id,
     )
 
 
@@ -1159,3 +1165,213 @@ async def test_rewound_watermark_refold_converges(db_setup):
 
     assert await run_hourly_fold_pass(now=now) >= 1
     assert await _dump_all_rollups() == baseline
+
+
+# --- Conversation presence satellite ---------------------------------------
+
+
+async def _dump_conversation_rollups() -> list[tuple[int, str, str, bool, int]]:
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(RequestConversationHourlyRollup))).scalars().all()
+        return sorted(
+            (row.bucket_epoch, row.conversation_id, row.account_id, row.is_deleted, row.request_count) for row in rows
+        )
+
+
+async def _conversation_activity(since: datetime, until: datetime) -> tuple[int, int]:
+    async with SessionLocal() as session:
+        activity = await RequestLogsRepository(session).aggregate_activity_between(since, until)
+        return activity.conversation_count, activity.conversation_request_count
+
+
+@pytest.mark.asyncio
+async def test_conversation_fold_dedups_across_the_fold_boundary(db_setup):
+    """A conversation with rows on both sides of the conversation watermark
+    counts ONCE: the folded id and the raw-tail id merge through the UNION
+    before COUNT(DISTINCT), while the request total stays additive. Warmup
+    kinds and blank ids never enter the satellite."""
+    now = utcnow()
+    mid = floor_to_hour(now - timedelta(days=2))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_conv", "conv-ts@example.com"))
+        logs = RequestLogsRepository(session)
+        await _add_log(
+            logs,
+            account_id="acc_conv",
+            request_id="r_cv_folded",
+            requested_at=mid - timedelta(days=1),
+            conversation_id="conv_x",
+        )
+        await _add_log(
+            logs,
+            account_id="acc_conv",
+            request_id="r_cv_tail",
+            requested_at=mid + timedelta(hours=1),
+            conversation_id="conv_x",
+        )
+        await _add_log(
+            logs,
+            account_id="acc_conv",
+            request_id="r_cv_warm",
+            requested_at=mid - timedelta(days=1, hours=1),
+            request_kind="warmup",
+            conversation_id="conv_x",
+        )
+        await _add_log(
+            logs,
+            account_id="acc_conv",
+            request_id="r_cv_blank",
+            requested_at=mid - timedelta(days=1, hours=2),
+            conversation_id=" \t",
+        )
+
+    window = (mid - timedelta(days=2), now)
+    reference = await _conversation_activity(*window)
+    assert reference == (1, 2)
+
+    # Watermark lands exactly at `mid`: the first row folds, the second stays
+    # in the live tail, and the metrics must not change.
+    assert await run_conversation_fold_pass(now=mid + FOLD_LAG) >= 1
+    async with SessionLocal() as session:
+        state = (
+            await session.execute(select(AccountUsageRollupState).where(AccountUsageRollupState.id == 1))
+        ).scalar_one()
+        assert state.conversation_folded_through == mid
+    folded = await _dump_conversation_rollups()
+    assert [(row[1], row[2], row[3], row[4]) for row in folded] == [("conv_x", "acc_conv", False, 1)]
+    assert await _conversation_activity(*window) == reference
+
+    # Idempotent fixed point at the same clock.
+    assert await run_conversation_fold_pass(now=mid + FOLD_LAG) == 0
+    assert await _dump_conversation_rollups() == folded
+
+
+@pytest.mark.asyncio
+async def test_conversation_bucket_series_rollup_matches_and_degrades(db_setup):
+    """Hour-multiple display buckets are served rollup+tail and must equal
+    the pre-fold (pure raw) series; non-hour-multiple buckets take the
+    documented full-raw degrade path and must also be unchanged."""
+    now = utcnow()
+    hour = floor_to_hour(now - timedelta(days=2))
+    since = hour - timedelta(days=1)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_cser", "cser-ts@example.com"))
+        logs = RequestLogsRepository(session)
+        for index, (offset, conversation_id) in enumerate(
+            [
+                (timedelta(minutes=1), "conv_a"),
+                (timedelta(minutes=2), "conv_a"),
+                (timedelta(hours=1, minutes=1), "conv_a"),
+                (timedelta(hours=1, minutes=2), "conv_b"),
+            ]
+        ):
+            await _add_log(
+                logs,
+                account_id="acc_cser",
+                request_id=f"r_cs_{index}",
+                requested_at=hour + offset,
+                conversation_id=conversation_id,
+            )
+
+    async def _series(bucket_seconds: int):
+        async with SessionLocal() as session:
+            rows = await RequestLogsRepository(session).aggregate_conversations_by_bucket(since, bucket_seconds)
+            return [(row.bucket_epoch, row.conversation_count) for row in rows]
+
+    hour_epoch = epoch_seconds(hour)
+    before_hourly, before_odd = await _series(3600), await _series(5400)
+    assert before_hourly == [(hour_epoch, 1), (hour_epoch + 3600, 2)]
+
+    await run_conversation_fold_pass(now=now)
+    assert await _series(3600) == before_hourly
+    assert await _series(5400) == before_odd
+
+
+@pytest.mark.asyncio
+async def test_account_soft_delete_mirrors_conversation_presence(db_setup):
+    """Soft deletion retroactively detaches the account's raw history
+    (account_id=NULL, deleted_at=now); the folded presence must move to the
+    orphaned-deleted dimension so the dashboard reads (deleted_at IS NULL)
+    stop counting it while the reports reads (no deleted_at filter) keep it —
+    exactly what the raw scan reports after the UPDATE."""
+    now = utcnow()
+    hour = floor_to_hour(now - timedelta(days=2))
+    window = (hour - timedelta(hours=1), now)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_csoft", "csoft-ts@example.com"))
+        await AccountsRepository(session).upsert(_make_account("acc_ckeep", "ckeep-ts@example.com"))
+        logs = RequestLogsRepository(session)
+        for index in range(2):
+            await _add_log(
+                logs,
+                account_id="acc_csoft",
+                request_id=f"r_cd_{index}",
+                requested_at=hour + timedelta(minutes=index),
+                conversation_id="conv_del",
+            )
+        await _add_log(
+            logs,
+            account_id="acc_ckeep",
+            request_id="r_ck",
+            requested_at=hour + timedelta(minutes=5),
+            conversation_id="conv_keep",
+        )
+    await run_conversation_fold_pass(now=now)
+
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).delete("acc_csoft")
+
+    assert await _conversation_activity(*window) == (1, 1)  # conv_keep only
+    async with SessionLocal() as session:
+        summary = await ReportsRepository(session).aggregate_summary(*window)
+    assert summary.conversation_count == 2  # reports include soft-deleted rows
+    assert await _dump_conversation_rollups() == [
+        (epoch_seconds(hour), "conv_del", _S, True, 2),
+        (epoch_seconds(hour), "conv_keep", "acc_ckeep", False, 1),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_account_hard_delete_removes_conversation_presence(db_setup):
+    """History deletion physically removes the account's raw rows; the mirror
+    must remove exactly that account's folded presence — a conversation
+    shared with a surviving account keeps the survivor's contribution, so
+    the switched reads still equal a raw scan of what remains."""
+    now = utcnow()
+    hour = floor_to_hour(now - timedelta(days=2))
+    window = (hour - timedelta(hours=1), now)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_chard", "chard-ts@example.com"))
+        await AccountsRepository(session).upsert(_make_account("acc_cother", "cother-ts@example.com"))
+        logs = RequestLogsRepository(session)
+        await _add_log(
+            logs,
+            account_id="acc_chard",
+            request_id="r_ch_shared",
+            requested_at=hour + timedelta(minutes=1),
+            conversation_id="conv_shared",
+        )
+        await _add_log(
+            logs,
+            account_id="acc_cother",
+            request_id="r_co_shared",
+            requested_at=hour + timedelta(minutes=2),
+            conversation_id="conv_shared",
+        )
+        await _add_log(
+            logs,
+            account_id="acc_chard",
+            request_id="r_ch_only",
+            requested_at=hour + timedelta(minutes=3),
+            conversation_id="conv_only",
+        )
+    await run_conversation_fold_pass(now=now)
+    assert await _conversation_activity(*window) == (2, 3)
+
+    async with SessionLocal() as session:
+        assert await AccountsRepository(session).delete("acc_chard", delete_history=True)
+
+    assert await _conversation_activity(*window) == (1, 1)  # conv_shared via the survivor
+    assert await _dump_conversation_rollups() == [
+        (epoch_seconds(hour), "conv_shared", "acc_cother", False, 1),
+    ]

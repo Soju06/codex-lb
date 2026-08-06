@@ -21,3 +21,4 @@
 
 - [x] 5.1 Replace the HTTP bridge reader's overloaded `closed` ownership guard with an explicit submitter liveness-settlement claim and cover closed-session sibling settlement.
 - [x] 5.2 Drive a real installed-library no-pong timeout so integration coverage pins the `websockets` watchdog shape used by classification.
+- [x] 5.3 Shield a submitter's claimed bridge liveness settlement from cancellation and cover the claim-to-settlement window.

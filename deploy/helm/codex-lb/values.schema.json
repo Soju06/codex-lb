@@ -7,6 +7,14 @@
       "minimum": 1,
       "description": "Number of replicas"
     },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "preStopSleepSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
     "image": {
       "type": "object",
       "properties": {
@@ -197,7 +205,13 @@
       "type": "object"
     },
     "config": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "shutdownDrainTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
     },
     "podSecurityContext": {
       "type": "object"

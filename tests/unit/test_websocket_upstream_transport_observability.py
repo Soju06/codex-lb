@@ -27,6 +27,7 @@ class _DummyWebSocketService(_WebSocketMixin):
     def __init__(self) -> None:
         self.request_log_calls: list[dict[str, object]] = []
         self.remembered_response_ids: list[str] = []
+        self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._encryptor = TokenEncryptor()
 
         class _LoadBalancer:
@@ -240,6 +241,7 @@ async def test_websocket_finalizer_records_bridge_upstream_transport_and_metric(
             "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
+            "connection_request_kind": None,
         }
     ]
     assert metric_calls == [
@@ -322,6 +324,7 @@ async def test_websocket_connect_failure_records_bridge_upstream_transport_and_m
             "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
+            "connection_request_kind": None,
         }
     ]
 
@@ -391,6 +394,7 @@ async def test_fail_pending_websocket_requests_records_bridge_upstream_transport
             "conversation_id": None,
             "client_ip": None,
             "request_kind": "normal",
+            "connection_request_kind": None,
         }
     ]
     assert metric_calls == [

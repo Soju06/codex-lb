@@ -50,7 +50,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
 )
-from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -204,6 +204,19 @@ class StubStickySessionsRepository(StickySessionsRepository):
         max_age_seconds: int | None = None,
     ) -> str | None:
         return None
+
+    async def get_account_id_and_abandonment(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+    ) -> StickyOwnerLookup:
+        # Delegates to get_account_id (rather than duplicating its logic) so
+        # a test that only overrides get_account_id — the common pattern in
+        # this file — is still observed here.
+        account_id = await self.get_account_id(key, kind=kind, max_age_seconds=max_age_seconds)
+        return StickyOwnerLookup(account_id=account_id, continuity_abandoned=False)
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
         row = self._build_row(key, account_id, kind)

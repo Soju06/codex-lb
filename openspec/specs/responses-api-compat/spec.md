@@ -120,6 +120,13 @@ The proxy MUST configure direct and routed upstream Responses WebSocket transpor
 - **THEN** the reader settles every pending request with `upstream_websocket_liveness_timeout`
 - **AND** the selected account receives no failure-health signal
 
+#### Scenario: Claimed bridge settlement survives submitter cancellation
+
+- **GIVEN** an HTTP bridge submitter claims liveness-settlement ownership after its send fails
+- **WHEN** the submitter is cancelled before whole-deque settlement completes
+- **THEN** settlement continues until every pending sibling is finalized exactly once
+- **AND** the submitter cancellation is preserved after settlement completes
+
 ### Requirement: Upstream websocket drops penalize affected accounts
 When an upstream websocket closes while one or more streamed response requests are pending and have not reached a terminal event, the proxy MUST record a transient upstream error for the account before signaling failure for those pending requests, except when the close carries a classified process-wide network failure or upstream WebSocket liveness timeout. A classified process-wide network failure or upstream WebSocket liveness timeout MUST remain account neutral and use its classified error code. For other closes, the proxy MUST surface `stream_incomplete` to affected pending requests except when a direct Responses WebSocket request has already successfully emitted a finite integer `sequence_number`. For that sequenced direct-WebSocket case, the proxy MUST record the request outcome as `stream_incomplete` without emitting a synthetic terminal frame under the active response id, then MUST close the downstream WebSocket with code 1011.
 
@@ -1900,14 +1907,31 @@ When a direct Responses WebSocket request has a prepared retry-safe fresh upstre
 - **AND** it does not rewrite the turn to `previous_response_owner_unavailable`
 
 ### Requirement: Codex WebSocket prewarm completions are classified separately
-When a direct Responses WebSocket request carries Codex turn metadata with `request_kind: "prewarm"`, the service MUST preserve that request kind in request logs. Empty-output prewarm completions MUST NOT update account success state or previous-response ownership, while still allowing the upstream terminal frame to pass through.
+For a direct Responses WebSocket, the service MUST treat Codex turn metadata received on the HTTP handshake as connection-scoped metadata rather than applying its `request_kind` to every `response.create` frame. The service MUST classify an individual turn as `prewarm` when the connection metadata is `prewarm` and either that turn carries `generate: false` or its completed usage reports zero output tokens. Other turns on the same connection MUST be classified as `normal`.
+
+Request logs for direct Responses WebSocket turns MUST persist the connection-scoped value separately as `connection_request_kind`. Empty-output prewarm completions MUST NOT update account success state or previous-response ownership, while still allowing the upstream terminal frame to pass through.
+
+#### Scenario: generated turn on a prewarm-opened connection is normal
+- **GIVEN** a direct Responses WebSocket handshake carries `x-codex-turn-metadata` with `request_kind: "prewarm"`
+- **WHEN** a later `response.create` does not carry `generate: false` and upstream completes it with non-zero output tokens
+- **THEN** the request log records `request_kind` as `normal`
+- **AND** the request log records `connection_request_kind` as `prewarm`
+- **AND** the completion remains eligible to update account success state and previous-response ownership
 
 #### Scenario: empty prewarm completion does not look like user turn progress
-- **GIVEN** a direct WebSocket request carries `x-codex-turn-metadata` with `request_kind: "prewarm"`
-- **WHEN** upstream emits `response.completed` with zero output tokens
+- **GIVEN** a direct Responses WebSocket handshake carries `x-codex-turn-metadata` with `request_kind: "prewarm"`
+- **WHEN** a `response.create` carries `generate: false` or upstream completes it with zero output tokens
 - **THEN** the request log records `request_kind` as `prewarm`
+- **AND** the request log records `connection_request_kind` as `prewarm`
 - **AND** the service does not mark the account successful for that completion
 - **AND** the service does not remember the response id as a usable previous-response owner
+
+#### Scenario: failed generated turn on a prewarm-opened connection is normal
+- **GIVEN** a direct Responses WebSocket handshake carries `x-codex-turn-metadata` with `request_kind: "prewarm"`
+- **AND** a later `response.create` does not carry `generate: false`
+- **WHEN** that turn fails before completed usage is available
+- **THEN** the request log records `request_kind` as `normal`
+- **AND** the request log records `connection_request_kind` as `prewarm`
 
 ### Requirement: Codex compact requests are bounded by the proxy request budget
 When `/backend-api/codex/responses/compact` is called for Codex auto-compaction, the service MUST bound the upstream compact call by the remaining proxy compact request budget even when no explicit upstream compact timeout is configured. The service MUST preserve Codex turn metadata `request_kind` in compact request logs so auto-compaction failures are distinguishable from normal user turns.

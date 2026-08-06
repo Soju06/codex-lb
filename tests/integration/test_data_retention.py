@@ -15,7 +15,7 @@ from app.db.models import Account, AccountStatus, AdditionalUsageHistory, Reques
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import run_fold_pass
-from app.modules.accounts.usage_time_rollup import run_hourly_fold_pass
+from app.modules.accounts.usage_time_rollup import run_conversation_fold_pass, run_hourly_fold_pass
 from app.modules.request_logs.repository import RequestLogsRepository
 
 pytestmark = pytest.mark.integration
@@ -36,7 +36,9 @@ def _make_account(account_id: str, email: str) -> Account:
     )
 
 
-async def _add_log(logs_repo: RequestLogsRepository, *, account_id: str, request_id: str, requested_at):
+async def _add_log(
+    logs_repo: RequestLogsRepository, *, account_id: str, request_id: str, requested_at, conversation_id=None
+):
     return await logs_repo.add_log(
         account_id=account_id,
         request_id=request_id,
@@ -48,6 +50,7 @@ async def _add_log(logs_repo: RequestLogsRepository, *, account_id: str, request
         error_code=None,
         requested_at=requested_at,
         cost_usd=0.01,
+        conversation_id=conversation_id,
     )
 
 
@@ -95,6 +98,7 @@ async def test_request_log_pruning_respects_watermark_and_preserves_totals(async
 
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
+    await run_conversation_fold_pass(now=now)
 
     async def _request_usage():
         response = await async_client.get("/api/accounts")
@@ -191,6 +195,7 @@ async def test_pruning_drains_backlog_across_batches(db_setup, monkeypatch):
 
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
+    await run_conversation_fold_pass(now=now)
     _set_retention(monkeypatch, request_logs=30)
     monkeypatch.setattr(retention_job, "BATCH_SIZE", 2)
     deleted = await run_retention_pass(now=now)
@@ -216,6 +221,7 @@ async def test_request_log_pruning_skipped_while_fold_is_not_current(async_clien
     # Fold stalled 50 days ago: watermark = (now - 50d) - FOLD_LAG.
     await run_fold_pass(now=now - timedelta(days=50))
     await run_hourly_fold_pass(now=now - timedelta(days=50))
+    await run_conversation_fold_pass(now=now - timedelta(days=50))
 
     async def _request_usage():
         response = await async_client.get("/api/accounts")
@@ -264,6 +270,7 @@ async def test_request_log_pruning_skipped_while_hourly_backfill_behind(db_setup
 
     # Hourly fold catches up -> min watermark is current -> pruning resumes.
     await run_hourly_fold_pass(now=now)
+    await run_conversation_fold_pass(now=now)
     async with SessionLocal() as session:
         hourly_before = sorted(
             (await session.execute(sa_select(RequestUsageHourlyRollup))).scalars().all(),
@@ -303,6 +310,7 @@ async def test_request_log_pruning_skipped_while_hourly_fold_stalled(db_setup, m
         await _add_log(logs_repo, account_id="acc_hstall", request_id="req_1d", requested_at=now - timedelta(days=1))
 
     await run_hourly_fold_pass(now=now - timedelta(days=50))
+    await run_conversation_fold_pass(now=now - timedelta(days=50))
     await run_fold_pass(now=now)
 
     _set_retention(monkeypatch, request_logs=30)
@@ -311,6 +319,43 @@ async def test_request_log_pruning_skipped_while_hourly_fold_stalled(db_setup, m
     async with SessionLocal() as session:
         remaining = (await session.execute(select(RequestLog.request_id))).scalars().all()
     assert sorted(remaining) == ["req_1d", "req_60d"]
+
+
+@pytest.mark.asyncio
+async def test_request_log_pruning_skipped_while_conversation_backfill_behind(db_setup, monkeypatch):
+    """min-gate: the conversation satellite participates in the prune gate —
+    lifetime and hourly currency alone must not enable pruning while the
+    conversation backfill is still at the epoch, or raw the satellite never
+    folded would be lost. Once it catches up, pruning resumes and the folded
+    presence survives the prune."""
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import RequestConversationHourlyRollup
+
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_cgate", "cgate@example.com"))
+        await _add_log(
+            logs_repo,
+            account_id="acc_cgate",
+            request_id="req_60d",
+            requested_at=now - timedelta(days=60),
+            conversation_id="conv_gate",
+        )
+        await _add_log(logs_repo, account_id="acc_cgate", request_id="req_1d", requested_at=now - timedelta(days=1))
+
+    await run_fold_pass(now=now)
+    await run_hourly_fold_pass(now=now)
+    _set_retention(monkeypatch, request_logs=30)
+    assert (await run_retention_pass(now=now))["request_logs"] == 0
+
+    await run_conversation_fold_pass(now=now)
+    assert (await run_retention_pass(now=now))["request_logs"] == 1
+    async with SessionLocal() as session:
+        presence = (await session.execute(sa_select(RequestConversationHourlyRollup))).scalars().all()
+    assert [(row.conversation_id, row.request_count) for row in presence] == [("conv_gate", 1)]
 
 
 @pytest.mark.asyncio
@@ -476,6 +521,7 @@ async def test_api_key_totals_survive_pruning_and_match_pre_fold(db_setup, monke
 
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
+    await run_conversation_fold_pass(now=now)
     assert await _key_summary() == before
 
     _set_retention(monkeypatch, request_logs=30)
@@ -612,6 +658,7 @@ async def test_dashboard_retention_overrides_env_alias(async_client, db_setup, m
 
     await run_fold_pass(now=now)
     await run_hourly_fold_pass(now=now)
+    await run_conversation_fold_pass(now=now)
 
     # Env alias alone (90 days) would keep the 40-day-old row...
     _set_retention(monkeypatch, request_logs=90)

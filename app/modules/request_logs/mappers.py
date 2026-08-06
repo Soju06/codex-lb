@@ -48,6 +48,7 @@ def to_request_log_entry(
         request_id=log.request_id,
         archive_request_id=log.archive_request_id if include_sensitive_metadata else None,
         request_kind=log.request_kind,
+        connection_request_kind=log.connection_request_kind,
         model=log.model,
         source=log.source,
         model_source_id=log.model_source_id,

@@ -46,6 +46,11 @@ the failing send. The reader skips its normal settlement only when that claim
 exists; a later liveness expiry on an otherwise closed session still settles
 every pending sibling.
 
+Once published, the send claim owns the whole pending deque. The submitter
+therefore starts settlement as a shielded child before its next await and
+defers caller cancellation until that child completes; cancellation cannot
+leave a permanent claim whose reader has already yielded.
+
 For example, if `response.create` was written before a VPN route disappears and no pong returns, codex-lb emits a terminal `upstream_websocket_liveness_timeout` failure for that pending request and closes or retires the upstream session. It does not resend `response.create` on another account or socket.
 
 ## Risks / Trade-offs

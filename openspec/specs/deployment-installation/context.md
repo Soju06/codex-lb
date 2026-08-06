@@ -10,6 +10,39 @@ fixed, and how removed settings are retired.
 See `openspec/specs/deployment-installation/spec.md` for normative
 requirements.
 
+## Helm termination-grace upgrade contract
+
+The graceful-shutdown chart adds a render-time guard:
+`terminationGracePeriodSeconds` must be at least
+`config.shutdownDrainTimeoutSeconds + 32`. Existing values files, explicit
+`--set` arguments, or values retained by `helm upgrade --reuse-values` below
+that bound make `helm template`, `helm install`, and `helm upgrade` fail before
+resources are applied. A failed upgrade leaves the existing release in place.
+
+With the default 30-second drain timeout, the arithmetic minimum is 62 seconds
+and the chart default is 65 seconds. An explicit retained value of 60 seconds,
+the previous chart default, is therefore invalid. Before installing or
+upgrading, raise every retained low value explicitly to at least the computed
+minimum; setting 65 preserves the chart's default helper-launch headroom when
+the drain timeout remains 30 seconds. Production overrides should retain
+additional headroom for preStop helper launch.
+
+For example, this retained value fails rendering:
+
+```yaml
+config:
+  shutdownDrainTimeoutSeconds: 30
+terminationGracePeriodSeconds: 60
+```
+
+When `--reuse-values` is used, removing
+`terminationGracePeriodSeconds` from a new values file or omitting its `--set`
+argument does not clear the stored 60-second value. That upgrade must set the
+key explicitly to at least 62 seconds; setting it to 65 preserves the chart's
+three seconds of helper-launch headroom. To adopt the 65-second chart default
+without storing an override, use an intentional non-reuse or `--reset-values`
+upgrade with `terminationGracePeriodSeconds` absent.
+
 ## Raw socket peer preservation and proxy projection
 
 codex-lb captures the incoming ASGI client before delegating once to Uvicorn's

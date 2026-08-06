@@ -150,6 +150,7 @@ export function SettingsPage() {
                   settings.proxyAccountResponseCreateLimit,
                   settings.proxyAccountStreamLimit,
                   settings.proxyAccountStreamRecoveryReserve,
+                  settings.proxyApiKeyFairShareCongestionThresholdPct,
                 ].join(":")}
                 settings={settings}
                 accounts={accountsQuery.data ?? []}

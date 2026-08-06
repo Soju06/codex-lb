@@ -6,15 +6,16 @@ at watermark = epoch — in that state the switched code paths degrade to the
 identical single raw query the legacy readers ran — and re-asserted after
 folding to a mid-history hour and to the full target, plus under a
 concurrently-advancing fold, after the operator escape hatch, and after
-retention physically pruned the folded raw rows (the headline: statistics
-survive raw deletion; conversation metrics are expectedly raw-bound).
+retention physically pruned the folded raw rows (the headline: statistics —
+including the satellite-served distinct-conversation metrics — survive raw
+deletion).
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import delete, select, update
@@ -26,6 +27,7 @@ from app.db.models import (
     Account,
     AccountStatus,
     AccountUsageRollupState,
+    RequestConversationHourlyRollup,
     RequestDemandQuarterRollup,
     RequestLog,
     RequestUsageHourlyErrorRollup,
@@ -34,9 +36,14 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import FOLD_LAG
-from app.modules.accounts.usage_time_rollup import floor_to_hour, run_hourly_fold_pass
+from app.modules.accounts.usage_time_rollup import (
+    floor_to_hour,
+    run_conversation_fold_pass,
+    run_hourly_fold_pass,
+)
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.quota_planner.repository import QuotaPlannerRepository
+from app.modules.reports.repository import ReportsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 
 pytestmark = pytest.mark.integration
@@ -133,6 +140,18 @@ def _corpus() -> list[RequestLog]:
     for offset in (timedelta(hours=30), timedelta(days=5, hours=1), timedelta(days=9, hours=20)):
         rows.append(_log(BASE + offset, request_id_suffix="w", request_kind="warmup", cost_usd=0.002))
         rows.append(_log(BASE + offset + timedelta(minutes=20), request_id_suffix="lw", request_kind="limit_warmup"))
+    # Cancelled rows on both sides of every candidate watermark: the listing
+    # count's default status split (success+error) must exclude them from
+    # the folded sum and the raw tail alike.
+    for offset in (timedelta(days=1, hours=5), timedelta(days=9, hours=23)):
+        rows.append(
+            _log(
+                BASE + offset,
+                request_id_suffix="cx",
+                status="cancelled",
+                cost_usd=None,
+            )
+        )
     # Soft-deleted orphans (account detached): kept by dashboard buckets and
     # top-error, excluded by the planner.
     for offset in (timedelta(days=1, hours=2), timedelta(days=6, hours=7, minutes=31)):
@@ -261,11 +280,28 @@ async def _snapshot(*, lead_since: datetime = SINCE_UNALIGNED) -> dict:
         logs = RequestLogsRepository(session)
         planner = QuotaPlannerRepository(session)
         api_keys = ApiKeysRepository(session)
+        reports = ReportsRepository(session)
         return {
             "buckets_1h": await logs.aggregate_by_bucket(lead_since, 3600),
             "buckets_6h": await logs.aggregate_by_bucket(lead_since, 21600),
             "buckets_1d": await logs.aggregate_by_bucket(SINCE_ALIGNED, 86400),
             "buckets_raw_degrade": await logs.aggregate_by_bucket(lead_since, 5400),
+            "conv_buckets_1h": await logs.aggregate_conversations_by_bucket(lead_since, 3600),
+            "conv_buckets_6h": await logs.aggregate_conversations_by_bucket(lead_since, 21600),
+            "conv_buckets_raw_degrade": await logs.aggregate_conversations_by_bucket(lead_since, 5400),
+            "reports_summary": await reports.aggregate_summary(SINCE_ALIGNED, UNTIL_UNALIGNED),
+            "reports_summary_filtered": await reports.aggregate_summary(
+                SINCE_ALIGNED, UNTIL_UNALIGNED, account_ids=["acc_par_a"]
+            ),
+            "reports_daily_utc": await reports.aggregate_daily_rows(
+                BASE.date(), (BASE + timedelta(days=9)).date(), timezone.utc
+            ),
+            # A half-hour-offset local day: per-day windows are NOT
+            # hour-aligned, so every day carries partial raw edges around the
+            # satellite-served whole hours.
+            "reports_daily_offset": await reports.aggregate_daily_rows(
+                BASE.date(), (BASE + timedelta(days=9)).date(), timezone(timedelta(hours=5, minutes=30))
+            ),
             "activity_since": await logs.aggregate_activity_since(lead_since),
             "activity_between": await logs.aggregate_activity_between(lead_since, UNTIL_UNALIGNED),
             "activity_folded_only": await logs.aggregate_activity_between(*FOLDED_ONLY_WINDOW),
@@ -280,7 +316,32 @@ async def _snapshot(*, lead_since: datetime = SINCE_UNALIGNED) -> dict:
             "trends_key2": await api_keys.trends_by_key("key_2", SINCE_ALIGNED, UNTIL_UNALIGNED, 7200),
             "trends_raw_degrade": await api_keys.trends_by_key("key_1", lead_since, NOW, 5400),
             "trends_no_logs": await api_keys.trends_by_key("key_none", lead_since, NOW, 3600),
+            "listing_totals": await _listing_totals(logs, lead_since),
         }
+
+
+async def _listing_totals(logs: RequestLogsRepository, lead_since: datetime) -> dict[str, int]:
+    """Every rollup-expressible listing count shape (the demand-rollup path),
+    plus a non-expressible search fallback for contrast."""
+
+    async def _total(**kwargs) -> int:
+        result = await logs.list_recent(limit=1, **kwargs)
+        return result.total
+
+    return {
+        "default": await _total(),
+        "success_only": await _total(include_error_other=False),
+        "error_only": await _total(include_success=False),
+        "no_status_filter": await _total(include_success=False, include_error_other=False),
+        "windowed": await _total(since=lead_since, until=UNTIL_UNALIGNED),
+        "folded_only": await _total(since=FOLDED_ONLY_WINDOW[0], until=FOLDED_ONLY_WINDOW[1]),
+        "tail_only": await _total(since=TAIL_ONLY_WINDOW[0], until=TAIL_ONLY_WINDOW[1]),
+        "account": await _total(account_ids=["acc_par_a"]),
+        "api_key": await _total(api_key_ids=["key_2"], since=lead_since),
+        "models": await _total(models=[_MODELS[0]]),
+        "model_effort_pairs": await _total(model_options=[(_MODELS[1], None)]),
+        "search_fallback": await _total(search="gpt-5.1"),
+    }
 
 
 def _project_demand(bins) -> dict:
@@ -325,6 +386,18 @@ def _assert_snapshots_equal(actual: dict, expected: dict, *, skip_keys: tuple[st
                 actual_entry = actual_value[demand_key]
                 assert actual_entry[:4] == expected_entry[:4], (key, demand_key)
                 assert actual_entry[4] == pytest.approx(expected_entry[4], rel=1e-9, abs=1e-12), (key, demand_key)
+        elif key.startswith("reports_summary"):
+            assert replace(actual_value, total_cost_usd=0.0) == replace(expected_value, total_cost_usd=0.0), key
+            assert actual_value.total_cost_usd == pytest.approx(expected_value.total_cost_usd, rel=1e-9, abs=1e-12), key
+        elif key.startswith("reports_daily"):
+            float_zeroes = {"cost_usd": 0.0, "median_ttft_ms": 0.0, "median_tps": 0.0, "median_queue_ms": 0.0}
+            assert [replace(row, **float_zeroes) for row in actual_value] == [
+                replace(row, **float_zeroes) for row in expected_value
+            ], key
+            for field in float_zeroes:
+                assert [getattr(row, field) for row in actual_value] == pytest.approx(
+                    [getattr(row, field) for row in expected_value], rel=1e-9, abs=1e-9
+                ), (key, field)
         elif key.startswith("trends"):
             assert [(row.bucket_epoch, row.total_tokens) for row in actual_value] == [
                 (row.bucket_epoch, row.total_tokens) for row in expected_value
@@ -358,6 +431,14 @@ async def _watermark() -> datetime | None:
         return None if state is None else state.hourly_folded_through
 
 
+async def _conversation_watermark() -> datetime | None:
+    async with SessionLocal() as session:
+        state = (
+            await session.execute(select(AccountUsageRollupState).where(AccountUsageRollupState.id == 1))
+        ).scalar_one_or_none()
+        return None if state is None else state.conversation_folded_through
+
+
 @pytest.mark.asyncio
 async def test_switched_readers_match_legacy_across_watermark_states(db_setup):
     await _seed_corpus()
@@ -369,14 +450,22 @@ async def test_switched_readers_match_legacy_across_watermark_states(db_setup):
     assert reference["top_error_empty"] is None
     assert reference["trends_no_logs"] == []
 
-    # Watermark state 2 — mid-history whole hour.
+    # Watermark state 2 — mid-history whole hour. The hourly and conversation
+    # folds advance separately (mixed-watermark states in between must hold
+    # parity too: each satellite degrades on its own watermark).
     await run_hourly_fold_pass(now=MID_W + FOLD_LAG)
     assert await _watermark() == MID_W
+    _assert_snapshots_equal(await _snapshot(), reference)
+    await run_conversation_fold_pass(now=MID_W + FOLD_LAG)
+    assert await _conversation_watermark() == MID_W
     _assert_snapshots_equal(await _snapshot(), reference)
 
     # Watermark state 3 — full target: everything older than FOLD_LAG folded.
     await run_hourly_fold_pass(now=NOW)
+    _assert_snapshots_equal(await _snapshot(), reference)
+    await run_conversation_fold_pass(now=NOW)
     assert await _watermark() == TARGET_W
+    assert await _conversation_watermark() == TARGET_W
     _assert_snapshots_equal(await _snapshot(), reference)
 
 
@@ -389,6 +478,7 @@ async def test_reader_is_consistent_under_concurrent_fold_commit(db_setup, monke
     await _seed_corpus()
     reference = await _snapshot()
     await run_hourly_fold_pass(now=MID_W + FOLD_LAG)
+    await run_conversation_fold_pass(now=MID_W + FOLD_LAG)
 
     real_read_hourly_window = request_logs_repository_module.read_hourly_window
     fold_injections = {"count": 0}
@@ -398,6 +488,10 @@ async def test_reader_is_consistent_under_concurrent_fold_commit(db_setup, monke
         if fold_injections["count"] == 0:
             fold_injections["count"] += 1
             await run_hourly_fold_pass(now=NOW)  # advances MID_W -> TARGET_W
+            # The conversation metrics read comes AFTER this hook in the same
+            # reader; its single-statement UNION must see one consistent
+            # watermark generation even though the fold just advanced.
+            await run_conversation_fold_pass(now=NOW)
         return result
 
     monkeypatch.setattr(request_logs_repository_module, "read_hourly_window", _read_then_fold)
@@ -415,9 +509,16 @@ async def test_two_concurrent_fold_passes_serialize_without_double_count(db_setu
     await _seed_corpus()
     reference = await _snapshot()
 
-    await asyncio.gather(run_hourly_fold_pass(now=NOW), run_hourly_fold_pass(now=NOW))
+    await asyncio.gather(
+        run_hourly_fold_pass(now=NOW),
+        run_hourly_fold_pass(now=NOW),
+        run_conversation_fold_pass(now=NOW),
+        run_conversation_fold_pass(now=NOW),
+    )
     assert await _watermark() == TARGET_W
+    assert await _conversation_watermark() == TARGET_W
     assert await run_hourly_fold_pass(now=NOW) == 0  # fixed point
+    assert await run_conversation_fold_pass(now=NOW) == 0
     _assert_snapshots_equal(await _snapshot(), reference)
 
 
@@ -429,35 +530,44 @@ async def test_escape_hatch_reset_degrades_to_legacy_then_rebackfills(db_setup):
     await _seed_corpus()
     reference = await _snapshot()
     await run_hourly_fold_pass(now=NOW)
+    await run_conversation_fold_pass(now=NOW)
     _assert_snapshots_equal(await _snapshot(), reference)
 
     async with SessionLocal() as session:
         await session.execute(delete(RequestUsageHourlyRollup))
         await session.execute(delete(RequestUsageHourlyErrorRollup))
         await session.execute(delete(RequestDemandQuarterRollup))
+        await session.execute(delete(RequestConversationHourlyRollup))
         await session.execute(
-            update(AccountUsageRollupState).where(AccountUsageRollupState.id == 1).values(hourly_folded_through=_EPOCH)
+            update(AccountUsageRollupState)
+            .where(AccountUsageRollupState.id == 1)
+            .values(hourly_folded_through=_EPOCH, conversation_folded_through=_EPOCH)
         )
         await session.commit()
 
     assert await _watermark() == _EPOCH
+    assert await _conversation_watermark() == _EPOCH
     _assert_snapshots_equal(await _snapshot(), reference)  # pure-raw degrade
 
     await run_hourly_fold_pass(now=NOW)
+    await run_conversation_fold_pass(now=NOW)
     assert await _watermark() == TARGET_W
+    assert await _conversation_watermark() == TARGET_W
     _assert_snapshots_equal(await _snapshot(), reference)  # re-backfill converged
 
 
 @pytest.mark.asyncio
-async def test_statistics_survive_retention_pruning_folded_raw(db_setup):
+async def test_statistics_survive_retention_pruning_folded_raw(db_setup, monkeypatch):
     """The headline guarantee: after raw rows below the retention gate
     (watermark - FOLD_LAG) are physically deleted, every rollup-served
-    statistic is unchanged. Distinct-conversation metrics shrink to the
-    surviving raw rows (documented non-goal), and earliest_activity_at falls
+    statistic is unchanged — INCLUDING the distinct-conversation metrics,
+    which the conversation presence satellite now serves for folded history
+    (they used to be raw-bound and shrink here). earliest_activity_at falls
     back to the earliest folded bucket at whole-hour precision."""
     await _seed_corpus()
     reference = await _snapshot()
     await run_hourly_fold_pass(now=NOW)
+    await run_conversation_fold_pass(now=NOW)
     # The reference for unaligned window starts once their partial leading
     # hour is un-servable: identical to starting at the ceil hour (that
     # partial slice is ALWAYS raw-served, by design). Captured pre-prune;
@@ -472,39 +582,69 @@ async def test_statistics_survive_retention_pruning_folded_raw(db_setup):
 
     pruned = await _snapshot()
     expected = dict(reference)
-    for key in ("buckets_1h", "buckets_6h", "top_error_since", "top_error_between", "trends_key1"):
+    for key in (
+        "buckets_1h",
+        "buckets_6h",
+        "top_error_since",
+        "top_error_between",
+        "trends_key1",
+        "conv_buckets_1h",
+        "conv_buckets_6h",
+        "activity_since",
+        "activity_between",
+    ):
         expected[key] = leadless[key]
     _assert_snapshots_equal(
         pruned,
         expected,
         skip_keys=(
-            # Raw-bound by design after pruning:
-            "activity_since",  # conversation fields shrink (asserted below)
-            "activity_between",
-            "activity_folded_only",
             "earliest",  # hour-precision fallback (asserted below)
             # Non-hour-multiple display buckets are the documented full-raw
             # degrade path: after pruning they only see the surviving tail.
             "buckets_raw_degrade",
             "trends_raw_degrade",
+            "conv_buckets_raw_degrade",
+            # Reports measures other than conversation_count are raw-bound
+            # (documented non-goal); the satellite-served conversation counts
+            # are asserted to survive below. The half-hour-offset local days
+            # additionally lose their pruned partial leading half hours.
+            "reports_summary",
+            "reports_summary_filtered",
+            "reports_daily_utc",
+            "reports_daily_offset",
+            "listing_totals",  # tracks listable rows (asserted below)
         ),
     )
-    # Additive activity totals are unchanged (modulo the pruned partial
-    # leading hour for unaligned starts); only the distinct-conversation
-    # metrics dropped to what raw still holds.
-    for key, baseline in (
-        ("activity_since", leadless),
-        ("activity_between", leadless),
-        ("activity_folded_only", reference),
-    ):
-        actual, wanted = pruned[key], baseline[key]
-        assert replace(actual, cost_usd=0.0, conversation_count=0, conversation_request_count=0) == replace(
-            wanted, cost_usd=0.0, conversation_count=0, conversation_request_count=0
-        ), key
-        assert actual.cost_usd == pytest.approx(wanted.cost_usd, rel=1e-9), key
-        assert actual.conversation_count <= wanted.conversation_count, key
-        assert actual.conversation_request_count <= wanted.conversation_request_count, key
-    assert pruned["activity_folded_only"].conversation_count == 0  # fully pruned window
+    # Listing totals track LISTABLE rows, not the permanent folded
+    # statistics: after pruning they must equal the legacy raw counts over
+    # the surviving corpus (the rollup window is clamped to the earliest
+    # surviving live row).
+    original_count_recent = RequestLogsRepository._count_recent
+
+    async def _raw_only_count(self, filters, demand_params=None):
+        return await original_count_recent(self, filters, None)
+
+    monkeypatch.setattr(RequestLogsRepository, "_count_recent", _raw_only_count)
+    raw_expected = (await _snapshot())["listing_totals"]
+    assert pruned["listing_totals"] == raw_expected
+    monkeypatch.undo()
+    # Satellite-served conversation counts survive pruning exactly: the
+    # summary window is hour-aligned at the start and its unaligned tail is
+    # served from surviving raw; UTC local days are hour-aligned throughout.
+    assert pruned["reports_summary"].conversation_count == reference["reports_summary"].conversation_count
+    # Daily-report day-row membership stays raw-driven (the day CTE INNER
+    # joins request_logs, exactly as before the satellite): a fully pruned
+    # day drops out of the report; days that still have raw rows keep their
+    # satellite-served conversation counts unchanged.
+    pruned_daily = {row.date: row.conversation_count for row in pruned["reports_daily_utc"]}
+    reference_daily = {row.date: row.conversation_count for row in reference["reports_daily_utc"]}
+    assert pruned_daily
+    assert pruned_daily == {date: reference_daily[date] for date in pruned_daily}
+    # The filtered summary path stays fully raw-bound by design.
+    assert (
+        pruned["reports_summary_filtered"].conversation_count
+        <= reference["reports_summary_filtered"].conversation_count
+    )
     # earliest_activity_at: raw min is gone; the rollup fallback reports the
     # first countable bucket at hour precision.
     assert pruned["earliest"] == floor_to_hour(reference["earliest"])
@@ -512,6 +652,7 @@ async def test_statistics_survive_retention_pruning_folded_raw(db_setup):
     prune_cutoff_epoch = int((prune_cutoff - _EPOCH).total_seconds())
     assert all(row.bucket_epoch >= prune_cutoff_epoch // 5400 * 5400 for row in pruned["buckets_raw_degrade"])
     assert all(row.bucket_epoch >= prune_cutoff_epoch // 5400 * 5400 for row in pruned["trends_raw_degrade"])
+    assert all(row.bucket_epoch >= prune_cutoff_epoch // 5400 * 5400 for row in pruned["conv_buckets_raw_degrade"])
     assert pruned["buckets_raw_degrade"]  # the tail is still served
 
 
@@ -545,10 +686,34 @@ async def test_dashboard_overview_json_is_identical_before_and_after_fold(async_
 
     folded_slices = await run_hourly_fold_pass()  # real now: rows are > FOLD_LAG old
     assert folded_slices > 0
+    assert await run_conversation_fold_pass() > 0
     async with SessionLocal() as session:
         folded = (await session.execute(select(RequestUsageHourlyRollup))).scalars().all()
+        folded_conversations = (await session.execute(select(RequestConversationHourlyRollup))).scalars().all()
     assert folded  # the window flipped to rollup-served
+    assert folded_conversations  # conversation series flipped as well
 
     after = await async_client.get("/api/dashboard/overview?timeframe=7d")
     assert after.status_code == 200
     assert after.json() == before.json()
+
+
+@pytest.mark.asyncio
+async def test_listing_total_accepts_offset_aware_bounds(db_setup):
+    """The dashboard sends ISO `Z` bounds (offset-aware); the rollup window
+    arithmetic and the raw path must both accept them and agree with the
+    naive-UTC equivalents."""
+    from datetime import timezone
+
+    await _seed_corpus()
+    await run_hourly_fold_pass(now=NOW)
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        naive = await logs.list_recent(limit=1, since=SINCE_UNALIGNED, until=UNTIL_UNALIGNED)
+        aware = await logs.list_recent(
+            limit=1,
+            since=SINCE_UNALIGNED.replace(tzinfo=timezone.utc),
+            until=UNTIL_UNALIGNED.replace(tzinfo=timezone.utc),
+        )
+    assert aware.total == naive.total
+    assert naive.total > 0

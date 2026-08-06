@@ -49,8 +49,10 @@ class DashboardRepository:
         account_ids: list[str],
         window: str,
         since: datetime,
+        *,
+        cutoffs: dict[str, datetime] | None = None,
     ) -> dict[str, list[UsageHistorySnapshot]]:
-        return await self._usage_repo.bulk_history_since(account_ids, window, since)
+        return await self._usage_repo.bulk_history_since(account_ids, window, since, cutoffs=cutoffs)
 
     async def latest_window_minutes(self, window: str) -> int | None:
         return await self._usage_repo.latest_window_minutes(window)

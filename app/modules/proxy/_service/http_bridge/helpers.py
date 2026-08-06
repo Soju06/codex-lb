@@ -737,9 +737,13 @@ def _http_bridge_eventless_precreated_deadline(
         return None
     # Non-response telemetry (for example ``codex.rate_limits``) may update
     # the generic activity marker, but it must not extend the response.create
-    # acknowledgement deadline. The eventless watchdog is intentionally
-    # anchored to the send time until a response-lifecycle event is observed.
-    return sent_at + min(
+    # acknowledgement deadline. Keep the send-time anchor until a matched
+    # response-lifecycle event exists; then use the latest lifecycle activity
+    # so deferred reasoning is not retired from the original send time.
+    deadline_anchor = sent_at
+    if request_state.response_event_count > 0 and request_state.last_upstream_activity_at is not None:
+        deadline_anchor = request_state.last_upstream_activity_at
+    return deadline_anchor + min(
         float(stuck_gate_retire_after_seconds),
         _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
     )

@@ -252,16 +252,16 @@ def test_http_bridge_eventless_precreated_deadline_requires_narrow_owner_evidenc
 def test_http_bridge_eventless_precreated_deadline_survives_reasoning_prelude_without_created() -> None:
     request_state = _make_eventless_http_bridge_owner()
     request_state.response_event_count = 3
+    request_state.last_upstream_activity_at = 150.0
     request_state.upstream_model_output_seen = True
     request_state.deferred_reasoning_downstream_texts.append(
         'data: {"type":"response.output_item.added","item":{"type":"reasoning"}}\n\n'
     )
-    client_safe_cap_seconds = http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
 
     assert http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
         request_state,
         stuck_gate_retire_after_seconds=300.0,
-    ) == 100.0 + min(300.0, client_safe_cap_seconds)
+    ) == 150.0 + http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
 
 
 @pytest.mark.asyncio

@@ -1960,7 +1960,7 @@ class _HTTPBridgeMixin(
             catalog_omission_quota_admission=selection.catalog_omission_quota_admission,
         )
         _copy_websocket_route_metadata_to_session(session, request_state)
-        session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+        session.upstream_reader = self._scheduler.create_task(self._relay_http_bridge_upstream_messages(session))
         return session
 
     async def _reconnect_http_bridge_session(
@@ -2400,7 +2400,7 @@ class _HTTPBridgeMixin(
             await abort_selected_handoff()
             raise
         if restart_reader:
-            session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
+            session.upstream_reader = self._scheduler.create_task(self._relay_http_bridge_upstream_messages(session))
         _log_http_bridge_event(
             "reconnect",
             session.key,

@@ -68,9 +68,9 @@ from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse as UpstreamConsumeRateLimitResetCreditResponse,
 )
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
+from app.core.clock import REAL_SCHEDULER, Scheduler
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
-from app.core.clock import REAL_SCHEDULER, Scheduler
 from app.core.crypto import TokenEncryptor
 from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
@@ -5731,7 +5731,9 @@ async def _wait_for_first_stream_probe(
                 return bool(post_ready_done)
 
             marker_task = scheduler.create_task(capacity_wait_event.wait())
-            ready_task = scheduler.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+            ready_task = (
+                scheduler.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+            )
             try:
                 signal_discovery_remaining = max(
                     0.0,

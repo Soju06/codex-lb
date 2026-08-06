@@ -260,6 +260,7 @@ def _prepare_http_bridge_terminal_capacity_replay(request_state: _WebSocketReque
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    request_state.latency_response_created_ms = None
     request_state.upstream_model_output_seen = False
     _clear_websocket_request_error_overrides(request_state)
     return request_text

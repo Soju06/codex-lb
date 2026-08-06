@@ -665,6 +665,12 @@ class _StreamingRetryMixin:
                         and not settlement.downstream_visible
                     ):
                         delay = backoff_seconds(transient_retries)
+                        remaining_budget = _facade()._remaining_budget_seconds(deadline)
+                        if remaining_budget <= delay:
+                            raise ProxyResponseError(
+                                502,
+                                openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
+                            ) from exc
                         _facade().logger.info(
                             "Transient post-refresh stream error, retrying same account "
                             "request_id=%s account_id=%s retry=%s/%s delay=%.2fs code=%s",
@@ -676,6 +682,11 @@ class _StreamingRetryMixin:
                             exc.code,
                         )
                         await asyncio.sleep(delay)
+                        if _facade()._remaining_budget_seconds(deadline) <= 0:
+                            raise ProxyResponseError(
+                                502,
+                                openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
+                            ) from exc
                         continue
                     error_message = str(exc.error.get("message") or "Upstream error")
                     settlement.record_success = False

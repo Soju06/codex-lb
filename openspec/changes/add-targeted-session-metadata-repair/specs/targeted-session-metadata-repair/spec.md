@@ -28,11 +28,16 @@ The system SHALL require an explicit confirmation before changing metadata and S
 - **WHEN** the preview finds no eligible mismatched session IDs
 - **THEN** the system SHALL perform no write and SHALL report that no targeted repair is required
 
-### Requirement: ProviderSwitcher offers an independent targeted-repair action
+### Requirement: CLI offers an independent targeted-repair workflow
 
-ProviderSwitcher SHALL offer a metadata consistency action independent of provider selection. It SHALL present the preview result and SHALL not invoke a profile transition, a whole-home retag, or a config rewrite.
+The CLI SHALL expose metadata mismatch preview and session-ID-scoped repair independently of provider selection. The preview SHALL support machine-readable JSON, and the repair SHALL require explicit confirmation and explicit previewed session IDs. Neither command SHALL invoke a profile transition, a whole-home retag, or a config rewrite.
 
-#### Scenario: User declines the repair confirmation
+#### Scenario: Automation requests a machine-readable preview
 
-- **WHEN** ProviderSwitcher displays a non-empty mismatch preview and the user declines confirmation
-- **THEN** the system SHALL leave all session metadata and provider configuration unchanged
+- **WHEN** an operator runs `codex-lb codex-sessions metadata-mismatches --provider codex-lb --json`
+- **THEN** the CLI SHALL emit the scanned counts and eligible mismatch IDs as JSON without changing metadata
+
+#### Scenario: Non-interactive repair lacks confirmation
+
+- **WHEN** a non-interactive caller invokes `repair-metadata` without `--yes`
+- **THEN** the CLI SHALL refuse the write and leave all session metadata and provider configuration unchanged

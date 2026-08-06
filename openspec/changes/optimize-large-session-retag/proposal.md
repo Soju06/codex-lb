@@ -1,6 +1,6 @@
 ## Why
 
-Provider switching can leave large Codex homes partially retagged when repeated full JSONL scans, full-copy backups, rewrites, and verification exceed the ProviderSwitcher process limit. The retag path must scale with session volume while preserving exact rollback evidence and observable forward progress.
+Provider switching can leave large Codex homes partially retagged when repeated full JSONL scans, full-copy backups, rewrites, and verification exceed an integrating supervisor's process limit. The retag path must scale with session volume while preserving exact rollback evidence and observable forward progress.
 
 ## What Changes
 
@@ -24,6 +24,6 @@ None.
 ## Impact
 
 - Affected code: `app/codex_sessions_retag.py`, `app/cli.py`, and retag unit/CLI tests.
-- Affected consumer: ProviderSwitcher subprocess supervision and progress UI.
+- Affected consumer contract: any subprocess supervisor that parses the structured progress stream.
 - Storage behavior: backup creation prefers same-volume hard links but retains a safe copy fallback and atomic destination replacement.
 - No CLI command-line compatibility break is intended.

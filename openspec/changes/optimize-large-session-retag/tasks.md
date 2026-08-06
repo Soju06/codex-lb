@@ -11,15 +11,15 @@
 - [x] 2.3 Implement single-pass atomic JSONL conversion and targeted post-verification.
 - [x] 2.4 Emit structured phase and byte/item progress events while preserving the human-readable CLI summary.
 
-## 3. ProviderSwitcher Supervision and UX
+## 3. Subprocess supervision contract
 
-- [x] 3.1 Add a subprocess regression test for timeout after a reported backup and for missing rollback evidence.
-- [x] 3.2 Replace the fixed total timeout with progress-event-based idle detection while retaining partial stdout and backup paths.
-- [x] 3.3 Add typed retag progress propagation and display phase/progress in the ProviderSwitcher UI.
+- [x] 3.1 Emit a backup identity before long mutation phases and preserve the final backup identity in the summary.
+- [x] 3.2 Define progress-event semantics that allow an external supervisor to implement idle detection.
+- [x] 3.3 Keep process termination, UI display, and rollback orchestration outside the CLI implementation contract.
 
 ## 4. Verification and Packaging
 
 - [x] 4.1 Run focused and full codex-lb retag/CLI tests plus lint and strict OpenSpec validation.
-- [x] 4.2 Run ProviderSwitcher recovery tests, build, isolated self-test, and publish checks.
+- [x] 4.2 Run strict OpenSpec validation for the CLI contract.
 - [x] 4.3 Benchmark an isolated large-session fixture and verify no live provider switch or user-session retag is performed.
-- [x] 4.4 Produce the updated local EXE and approval-safe handoff with the existing 2455 and 2456 containers unchanged.
+- [x] 4.4 Produce an approval-safe CLI handoff without changing live provider configuration or containers.

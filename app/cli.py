@@ -67,7 +67,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         formatter_class=_CliHelpFormatter,
     )
     _add_targeted_metadata_arguments(mismatches, include_session_ids=False)
-    mismatches.add_argument("--json", action="store_true", help="Write the preview as JSON for ProviderSwitcher.")
+    mismatches.add_argument("--json", action="store_true", help="Write the preview as JSON for automation.")
     repair_metadata = codex_sessions_subparsers.add_parser(
         "repair-metadata",
         help="Repair only explicitly supplied metadata mismatch session IDs.",
@@ -82,7 +82,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     repair_metadata.add_argument(
         "--json",
         action="store_true",
-        help="Write the repair result as JSON for ProviderSwitcher.",
+        help="Write the repair result as JSON for automation.",
     )
 
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))

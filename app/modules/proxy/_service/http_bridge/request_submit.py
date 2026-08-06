@@ -1840,6 +1840,13 @@ class _HTTPBridgeRequestSubmitMixin:
                     caller_response_events_seen == 0 and current_response_created
                 )
                 if became_healthy_during_suspend:
+                    # Retirement was armed before the liveness re-check, but
+                    # a response event arrived while persistence was suspended.
+                    # Keep the still-registered session reusable and cancel the
+                    # stale retirement intent.
+                    session.closed = False
+                    session.upstream_control.reconnect_requested = False
+                    session.upstream_control.retire_after_drain = False
                     return
 
                 session.closed = True

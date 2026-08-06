@@ -214,6 +214,7 @@ from app.modules.proxy.continuity import (
 )
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
 from app.modules.proxy.durable_bridge_repository import durable_bridge_hash
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.helpers import (
     _normalize_error_code,
 )
@@ -392,6 +393,53 @@ def _verify_durable_full_resend(
     if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
         return None
     return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+
+
+_HTTP_BRIDGE_DEAD_OWNER_RECOVERY_CODE = "bridge_continuity_recovery_required"
+_HTTP_BRIDGE_DEAD_OWNER_RECOVERY_MESSAGE = (
+    "The previous bridge owner is no longer available; start a fresh turn to continue."
+)
+
+
+def _http_bridge_dead_owner_terminal(*, response_id: str) -> dict[str, JsonValue]:
+    """Return the non-retryable terminal for a proven-dead continuity owner."""
+
+    return cast(
+        dict[str, JsonValue],
+        response_failed_event(
+            _HTTP_BRIDGE_DEAD_OWNER_RECOVERY_CODE,
+            _HTTP_BRIDGE_DEAD_OWNER_RECOVERY_MESSAGE,
+            response_id=response_id,
+        ),
+    )
+
+
+def _http_bridge_dead_owner_proxy_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        400,
+        openai_error(
+            _HTTP_BRIDGE_DEAD_OWNER_RECOVERY_CODE,
+            _HTTP_BRIDGE_DEAD_OWNER_RECOVERY_MESSAGE,
+            error_type="invalid_request_error",
+        ),
+    )
+
+
+def _http_bridge_durable_owner_is_dead(
+    lookup: DurableBridgeLookup,
+    *,
+    current_instance: str,
+    current_process_epoch: str,
+) -> bool:
+    """Classify an anchored durable lookup whose owner cannot be live now."""
+
+    previous_process_epoch = lookup.owner_process_epoch
+    process_epoch_is_dead = previous_process_epoch is not None and previous_process_epoch != current_process_epoch
+    return (
+        lookup.owner_instance_id != current_instance
+        or process_epoch_is_dead
+        or not lookup.lease_is_active(now=utcnow())
+    )
 
 
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
@@ -955,6 +1003,7 @@ class _HTTPBridgeStreamingMixin:
         deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None,
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
+        dead_owner_anchor = False
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -1029,6 +1078,7 @@ class _HTTPBridgeStreamingMixin:
             request_state.deferred_account_error_backoffs = lifecycle.pending_backoffs
             request_state.deferred_account_backoff_tracker = deferred_account_backoff_tracker
             request_state.deferred_account_backoff_lifecycle = lifecycle
+            request_state.durable_owner_dead = dead_owner_anchor
             return request_state, text_data
 
         async def release_unowned_bridge_lifecycle(
@@ -1172,6 +1222,14 @@ class _HTTPBridgeStreamingMixin:
                         exc_info=True,
                     )
                 durable_lookup = None
+        if durable_lookup is not None and durable_lookup.latest_response_id is not None:
+            current_instance = _service_get_settings().http_responses_session_bridge_instance_id
+            current_process_epoch = http_bridge_owner_process_epoch()
+            dead_owner_anchor = _http_bridge_durable_owner_is_dead(
+                durable_lookup,
+                current_instance=current_instance,
+                current_process_epoch=current_process_epoch,
+            )
         effective_payload = payload
         untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
@@ -1697,6 +1755,7 @@ class _HTTPBridgeStreamingMixin:
             nonlocal account_neutral_recovery
             nonlocal affinity
             nonlocal bridge_session_key
+            nonlocal dead_owner_anchor
             nonlocal durable_full_resend_anchor_count
             nonlocal durable_full_resend_anchor_fingerprint
             nonlocal durable_full_resend_fresh_payload
@@ -1765,6 +1824,7 @@ class _HTTPBridgeStreamingMixin:
             durable_full_resend_fresh_payload = None
             durable_full_resend_is_account_neutral = None
             durable_lookup = None
+            dead_owner_anchor = False
             file_required_preferred_account = False
 
         if durable_recovery_attempt_claimed:
@@ -3222,6 +3282,8 @@ class _HTTPBridgeStreamingMixin:
             await self._release_websocket_request_state_reservation(request_state)
             request_state.api_key_reservation = None
             if propagate_http_errors:
+                if request_state.durable_owner_dead:
+                    raise _http_bridge_dead_owner_proxy_error()
                 raise ProxyResponseError(
                     503,
                     openai_error(
@@ -3235,7 +3297,11 @@ class _HTTPBridgeStreamingMixin:
             return format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
-                    response_failed_event(
+                    _http_bridge_dead_owner_terminal(
+                        response_id=_websocket_downstream_response_id(request_state),
+                    )
+                    if request_state.durable_owner_dead
+                    else response_failed_event(
                         "stream_idle_timeout",
                         "Upstream did not respond within the keepalive window",
                         response_id=_websocket_downstream_response_id(request_state),
@@ -3354,7 +3420,11 @@ class _HTTPBridgeStreamingMixin:
             terminal_event = format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
-                    response_failed_event(
+                    _http_bridge_dead_owner_terminal(
+                        response_id=_websocket_downstream_response_id(request_state),
+                    )
+                    if request_state.durable_owner_dead
+                    else response_failed_event(
                         "stream_idle_timeout",
                         "Upstream did not respond within the keepalive window",
                         response_id=_websocket_downstream_response_id(request_state),
@@ -3367,6 +3437,8 @@ class _HTTPBridgeStreamingMixin:
             # upstream handoff for retirement.
             await self._detach_http_bridge_request(session, request_state=request_state)
             if propagate_http_errors:
+                if request_state.durable_owner_dead:
+                    raise _http_bridge_dead_owner_proxy_error()
                 raise ProxyResponseError(
                     503,
                     openai_error(
@@ -3603,7 +3675,11 @@ class _HTTPBridgeStreamingMixin:
                                     yield format_sse_event(
                                         cast(
                                             Mapping[str, JsonValue],
-                                            response_failed_event(
+                                            _http_bridge_dead_owner_terminal(
+                                                response_id=downstream_response_id,
+                                            )
+                                            if request_state.durable_owner_dead
+                                            else response_failed_event(
                                                 "stream_idle_timeout",
                                                 "Upstream did not respond within the keepalive window",
                                                 response_id=downstream_response_id,

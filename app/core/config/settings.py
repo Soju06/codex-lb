@@ -297,6 +297,7 @@ class Settings(BaseSettings):
     http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
+    http_responses_session_bridge_anchor_poison_failure_threshold: int = Field(default=7, ge=1, le=100)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float = Field(

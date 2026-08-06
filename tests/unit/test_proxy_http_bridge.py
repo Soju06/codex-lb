@@ -10,7 +10,7 @@ import time
 from collections import deque
 from contextlib import nullcontext
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -49,7 +49,7 @@ from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
 )
-from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
@@ -58,6 +58,47 @@ from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission
 
 pytestmark = pytest.mark.unit
+
+
+def _durable_owner_lookup(*, process_epoch: str, lease_expires_at: datetime) -> DurableBridgeLookup:
+    return DurableBridgeLookup(
+        session_id="dead-owner-session",
+        canonical_kind="session_header",
+        canonical_key="dead-owner-key",
+        api_key_scope="anonymous",
+        account_id="acc-bridge",
+        owner_instance_id="bridge-instance",
+        owner_process_epoch=process_epoch,
+        owner_epoch=2,
+        lease_expires_at=lease_expires_at,
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="turn-state",
+        latest_response_id="resp-dead-owner",
+    )
+
+
+def test_http_bridge_dead_owner_epoch_is_non_retryable_but_current_owner_silence_is_retryable() -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    stale = http_bridge_streaming_module._http_bridge_durable_owner_is_dead(
+        _durable_owner_lookup(process_epoch="boot-a", lease_expires_at=now + timedelta(minutes=5)),
+        current_instance="bridge-instance",
+        current_process_epoch="boot-b",
+    )
+    transient = http_bridge_streaming_module._http_bridge_durable_owner_is_dead(
+        _durable_owner_lookup(process_epoch="boot-b", lease_expires_at=now + timedelta(minutes=5)),
+        current_instance="bridge-instance",
+        current_process_epoch="boot-b",
+    )
+
+    assert stale is True
+    assert transient is False
+
+    terminal = http_bridge_streaming_module._http_bridge_dead_owner_terminal(response_id="resp-dead-owner")
+    assert terminal["response"]["error"]["code"] == "bridge_continuity_recovery_required"
+    assert "fresh turn" in terminal["response"]["error"]["message"]
+    proxy_error = http_bridge_streaming_module._http_bridge_dead_owner_proxy_error()
+    assert proxy_error.status_code == 400
+    assert proxy_error.payload["error"]["type"] == "invalid_request_error"
 
 
 @pytest.fixture(autouse=True)
@@ -22142,6 +22183,53 @@ async def test_http_bridge_reader_failure_keeps_waiter_count_when_draining_reque
     assert retired is False
     assert session.queued_request_count == 1
     record_failure.assert_awaited_once_with(session, detail="stream_incomplete")
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_repeated_zero_event_idle_timeouts_poison_anchor_with_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key_value="bridge-anchor-poison",
+        pending_requests=deque([_make_eventless_http_bridge_owner()]),
+        queued_request_count=1,
+    )
+    session.admission_waiter_count = 1
+    session.durable_session_id = "durable-anchor-poison"
+    session.durable_owner_epoch = 3
+    durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+    service._durable_bridge = durable_bridge
+    fail_pending = AsyncMock()
+    retire = AsyncMock()
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+
+    for failure_number in range(1, 8):
+        retired = await service._fail_http_bridge_reader_and_maybe_retire(
+            session,
+            error_code="stream_idle_timeout",
+            error_message="idle timeout",
+        )
+        assert retired is (failure_number == 7)
+
+    durable_bridge.rebind_session_account.assert_awaited_once_with(
+        session_id="durable-anchor-poison",
+        api_key_id=None,
+        instance_id=proxy_service.get_settings().http_responses_session_bridge_instance_id,
+        owner_epoch=3,
+        account_id="acc-bridge",
+        clear_continuity=True,
+    )
+    retire.assert_awaited_once_with(
+        session,
+        detail="repeated_zero_event_idle_timeout",
+        response_events_seen=0,
+    )
 
 
 @pytest.mark.asyncio

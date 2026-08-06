@@ -82,6 +82,7 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ADVERTISE_BASE_URL` | `str \| None` | `None` |
+| `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_ANCHOR_POISON_FAILURE_THRESHOLD` | `int` | `7` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS` | `float` | `2.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_IDLE_TTL_SECONDS` | `float` | `900.0` |
 | `CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED` | `bool` | `False` |

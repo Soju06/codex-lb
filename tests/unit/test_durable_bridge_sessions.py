@@ -2359,6 +2359,83 @@ async def test_startup_purges_owned_bridge_rows(
 
 
 @pytest.mark.asyncio
+async def test_startup_closes_same_instance_previous_process_epoch_rows(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    previous_process = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-reused-container",
+        api_key_id=None,
+        instance_id="container-74e8e7cda9fb",
+        owner_process_epoch="boot-a",
+        lease_ttl_seconds=120.0,
+        account_id="acc-1",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        latest_turn_state="http_turn_reused_container",
+        latest_response_id="resp_reused_container",
+        allow_takeover=True,
+    )
+    await coordinator.register_session_header(
+        session_id=previous_process.session_id,
+        api_key_id=None,
+        session_header="sid-reused-container",
+    )
+    current_process = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-current-process",
+        api_key_id=None,
+        instance_id="container-74e8e7cda9fb",
+        owner_process_epoch="boot-b",
+        lease_ttl_seconds=120.0,
+        account_id="acc-1",
+        model="gpt-5.6-luna",
+        service_tier=None,
+        latest_turn_state="http_turn_current_process",
+        latest_response_id="resp_current_process",
+        allow_takeover=True,
+    )
+
+    retired = await coordinator.purge_owned_sessions_on_startup(
+        instance_id="container-74e8e7cda9fb",
+        owner_process_epoch="boot-b",
+        ownerless_cutoff=utcnow() - timedelta(seconds=60),
+    )
+
+    assert retired == 1
+    current_lookup = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-current-process",
+        api_key_id=None,
+        turn_state="http_turn_current_process",
+        session_header="sid-current-process",
+        previous_response_id="resp_current_process",
+    )
+    assert current_lookup is not None
+    assert current_lookup.session_id == current_process.session_id
+    assert current_lookup.owner_process_epoch == "boot-b"
+    async with async_session_factory() as session:
+        retired_row = await session.get(HttpBridgeSessionRecord, previous_process.session_id)
+        retired_aliases = list(
+            (
+                await session.execute(
+                    select(HttpBridgeSessionAlias).where(
+                        HttpBridgeSessionAlias.session_id == previous_process.session_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert retired_row is not None
+    assert retired_row.state == HttpBridgeSessionState.CLOSED
+    assert retired_row.owner_instance_id is None
+    assert retired_row.closed_at is not None
+    assert retired_aliases == []
+
+
+@pytest.mark.asyncio
 async def test_startup_retains_verified_replay_alias_as_ownerless_restart_proof(
     coordinator: DurableBridgeSessionCoordinator,
     async_session_factory: Callable[[], AsyncSession],

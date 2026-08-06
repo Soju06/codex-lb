@@ -1198,6 +1198,94 @@ async def test_request_log_conversation_id_migration_upgrade_and_downgrade(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_account_plan_downgrade_observations_migration_upgrade_and_downgrade(tmp_path):
+    """Round-trip the plan-downgrade evidence migration through Alembic itself.
+
+    The store tests build their schema through ``Base.metadata.create_all``, so
+    only this test executes the revision's ``upgrade`` and ``downgrade``
+    functions: parent -> revision creates the table with the expected shape,
+    downgrade removes it, the guarded upgrade tolerates a database where a
+    pre-merge build of this same revision already created the table, and a
+    final upgrade to ``head`` proves the re-parented revision sits on the
+    single-head path.
+    """
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'plan-downgrade-observations.sqlite'}"
+    parent_revision = "20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads"
+    observations_revision = "20260726_000000_add_account_plan_downgrade_observations"
+    table_name = "account_plan_downgrade_observations"
+    expected_columns = {
+        "account_id",
+        "observations",
+        "credential_fingerprint",
+        "observed_plan_type",
+        "first_observed_at",
+        "last_observed_at",
+    }
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        present = inspector.has_table(table_name)
+        return {
+            "present": present,
+            "columns": ({column["name"] for column in inspector.get_columns(table_name)} if present else set()),
+            "pk": (inspector.get_pk_constraint(table_name)["constrained_columns"] if present else None),
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert not state["present"]
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, observations_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["present"]
+        assert state["columns"] == expected_columns
+        assert state["pk"] == ["account_id"]
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert not state["present"]
+
+        # Guarded upgrade: a database where a pre-merge build of this same
+        # revision already created the table must upgrade cleanly without a
+        # second CREATE TABLE.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE account_plan_downgrade_observations ("
+                    "account_id VARCHAR NOT NULL, observations INTEGER NOT NULL, "
+                    "credential_fingerprint VARCHAR(64) NOT NULL, observed_plan_type VARCHAR NOT NULL, "
+                    "first_observed_at DATETIME NOT NULL, last_observed_at DATETIME NOT NULL, "
+                    "PRIMARY KEY (account_id))"
+                )
+            )
+        await to_thread.run_sync(lambda: run_upgrade(db_url, observations_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["present"]
+        assert state["columns"] == expected_columns
+
+        # The revision must sit on the single-head path: upgrading to head
+        # from here succeeds without a divergent-heads error and leaves the
+        # table in place.
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state["present"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_request_usage_time_rollups_migration_upgrade_and_downgrade(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect

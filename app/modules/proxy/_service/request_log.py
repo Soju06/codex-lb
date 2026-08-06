@@ -22,6 +22,9 @@ _PERSISTENCE_TASK_NAME_PREFIXES = (
     "proxy-request-log-",
     "proxy-stream-api-key-settle-",
     "proxy-release_stream_api_key_reservation",
+    "proxy-websocket-terminal-",
+    "proxy-websocket-transport-end-",
+    "proxy-websocket-finalization-",
     "http-bridge-recovery-settlement-",
 )
 

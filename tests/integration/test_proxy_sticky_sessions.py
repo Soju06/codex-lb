@@ -8,12 +8,12 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import text, update
 
 import app.modules.proxy.service as proxy_module
 from app.core.crypto import TokenEncryptor
 from app.core.openai.models import OpenAIResponsePayload
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
@@ -1725,6 +1725,91 @@ async def test_stale_expiry_cleanup_cannot_delete_fresh_rebound_owner(async_clie
     assert persisted_owner == new_owner
 
 
+@pytest.mark.asyncio
+async def test_stale_expiry_race_reread_reports_concurrent_tombstone() -> None:
+    """The race-safe max-age expiry path (see get_account_id_and_abandonment)
+    re-reads the row when its delete-on-expiry predicate misses a concurrent
+    write, and must apply the abandonment check to that re-read row, not just
+    the initial snapshot — otherwise a mapping tombstoned by the purge job in
+    the gap between the stale read and the delete attempt would be reported
+    as a plain miss (never-seen key) instead of authorized-to-reselect."""
+    from sqlalchemy import update
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            Account(
+                id="acc_race_tombstone_owner",
+                email="race-tombstone@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+    key = "\ncodex_live_call:tombstone-race"
+    stale_read = asyncio.Event()
+    tombstoned = asyncio.Event()
+
+    async with SessionLocal() as setup_session:
+        repo = StickySessionsRepository(setup_session)
+        await repo.upsert(key, "acc_race_tombstone_owner", kind=StickySessionKind.CODEX_SESSION)
+        await setup_session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.CODEX_SESSION)
+            .values(updated_at=utcnow() - timedelta(hours=3))
+        )
+        await setup_session.commit()
+
+    class PausedAfterStaleReadRepository(StickySessionsRepository):
+        async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
+            row = await super().get_entry(key, kind=kind)
+            await self._session.commit()
+            stale_read.set()
+            await tombstoned.wait()
+            return row
+
+    async with SessionLocal() as stale_session, SessionLocal() as tombstone_session:
+        stale_repo = PausedAfterStaleReadRepository(stale_session)
+        resolution = asyncio.create_task(
+            stale_repo.get_account_id_and_abandonment(
+                key,
+                kind=StickySessionKind.CODEX_SESSION,
+                max_age_seconds=60,
+            )
+        )
+        await asyncio.wait_for(stale_read.wait(), timeout=1)
+        # Same account_id, but updated_at moves — this is exactly what the
+        # purge job's tombstone step does, and it's enough to miss the
+        # delete-on-expiry predicate (which pins on the originally observed
+        # updated_at), forcing the race-safe re-read.
+        await tombstone_session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.CODEX_SESSION)
+            .values(updated_at=utcnow(), continuity_abandoned_at=utcnow())
+        )
+        await tombstone_session.commit()
+        tombstoned.set()
+        resolved = await asyncio.wait_for(resolution, timeout=1)
+
+    async with SessionLocal() as verification_session:
+        persisted_row = await StickySessionsRepository(verification_session).get_entry(
+            key, kind=StickySessionKind.CODEX_SESSION
+        )
+
+    assert resolved.account_id is None
+    assert resolved.continuity_abandoned is True
+    assert persisted_row is not None
+    assert persisted_row.continuity_abandoned_at is not None
+
+
 def test_realtime_call_affinity_key_is_scoped_and_opaque() -> None:
     api_key_a = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
     api_key_b = cast(ApiKeyData, SimpleNamespace(id="api-key-b"))
@@ -1815,3 +1900,292 @@ async def test_resolve_missing_realtime_call_does_not_purge_other_bindings(async
 
     assert resolved_owner is None
     assert retained_row.account_id == account_id
+
+
+@pytest.mark.asyncio
+async def test_purge_stale_hard_codex_session_mappings_only_drops_durably_unavailable_owners(db_setup):
+    """A hard codex_session mapping must survive a merely-transient owner
+    blip (rate-limited/paused, but recently used) and only be dropped once
+    BOTH the owner is non-active AND the mapping itself hasn't been used
+    since well before the cutoff. Mappings on a healthy owner, and mappings
+    still recently used despite an unavailable owner, must never be touched.
+    A known future reset_at overrides the flat cutoff entirely: the owner's
+    own stated recovery point must pass before its mapping is eligible."""
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    cutoff = now - timedelta(hours=6)
+    future_reset_at = naive_utc_to_epoch(now + timedelta(days=3))
+    accounts = [
+        ("acc_purge_active", AccountStatus.ACTIVE, None),
+        ("acc_purge_recent_transition_rate_limited", AccountStatus.ACTIVE, None),
+        ("acc_purge_recent_transition_paused", AccountStatus.ACTIVE, None),
+        ("acc_purge_fresh_rate_limited", AccountStatus.RATE_LIMITED, None),
+        ("acc_purge_stale_rate_limited", AccountStatus.RATE_LIMITED, None),
+        ("acc_purge_fresh_paused", AccountStatus.PAUSED, None),
+        ("acc_purge_stale_paused", AccountStatus.PAUSED, None),
+        ("acc_purge_stale_future_reset", AccountStatus.RATE_LIMITED, future_reset_at),
+    ]
+    # Only the "stale_*" mappings are backdated to before the cutoff; the
+    # rest keep their real upsert-time timestamp (well after the cutoff).
+    stale_account_ids = {"acc_purge_stale_rate_limited", "acc_purge_stale_paused", "acc_purge_stale_future_reset"}
+
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        for account_id, status, reset_at in accounts:
+            await repo_accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=status,
+                    deactivation_reason=None,
+                    reset_at=reset_at,
+                )
+            )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        for account_id, _status, _reset_at in accounts:
+            await repo.upsert(f"turn_{account_id}", account_id, kind=StickySessionKind.CODEX_SESSION)
+
+    async with SessionLocal() as session:
+        for account_id in stale_account_ids:
+            await session.execute(
+                update(StickySession)
+                .where(StickySession.key == f"turn_{account_id}", StickySession.kind == StickySessionKind.CODEX_SESSION)
+                .values(updated_at=cutoff - timedelta(hours=1))
+            )
+        for account_id in ("acc_purge_recent_transition_rate_limited", "acc_purge_recent_transition_paused"):
+            await session.execute(
+                update(StickySession)
+                .where(StickySession.key == f"turn_{account_id}", StickySession.kind == StickySessionKind.CODEX_SESSION)
+                .values(updated_at=cutoff - timedelta(hours=1))
+            )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        assert await repo_accounts.update_status(
+            "acc_purge_recent_transition_rate_limited",
+            AccountStatus.RATE_LIMITED,
+        )
+        assert await repo_accounts.update_status_if_current(
+            "acc_purge_recent_transition_paused",
+            AccountStatus.PAUSED,
+            expected_status=AccountStatus.ACTIVE,
+        )
+        # Rewriting an already-unavailable state must not extend the grace
+        # period, and a failed compare-and-set must not touch it either.
+        assert await repo_accounts.update_status(
+            "acc_purge_stale_rate_limited",
+            AccountStatus.RATE_LIMITED,
+        )
+        assert not await repo_accounts.update_status_if_current(
+            "acc_purge_stale_paused",
+            AccountStatus.PAUSED,
+            expected_status=AccountStatus.ACTIVE,
+        )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        purged_count = await repo.purge_stale_hard_codex_session_mappings(cutoff, now=now)
+
+    # First pass only tombstones (continuity_abandoned_at set); nothing is
+    # actually deleted yet, so a `conversation`-continuity request against
+    # one of these keys can still recognize "abandoned, pick a fresh owner"
+    # instead of being told the key was never seen.
+    assert purged_count == 2
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        entries = {
+            account_id: await repo.get_entry(f"turn_{account_id}", kind=StickySessionKind.CODEX_SESSION)
+            for account_id, _status, _reset_at in accounts
+        }
+    present = {account_id for account_id, entry in entries.items() if entry is not None}
+    tombstoned = {
+        account_id
+        for account_id, entry in entries.items()
+        if entry is not None and entry.continuity_abandoned_at is not None
+    }
+    assert present == {account_id for account_id, _status, _reset_at in accounts}
+    assert tombstoned == {"acc_purge_stale_rate_limited", "acc_purge_stale_paused"}
+
+
+@pytest.mark.asyncio
+async def test_purge_stale_hard_codex_session_mappings_deletes_unclaimed_tombstones(db_setup):
+    """Once a tombstone (continuity_abandoned_at set — see the first purge
+    pass) has sat unclaimed past a further grace window, it's dropped
+    outright: by then a fresh request for that key is fine falling back to
+    the same conservative fail-closed default as a key that was never seen.
+    A tombstone still inside its grace window, and a live (never-purged)
+    mapping, must both be left alone."""
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    cutoff = now - timedelta(hours=6)
+    accounts = [
+        ("acc_tombstone_old", AccountStatus.RATE_LIMITED, None),
+        ("acc_tombstone_recent", AccountStatus.RATE_LIMITED, None),
+        ("acc_tombstone_live", AccountStatus.RATE_LIMITED, None),
+    ]
+
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        for account_id, status, reset_at in accounts:
+            await repo_accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=status,
+                    deactivation_reason=None,
+                    reset_at=reset_at,
+                )
+            )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        for account_id, _status, _reset_at in accounts:
+            await repo.upsert(f"turn_{account_id}", account_id, kind=StickySessionKind.CODEX_SESSION)
+
+    async with SessionLocal() as session:
+        # Already a tombstone, past its own grace window: must be deleted.
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key == "turn_acc_tombstone_old", StickySession.kind == StickySessionKind.CODEX_SESSION)
+            .values(continuity_abandoned_at=cutoff - timedelta(hours=1))
+        )
+        # Already a tombstone, but still inside its grace window: must survive.
+        await session.execute(
+            update(StickySession)
+            .where(
+                StickySession.key == "turn_acc_tombstone_recent", StickySession.kind == StickySessionKind.CODEX_SESSION
+            )
+            .values(continuity_abandoned_at=cutoff + timedelta(hours=1))
+        )
+        # Never tombstoned at all, and its updated_at is recent: must survive
+        # untouched by either phase.
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        purged_count = await repo.purge_stale_hard_codex_session_mappings(cutoff, now=now)
+
+    assert purged_count == 1
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        entries = {
+            account_id: await repo.get_entry(f"turn_{account_id}", kind=StickySessionKind.CODEX_SESSION)
+            for account_id, _status, _reset_at in accounts
+        }
+    assert entries["acc_tombstone_old"] is None
+    assert entries["acc_tombstone_recent"] is not None
+    assert entries["acc_tombstone_recent"].continuity_abandoned_at is not None
+    assert entries["acc_tombstone_live"] is not None
+    assert entries["acc_tombstone_live"].continuity_abandoned_at is None
+
+
+@pytest.mark.asyncio
+async def test_seed_hard_sticky_outage_grace_on_startup_refreshes_only_unavailable_accounts(db_setup):
+    """A hard codex_session mapping whose owner was already unavailable
+    before this process started (no live status transition to hook) must
+    still get a fresh grace window once, at startup — otherwise the very
+    first cleanup cycle could purge an outage that began moments before
+    deploy. A healthy owner's mapping must be left untouched."""
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    long_ago = utcnow() - timedelta(days=30)
+    accounts = [
+        ("acc_seed_active", AccountStatus.ACTIVE),
+        ("acc_seed_rate_limited", AccountStatus.RATE_LIMITED),
+        ("acc_seed_paused", AccountStatus.PAUSED),
+        ("acc_seed_quota_exceeded", AccountStatus.QUOTA_EXCEEDED),
+    ]
+
+    async with SessionLocal() as session:
+        repo_accounts = AccountsRepository(session)
+        for account_id, status in accounts:
+            await repo_accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=status,
+                    deactivation_reason=None,
+                )
+            )
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        for account_id, _status in accounts:
+            await repo.upsert(f"turn_{account_id}", account_id, kind=StickySessionKind.CODEX_SESSION)
+
+    # Backdate every mapping's updated_at, simulating rows that predate this
+    # process's startup entirely (no status transition ever touched them).
+    async with SessionLocal() as session:
+        for account_id, _status in accounts:
+            await session.execute(
+                update(StickySession)
+                .where(StickySession.key == f"turn_{account_id}", StickySession.kind == StickySessionKind.CODEX_SESSION)
+                .values(updated_at=long_ago)
+            )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        seeded_count = await AccountsRepository(session).seed_hard_sticky_outage_grace_on_startup()
+
+    assert seeded_count == 3
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        refreshed_at = {}
+        for account_id, _status in accounts:
+            entry = await repo.get_entry(f"turn_{account_id}", kind=StickySessionKind.CODEX_SESSION)
+            assert entry is not None
+            refreshed_at[account_id] = entry.updated_at
+
+    assert refreshed_at["acc_seed_active"] == long_ago
+    for account_id in ("acc_seed_rate_limited", "acc_seed_paused", "acc_seed_quota_exceeded"):
+        assert refreshed_at[account_id] > long_ago + timedelta(days=1)
+
+    # A later boot — same or a different replica, same shared database —
+    # must not reseed: the durable runtime_sentinels marker means this only
+    # ever runs once per database, so a fast redeploy/autoscaling cadence
+    # can't keep resetting the grace clock for a durably-dead mapping.
+    async with SessionLocal() as session:
+        for account_id, _status in accounts:
+            await session.execute(
+                update(StickySession)
+                .where(StickySession.key == f"turn_{account_id}", StickySession.kind == StickySessionKind.CODEX_SESSION)
+                .values(updated_at=long_ago)
+            )
+        await session.commit()
+
+    async with SessionLocal() as session:
+        second_boot_seeded_count = await AccountsRepository(session).seed_hard_sticky_outage_grace_on_startup()
+    assert second_boot_seeded_count == 0
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        for account_id, _status in accounts:
+            entry = await repo.get_entry(f"turn_{account_id}", kind=StickySessionKind.CODEX_SESSION)
+            assert entry is not None
+            assert entry.updated_at == long_ago

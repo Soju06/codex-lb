@@ -61,6 +61,7 @@ from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_rese
 from app.core.utils.time import utcnow
 from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
 from app.modules.accounts import api as accounts_api
+from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup_scheduler import build_account_usage_rollup_scheduler
 from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
@@ -245,9 +246,9 @@ async def lifespan(app: FastAPI):
     heartbeat_task: asyncio.Task[None] | None = None
     instance_id = None
 
+    shutdown_state.prepare_lifespan_start()
     startup_module._startup_complete = False
     startup_module.reset_bridge_registration()
-    shutdown_state.reset()
     await get_settings_cache().invalidate(propagate=False)
     await get_rate_limit_headers_cache().invalidate()
     reload_additional_quota_registry()
@@ -382,6 +383,14 @@ async def lifespan(app: FastAPI):
 
     await cache_poller.start()
 
+    async with SessionLocal() as session:
+        seeded_count = await AccountsRepository(session).seed_hard_sticky_outage_grace_on_startup()
+    if seeded_count > 0:
+        logger.info(
+            "Seeded hard codex_session purge grace for already-unavailable accounts seeded_count=%s",
+            seeded_count,
+        )
+
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
@@ -406,12 +415,14 @@ async def lifespan(app: FastAPI):
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 
+        from app.core.server import SignalNeutralServer
+
         scrape_registry = make_scrape_registry()
         prometheus_module = import_module("prometheus_client")
         make_asgi_app = getattr(prometheus_module, "make_asgi_app")
         metrics_app = make_asgi_app(registry=scrape_registry)
         config = uvicorn.Config(metrics_app, host="0.0.0.0", port=settings.metrics_port, log_level="warning")
-        metrics_server = uvicorn.Server(config)
+        metrics_server = SignalNeutralServer(config)
 
         async def _serve_metrics(srv: _MetricsServer) -> None:
             try:
@@ -507,9 +518,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        shutdown_state.set_bridge_drain_active(True)
-        shutdown_state.set_draining(True)
-        drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=settings.shutdown_drain_timeout_seconds)
+        shutdown_state.commit_shutdown(timeout_seconds=settings.shutdown_drain_timeout_seconds)
+        remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
+        drained = await shutdown_state.wait_for_in_flight_drain(timeout_seconds=remaining_drain_seconds)
         # No await separates the timeout result from this cutoff. A slow
         # request therefore either registered its task before the barrier or
         # is prevented from starting new audit/fleet database work afterward.
@@ -548,7 +559,8 @@ async def lifespan(app: FastAPI):
         # persistence tasks that this drain must cover.
         if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
             try:
-                await proxy_service.drain_persistence_tasks(timeout_seconds=settings.shutdown_drain_timeout_seconds)
+                remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
+                await proxy_service.drain_persistence_tasks(timeout_seconds=remaining_drain_seconds)
             except Exception:
                 logger.warning("Failed to drain proxy persistence tasks during shutdown", exc_info=True)
 
@@ -584,7 +596,8 @@ async def lifespan(app: FastAPI):
         # shared HTTP clients, and both database engines are still available.
         # The replica heartbeat is already stopped/staled so this grace period
         # does not extend its active bridge-ring lifetime.
-        await _drain_detached_control_plane_tasks(settings.shutdown_drain_timeout_seconds)
+        remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
+        await _drain_detached_control_plane_tasks(remaining_drain_seconds)
 
         # Start the single process-level lease-renewal keeper BEFORE stopping any
         # scheduler. Schedulers are stopped one at a time and only the final
@@ -639,7 +652,10 @@ async def lifespan(app: FastAPI):
                 logger.exception("Metrics server stopped with an error")
             finally:
                 mark_process_dead()
-                await close_db()
+                try:
+                    await close_db()
+                finally:
+                    shutdown_state.mark_lifespan_completed()
 
 
 def create_app() -> FastAPI:

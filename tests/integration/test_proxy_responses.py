@@ -428,6 +428,73 @@ async def test_backend_responses_forwards_explicit_empty_tools(async_client, mon
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_strips_replayed_tool_call_namespaces_upstream(async_client, monkeypatch):
+    raw_account_id = "acc_replayed_namespaced_function_call"
+    auth_json = _make_auth_json(raw_account_id, "replayed-namespaced-call@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_replayed_namespaced_call",'
+            '"object":"response","status":"completed","output":[],"usage":{"input_tokens":2,'
+            '"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    replayed_calls = [
+        {
+            "type": "function_call",
+            "namespace": "collaboration",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "namespace": "exec",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "continue",
+            "input": replayed_calls,
+            "stream": True,
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    assert _extract_first_event(lines)["type"] == "response.completed"
+    assert seen_payload["input"] == [
+        {
+            "type": "function_call",
+            "name": "spawn_agent",
+            "arguments": '{"message":"same task"}',
+            "call_id": "call_123",
+        },
+        {
+            "type": "custom_tool_call",
+            "name": "exec",
+            "input": "git status --short",
+            "call_id": "call_456",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_preserves_non_message_developer_directive(async_client, monkeypatch):
     raw_account_id = "acc_future_directive"
     auth_json = _make_auth_json(raw_account_id, "future-directive@example.com")
@@ -2621,6 +2688,72 @@ async def test_v1_responses_compact_invalid_messages_returns_openai_400(async_cl
     assert body["error"]["type"] == "invalid_request_error"
     assert body["error"]["code"] == "invalid_request_error"
     assert body["error"]["param"] == "messages"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_compact_strips_replayed_tool_call_namespaces_upstream(async_client, monkeypatch):
+    raw_account_id = "acc_v1_compact_namespaced_replay"
+    auth_json = _make_auth_json(raw_account_id, "v1-compact-namespaced-replay@example.com")
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_compact(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, account_id, kwargs
+        seen_payload.update(payload.to_payload())
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "compaction_summary": {
+                    "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+                    "summary_text": "condensed thread state",
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/v1/responses/compact",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "compact",
+            "input": [
+                {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "call_id": "call_1",
+                    "name": "spawn_agent",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "custom_tool_call",
+                    "namespace": "exec",
+                    "call_id": "call_2",
+                    "name": "exec",
+                    "input": "pwd",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen_payload["input"] == [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "spawn_agent",
+            "arguments": "{}",
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_2",
+            "name": "exec",
+            "input": "pwd",
+        },
+    ]
 
 
 @pytest.mark.asyncio

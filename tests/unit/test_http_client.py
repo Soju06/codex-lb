@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import socket
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -90,11 +91,13 @@ async def test_init_http_client_creates_tcp_connector_with_limits() -> None:
         "ssl": ssl_context,
         "keepalive_timeout": 90,
         "ttl_dns_cache": 300,
+        "socket_factory": http_module._keepalive_socket_factory,
     }
     assert tcp_connector_cls.call_args_list[1].kwargs == {
         "ssl": ssl_context,
         "keepalive_timeout": 90,
         "ttl_dns_cache": 300,
+        "socket_factory": http_module._keepalive_socket_factory,
     }
     assert client_session_cls.call_args_list[0].kwargs["connector"] is connector
     assert client_session_cls.call_args_list[1].kwargs["connector"] is websocket_connector
@@ -282,6 +285,43 @@ async def test_init_http_client_preserves_socks4a_remote_dns_for_proxy_connector
     assert [call.kwargs["rdns"] for call in proxy_connector_cls.from_url.call_args_list] == [True, True]
 
     await http_module.close_http_client()
+
+
+def test_keepalive_socket_factory_enables_keepalive_probes() -> None:
+    addr_info = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 0))
+
+    sock = http_module._keepalive_socket_factory(addr_info)
+    try:
+        assert sock.family == socket.AF_INET
+        assert sock.type == socket.SOCK_STREAM
+        # Linux reports the flag as 1, macOS as the option's bit value, so the
+        # portable assertion is "enabled" rather than a specific integer.
+        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+    finally:
+        sock.close()
+
+
+def test_apply_tcp_keepalive_survives_unsupported_probe_options() -> None:
+    sock = MagicMock()
+    sock.setsockopt.side_effect = lambda level, *_: None if level == socket.SOL_SOCKET else _raise_os_error()
+
+    http_module._apply_tcp_keepalive(sock)
+
+    assert sock.setsockopt.call_args_list[0].args[:2] == (socket.SOL_SOCKET, socket.SO_KEEPALIVE)
+    assert sock.setsockopt.call_count > 1
+
+
+def test_apply_tcp_keepalive_stops_when_keepalive_is_rejected() -> None:
+    sock = MagicMock()
+    sock.setsockopt.side_effect = OSError("unsupported")
+
+    http_module._apply_tcp_keepalive(sock)
+
+    assert sock.setsockopt.call_count == 1
+
+
+def _raise_os_error() -> None:
+    raise OSError("unsupported")
 
 
 def test_build_ssl_context_preserves_default_roots_and_adds_certifi_bundle() -> None:

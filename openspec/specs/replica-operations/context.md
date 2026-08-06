@@ -88,14 +88,34 @@ retry once on conflict because their mutations are idempotent absolute writes.
   (per-pod scrape targets / ServiceMonitor); scraping through a load-balanced VIP samples a
   random replica per scrape and is unsupported.
 
+## Graceful shutdown drain
+
+Pod termination closes application admission before Uvicorn closes HTTP or WebSocket connections.
+Helm preStop starts the process drain, drops readiness, waits through the routing dwell, and then
+returns when tracked work reaches zero or the shared application deadline expires. A direct
+SIGTERM establishes the same barrier when preStop is absent. New WebSocket scopes are rejected;
+admitted Responses sockets close promptly when idle and remain tracked through terminal delivery,
+request-log persistence ownership, and API-key settlement ownership while the bounded budget
+remains. Once the deadline expires, shutdown proceeds rather than extending the drain; work still
+blocked at that point can be cut off, so operators should size the timeout for expected turn
+latency.
+
+With the defaults, preStop starts a 30-second application deadline and waits at least the
+15-second routing dwell measured from Python helper start; local drain-start request latency
+consumes that same absolute budget. If `in_flight` is already zero when dwell ends, SIGTERM reuses
+the roughly 15 seconds remaining instead of granting another 30-second drain period. Kubelet's
+hard termination grace starts before the helper process, so exec/Python launch latency consumes
+only that hard grace and remains outside the application deadline. The chart requires
+`terminationGracePeriodSeconds` to cover the application timeout plus a two-second failed
+preStop-start fallback and a fixed 30-second post-drain reserve. The launcher stops awaiting
+Uvicorn connection and lifespan cleanup 25 seconds after the shared application deadline, leaving
+five additional seconds after helper start for captured-signal delivery and ordinary process exit.
+If cleanup ignores cancellation, the launcher forces that captured signal, or SIGTERM for a
+programmatic shutdown, instead of returning an unbounded task to asyncio runner teardown. The
+65-second default adds three seconds of launch headroom above the enforced minimum.
+
 ## Known limitations (triaged follow-ups)
 
-- **Websocket turns are not drained on shutdown** — drain rejects new HTTP work but neither
-  rejects new websocket scopes nor waits for in-flight websocket turns. HTTP and bridge teardown
-  waits up to the configured drain timeout for tracked proxy-persistence tasks, including request
-  logs enqueued while bridge sessions close. If that bounded wait times out or raises, shutdown
-  continues to database close, so the last request logs or settlements can still be lost.
-  Follow-up: `graceful-drain-lifecycle`.
 - **`file_id` → account pins are process-local best-effort** — file finalize/input_file requests
   landing on another replica can route to an account that does not own the file. Follow-up:
   `persist-file-account-pins`.

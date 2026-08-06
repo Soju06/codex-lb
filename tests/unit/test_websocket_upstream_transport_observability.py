@@ -27,6 +27,7 @@ class _DummyWebSocketService(_WebSocketMixin):
     def __init__(self) -> None:
         self.request_log_calls: list[dict[str, object]] = []
         self.remembered_response_ids: list[str] = []
+        self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._encryptor = TokenEncryptor()
 
         class _LoadBalancer:

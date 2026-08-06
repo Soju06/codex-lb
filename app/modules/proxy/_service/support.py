@@ -825,6 +825,18 @@ class _WebSocketRequestState:
     # explicit turn-state header guarantees continuity for stale recovery.
     hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
+    # True only when the client's own incoming payload (before this anchor was
+    # injected or trimmed) already looked like a full conversation resend
+    # (``_http_bridge_payload_looks_like_full_resend``). Deliberately weaker
+    # than ``fresh_upstream_request_is_retry_safe``: it does not require the
+    # exact-manifest/retained-output proof that field needs for an in-place
+    # same-request replay, only that the client is a resend-capable client at
+    # all. Used to decide whether it is safe to invalidate a durable session's
+    # stored anchor after this request proves eventless -- a client that
+    # already resends full history on its own can recover unanchored; a
+    # genuine delta-only client has no other way to convey prior context and
+    # must stay anchored.
+    proxy_injected_anchor_had_full_resend_payload: bool = False
     expose_stale_previous_response_classifier: bool = False
     fresh_upstream_request_text: str | None = None
     # True only when ``fresh_upstream_request_text`` contains a *safe* pre-
@@ -1119,6 +1131,7 @@ class _WebSocketUpstreamControl:
     downstream_sequence_request_state: _WebSocketRequestState | None = None
     downstream_sequence_number: int | None = None
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
+    terminal_message_task: asyncio.Task[bool] | None = None
 
 
 @dataclass(slots=True)
@@ -1221,6 +1234,8 @@ def _websocket_request_can_replay_before_visible_output(
     allow_clean_close_retry: bool = False,
 ) -> bool:
     if not request_state.request_text:
+        return False
+    if request_state.transport == _REQUEST_TRANSPORT_WEBSOCKET and request_state.response_create_sent_at is None:
         return False
     if request_state.replay_count >= 1 and not (
         allow_clean_close_retry

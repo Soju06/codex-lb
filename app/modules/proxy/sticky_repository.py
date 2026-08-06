@@ -10,8 +10,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import Insert
 
-from app.core.utils.time import to_utc_naive, utcnow
-from app.db.models import Account, StickySession, StickySessionKind
+from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
+from app.db.models import Account, AccountStatus, StickySession, StickySessionKind
 from app.db.session import sqlite_writer_section
 from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessionSortDir
 
@@ -40,6 +40,23 @@ class StickySessionListEntryRecord:
     display_name: str
 
 
+@dataclass(frozen=True, slots=True)
+class StickyOwnerLookup:
+    """Result of resolving a mapping's owner, accessed by attribute (never
+    unpacked) so an un-configured test double for ``sticky_sessions`` degrades
+    to its existing safe defaults (no owner, not abandoned) instead of a hard
+    crash on tuple destructuring."""
+
+    account_id: str | None
+    continuity_abandoned: bool
+
+
+def _owner_lookup_from_row(row: StickySession) -> StickyOwnerLookup:
+    if row.continuity_abandoned_at is not None:
+        return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
+    return StickyOwnerLookup(account_id=row.account_id, continuity_abandoned=False)
+
+
 class StickySessionsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -51,17 +68,38 @@ class StickySessionsRepository:
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
     ) -> str | None:
+        lookup = await self.get_account_id_and_abandonment(key, kind=kind, max_age_seconds=max_age_seconds)
+        return lookup.account_id
+
+    async def get_account_id_and_abandonment(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+    ) -> StickyOwnerLookup:
+        """Resolve a mapping's owner, and whether it's a purge tombstone.
+
+        A tombstoned row (``continuity_abandoned_at`` set — see
+        ``purge_stale_hard_codex_session_mappings``) is deliberately reported
+        as ownerless here, same as a missing row, so every existing caller of
+        ``get_account_id`` keeps treating it as "no live pin" without change.
+        The extra flag lets ``run_sticky_selection_path`` additionally
+        distinguish "this key was purged" from "this key was never seen",
+        which matters only for the `conversation`-continuity ambiguous-owner
+        check that has no other index to fall back on.
+        """
         if not key:
-            return None
+            return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
         row = await self.get_entry(key, kind=kind)
         if row is None:
-            return None
+            return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
         if max_age_seconds is None:
-            return row.account_id
+            return _owner_lookup_from_row(row)
         cutoff = utcnow() - timedelta(seconds=max_age_seconds)
         observed_updated_at = to_utc_naive(row.updated_at)
         if observed_updated_at >= cutoff:
-            return row.account_id
+            return _owner_lookup_from_row(row)
 
         # Release the read snapshot before attempting a SQLite write upgrade.
         # The DELETE remains safe because every value observed above participates
@@ -78,14 +116,18 @@ class StickySessionsRepository:
             )
             .returning(StickySession.key)
         )
-        current: tuple[str, datetime] | None = None
+        current: tuple[str, datetime, datetime | None] | None = None
         async with sqlite_writer_section():
             deleted_key = (await self._session.execute(statement)).scalar_one_or_none()
             if deleted_key is None:
                 current = (
                     (
                         await self._session.execute(
-                            select(StickySession.account_id, StickySession.updated_at).where(
+                            select(
+                                StickySession.account_id,
+                                StickySession.updated_at,
+                                StickySession.continuity_abandoned_at,
+                            ).where(
                                 StickySession.key == key,
                                 StickySession.kind == kind,
                             )
@@ -97,11 +139,13 @@ class StickySessionsRepository:
             await self._session.commit()
 
         if deleted_key is not None or current is None:
-            return None
-        current_account_id, current_updated_at = current
+            return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
+        current_account_id, current_updated_at, current_continuity_abandoned_at = current
         if to_utc_naive(current_updated_at) < cutoff:
-            return None
-        return current_account_id
+            return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
+        if current_continuity_abandoned_at is not None:
+            return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
+        return StickyOwnerLookup(account_id=current_account_id, continuity_abandoned=False)
 
     async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
         if not key:
@@ -195,7 +239,7 @@ class StickySessionsRepository:
                     StickySession.kind == kind,
                     StickySession.account_id == expected_account_id,
                 )
-                .values(account_id=restore_account_id, updated_at=func.now())
+                .values(account_id=restore_account_id, updated_at=func.now(), continuity_abandoned_at=None)
                 .returning(StickySession.key)
             )
 
@@ -348,6 +392,85 @@ class StickySessionsRepository:
             await self._session.commit()
         return deleted
 
+    async def purge_stale_hard_codex_session_mappings(self, cutoff: datetime, *, now: datetime) -> int:
+        """Retire CODEX_SESSION mappings pinned to a durably unusable owner.
+
+        A hard `codex_session` mapping is never rebound by ordinary selection
+        (see load_balancer.py's hard_sticky branch) even once its owner is
+        rate-limited/quota-exceeded/paused, because that pin can represent
+        live, unverifiable session state that isn't safe to move mid-flight.
+        That correctly protects a transient blip, but leaves the mapping
+        stuck forever if the owner never recovers.
+
+        ``Account.reset_at`` is frequently absent, while ``blocked_at`` is
+        cleared when an account is paused, so neither field provides one
+        durable outage clock for every unavailable status. Instead,
+        ``AccountsRepository`` refreshes the mapping timestamp exactly when
+        its owner transitions from an available status into one of the
+        unavailable statuses below. ``StickySession.updated_at`` therefore
+        records the later of the mapping's last use and the outage start.
+        Only once BOTH the owner is still non-active AND that conservative
+        timestamp is before ``cutoff`` do we give up on the mapping.
+
+        When ``Account.reset_at`` is known and still in the future (e.g. a
+        multi-day quota window), the owner's own stated recovery point takes
+        priority over the flat cutoff: the mapping survives until after
+        ``reset_at`` even if it has long since gone stale by the cutoff
+        alone, since purging before an account's own known recovery time
+        would contradict "well past its own recovery point". ``reset_at``
+        only ever narrows eligibility (delays a purge); it never widens it
+        when unset, which is why the fixed cutoff remains the fallback.
+
+        Giving up is done in two phases, never by an outright delete on the
+        first pass:
+
+        1. Tombstone: set ``continuity_abandoned_at`` instead of deleting.
+           A `conversation`-continuity request has no owner index besides
+           this row (see affinity.py's ``require_unambiguous_account``), so
+           an outright delete would be indistinguishable from "this key was
+           never seen" — and with more than one account in the pool, that
+           makes ``run_sticky_selection_path`` fail closed forever, even
+           after the original owner recovers, because nothing on that path
+           can ever re-create the very row it needs to stop failing closed.
+           A tombstone instead lets selection recognize "this key's
+           continuity was deliberately abandoned, picking a fresh owner is
+           authorized", so a subsequent request can escape the stuck state.
+        2. Delete: once a tombstone has sat for a further ``cutoff`` window
+           with nobody claiming it (i.e. it's still a tombstone, so no
+           request re-pinned it), it's dropped outright. A fresh request for
+           that key then falls back to the same conservative fail-closed
+           default as a key that was never seen, which is fine this long
+           after the fact.
+        """
+        now_epoch = naive_utc_to_epoch(to_utc_naive(now))
+        unavailable_account_ids = select(Account.id).where(
+            Account.status.in_((AccountStatus.PAUSED, AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED)),
+            or_(Account.reset_at.is_(None), Account.reset_at < now_epoch),
+        )
+        cutoff_naive = to_utc_naive(cutoff)
+        tombstone_stmt = (
+            update(StickySession)
+            .where(
+                StickySession.kind == StickySessionKind.CODEX_SESSION,
+                StickySession.continuity_abandoned_at.is_(None),
+                StickySession.updated_at < cutoff_naive,
+                StickySession.account_id.in_(unavailable_account_ids),
+            )
+            .values(continuity_abandoned_at=to_utc_naive(now))
+        )
+        delete_stmt = delete(StickySession).where(
+            StickySession.kind == StickySessionKind.CODEX_SESSION,
+            StickySession.continuity_abandoned_at.is_not(None),
+            StickySession.continuity_abandoned_at < cutoff_naive,
+        )
+        async with sqlite_writer_section():
+            tombstoned_result = await self._session.execute(tombstone_stmt.returning(StickySession.key))
+            tombstoned = len(tombstoned_result.scalars().all())
+            deleted_result = await self._session.execute(delete_stmt.returning(StickySession.key))
+            deleted = len(deleted_result.scalars().all())
+            await self._session.commit()
+        return tombstoned + deleted
+
     def _build_upsert_statement(self, key: str, account_id: str, kind: StickySessionKind) -> Insert:
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":
@@ -362,6 +485,11 @@ class StickySessionsRepository:
             set_={
                 "account_id": account_id,
                 "updated_at": func.now(),
+                # A fresh pin fully re-establishes ownership, so any earlier
+                # purge tombstone (see purge_stale_hard_codex_session_mappings)
+                # no longer applies — otherwise this row would keep reporting
+                # itself as abandoned even though it now has a live owner.
+                "continuity_abandoned_at": None,
             },
         )
 

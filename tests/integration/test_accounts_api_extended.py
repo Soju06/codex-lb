@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
 from app.core.usage.refresh_scheduler import reconcile_recoverable_account_statuses
-from app.core.utils.time import utcnow
+from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
@@ -1215,7 +1215,7 @@ async def test_accounts_list_ignores_hidden_zero_capacity_primary_without_weekly
 
 @pytest.mark.asyncio
 async def test_accounts_list_recovers_zero_capacity_rate_limited_status(async_client, db_setup):
-    expired_reset = int((utcnow() - timedelta(minutes=5)).timestamp())
+    expired_reset = naive_utc_to_epoch(utcnow() - timedelta(minutes=5))
     account = _make_account("acc_free_recovered_primary", "free-recovered@example.com", plan_type="free")
     account.status = AccountStatus.RATE_LIMITED
     account.reset_at = expired_reset
@@ -1550,8 +1550,8 @@ async def test_accounts_list_prefers_newer_weekly_primary_over_stale_secondary(a
 
 @pytest.mark.asyncio
 async def test_accounts_list_recovers_quota_exceeded_status_from_secondary_usage(async_client, db_setup):
-    expired_reset = int((utcnow() - timedelta(minutes=5)).timestamp())
-    blocked_at = int((utcnow() - timedelta(hours=2)).timestamp())
+    expired_reset = naive_utc_to_epoch(utcnow() - timedelta(minutes=5))
+    blocked_at = naive_utc_to_epoch(utcnow() - timedelta(hours=2))
     account = _make_account("acc_quota_recovered_secondary", "quota-recovered@example.com")
     account.status = AccountStatus.QUOTA_EXCEEDED
     account.reset_at = expired_reset
@@ -1566,7 +1566,7 @@ async def test_accounts_list_recovers_quota_exceeded_status_from_secondary_usage
             "acc_quota_recovered_secondary",
             42.0,
             window="secondary",
-            reset_at=int((utcnow() + timedelta(days=1)).timestamp()),
+            reset_at=naive_utc_to_epoch(utcnow() + timedelta(days=1)),
             window_minutes=10080,
         )
 

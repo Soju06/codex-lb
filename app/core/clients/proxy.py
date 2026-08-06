@@ -2780,14 +2780,32 @@ async def _stream_responses_with_session(
         pre_request_started_at,
         time.monotonic(),
     )
+    # sock_read carries the idle budget into the phase before response headers
+    # exist. Without it, a connection that is established but never answered is
+    # bounded only by the request budget, which is hours long, while it holds a
+    # per-session response-create gate that later turns queue behind.
     timeout = aiohttp.ClientTimeout(
         total=remaining_request_timeout,
         sock_connect=effective_connect_timeout,
-        sock_read=None,
+        sock_read=effective_idle_timeout,
     )
     started_at = time.monotonic()
 
     async def _stream_via_http(
+        current_headers: Mapping[str, str],
+        current_timeout: aiohttp.ClientTimeout,
+    ) -> AsyncIterator[str]:
+        try:
+            async for event_block in _stream_via_http_attempt(current_headers, current_timeout):
+                yield event_block
+        except aiohttp.SocketTimeoutError as exc:
+            # A socket read timeout means the connection was established and
+            # then produced nothing. That is an idle stream, not a transport
+            # failure, so it joins the idle-timeout path instead of being
+            # reported as an unavailable upstream.
+            raise StreamIdleTimeoutError() from exc
+
+    async def _stream_via_http_attempt(
         current_headers: Mapping[str, str],
         current_timeout: aiohttp.ClientTimeout,
     ) -> AsyncIterator[str]:
@@ -3051,7 +3069,7 @@ async def _stream_responses_with_session(
         timeout = aiohttp.ClientTimeout(
             total=remaining_request_timeout,
             sock_connect=effective_connect_timeout,
-            sock_read=None,
+            sock_read=effective_idle_timeout,
         )
         started_at = time.monotonic()
         _maybe_log_upstream_request_start(

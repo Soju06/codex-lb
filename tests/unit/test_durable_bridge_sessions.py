@@ -1584,6 +1584,129 @@ async def test_durable_bridge_forced_generation_advance_fences_same_account_stal
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_clear_response_anchor_nulls_anchor_fields_but_keeps_turn_state(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-clear-anchor",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state="http_turn_stuck",
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="http_turn_stuck",
+        lease_ttl_seconds=60.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_stuck_anchor",
+        lease_ttl_seconds=60.0,
+        input_item_count=5,
+        input_full_fingerprint="c" * 64,
+        pending_tool_calls={"call_stuck": "function_call"},
+    )
+
+    cleared = await coordinator.clear_live_session_response_anchor(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+    )
+
+    assert cleared is not None
+    assert cleared.latest_response_id is None
+    assert cleared.latest_input_item_count is None
+    assert cleared.latest_input_full_fingerprint is None
+    assert cleared.latest_pending_tool_calls is None
+    assert cleared.latest_turn_state == "http_turn_stuck"
+
+    lookup_by_turn_state = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-clear-anchor",
+        api_key_id="key-1",
+        turn_state="http_turn_stuck",
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert lookup_by_turn_state is not None
+    assert lookup_by_turn_state.latest_response_id is None
+
+    # The previous-response alias row itself is untouched: a client that
+    # still supplies the stale id explicitly can resolve the session; only
+    # the proxy's own no-anchor injection path stops using it.
+    lookup_by_stale_alias = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-clear-anchor",
+        api_key_id="key-1",
+        turn_state=None,
+        session_header=None,
+        previous_response_id="resp_stuck_anchor",
+    )
+    assert lookup_by_stale_alias is not None
+    assert lookup_by_stale_alias.session_id == claimed.session_id
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_clear_response_anchor_is_noop_after_epoch_advance(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-clear-anchor-stale-epoch",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+
+    # A newer owner takes over (forced epoch advance) before the stuck
+    # timeout handler on the old owner gets to clear the anchor.
+    replaced = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-clear-anchor-stale-epoch",
+        api_key_id=None,
+        instance_id="instance-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state="http_turn_2",
+        latest_response_id="resp_2",
+        allow_takeover=True,
+        force_owner_epoch_advance=True,
+    )
+    assert replaced.owner_epoch == claimed.owner_epoch + 1
+
+    stale_clear = await coordinator.clear_live_session_response_anchor(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+    )
+
+    assert stale_clear is not None
+    assert stale_clear.owner_epoch == replaced.owner_epoch
+    assert stale_clear.latest_response_id == "resp_2"
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_claim_takes_over_after_release(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

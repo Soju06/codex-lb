@@ -365,14 +365,15 @@ def apply_api_key_enforcement_to_chat_payload(
         value = payload.get(key)
         if isinstance(value, str):
             payload[key] = resolve_wire_reasoning_effort(value)
-        elif key == "thinking" and isinstance(value, dict) and isinstance(value.get("effort"), str):
-            payload[key] = {**value, "effort": resolve_wire_reasoning_effort(value["effort"])}
+        elif key == "thinking" and isinstance(value, dict):
+            effort = value.get("effort")
+            if isinstance(effort, str):
+                payload[key] = {**value, "effort": resolve_wire_reasoning_effort(effort)}
     reasoning = payload.get("reasoning")
-    if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
-        payload["reasoning"] = {
-            **reasoning,
-            "effort": resolve_wire_reasoning_effort(reasoning["effort"]),
-        }
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str):
+            payload["reasoning"] = {**reasoning, "effort": resolve_wire_reasoning_effort(effort)}
 
     if allowed_reasoning_effort is not None:
         wire_effort = resolve_wire_reasoning_effort(allowed_reasoning_effort)

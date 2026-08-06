@@ -8,6 +8,7 @@ import pytest
 from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.model_registry import ModelRegistry
 from app.core.openai.requests import ResponsesRequest
+from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
@@ -414,7 +415,7 @@ def test_reasoning_effort_allowlist_keeps_client_plane_efforts_distinct(
 
 
 def test_source_chat_reasoning_aliases_use_wire_safe_ultra_alias() -> None:
-    payload = {
+    payload: dict[str, JsonValue] = {
         "reasoning_effort": "ultra",
         "reasoningEffort": "ultra",
         "thinking": {"effort": "ultra", "summary": "auto"},
@@ -432,7 +433,7 @@ def test_source_chat_reasoning_aliases_use_wire_safe_ultra_alias() -> None:
 
 
 def test_source_chat_reasoning_policy_aligns_conflicting_aliases() -> None:
-    payload = {
+    payload: dict[str, JsonValue] = {
         "reasoning_effort": "low",
         "reasoningEffort": "low",
         "thinking": {"effort": "ultra", "summary": "auto"},

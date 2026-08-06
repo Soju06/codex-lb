@@ -17,6 +17,17 @@ def upgrade() -> None:
     if "lease_expires_at" not in columns:
         with op.batch_alter_table("quota_planner_decisions") as batch_op:
             batch_op.add_column(sa.Column("lease_expires_at", sa.DateTime(), nullable=True))
+        # Claims created before lease metadata existed must not remain
+        # permanently active.  Expire legacy executing rows immediately so a
+        # subsequent scheduler cycle can reclaim them safely.
+        op.execute(
+            sa.text(
+                "UPDATE quota_planner_decisions "
+                "SET lease_expires_at = CURRENT_TIMESTAMP "
+                "WHERE action = 'warmup' AND status = 'executing' "
+                "AND lease_expires_at IS NULL"
+            )
+        )
 
 
 def downgrade() -> None:

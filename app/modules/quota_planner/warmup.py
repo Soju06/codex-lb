@@ -117,12 +117,15 @@ class QuotaWarmupService:
             force_probe=force_probe,
         )
         if not allowed:
-            row = await self._planner.update_decision_status(
-                decision.id,
-                status="skipped",
-                reason=reason,
-                expected_status="planned",
-            )
+            if decision.status == "executing" and warmup_claim_is_expired(decision):
+                row = await self._planner.skip_stale_warmup_claim(decision.id, reason=reason)
+            else:
+                row = await self._planner.update_decision_status(
+                    decision.id,
+                    status="skipped",
+                    reason=reason,
+                    expected_status="planned",
+                )
             if row is None:
                 current = await self._planner.get_decision(decision.id)
                 if current is not None:

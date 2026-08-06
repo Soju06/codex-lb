@@ -609,12 +609,7 @@ class _StreamingMixin(_StreamingRetryMixin):
             first_payload = parse_sse_data_json(first)
             event = parse_sse_event_payload(first_payload)
             event_type = _event_type_from_payload(event, first_payload)
-            terminal_event_seen = event_type in {
-                "response.completed",
-                "response.failed",
-                "response.incomplete",
-                "error",
-            }
+            terminal_event_seen = False
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
                 api_key_reservation_touch_state.last_touch_at = await proxy._maybe_touch_api_key_reservation(
@@ -764,12 +759,12 @@ class _StreamingMixin(_StreamingRetryMixin):
                     yield first
             if terminal_stream_error is not None:
                 raise terminal_stream_error
+            if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                terminal_event_seen = True
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
                 event = parse_sse_event_payload(event_payload)
                 event_type = _event_type_from_payload(event, event_payload)
-                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    terminal_event_seen = True
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
                 if (
                     enforce_openai_sdk_contract
@@ -940,6 +935,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.downstream_visible = True
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
+                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    terminal_event_seen = True
                 yield line
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)

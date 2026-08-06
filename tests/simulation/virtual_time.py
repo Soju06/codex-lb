@@ -61,14 +61,21 @@ class VirtualScheduler:
         if timeout is None:
             return await task
         timeout_task = self.create_task(self.sleep(timeout))
-        done, pending = await asyncio.wait({task, timeout_task}, return_when=asyncio.FIRST_COMPLETED)
-        if timeout_task in done:
+        try:
+            done, pending = await asyncio.wait({task, timeout_task}, return_when=asyncio.FIRST_COMPLETED)
+            if timeout_task in done:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise asyncio.TimeoutError
+            timeout_task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            return task.result()
+        except asyncio.CancelledError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            raise asyncio.TimeoutError
-        timeout_task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        return task.result()
+            timeout_task.cancel()
+            await asyncio.gather(timeout_task, return_exceptions=True)
+            raise
 
     def create_task(self, coroutine: Coroutine[Any, Any, T], *, name: str | None = None) -> asyncio.Task[T]:
         task = asyncio.create_task(coroutine, name=name)

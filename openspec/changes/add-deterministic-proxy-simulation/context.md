@@ -12,6 +12,13 @@ scheduler objects. The virtual scheduler runs on the pytest loop but owns its
 timers and task registry, so tests can advance deadlines without wall-clock
 sleep and can cancel owned tasks at the reset boundary.
 
+Inside the proxy mixins the seam is read through `scheduler_for` and `clock_for`
+rather than a bare attribute. Bridge and websocket lifecycle methods are also
+called with partial service doubles, so requiring every caller to carry a
+collaborator would turn a test-only construction detail into a runtime failure.
+The accessors fall back to the real scheduler and real clock, which is the same
+production default the constructors use.
+
 The audit's third injection item, an upstream transport factory, is deliberately
 left out. The converted tests reach their upstream through the existing fake SSE
 and fake websocket doubles, so a transport factory would be new production

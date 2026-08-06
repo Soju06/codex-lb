@@ -11,6 +11,8 @@
       lifecycle owners so a simulation owns every task a turn spawns.
 - [x] 1.5 Declare the clock and scheduler collaborators on the HTTP bridge and
       WebSocket service protocols.
+- [x] 1.6 Read the collaborators through `scheduler_for`/`clock_for` inside the
+      mixins so partial service objects keep the real production default.
 
 ## 2. Deterministic tests
 

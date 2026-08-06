@@ -4,15 +4,19 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 
 import aiohttp
 
 from app.core.config.settings import get_settings
-from app.core.types import JsonValue
 from app.db.session import get_background_session
 from app.modules.telemetry.consent import TelemetryConsentStore, TelemetryIdentity
-from app.modules.telemetry.schemas import TelemetrySnapshot
+from app.modules.telemetry.schemas import (
+    TelemetryActivation,
+    TelemetryModel,
+    TelemetryRegistration,
+    TelemetrySnapshot,
+    build_snapshot_envelope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,31 +80,21 @@ class TelemetrySender:
         identity: TelemetryIdentity,
     ) -> None:
         if self._activated_instance_id != identity.instance_id:
-            registration = _json_bytes(
-                {
-                    "app_name": "codex-lb",
-                    "app_version": snapshot.version,
-                    "deployment_mode": snapshot.deploy.method,
-                    "environment": "",
-                    "instance_id": identity.instance_id,
-                    "os_arch": f"{snapshot.os}/{snapshot.arch}",
-                    "public_key": identity.public_key_hex,
-                }
+            registration = TelemetryRegistration(
+                app_version=snapshot.version,
+                deployment_mode=snapshot.deploy.method,
+                instance_id=identity.instance_id,
+                os_arch=f"{snapshot.os}/{snapshot.arch}",
+                public_key=identity.public_key_hex,
             )
-            await self._post(session, "/v1/register", registration, accepted={200, 201})
+            await self._post(session, "/v1/register", _json_bytes(registration), accepted={200, 201})
 
-            activation = _json_bytes({"action": "activate"})
-            await self._post_signed(session, "/v1/activate", activation, identity, accepted={200})
+            activation = TelemetryActivation()
+            await self._post_signed(session, "/v1/activate", _json_bytes(activation), identity, accepted={200})
             self._activated_instance_id = identity.instance_id
 
-        envelope = _json_bytes(
-            {
-                "instance_id": identity.instance_id,
-                "metrics": snapshot.model_dump(mode="json"),
-                "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-            }
-        )
-        await self._post_signed(session, "/v1/snapshot", envelope, identity, accepted={200, 202})
+        envelope = build_snapshot_envelope(snapshot)
+        await self._post_signed(session, "/v1/snapshot", _json_bytes(envelope), identity, accepted={200, 202})
 
     async def _post_signed(
         self,
@@ -147,5 +141,5 @@ async def _load_sender_context() -> tuple[bool, TelemetryIdentity | None]:
         return True, await store.get_or_create_identity()
 
 
-def _json_bytes(value: JsonValue) -> bytes:
-    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
+def _json_bytes(value: TelemetryModel) -> bytes:
+    return json.dumps(value.model_dump(mode="json"), separators=(",", ":"), sort_keys=True).encode("utf-8")

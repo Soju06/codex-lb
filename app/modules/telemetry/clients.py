@@ -41,7 +41,10 @@ def client_shares(rows: Iterable[ClientCount]) -> tuple[dict[str, float], float]
     total = 0
     for row in rows:
         requests = max(0, row.requests)
-        counts[client_family(row.raw_group)] += requests
+        family = client_family(row.raw_group)
+        if family not in CANONICAL_CLIENT_FAMILIES:
+            raise ValueError(f"non-canonical telemetry client family: {family}")
+        counts[family] += requests
         total += requests
     if total == 0:
         return {}, 0.0

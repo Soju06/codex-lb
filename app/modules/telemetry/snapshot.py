@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import logging
 import os
 import platform
 import time
@@ -8,13 +9,16 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 from sqlalchemy import and_, case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.sql.elements import ColumnElement
 
 from app import __version__
 from app.core.auth.dashboard_mode import DashboardAuthMode
+from app.core.balancer.logic import RoutingStrategy
 from app.core.config.settings import Settings, get_settings
 from app.core.openai.model_registry import get_model_registry
 from app.core.utils.time import utcnow
@@ -49,18 +53,7 @@ _PROCESS_STARTED = time.monotonic()
 _MIB = 1024**2
 _GIB = 1024**3
 _REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
-_ROUTING_POLICIES = frozenset(
-    {
-        "usage_weighted",
-        "round_robin",
-        "capacity_weighted",
-        "relative_availability",
-        "fill_first",
-        "sequential_drain",
-        "reset_drain",
-        "single_account",
-    }
-)
+_ROUTING_POLICIES: frozenset[str] = frozenset(get_args(RoutingStrategy))
 _SAFE_UPSTREAM_ERROR_CODES = frozenset(
     {
         "authentication_error",
@@ -79,6 +72,11 @@ _SAFE_UPSTREAM_ERROR_CODES = frozenset(
     }
 )
 
+logger = logging.getLogger(__name__)
+
+type Predicate = ColumnElement[bool]
+type NullableIntegerColumn = InstrumentedAttribute[int | None]
+
 
 def count_bucket(value: int) -> str:
     if value <= 0:
@@ -95,8 +93,10 @@ def count_bucket(value: int) -> str:
 
 
 def db_size_bucket(
-    size_bytes: int,
-) -> Literal["<100MB", "100MB-1GB", "1-5GB", "5-10GB", "10-50GB", "50GB+"]:
+    size_bytes: int | None,
+) -> Literal["unknown", "<100MB", "100MB-1GB", "1-5GB", "5-10GB", "10-50GB", "50GB+"]:
+    if size_bytes is None:
+        return "unknown"
     if size_bytes < 100 * _MIB:
         return "<100MB"
     if size_bytes < _GIB:
@@ -169,7 +169,7 @@ class TelemetrySnapshotBuilder:
         account_count, workspace_accounts, plan_counts = await self._account_aggregates()
         database_size = await self._database_size_bytes()
         models = await self._model_usage(conditions, summary.total_requests)
-        request_kinds = await self._request_kind_mix(conditions, summary.total_requests)
+        request_kinds = self._request_kind_mix(summary.total_requests)
         transport_mix = await self._transport_mix(conditions, summary.total_requests)
         service_tier_mix = await self._service_tier_mix(conditions, summary.total_requests)
         latency_p50 = await self._percentile(RequestLog.latency_ms, conditions, 0.50)
@@ -266,7 +266,7 @@ class TelemetrySnapshotBuilder:
             plan_counts[_canonical_plan(raw_plan)] += int(raw_count)
         return int(row.accounts), bool(row.workspace), dict(plan_counts)
 
-    async def _model_usage(self, conditions: list, total_requests: int) -> list[ModelUsageSnapshot]:
+    async def _model_usage(self, conditions: list[Predicate], total_requests: int) -> list[ModelUsageSnapshot]:
         result = await self._session.execute(
             select(
                 RequestLog.model,
@@ -302,30 +302,34 @@ class TelemetrySnapshotBuilder:
             for name, values in sorted(grouped.items())
         ]
 
-    async def _request_kind_mix(self, conditions: list, total: int) -> RequestKindsSnapshot:
-        images = await self._count_where(conditions, RequestLog.model.like("gpt-image-%"))
-        chat = await self._count_where(
-            conditions,
-            RequestLog.source == "model_source",
-            ~RequestLog.model.like("gpt-image-%"),
-        )
-        responses = max(0, total - images - chat)
+    def _request_kind_mix(self, total: int) -> RequestKindsSnapshot:
+        # ``request_logs.request_kind`` records workload classes such as
+        # normal/warmup/compaction, not the ingress route family. Chat,
+        # Responses, images, and audio can therefore be indistinguishable in
+        # persisted rows. Report that limitation instead of inferring a route
+        # from the upstream source or model name.
         return RequestKindsSnapshot(
-            responses=_ratio(responses, total),
-            chat=_ratio(chat, total),
-            images=_ratio(images, total),
+            responses=0.0,
+            chat=0.0,
+            images=0.0,
+            unknown=1.0 if total else 0.0,
         )
 
-    async def _transport_mix(self, conditions: list, total: int) -> TransportMixSnapshot:
+    async def _transport_mix(self, conditions: list[Predicate], total: int) -> TransportMixSnapshot:
         websocket = await self._count_where(conditions, RequestLog.transport == "websocket")
         return TransportMixSnapshot(ws=_ratio(websocket, total), http_bridge=_ratio(total - websocket, total))
 
-    async def _service_tier_mix(self, conditions: list, total: int) -> ServiceTierMixSnapshot:
+    async def _service_tier_mix(self, conditions: list[Predicate], total: int) -> ServiceTierMixSnapshot:
         tier = func.coalesce(RequestLog.actual_service_tier, RequestLog.service_tier, "default")
         flex = await self._count_where(conditions, tier == "flex")
         return ServiceTierMixSnapshot(default=_ratio(total - flex, total), flex=_ratio(flex, total))
 
-    async def _percentile(self, column, conditions: list, quantile: float) -> int:
+    async def _percentile(
+        self,
+        column: NullableIntegerColumn,
+        conditions: list[Predicate],
+        quantile: float,
+    ) -> int:
         count_result = await self._session.execute(
             select(func.count()).where(and_(*conditions, column.is_not(None), column >= 0))
         )
@@ -340,13 +344,16 @@ class TelemetrySnapshotBuilder:
             .offset(rank)
             .limit(1)
         )
-        return int(result.scalar_one())
+        value = result.scalar_one()
+        if value is None:
+            raise RuntimeError("percentile query returned a null value after a non-null filter")
+        return int(value)
 
-    async def _count_where(self, conditions: list, *extra_conditions) -> int:
+    async def _count_where(self, conditions: list[Predicate], *extra_conditions: Predicate) -> int:
         result = await self._session.execute(select(func.count()).where(and_(*conditions, *extra_conditions)))
         return int(result.scalar_one())
 
-    async def _top_upstream_errors(self, conditions: list) -> list[str]:
+    async def _top_upstream_errors(self, conditions: list[Predicate]) -> list[str]:
         result = await self._session.execute(
             select(RequestLog.upstream_error_code, func.count().label("requests"))
             .where(and_(*conditions, RequestLog.upstream_error_code.is_not(None)))
@@ -358,7 +365,7 @@ class TelemetrySnapshotBuilder:
             counts[code] += int(count)
         return [code for code, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]]
 
-    async def _feature_counts(self, conditions: list) -> _FeatureCounts:
+    async def _feature_counts(self, conditions: list[Predicate]) -> _FeatureCounts:
         scalar_queries = (
             select(func.count()).select_from(ApiFirewallAllowlist),
             select(func.count()).select_from(ApiKey),
@@ -381,17 +388,18 @@ class TelemetrySnapshotBuilder:
             quota_planner_mode=str(values[6] or "shadow"),
         )
 
-    async def _database_size_bytes(self) -> int:
+    async def _database_size_bytes(self) -> int | None:
         if self._session.get_bind().dialect.name == "postgresql":
             result = await self._session.execute(text("SELECT pg_database_size(current_database())"))
             return int(result.scalar_one())
         path = sqlite_db_path_from_url(self._settings.database_url)
         if path is None:
-            return 0
+            return None
         try:
             return Path(path).stat().st_size
-        except OSError:
-            return 0
+        except OSError as exc:
+            logger.debug("Unable to measure SQLite database size path=%s", path, exc_info=exc)
+            return None
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from unittest.mock import AsyncMock
+from collections.abc import Awaitable, Callable
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -13,6 +14,18 @@ from app.modules.telemetry.consent import TelemetryConsentStore, resolve_consent
 from app.modules.telemetry.scheduler import TELEMETRY_INTERVAL_SECONDS, TelemetryScheduler
 
 pytestmark = pytest.mark.unit
+
+
+class _GateLeader:
+    def __init__(self, *, leader: bool) -> None:
+        self.leader = leader
+        self.run_if_leader_calls = 0
+
+    async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object | None:
+        self.run_if_leader_calls += 1
+        if not self.leader:
+            return None
+        return await fn()
 
 
 def test_consent_precedence_and_default_activation() -> None:
@@ -75,6 +88,41 @@ async def test_disabled_scheduler_tick_makes_zero_sender_calls(db_setup, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_non_leader_scheduler_tick_builds_and_transmits_nothing(monkeypatch) -> None:
+    import app.modules.telemetry.scheduler as scheduler_module
+
+    leader = _GateLeader(leader=False)
+    builder = Mock(side_effect=AssertionError("non-leader must not construct a snapshot builder"))
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: leader)
+    monkeypatch.setattr(scheduler_module, "TelemetrySnapshotBuilder", builder)
+    sender = AsyncMock()
+
+    await TelemetryScheduler(sender=sender)._tick(log_undecided_notice=True)
+
+    assert leader.run_if_leader_calls == 1
+    builder.assert_not_called()
+    sender.send_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_main_lifespan_constructs_starts_and_stops_telemetry_scheduler(app_instance, monkeypatch) -> None:
+    import app.main as main_module
+
+    scheduler = Mock()
+    scheduler.start = AsyncMock()
+    scheduler.stop = AsyncMock()
+    factory = Mock(return_value=scheduler)
+    monkeypatch.setattr(main_module, "build_telemetry_scheduler", factory)
+
+    async with app_instance.router.lifespan_context(app_instance):
+        factory.assert_called_once_with()
+        scheduler.start.assert_awaited_once_with()
+        scheduler.stop.assert_not_awaited()
+
+    scheduler.stop.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_sends_startup_and_interval_snapshots_with_one_undecided_notice(
     db_setup,
     monkeypatch,
@@ -100,6 +148,6 @@ async def test_scheduler_sends_startup_and_interval_snapshots_with_one_undecided
         record.getMessage() for record in caplog.records if "Anonymous telemetry is active" in record.getMessage()
     ]
     assert len(notices) == 1
-    assert "openspec/specs/telemetry" in notices[0]
+    assert "https://soju06.github.io/codex-lb/telemetry/" in notices[0]
     assert "CODEX_LB_TELEMETRY_ENABLED=false" in notices[0]
     assert scheduler._task is None

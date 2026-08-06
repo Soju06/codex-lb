@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import get_args
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.core.balancer.logic import RoutingStrategy
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey, Base, ModelSource, RequestLog
 from app.modules.telemetry.clients import (
+    CANONICAL_CLIENT_FAMILIES,
     CLIENT_FAMILY_BY_RAW_GROUP,
     ClientCount,
     client_family,
     client_shares,
 )
+from app.modules.telemetry.schemas import TelemetryActivation, TelemetryRegistration, build_snapshot_envelope
 from app.modules.telemetry.snapshot import (
+    _ROUTING_POLICIES,
     TelemetrySnapshotBuilder,
+    _canonical_routing_policy,
     cost_bucket,
     count_bucket,
     db_size_bucket,
@@ -70,7 +78,8 @@ async def test_snapshot_serialized_field_set_matches_documented_schema(async_ses
     async_session.add(_request_log("schema", model="gpt-5.4", useragent_group="codex_exec"))
     await async_session.commit()
 
-    payload = (await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000001")).model_dump()
+    snapshot = await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000001")
+    payload = snapshot.model_dump()
 
     assert set(payload) == {
         "schema_version",
@@ -114,7 +123,7 @@ async def test_snapshot_serialized_field_set_matches_documented_schema(async_ses
         "rate_limit_429_ratio",
         "top_upstream_errors",
     }
-    assert set(payload["usage_7d"]["request_kinds"]) == {"responses", "chat", "images"}
+    assert set(payload["usage_7d"]["request_kinds"]) == {"responses", "chat", "images", "unknown"}
     assert set(payload["usage_7d"]["transport_mix"]) == {"ws", "http_bridge"}
     assert set(payload["usage_7d"]["service_tier_mix"]) == {"default", "flex"}
     assert set(payload["usage_7d"]["models"][0]) == {
@@ -139,6 +148,27 @@ async def test_snapshot_serialized_field_set_matches_documented_schema(async_ses
         "image_api_used",
     }
 
+    registration = TelemetryRegistration(
+        app_version=snapshot.version,
+        deployment_mode=snapshot.deploy.method,
+        instance_id=snapshot.instance_id,
+        os_arch=f"{snapshot.os}/{snapshot.arch}",
+        public_key="00",
+    ).model_dump(mode="json")
+    activation = TelemetryActivation().model_dump(mode="json")
+    envelope = build_snapshot_envelope(snapshot).model_dump(mode="json")
+    assert set(registration) == {
+        "app_name",
+        "app_version",
+        "deployment_mode",
+        "environment",
+        "instance_id",
+        "os_arch",
+        "public_key",
+    }
+    assert set(activation) == {"action"}
+    assert set(envelope) == {"instance_id", "metrics", "timestamp"}
+
 
 def test_client_mapping_table_and_unknown_family_are_allowlisted() -> None:
     for raw_group, expected_family in CLIENT_FAMILY_BY_RAW_GROUP.items():
@@ -155,6 +185,20 @@ def test_client_mapping_table_and_unknown_family_are_allowlisted() -> None:
     assert shares == {"codex-cli": 0.833333, "other": 0.166667}
     assert other_ratio == 0.166667
     assert "senpi" not in str(shares)
+
+
+def test_client_share_emission_rejects_noncanonical_mapping(monkeypatch) -> None:
+    monkeypatch.setitem(CLIENT_FAMILY_BY_RAW_GROUP, "unexpected", "private-client")
+    assert "private-client" not in CANONICAL_CLIENT_FAMILIES
+
+    with pytest.raises(ValueError, match="non-canonical telemetry client family"):
+        client_shares([ClientCount("unexpected", 1)])
+
+
+def test_routing_policy_allowlist_is_derived_from_balancer_declaration() -> None:
+    assert _ROUTING_POLICIES == frozenset(get_args(RoutingStrategy))
+    for strategy in get_args(RoutingStrategy):
+        assert _canonical_routing_policy(strategy) == strategy
 
 
 @pytest.mark.asyncio
@@ -198,6 +242,37 @@ async def test_model_catalog_filter_merges_custom_models_and_scopes_reasoning(
     assert "secret-effort" not in serialized
 
 
+@pytest.mark.asyncio
+async def test_request_kind_mix_fails_honest_without_persisted_route_family(async_session: AsyncSession) -> None:
+    async_session.add_all(
+        [
+            _request_log("subscription", model="gpt-5.4", useragent_group="codex_exec"),
+            _request_log(
+                "source-backed",
+                model="gpt-5.4",
+                useragent_group="OpenAI",
+                source="model_source",
+            ),
+            _request_log(
+                "image-shaped",
+                model="gpt-image-1",
+                useragent_group="OpenAI",
+                source="model_source",
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    payload = await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000005")
+
+    assert payload.usage_7d.request_kinds.model_dump() == {
+        "responses": 0.0,
+        "chat": 0.0,
+        "images": 0.0,
+        "unknown": 1.0,
+    }
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -219,7 +294,10 @@ def test_count_bucket_edges(value: int, expected: str) -> None:
 def test_sensitive_aggregate_bucket_edges() -> None:
     mib = 1024**2
     gib = 1024**3
-    assert [db_size_bucket(value) for value in (0, 100 * mib - 1, 100 * mib, gib, 5 * gib, 10 * gib, 50 * gib)] == [
+    assert [
+        db_size_bucket(value) for value in (None, 0, 100 * mib - 1, 100 * mib, gib, 5 * gib, 10 * gib, 50 * gib)
+    ] == [
+        "unknown",
         "<100MB",
         "<100MB",
         "100MB-1GB",
@@ -250,6 +328,29 @@ def test_sensitive_aggregate_bucket_edges() -> None:
         "4k-16k",
         "16k+",
     ]
+
+
+@pytest.mark.asyncio
+async def test_unmeasurable_database_size_is_unknown_and_logs_original_exception(
+    async_session: AsyncSession,
+    monkeypatch,
+    caplog,
+) -> None:
+    error = OSError("stat denied")
+
+    def fail_stat(_path: Path):
+        raise error
+
+    monkeypatch.setattr(Path, "stat", fail_stat)
+    builder = TelemetrySnapshotBuilder(async_session)
+
+    with caplog.at_level(logging.DEBUG, logger="app.modules.telemetry.snapshot"):
+        size = await builder._database_size_bytes()
+
+    assert size is None
+    assert db_size_bucket(size) == "unknown"
+    assert caplog.records[-1].exc_info is not None
+    assert caplog.records[-1].exc_info[1] is error
 
 
 @pytest.mark.asyncio

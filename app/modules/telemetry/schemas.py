@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,7 +13,7 @@ class TelemetryModel(BaseModel):
 class DeploymentSnapshot(TelemetryModel):
     method: Literal["docker", "k8s", "pip", "bare"]
     db_backend: Literal["sqlite", "postgres"]
-    db_size_bucket: Literal["<100MB", "100MB-1GB", "1-5GB", "5-10GB", "10-50GB", "50GB+"]
+    db_size_bucket: Literal["unknown", "<100MB", "100MB-1GB", "1-5GB", "5-10GB", "10-50GB", "50GB+"]
     replicas: int = Field(ge=1)
     reverse_proxy: bool
 
@@ -37,6 +38,7 @@ class RequestKindsSnapshot(TelemetryModel):
     responses: float
     chat: float
     images: float
+    unknown: float
 
 
 class TransportMixSnapshot(TelemetryModel):
@@ -106,6 +108,38 @@ class TelemetrySnapshot(TelemetryModel):
     features: FeaturesSnapshot
 
 
+class TelemetryRegistration(TelemetryModel):
+    app_name: Literal["codex-lb"] = "codex-lb"
+    app_version: str
+    deployment_mode: Literal["docker", "k8s", "pip", "bare"]
+    environment: str = ""
+    instance_id: str
+    os_arch: str
+    public_key: str
+
+
+class TelemetryActivation(TelemetryModel):
+    action: Literal["activate"] = "activate"
+
+
+class TelemetrySnapshotEnvelope(TelemetryModel):
+    instance_id: str
+    metrics: TelemetrySnapshot
+    timestamp: datetime
+
+
+def build_snapshot_envelope(
+    snapshot: TelemetrySnapshot,
+    *,
+    timestamp: datetime | None = None,
+) -> TelemetrySnapshotEnvelope:
+    return TelemetrySnapshotEnvelope(
+        instance_id=snapshot.instance_id,
+        metrics=snapshot,
+        timestamp=timestamp or datetime.now(UTC),
+    )
+
+
 class TelemetryConsentUpdate(TelemetryModel):
     enabled: bool
 
@@ -114,4 +148,4 @@ class TelemetryConsentResponse(TelemetryModel):
     state: Literal["undecided", "enabled", "disabled"]
     source: Literal["env", "persisted", "default"]
     active: bool
-    preview: TelemetrySnapshot
+    preview: TelemetrySnapshotEnvelope | None

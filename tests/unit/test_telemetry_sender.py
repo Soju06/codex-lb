@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from unittest.mock import AsyncMock, Mock
 
@@ -7,7 +8,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.modules.telemetry.consent import TelemetryIdentity
-from app.modules.telemetry.schemas import TelemetrySnapshot
+from app.modules.telemetry.schemas import TelemetrySnapshot, build_snapshot_envelope
 from app.modules.telemetry.sender import TelemetrySender
 
 pytestmark = pytest.mark.unit
@@ -44,7 +45,7 @@ def _snapshot() -> TelemetrySnapshot:
                 "tokens_output": 0,
                 "tokens_cached_ratio": 0,
                 "cost_usd_bucket": "<10",
-                "request_kinds": {"responses": 0, "chat": 0, "images": 0},
+                "request_kinds": {"responses": 0, "chat": 0, "images": 0, "unknown": 0},
                 "transport_mix": {"ws": 0, "http_bridge": 0},
                 "service_tier_mix": {"default": 0, "flex": 0},
                 "clients": {},
@@ -124,6 +125,21 @@ async def test_sender_uses_canonical_shm_paths_and_valid_ed25519_signature() -> 
     assert [call.args[1] for call in sender._post_signed.await_args_list] == ["/v1/activate", "/v1/snapshot"]
     assert all("/api/v1/" not in call.args[1] for call in sender._post_signed.await_args_list)
 
+    registration = json.loads(register_call.args[2])
+    activation = json.loads(sender._post_signed.await_args_list[0].args[2])
+    envelope = json.loads(sender._post_signed.await_args_list[1].args[2])
+    assert set(registration) == {
+        "app_name",
+        "app_version",
+        "deployment_mode",
+        "environment",
+        "instance_id",
+        "os_arch",
+        "public_key",
+    }
+    assert set(activation) == {"action"}
+    assert set(envelope) == {"instance_id", "metrics", "timestamp"}
+
     signing_sender = TelemetrySender()
     signing_sender._post = AsyncMock()
     body = b'{"action":"activate"}'
@@ -133,3 +149,27 @@ async def test_sender_uses_canonical_shm_paths_and_valid_ed25519_signature() -> 
     headers = signed_call.kwargs["headers"]
     identity.private_key.public_key().verify(bytes.fromhex(headers["X-Signature"]), body)
     assert headers["X-Instance-ID"] == identity.instance_id
+
+
+def _key_structure(value):
+    if isinstance(value, dict):
+        return {key: _key_structure(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_key_structure(value[0])] if value else []
+    return None
+
+
+@pytest.mark.asyncio
+async def test_preview_and_sender_snapshot_envelopes_have_identical_key_structure() -> None:
+    snapshot = _snapshot()
+    identity = TelemetryIdentity(snapshot.instance_id, Ed25519PrivateKey.generate())
+    preview = build_snapshot_envelope(snapshot)
+    sender = TelemetrySender()
+    sender._post = AsyncMock()
+    sender._post_signed = AsyncMock()
+
+    await sender._transmit_once(Mock(), snapshot, identity)
+
+    sender_body = json.loads(sender._post_signed.await_args_list[-1].args[2])
+    preview_body = json.loads(preview.model_dump_json())
+    assert _key_structure(sender_body) == _key_structure(preview_body)

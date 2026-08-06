@@ -297,7 +297,7 @@ class DurableBridgeSessionCoordinator:
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
-        owner_process_epoch: str | None = None,
+        owner_process_epoch: str,
         force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeLookup:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)

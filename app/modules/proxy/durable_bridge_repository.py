@@ -547,7 +547,7 @@ class DurableBridgeRepository:
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
-        owner_process_epoch: str | None = None,
+        owner_process_epoch: str,
         force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeSessionSnapshot:
         session_key_hash = durable_bridge_hash(session_key_value)
@@ -1184,6 +1184,11 @@ class DurableBridgeRepository:
                                     state=HttpBridgeSessionState.CLOSED,
                                     closed_at=now,
                                     last_seen_at=now,
+                                    latest_turn_state=None,
+                                    latest_response_id=None,
+                                    latest_input_item_count=None,
+                                    latest_input_full_fingerprint=None,
+                                    latest_pending_tool_calls_json=None,
                                 )
                                 .returning(HttpBridgeSessionRecord.id)
                             )

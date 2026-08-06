@@ -1354,6 +1354,7 @@ class _HTTPBridgeStreamingMixin:
                                     service_tier=None,
                                     latest_turn_state=durable_lookup.latest_turn_state,
                                     latest_response_id=None,
+                                    owner_process_epoch=http_bridge_owner_process_epoch(),
                                     # Revalidate the stale lookup under the
                                     # row lock; an active owner that appeared
                                     # after the lookup must not be displaced.
@@ -1447,6 +1448,7 @@ class _HTTPBridgeStreamingMixin:
                 )
                 force_local_recovery_creation = True
             durable_lookup = None
+            dead_owner_anchor = False
         if durable_lookup is not None:
             bridge_session_key = _HTTPBridgeSessionKey(
                 durable_lookup.canonical_kind,

@@ -14,6 +14,9 @@ On startup, an instance MUST retire durable HTTP bridge sessions whose
 is missing or differs from the current process owner epoch. Retired rows MUST
 be closed and MUST NOT remain attachable through session-header,
 turn-state, previous-response, latest-turn-state, or latest-response lookup.
+Retired rows MUST clear stored previous-response, latest-turn-state, input
+fingerprint, and pending-tool continuity anchors before any future claim can
+reuse the same canonical session key.
 
 #### Scenario: Same-container restart retires previous-process rows
 

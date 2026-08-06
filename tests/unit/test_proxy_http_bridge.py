@@ -19853,6 +19853,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
         request_state.awaiting_response_created = False
         request_state.response_create_gate = None
         request_state.response_create_gate_acquired = False
+        assert request_state.durable_owner_dead is False
         raise gate_timeout_error
         yield ""
 
@@ -22230,6 +22231,59 @@ async def test_http_bridge_repeated_zero_event_idle_timeouts_poison_anchor_with_
         detail="repeated_zero_event_idle_timeout",
         response_events_seen=0,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clear_outcome", [False, RuntimeError("clear failed")])
+async def test_http_bridge_anchor_poisoning_waits_when_durable_clear_fails(
+    clear_outcome: bool | RuntimeError,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key_value="bridge-anchor-poison-clear-fails",
+        pending_requests=deque([_make_eventless_http_bridge_owner()]),
+        queued_request_count=1,
+    )
+    session.admission_waiter_count = 1
+    session.durable_session_id = "durable-anchor-poison-clear-fails"
+    session.durable_owner_epoch = 4
+    rebind = (
+        AsyncMock(side_effect=clear_outcome)
+        if isinstance(clear_outcome, RuntimeError)
+        else AsyncMock(return_value=clear_outcome)
+    )
+    durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+        rebind_session_account=rebind,
+    )
+    service._durable_bridge = durable_bridge
+    fail_pending = AsyncMock()
+    retire = AsyncMock()
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+
+    with caplog.at_level("WARNING"):
+        for _failure_number in range(1, 8):
+            retired = await service._fail_http_bridge_reader_and_maybe_retire(
+                session,
+                error_code="stream_idle_timeout",
+                error_message="idle timeout",
+            )
+
+    assert retired is False
+    durable_bridge.rebind_session_account.assert_awaited_once_with(
+        session_id="durable-anchor-poison-clear-fails",
+        api_key_id=None,
+        instance_id=proxy_service.get_settings().http_responses_session_bridge_instance_id,
+        owner_epoch=4,
+        account_id="acc-bridge",
+        clear_continuity=True,
+    )
+    retire.assert_not_awaited()
+    assert "poisoned anchor" in caplog.text or "poisoned HTTP bridge continuity" in caplog.text
 
 
 @pytest.mark.asyncio

@@ -337,10 +337,15 @@ async def test_unmeasurable_database_size_is_unknown_and_logs_original_exception
     caplog,
 ) -> None:
     error = OSError("stat denied")
+    target = Path("/tmp/telemetry-unmeasurable-db.sqlite3")
+    real_stat = Path.stat
 
-    def fail_stat(_path: Path):
-        raise error
+    def fail_stat(path: Path, *args: object, **kwargs: object):
+        if path == target:
+            raise error
+        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
 
+    monkeypatch.setattr("app.modules.telemetry.snapshot.sqlite_db_path_from_url", lambda _url: str(target))
     monkeypatch.setattr(Path, "stat", fail_stat)
     builder = TelemetrySnapshotBuilder(async_session)
 

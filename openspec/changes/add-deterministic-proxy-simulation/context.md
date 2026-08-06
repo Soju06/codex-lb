@@ -12,6 +12,11 @@ scheduler objects. The virtual scheduler runs on the pytest loop but owns its
 timers and task registry, so tests can advance deadlines without wall-clock
 sleep and can cancel owned tasks at the reset boundary.
 
+The audit's third injection item, an upstream transport factory, is deliberately
+left out. The converted tests reach their upstream through the existing fake SSE
+and fake websocket doubles, so a transport factory would be new production
+surface with no consumer yet. It stays available for the next slice.
+
 The first schedule checker models the recurring lease and terminal-state bug
 class from the taxonomy: a bridge turn must reach exactly one terminal outcome
 and release response-create, API-key, and account leases exactly once even when

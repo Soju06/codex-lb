@@ -265,7 +265,6 @@ async def test_http_bridge_stream_waits_only_while_completed_delivery_is_active(
 
     finalize_request = AsyncMock()
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
-    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", block_after_terminal_claim)
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
     monkeypatch.setattr(
@@ -595,6 +594,9 @@ async def test_http_bridge_stream_idle_timeout_revokes_queue_before_completed_cl
     finalize_request = AsyncMock()
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
     monkeypatch.setattr(service, "_detach_http_bridge_request", fake_detach_http_bridge_request)
+    # The retry circuit lookup loads durable state over the real DB session,
+    # which the virtual clock cannot advance; this scenario is about the idle
+    # timeout, so the cooldown is stubbed out rather than simulated.
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", AsyncMock(return_value=True))
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)

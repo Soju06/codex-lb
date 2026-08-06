@@ -510,6 +510,40 @@ def _http_bridge_terminal_capacity_retry_error_code(
     return error_code or "model_at_capacity"
 
 
+def _http_bridge_transport_close_capacity_retry_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    has_other_pending_requests: bool,
+    error_code: str | None,
+    error_message: str | None,
+) -> str | None:
+    """Classify output-free accepted disconnects that native Codex can replay."""
+    if request_state is None or request_state.enforce_openai_sdk_contract:
+        return None
+    if has_other_pending_requests:
+        return None
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return None
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return None
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return None
+    if request_state.response_event_count < 1:
+        return None
+    if request_state.event_queue is None:
+        return None
+    if not request_state.request_text or request_state.replay_count >= 1:
+        return None
+    normalized_error_code = _normalize_error_code(error_code, None)
+    if normalized_error_code == "proxy_network_unavailable":
+        return None
+    if _http_bridge_terminal_capacity_retry_message(error_message):
+        return normalized_error_code or "model_at_capacity"
+    if normalized_error_code in {"stream_incomplete", "upstream_error", "upstream_unavailable"}:
+        return "stream_incomplete"
+    return None
+
+
 async def _wait_before_http_bridge_model_capacity_retry(
     request_state: _WebSocketRequestState | None,
     *,
@@ -1105,6 +1139,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 async with session.pending_lock:
                     archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                    has_other_pending_requests = len(session.pending_requests) != 1
                     response_events_seen = max(
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
@@ -1693,12 +1728,6 @@ class _HTTPBridgeUpstreamEventsMixin:
             event_block = f"data: {rewritten_text}\n\n"
 
         retry_error_code = _websocket_precreated_retry_error_code(
-            status_request_state,
-            event_type=event_type,
-            payload=payload,
-            has_other_pending_requests=has_other_pending_requests,
-        )
-        terminal_capacity_retry_error_code = _http_bridge_terminal_capacity_retry_error_code(
             status_request_state,
             event_type=event_type,
             payload=payload,

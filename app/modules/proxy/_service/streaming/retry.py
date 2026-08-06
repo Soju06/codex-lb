@@ -372,6 +372,7 @@ class _StreamingRetryMixin:
         network_recovery = ProcessNetworkRecovery(transport="stream", request_id=request_id)
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
+        last_exhausted_transient_exc: ProxyResponseError | None = None
         last_pre_dispatch_transport_error: ProxyResponseError | None = None
         last_account_model_rejection: ProxyResponseError | None = None
         last_account_model_rejection_account_id: str | None = None

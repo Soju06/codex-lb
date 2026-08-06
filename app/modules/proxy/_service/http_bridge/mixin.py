@@ -1693,7 +1693,6 @@ class _HTTPBridgeMixin(
             )
         )
         settings = await _service_get_settings_cache().get()
-        prefer_earlier_reset_accounts = bool(getattr(settings, "prefer_earlier_reset_accounts", False))
         excluded_account_ids = set(exclude_account_ids or ())
         if require_preferred_account:
             fallback_on_preferred_account_unavailable = False

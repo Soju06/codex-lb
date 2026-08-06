@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260806_000000_add_anonymous_telemetry"
-down_revision = "20260730_000000_add_api_key_fair_share_threshold"
+down_revision = "20260806_020000_add_usage_history_bulk_covering_indexes"
 branch_labels = None
 depends_on = None
 

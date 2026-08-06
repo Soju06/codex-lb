@@ -340,10 +340,10 @@ async def test_unmeasurable_database_size_is_unknown_and_logs_original_exception
     target = Path("/tmp/telemetry-unmeasurable-db.sqlite3")
     real_stat = Path.stat
 
-    def fail_stat(path: Path, *args: object, **kwargs: object):
+    def fail_stat(path: Path, *, follow_symlinks: bool = True):
         if path == target:
             raise error
-        return real_stat(path, *args, **kwargs)  # type: ignore[arg-type]
+        return real_stat(path, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr("app.modules.telemetry.snapshot.sqlite_db_path_from_url", lambda _url: str(target))
     monkeypatch.setattr(Path, "stat", fail_stat)

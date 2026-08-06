@@ -30,8 +30,9 @@ export function updateSettings(payload: unknown) {
   });
 }
 
-export function getTelemetryConsent() {
-  return get(TELEMETRY_PATH, TelemetryConsentSchema);
+export function getTelemetryConsent(options: { includePreview?: boolean } = {}) {
+  const path = options.includePreview ? `${TELEMETRY_PATH}?include_preview=true` : TELEMETRY_PATH;
+  return get(path, TelemetryConsentSchema);
 }
 
 export function updateTelemetryConsent(payload: unknown) {

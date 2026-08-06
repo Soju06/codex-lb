@@ -2,6 +2,7 @@ import { Activity } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -11,9 +12,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { TelemetryPayloadPreview } from "@/features/settings/components/telemetry-payload-preview";
-import { useTelemetryConsent } from "@/features/settings/hooks/use-settings";
+import { useTelemetryConsent, useTelemetryPreview } from "@/features/settings/hooks/use-settings";
 
 export type TelemetrySettingsProps = {
   disabled: boolean;
@@ -23,10 +25,14 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
   const { t } = useTranslation();
   const [previewOpen, setPreviewOpen] = useState(false);
   const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent();
+  // Building the snapshot is expensive, so the preview is fetched only once
+  // the operator opens the dialog.
+  const { telemetryPreviewQuery } = useTelemetryPreview(previewOpen);
 
   const consent = telemetryConsentQuery.data;
   const envControlled = consent?.source === "env";
   const busy = disabled || updateTelemetryConsentMutation.isPending || !consent;
+  const previewEnvelope = telemetryPreviewQuery.data?.preview ?? null;
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -76,7 +82,7 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
       </div>
 
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        {previewOpen && consent ? (
+        {previewOpen ? (
           <DialogContent className="sm:max-w-2xl">
             <DialogHeader>
               <DialogTitle>{t("settings.telemetry.previewDialog.title")}</DialogTitle>
@@ -84,7 +90,13 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
                 {t("settings.telemetry.previewDialog.description")}
               </DialogDescription>
             </DialogHeader>
-            <TelemetryPayloadPreview preview={consent.preview} />
+            {previewEnvelope ? (
+              <TelemetryPayloadPreview preview={previewEnvelope} />
+            ) : telemetryPreviewQuery.error ? (
+              <AlertMessage variant="error">{telemetryPreviewQuery.error.message}</AlertMessage>
+            ) : (
+              <Skeleton className="h-64 w-full rounded-lg" />
+            )}
             <DialogFooter showCloseButton />
           </DialogContent>
         ) : null}

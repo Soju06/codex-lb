@@ -24,12 +24,16 @@ export function TelemetryConsentDialog() {
   const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent();
 
   const consent = telemetryConsentQuery.data;
+  // The dialog exists to show the exact payload before the first send, so it
+  // is skipped when the backend attached no preview envelope.
+  const preview = consent?.preview ?? null;
   const open =
     canWrite &&
     !dismissed &&
     consent !== undefined &&
     consent.state === "undecided" &&
-    consent.source !== "env";
+    consent.source !== "env" &&
+    preview !== null;
 
   if (!open) {
     return null;
@@ -54,7 +58,7 @@ export function TelemetryConsentDialog() {
             {t("settings.telemetry.consentDialog.categories")}
           </p>
           <p className="text-sm font-medium">{t("settings.telemetry.consentDialog.payloadLabel")}</p>
-          <TelemetryPayloadPreview preview={consent.preview} />
+          <TelemetryPayloadPreview preview={preview} />
           <p className="text-sm">
             <a
               href={TELEMETRY_DOCS_URL}

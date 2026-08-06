@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { TelemetryConsentDialog } from "@/features/settings/components/telemetry-consent-dialog";
-import { createTelemetryConsent } from "@/test/mocks/factories";
+import { createTelemetryConsent, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -18,16 +18,20 @@ describe("TelemetryConsentDialog", () => {
     useAuthStore.setState({ canWrite: true });
   });
 
-  it("shows the exact payload preview with both decision actions while undecided", async () => {
+  it("shows the exact transmitted envelope with both decision actions while undecided", async () => {
     server.use(http.get("/api/settings/telemetry", () => HttpResponse.json(undecidedConsent())));
 
     renderWithProviders(<TelemetryConsentDialog />);
 
     const dialog = await screen.findByRole("dialog", { name: "Anonymous telemetry" });
-    expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
+    // The full envelope is the exact transmitted body: top-level instance_id
+    // and timestamp plus the snapshot under metrics.
     expect(
       within(dialog).getByText(/"instance_id": "00000000-0000-4000-8000-000000000000"/),
     ).toBeInTheDocument();
+    expect(within(dialog).getByText(/"timestamp": "2026-08-06T00:00:00Z"/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"metrics": \{/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Keep enabled" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Disable telemetry" })).toBeInTheDocument();
     expect(
@@ -98,7 +102,38 @@ describe("TelemetryConsentDialog", () => {
   });
 
   it("stays hidden once a decision has been persisted", async () => {
-    // Default mock state is enabled/persisted.
+    // Synthetic preview keeps the preview-null gate open so this test binds
+    // the state === "undecided" gate alone.
+    server.use(
+      http.get("/api/settings/telemetry", () =>
+        HttpResponse.json(
+          createTelemetryConsent({
+            state: "enabled",
+            source: "persisted",
+            active: true,
+            preview: createTelemetrySnapshotEnvelope(),
+          }),
+        ),
+      ),
+    );
+
+    const { queryClient } = renderWithProviders(<TelemetryConsentDialog />);
+
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["settings", "telemetry"])?.status).toBe("success"),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("stays hidden when the response carries no preview envelope", async () => {
+    server.use(
+      http.get("/api/settings/telemetry", () =>
+        HttpResponse.json(
+          createTelemetryConsent({ state: "undecided", source: "default", active: true, preview: null }),
+        ),
+      ),
+    );
+
     const { queryClient } = renderWithProviders(<TelemetryConsentDialog />);
 
     await waitFor(() =>
@@ -108,9 +143,18 @@ describe("TelemetryConsentDialog", () => {
   });
 
   it("stays hidden while the environment variable controls telemetry", async () => {
+    // Synthetic preview keeps the preview-null gate open so this test binds
+    // the source !== "env" gate alone.
     server.use(
       http.get("/api/settings/telemetry", () =>
-        HttpResponse.json(createTelemetryConsent({ state: "undecided", source: "env", active: false })),
+        HttpResponse.json(
+          createTelemetryConsent({
+            state: "undecided",
+            source: "env",
+            active: false,
+            preview: createTelemetrySnapshotEnvelope(),
+          }),
+        ),
       ),
     );
 

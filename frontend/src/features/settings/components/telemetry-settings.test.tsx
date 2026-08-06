@@ -4,7 +4,7 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
-import { createTelemetryConsent } from "@/test/mocks/factories";
+import { createTelemetryConsent, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
@@ -58,16 +58,37 @@ describe("TelemetrySettings", () => {
     expect(toggle).toBeDisabled();
   });
 
-  it("shows the collected payload preview on demand", async () => {
+  it("fetches the preview envelope only when the operator opens the dialog", async () => {
     const user = userEvent.setup();
+    const telemetryRequests: URL[] = [];
+    server.use(
+      http.get("/api/settings/telemetry", ({ request }) => {
+        const url = new URL(request.url);
+        telemetryRequests.push(url);
+        if (url.searchParams.get("include_preview") === "true") {
+          return HttpResponse.json(
+            createTelemetryConsent({ preview: createTelemetrySnapshotEnvelope() }),
+          );
+        }
+        return HttpResponse.json(createTelemetryConsent());
+      }),
+    );
 
     renderWithProviders(<TelemetrySettings disabled={false} />);
 
     const viewButton = await screen.findByRole("button", { name: "View collected data" });
     await waitFor(() => expect(viewButton).toBeEnabled());
+    // The always-on consent query must not carry the expensive preview flag.
+    expect(telemetryRequests.length).toBeGreaterThan(0);
+    expect(telemetryRequests.every((url) => !url.searchParams.has("include_preview"))).toBe(true);
+
     await user.click(viewButton);
 
     const dialog = await screen.findByRole("dialog", { name: "Collected telemetry data" });
     expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"timestamp": "2026-08-06T00:00:00Z"/)).toBeInTheDocument();
+    expect(
+      telemetryRequests.filter((url) => url.searchParams.get("include_preview") === "true"),
+    ).toHaveLength(1);
   });
 });

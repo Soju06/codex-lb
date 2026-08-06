@@ -1,7 +1,7 @@
-import type { TelemetryConsent } from "@/features/settings/schemas";
+import type { TelemetrySnapshotEnvelope } from "@/features/settings/schemas";
 
 export type TelemetryPayloadPreviewProps = {
-  preview: TelemetryConsent["preview"];
+  preview: TelemetrySnapshotEnvelope;
 };
 
 export function TelemetryPayloadPreview({ preview }: TelemetryPayloadPreviewProps) {

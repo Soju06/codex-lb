@@ -38,6 +38,7 @@ import {
   createQuotaPlannerWarmupActionResponse,
   createRequestLogFilterOptions,
   createTelemetryConsent,
+  createTelemetrySnapshotEnvelope,
   createUpstreamProxyAdmin,
   createRequestLogsResponse,
   type DashboardAuthSession,
@@ -1206,7 +1207,15 @@ export const handlers = [
     return HttpResponse.json(state.settings);
   }),
 
-  http.get("/api/settings/telemetry", () => {
+  http.get("/api/settings/telemetry", ({ request }) => {
+    // include_preview=true is the on-demand path: the envelope is attached
+    // regardless of consent state.
+    if (new URL(request.url).searchParams.get("include_preview") === "true") {
+      return HttpResponse.json({
+        ...state.telemetryConsent,
+        preview: createTelemetrySnapshotEnvelope(),
+      });
+    }
     return HttpResponse.json(state.telemetryConsent);
   }),
 
@@ -1216,10 +1225,10 @@ export const handlers = [
       return HttpResponse.json(state.telemetryConsent);
     }
     state.telemetryConsent = createTelemetryConsent({
-      ...state.telemetryConsent,
       state: payload.enabled ? "enabled" : "disabled",
       source: "persisted",
       active: payload.enabled,
+      preview: null,
     });
     return HttpResponse.json(state.telemetryConsent);
   }),

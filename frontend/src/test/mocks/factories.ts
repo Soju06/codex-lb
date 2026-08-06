@@ -49,10 +49,16 @@ import {
 	RequestLogSchema,
 	RequestLogsResponseSchema,
 } from "@/features/dashboard/schemas";
-import type { DashboardSettings, TelemetryConsent, UpstreamProxyAdmin } from "@/features/settings/schemas";
+import type {
+	DashboardSettings,
+	TelemetryConsent,
+	TelemetrySnapshotEnvelope,
+	UpstreamProxyAdmin,
+} from "@/features/settings/schemas";
 import {
 	DashboardSettingsSchema,
 	TelemetryConsentSchema,
+	TelemetrySnapshotEnvelopeSchema,
 	UpstreamProxyAdminSchema,
 } from "@/features/settings/schemas";
 import type {
@@ -538,84 +544,96 @@ export function createDashboardSettings(
 	});
 }
 
-export function createTelemetrySnapshotPreview(): TelemetryConsent["preview"] {
-	return {
-		schema_version: 1,
+export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
+	return TelemetrySnapshotEnvelopeSchema.parse({
 		instance_id: "00000000-0000-4000-8000-000000000000",
-		version: "1.23.0",
-		python: "3.13",
-		os: "linux",
-		arch: "x86_64",
-		uptime_hours: 168,
-		deploy: {
-			method: "docker",
-			db_backend: "sqlite",
-			db_size_bucket: "<100MB",
-			replicas: 1,
-			reverse_proxy: true,
+		timestamp: "2026-08-06T00:00:00Z",
+		metrics: {
+			schema_version: 1,
+			instance_id: "00000000-0000-4000-8000-000000000000",
+			version: "1.23.0",
+			python: "3.13",
+			os: "linux",
+			arch: "x86_64",
+			uptime_hours: 168,
+			deploy: {
+				method: "docker",
+				db_backend: "sqlite",
+				db_size_bucket: "<100MB",
+				replicas: 1,
+				reverse_proxy: true,
+			},
+			accounts: {
+				pool_bucket: "2-5",
+				plan_mix: { plus: "2-5", pro: "0", team: "0", free: "0" },
+				workspace_accounts: false,
+				routing_policy: "usage_weighted",
+				limit_warmup_enabled: false,
+				egress_proxy_used: false,
+			},
+			usage_7d: {
+				requests: 1024,
+				success_rate: 0.99,
+				tokens_input: 1000000,
+				tokens_output: 50000,
+				tokens_cached_ratio: 0.8,
+				cost_usd_bucket: "<10",
+				request_kinds: { responses: 0.97, chat: 0.02, images: 0.01, unknown: 0.0 },
+				transport_mix: { ws: 0.6, http_bridge: 0.4 },
+				service_tier_mix: { default: 1.0, flex: 0.0 },
+				clients: { "codex-cli": 0.9, other: 0.1 },
+				clients_other_ratio: 0.1,
+				models: [
+					{
+						name: "gpt-5.4-codex",
+						share: 1.0,
+						reasoning: { high: 0.5, medium: 0.5 },
+						avg_output_tokens_bucket: "250-1k",
+					},
+				],
+				latency_ms_p50: 1200,
+				ttft_ms_p50: 800,
+				ttft_ms_p95: 3400,
+				rate_limit_429_ratio: 0.004,
+				top_upstream_errors: ["server_overloaded"],
+			},
+			features: {
+				api_firewall: false,
+				quota_planner: false,
+				sticky_sessions: true,
+				conversation_archive: false,
+				automations: false,
+				fleet: false,
+				model_sources_count: 0,
+				api_keys_bucket: "2-5",
+				prometheus: false,
+				otel: false,
+				dashboard_auth: true,
+				reset_credits: true,
+				image_api_used: false,
+			},
 		},
-		accounts: {
-			pool_bucket: "2-5",
-			plan_mix: { plus: "2-5", pro: "0", team: "0", free: "0" },
-			workspace_accounts: false,
-			routing_policy: "usage_weighted",
-			limit_warmup_enabled: false,
-			egress_proxy_used: false,
-		},
-		usage_7d: {
-			requests: 1024,
-			success_rate: 0.99,
-			tokens_input: 1000000,
-			tokens_output: 50000,
-			tokens_cached_ratio: 0.8,
-			cost_usd_bucket: "<10",
-			request_kinds: { responses: 0.97, chat: 0.02, images: 0.01 },
-			transport_mix: { ws: 0.6, http_bridge: 0.4 },
-			service_tier_mix: { default: 1.0, flex: 0.0 },
-			clients: { "codex-cli": 0.9, other: 0.1 },
-			clients_other_ratio: 0.1,
-			models: [
-				{
-					name: "gpt-5.4-codex",
-					share: 1.0,
-					reasoning: { high: 0.5, medium: 0.5 },
-					avg_output_tokens_bucket: "250-1k",
-				},
-			],
-			latency_ms_p50: 1200,
-			ttft_ms_p50: 800,
-			ttft_ms_p95: 3400,
-			rate_limit_429_ratio: 0.004,
-			top_upstream_errors: ["server_overloaded"],
-		},
-		features: {
-			api_firewall: false,
-			quota_planner: false,
-			sticky_sessions: true,
-			conversation_archive: false,
-			automations: false,
-			fleet: false,
-			model_sources_count: 0,
-			api_keys_bucket: "2-5",
-			prometheus: false,
-			otel: false,
-			dashboard_auth: true,
-			reset_credits: true,
-			image_api_used: false,
-		},
-	};
+	});
 }
 
 export function createTelemetryConsent(
 	overrides: Partial<TelemetryConsent> = {},
 ): TelemetryConsent {
-	return TelemetryConsentSchema.parse({
+	const base = {
 		state: "enabled",
 		source: "persisted",
 		active: true,
-		preview: createTelemetrySnapshotPreview(),
 		...overrides,
-	});
+	};
+	// Mirror the backend: the base GET attaches a preview envelope only for
+	// the undecided/default (consent dialog) case; explicit overrides win.
+	const preview =
+		"preview" in overrides
+			? overrides.preview
+			: base.state === "undecided" && base.source === "default"
+				? createTelemetrySnapshotEnvelope()
+				: null;
+	return TelemetryConsentSchema.parse({ ...base, preview });
 }
 
 export function createQuotaPlannerSettings(

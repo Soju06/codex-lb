@@ -1198,6 +1198,103 @@ async def test_request_log_conversation_id_migration_upgrade_and_downgrade(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_usage_history_bulk_covering_indexes_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'usage-history-bulk-covering.sqlite'}"
+    parent_revision = "20260730_000000_add_api_key_fair_share_threshold"
+    covering_revision = "20260806_020000_add_usage_history_bulk_covering_indexes"
+    covering_indexes = {
+        "idx_usage_window_account_time_covering",
+        "idx_usage_window_raw_account_time_covering",
+    }
+
+    async def _usage_history_indexes(engine) -> set[str]:
+        async with engine.connect() as conn:
+            return {row[1] for row in await conn.execute(text("PRAGMA index_list('usage_history')"))}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        indexes = await _usage_history_indexes(engine)
+        assert not (covering_indexes & indexes)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, covering_revision, bootstrap_legacy=False))
+        indexes = await _usage_history_indexes(engine)
+        assert covering_indexes <= indexes
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        indexes = await _usage_history_indexes(engine)
+        assert not (covering_indexes & indexes)
+
+        # Idempotent re-upgrade (IF NOT EXISTS tolerates pre-created indexes).
+        await to_thread.run_sync(lambda: run_upgrade(db_url, covering_revision, bootstrap_legacy=False))
+        indexes = await _usage_history_indexes(engine)
+        assert covering_indexes <= indexes
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only invalid covering-index repair test",
+)
+async def test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql(db_setup):
+    """An invalid leftover from an interrupted CREATE INDEX CONCURRENTLY is rebuilt.
+
+    ``IF NOT EXISTS`` alone would silently accept an invalid same-named index,
+    leaving the bulk fetch without a usable covering index. Pins the repair
+    probe: step the schema back below the covering revision, plant a decoy
+    key-only index marked invalid (exactly what an interrupted concurrent
+    build leaves behind), and assert the re-applied migration replaces it
+    with a valid covering index.
+    """
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    parent_revision = "20260730_000000_add_api_key_fair_share_threshold"
+    index_name = "idx_usage_window_account_time_covering"
+
+    await run_startup_migrations(_DATABASE_URL)
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent_revision))
+
+    async with SessionLocal() as session:
+        await session.execute(text(f"CREATE INDEX {index_name} ON usage_history (account_id)"))
+        await session.execute(
+            text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = CAST(:name AS regclass)"),
+            {"name": index_name},
+        )
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        indisvalid = (
+            await session.execute(
+                text(
+                    "SELECT i.indisvalid FROM pg_index i "
+                    "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = :name"
+                ),
+                {"name": index_name},
+            )
+        ).scalar_one()
+        indexdef = (
+            await session.execute(
+                text("SELECT pg_get_indexdef(CAST(:name AS regclass))"),
+                {"name": index_name},
+            )
+        ).scalar_one()
+
+    assert indisvalid is True
+    assert "INCLUDE" in indexdef  # rebuilt as the covering index, not the accepted decoy
+
+
+@pytest.mark.asyncio
 async def test_account_plan_downgrade_observations_migration_upgrade_and_downgrade(tmp_path):
     """Round-trip the plan-downgrade evidence migration through Alembic itself.
 

@@ -30,7 +30,7 @@ from app.db.models import (
     RequestLog,
     RequestUsageHourlyRollup,
 )
-from app.db.session import sqlite_writer_section
+from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.modules.accounts.usage_rollup import lock_fold_state
 from app.modules.accounts.usage_time_rollup import (
     HOURLY_BUCKET_SECONDS,
@@ -969,6 +969,9 @@ class RequestLogsRepository:
         archive_request_id: str | None = None,
     ) -> RequestLog:
         async with sqlite_writer_section():
+            # Telemetry write: this transaction only appends one request-log
+            # row, so its commit may skip the synchronous WAL flush.
+            await relax_commit_durability(self._session)
             resolved_request_id = ensure_request_id(request_id)
             resolved_archive_request_id = (archive_request_id or "").strip() or resolved_request_id
             resolved_plan_type = plan_type

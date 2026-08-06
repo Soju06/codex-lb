@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable, Protocol, 
 
 import anyio
 from anyio import to_thread
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -294,6 +294,36 @@ async def get_background_session() -> AsyncIterator[AsyncSession]:
         raise
     finally:
         await close_session(session)
+
+
+async def relax_commit_durability(session: AsyncSession) -> None:
+    """Relax commit durability for the current telemetry write transaction.
+
+    High-frequency append-only accounting/telemetry writes (request logs,
+    API-key usage reservations, usage history entries) dominate the slow-query
+    profile on PostgreSQL because every commit waits for a WAL fsync. Those
+    rows describe in-flight requests: if the server crashes, the in-flight
+    requests are lost anyway, so losing the final unflushed WAL window (bounded
+    by three times ``wal_writer_delay`` — up to ~600 ms at the default 200 ms
+    setting) keeps accounting semantics identical. For such transactions
+    this helper emits ``SET LOCAL synchronous_commit = off`` so the commit
+    returns without waiting for the WAL flush.
+
+    ``SET LOCAL`` is transaction-scoped: PostgreSQL reverts it automatically
+    at COMMIT/ROLLBACK, so nothing leaks onto the pooled connection. Executed
+    outside a transaction, PostgreSQL merely emits a WARNING and the setting
+    never applies — calling this through an ``AsyncSession`` is what makes it
+    safe, because session autobegin opens the write transaction at this very
+    statement when none is open yet.
+
+    No-op on SQLite (durability there is governed by ``PRAGMA synchronous``).
+    MUST NOT be used for configuration writes (accounts, API keys, settings,
+    limits management): those keep full durability.
+    """
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    await session.execute(text("SET LOCAL synchronous_commit = off"))
 
 
 @asynccontextmanager

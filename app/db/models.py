@@ -1982,6 +1982,24 @@ Index(
     UsageHistory.recorded_at.desc(),
     UsageHistory.id.desc(),
 )
+# The raw "window" column rides in the payload because the planner only
+# considers an index-only scan when every column referenced by the query is
+# returnable from the index, and the coalesce(...) expression key cannot
+# return its underlying raw column.
+Index(
+    "idx_usage_window_account_time_covering",
+    _PRIMARY_WINDOW_INDEX_EXPR,
+    UsageHistory.account_id,
+    UsageHistory.recorded_at,
+    postgresql_include=["used_percent", "reset_at", "window_minutes", "id", "window"],
+)
+Index(
+    "idx_usage_window_raw_account_time_covering",
+    UsageHistory.window,
+    UsageHistory.account_id,
+    UsageHistory.recorded_at,
+    postgresql_include=["used_percent", "reset_at", "window_minutes", "id"],
+)
 Index("idx_accounts_email", Account.email)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)

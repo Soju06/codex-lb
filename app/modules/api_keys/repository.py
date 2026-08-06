@@ -27,7 +27,7 @@ from app.db.models import (
     RequestLog,
     RequestUsageHourlyRollup,
 )
-from app.db.session import sqlite_writer_section
+from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
 from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, to_dimension
 from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_hourly_window
@@ -377,11 +377,6 @@ class ApiKeysRepository:
         await self._session.commit()
         return True
 
-    async def update_last_used(self, key_id: str, *, commit: bool = True) -> None:
-        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
-        if commit:
-            await self._session.commit()
-
     async def commit(self) -> None:
         await self._session.commit()
 
@@ -476,7 +471,6 @@ class ApiKeysRepository:
                     .where(ApiKeyLimit.id == limit.id)
                     .values(current_value=ApiKeyLimit.current_value + increment)
                 )
-        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
         await self._session.commit()
 
     async def reset_limit(self, limit_id: int, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool:
@@ -601,6 +595,10 @@ class ApiKeysRepository:
         model: str,
         items: list[UsageReservationItemData],
     ) -> None:
+        # Telemetry write: reservation creation (and the limit counters it
+        # rides with) is per-request usage accounting, so the enclosing
+        # transaction's commit may skip the synchronous WAL flush.
+        await relax_commit_durability(self._session)
         reservation = ApiKeyUsageReservation(
             id=reservation_id,
             api_key_id=key_id,
@@ -733,6 +731,11 @@ class ApiKeysRepository:
         cached_input_tokens: int | None,
         cost_microdollars: int | None,
     ) -> None:
+        # Telemetry write: reservation settlement (finalize/fail/release,
+        # including the last_used_at touch that rides the same transaction)
+        # is per-request usage accounting, so the enclosing transaction's
+        # commit may skip the synchronous WAL flush.
+        await relax_commit_durability(self._session)
         await self._session.execute(
             update(ApiKeyUsageReservation)
             .where(ApiKeyUsageReservation.id == reservation_id)
@@ -788,6 +791,14 @@ class ApiKeysRepository:
                     reservation_ids = list(result.scalars().all())
                     if not reservation_ids:
                         break
+
+                    # Telemetry write: stale-reservation release settles the
+                    # same per-request accounting rows as the request-path
+                    # settlement (reservation status flip plus limit-counter
+                    # adjustments), and a crash-lost batch is simply reclaimed
+                    # by the next scheduler run. Each batch commits its own
+                    # transaction, so relax every batch individually.
+                    await relax_commit_durability(self._session)
 
                     item_result = await self._session.execute(
                         select(

@@ -24,6 +24,7 @@ from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, LimitWindow, RequestLog, UsageHistory
 from app.db.session import SessionLocal
+from app.modules.api_keys.last_used_coalescer import get_api_key_last_used_coalescer
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
 from app.modules.model_sources.forwarding import (
@@ -1050,6 +1051,11 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
     ) as response:
         assert response.status_code == 200
         _ = [line async for line in response.aiter_lines() if line]
+
+    # last_used_at is write-behind: the settlement records into the coalescer
+    # and the periodic flusher persists it. Flush explicitly before asserting.
+    flushed = await get_api_key_last_used_coalescer().flush()
+    assert flushed == 1
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)

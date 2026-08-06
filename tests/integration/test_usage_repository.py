@@ -360,6 +360,200 @@ async def test_latest_by_account_primary_query_plan_uses_normalized_window_index
     assert "Seq Scan" not in plan_json
 
 
+async def _seed_bulk_history_plan_fixture(session: AsyncSession) -> None:
+    now = utcnow()
+    accounts_repo = AccountsRepository(session)
+    repo = UsageRepository(session)
+    await accounts_repo.upsert(_make_account("acc1"))
+    await accounts_repo.upsert(_make_account("acc2"))
+
+    for offset in range(4):
+        recorded_at = now - timedelta(minutes=30 * offset)
+        await repo.add_entry("acc1", 10.0 + offset, window=None, recorded_at=recorded_at, window_minutes=300)
+        await repo.add_entry("acc1", 20.0 + offset, window="primary", recorded_at=recorded_at, window_minutes=300)
+        await repo.add_entry("acc1", 30.0 + offset, window="secondary", recorded_at=recorded_at, window_minutes=10080)
+        await repo.add_entry("acc2", 40.0 + offset, window="primary", recorded_at=recorded_at, window_minutes=300)
+        await repo.add_entry("acc2", 50.0 + offset, window="secondary", recorded_at=recorded_at, window_minutes=10080)
+
+    await _vacuum_analyze_usage_history(session)
+
+
+async def _vacuum_analyze_usage_history(session: AsyncSession) -> None:
+    """Populate the visibility map so covering-index EXPLAIN tests are deterministic.
+
+    A freshly seeded table has an empty visibility map, so the planner costs
+    every Index Only Scan with full heap recheck fetches and can prefer a
+    plain Index Scan on a cheaper non-covering key index (observed on a clean
+    PostgreSQL 18: idx_usage_window_account_time at cost 8.18 beats the
+    covering index at 8.5) — disabling seq/bitmap scans does not force the
+    index-only path when that cheaper non-covering index exists. VACUUM marks
+    the pages all-visible (and ANALYZE refreshes stats), which is the steady
+    production state the covering indexes target.
+    """
+    # Close the seeding transaction first: an open snapshot can keep VACUUM
+    # from marking the freshly inserted pages all-visible.
+    await session.commit()
+    autocommit_engine = engine.execution_options(isolation_level="AUTOCOMMIT")
+    async with autocommit_engine.connect() as conn:
+        await conn.execute(text("VACUUM (ANALYZE) usage_history"))
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_primary_query_plan_is_index_only_postgresql(db_setup):
+    """The bulk projections fetch must be servable without heap fetches.
+
+    Sequential and bitmap scans are disabled so the planner has to surface
+    its index path for the bulk shape; with the covering payload in place
+    and the visibility map populated (the seed fixture runs VACUUM ANALYZE)
+    that path must be an Index Only Scan (a bare index scan would prove the
+    payload is missing).
+    """
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only query plan test")
+
+        await _seed_bulk_history_plan_fixture(session)
+
+        await session.execute(text("SET enable_seqscan = off"))
+        await session.execute(text("SET enable_bitmapscan = off"))
+        plan = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN (FORMAT JSON)
+                    SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                    FROM usage_history
+                    WHERE account_id IN ('acc1', 'acc2')
+                      AND recorded_at >= now() - interval '5 hours'
+                      AND coalesce("window", 'primary') = 'primary'
+                    ORDER BY account_id, recorded_at ASC
+                    """
+                )
+            )
+        ).scalar_one()
+
+    plan_json = json.dumps(plan)
+    assert "Index Only Scan" in plan_json
+    assert (
+        "idx_usage_window_account_time_covering" in plan_json
+        or "idx_usage_window_raw_account_time_covering" in plan_json
+    )
+    assert "Seq Scan" not in plan_json
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_cutoff_query_plan_is_index_only_postgresql(db_setup):
+    """The per-account-cutoff OR shape has an index-only path available.
+
+    With bitmap scans enabled the planner may still prefer a BitmapOr over
+    the covering index arms (bitmap heap scans cannot be index-only); this
+    pins that the covering payload at least makes the heap-free plan
+    available for the production shape.
+    """
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only query plan test")
+
+        await _seed_bulk_history_plan_fixture(session)
+
+        await session.execute(text("SET enable_seqscan = off"))
+        await session.execute(text("SET enable_bitmapscan = off"))
+        plan = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN (FORMAT JSON)
+                    SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                    FROM usage_history
+                    WHERE ((account_id = 'acc1' AND recorded_at >= now() - interval '5 hours')
+                        OR (account_id = 'acc2' AND recorded_at >= now() - interval '7 days'))
+                      AND coalesce("window", 'primary') = 'primary'
+                    ORDER BY account_id, recorded_at ASC
+                    """
+                )
+            )
+        ).scalar_one()
+
+    plan_json = json.dumps(plan)
+    assert "Index Only Scan" in plan_json
+    assert (
+        "idx_usage_window_account_time_covering" in plan_json
+        or "idx_usage_window_raw_account_time_covering" in plan_json
+    )
+    assert "Seq Scan" not in plan_json
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_secondary_query_plan_is_index_only_postgresql(db_setup):
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only query plan test")
+
+        await _seed_bulk_history_plan_fixture(session)
+
+        await session.execute(text("SET enable_seqscan = off"))
+        await session.execute(text("SET enable_bitmapscan = off"))
+        plan = (
+            await session.execute(
+                text(
+                    """
+                    EXPLAIN (FORMAT JSON)
+                    SELECT id, account_id, used_percent, recorded_at, reset_at, window_minutes
+                    FROM usage_history
+                    WHERE account_id IN ('acc1', 'acc2')
+                      AND recorded_at >= now() - interval '7 days'
+                      AND "window" = 'secondary'
+                    ORDER BY account_id, recorded_at ASC
+                    """
+                )
+            )
+        ).scalar_one()
+
+    plan_json = json.dumps(plan)
+    assert "Index Only Scan" in plan_json
+    assert "idx_usage_window_raw_account_time_covering" in plan_json
+    assert "Seq Scan" not in plan_json
+
+
+@pytest.mark.asyncio
+async def test_bulk_history_since_covered_read_matches_non_covered_read_postgresql(db_setup):
+    """The covering index changes the plan, never the rows.
+
+    Pins the spec's row-equality clause by running the production
+    ``bulk_history_since`` read once with the index-only path available and
+    once with index-only scans disabled (the pre-covering heap-fetch plan),
+    then asserting identical results.
+    """
+    since = utcnow() - timedelta(hours=5)
+    async with SessionLocal() as session:
+        if _dialect_name(session) != "postgresql":
+            pytest.skip("PostgreSQL-only covered-read equality test")
+
+        await _seed_bulk_history_plan_fixture(session)
+
+        await session.execute(text("SET enable_seqscan = off"))
+        await session.execute(text("SET enable_bitmapscan = off"))
+        covered = await UsageRepository(session).bulk_history_since(["acc1", "acc2"], "primary", since)
+
+    async with SessionLocal() as session:
+        await session.execute(text("SET enable_indexonlyscan = off"))
+        non_covered = await UsageRepository(session).bulk_history_since(["acc1", "acc2"], "primary", since)
+
+    # The query orders by (account_id, recorded_at) only, so rows tied on
+    # recorded_at (NULL-window and 'primary' snapshots share timestamps) come
+    # back in plan-dependent order; compare with a deterministic tie-break.
+    def _sorted_rows(grouped):
+        return {
+            account_id: sorted(snapshots, key=lambda snapshot: (snapshot.recorded_at, snapshot.id))
+            for account_id, snapshots in grouped.items()
+        }
+
+    assert _sorted_rows(covered) == _sorted_rows(non_covered)
+    assert set(covered) == {"acc1", "acc2"}
+    assert len(covered["acc1"]) == 8  # four NULL-window + four 'primary' snapshots
+    assert len(covered["acc2"]) == 4
+
+
 def test_bulk_history_since_sqlite_cache_reuses_superset_and_picks_up_appends(tmp_path):
     db_path = tmp_path / "usage.db"
     _clear_bulk_history_since_sqlite_cache()

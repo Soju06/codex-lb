@@ -18,7 +18,7 @@ from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
-from app.db.session import sqlite_writer_section
+from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.db.sqlite_utils import sqlite_db_path_from_url
 from app.modules.usage.additional_quota_keys import (
     AdditionalQuotaQueryScope,
@@ -616,8 +616,11 @@ class UsageRepository:
             credits_balance=credits_balance,
             recorded_at=recorded_at or utcnow(),
         )
-        self._session.add(entry)
         async with sqlite_writer_section():
+            # Telemetry write: this transaction only appends usage-history
+            # rows, so its commit may skip the synchronous WAL flush.
+            await relax_commit_durability(self._session)
+            self._session.add(entry)
             await self._session.commit()
             await self._session.refresh(entry)
         return entry
@@ -649,9 +652,12 @@ class UsageRepository:
             )
             for window in windows
         ]
-        self._session.add_all(entries)
         try:
             async with sqlite_writer_section():
+                # Telemetry write: this transaction only appends usage-history
+                # rows, so its commit may skip the synchronous WAL flush.
+                await relax_commit_durability(self._session)
+                self._session.add_all(entries)
                 await self._session.commit()
         except BaseException:
             await self._session.rollback()
@@ -1080,8 +1086,12 @@ class AdditionalUsageRepository:
             window_minutes=window_minutes,
             recorded_at=recorded_at or utcnow(),
         )
-        self._session.add(entry)
         async with sqlite_writer_section():
+            # Telemetry write: this transaction only appends one
+            # additional-usage-history row, so its commit may skip the
+            # synchronous WAL flush.
+            await relax_commit_durability(self._session)
+            self._session.add(entry)
             await self._session.commit()
 
     async def delete_for_account(self, account_id: str) -> None:

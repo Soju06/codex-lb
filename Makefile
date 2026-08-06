@@ -17,6 +17,7 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_proxy_compact.py::test_proxy_compact_headers_include_monthly_only_credits \
 	tests/integration/test_repositories.py::test_accounts_upsert_with_merge_disabled_uses_identity_lock_on_postgresql \
 	tests/integration/test_db_session_timezone.py \
+	tests/integration/test_db_commit_durability.py \
 	tests/test_request_logs_options_api.py \
 	tests/integration/test_account_usage_rollup.py \
 	tests/integration/test_request_usage_time_rollup.py \

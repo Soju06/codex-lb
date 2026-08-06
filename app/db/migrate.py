@@ -73,6 +73,8 @@ _MANUAL_DRIFT_INDEX_REQUIREMENTS: dict[str, frozenset[str]] = {
             "idx_usage_window_account_latest",
             "idx_usage_window_account_time",
             "idx_usage_window_raw_account_latest",
+            "idx_usage_window_account_time_covering",
+            "idx_usage_window_raw_account_time_covering",
         }
     ),
     "request_logs": frozenset(

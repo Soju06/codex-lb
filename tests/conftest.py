@@ -348,6 +348,14 @@ def _reset_global_state() -> None:
     except Exception:
         pass
     try:
+        # Pending last-used touches would otherwise leak a previous test's key
+        # ids into the next test's flush (harmless guarded UPDATEs, but noisy).
+        from app.modules.api_keys.last_used_coalescer import get_api_key_last_used_coalescer
+
+        get_api_key_last_used_coalescer().clear()
+    except Exception:
+        pass
+    try:
         from app.core.resilience.degradation import set_normal
 
         set_normal()

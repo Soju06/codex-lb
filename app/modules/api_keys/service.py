@@ -24,6 +24,7 @@ from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, ApiKey, ApiKeyLimit, LimitType, LimitWindow, ModelSource, UsageHistory
 from app.db.session import sqlite_writer_section
+from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer, get_api_key_last_used_coalescer
 from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
@@ -98,8 +99,6 @@ class ApiKeysRepositoryProtocol(Protocol):
     ) -> ApiKey | None: ...
 
     async def delete(self, key_id: str) -> bool: ...
-
-    async def update_last_used(self, key_id: str, *, commit: bool = True) -> None: ...
 
     async def commit(self) -> None: ...
 
@@ -448,9 +447,16 @@ class ApiKeyUsageReservationData:
 
 
 class ApiKeysService:
-    def __init__(self, repository: ApiKeysRepositoryProtocol, usage_repository: UsageRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: ApiKeysRepositoryProtocol,
+        usage_repository: UsageRepository | None = None,
+        *,
+        last_used_coalescer: ApiKeyLastUsedCoalescer | None = None,
+    ) -> None:
         self._repository = repository
         self._usage_repository = usage_repository
+        self._last_used_coalescer = last_used_coalescer or get_api_key_last_used_coalescer()
 
     async def create_key(self, payload: ApiKeyCreateData) -> ApiKeyCreatedData:
         _validate_unique_limit_rule_identities(payload.limits)
@@ -1011,11 +1017,14 @@ class ApiKeysService:
                     cached_input_tokens=cached_input_tokens,
                     cost_microdollars=cost_microdollars,
                 )
-                await self._repository.update_last_used(reservation.api_key_id, commit=False)
                 await self._repository.commit()
             except Exception:
                 await self._repository.rollback()
                 raise
+
+            # Write-behind: the periodic flusher persists last_used_at
+            # (coalesced, greatest-wins) instead of this settlement commit.
+            self._last_used_coalescer.record(reservation.api_key_id, utcnow())
 
     async def touch_usage_reservation(self, reservation_id: str) -> bool:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
@@ -1109,6 +1118,7 @@ class ApiKeysService:
             output_tokens=output_tokens,
             cost_microdollars=cost_microdollars,
         )
+        self._last_used_coalescer.record(key_id, utcnow())
 
     async def get_key_trends(self, key_id: str) -> ApiKeyTrendsData | None:
         row = await self._repository.get_by_id(key_id)

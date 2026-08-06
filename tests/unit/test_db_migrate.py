@@ -2072,7 +2072,7 @@ def test_capability_lineage_migration_is_additive_reversible_and_single_head(tmp
 def test_connection_request_kind_migration_is_additive_without_backfill(tmp_path: Path) -> None:
     db_path = tmp_path / "connection-request-kind.db"
     url = _db_url(db_path)
-    parent_revision = "20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads"
+    parent_revision = "20260727_000000_add_sticky_session_continuity_abandoned_at"
     target_revision = "20260804_230000_add_request_log_connection_request_kind"
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)

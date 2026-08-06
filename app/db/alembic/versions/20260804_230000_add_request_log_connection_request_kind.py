@@ -1,7 +1,7 @@
 """add connection-scoped request kind to request logs
 
 Revision ID: 20260804_230000_add_request_log_connection_request_kind
-Revises: 20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads
+Revises: 20260727_000000_add_sticky_session_continuity_abandoned_at
 Create Date: 2026-08-04 23:00:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260804_230000_add_request_log_connection_request_kind"
-down_revision = "20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads"
+down_revision = "20260727_000000_add_sticky_session_continuity_abandoned_at"
 branch_labels = None
 depends_on = None
 

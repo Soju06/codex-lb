@@ -3331,7 +3331,8 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     try:
         return await _build_codex_models_response_body(api_key)
     finally:
-        await _release_reservation(reservation)
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
 
 
 async def _build_codex_models_response_body(
@@ -3447,7 +3448,8 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     try:
         return await _build_models_response_body(api_key)
     finally:
-        await _release_reservation(reservation)
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
 
 
 async def _build_models_response_body(

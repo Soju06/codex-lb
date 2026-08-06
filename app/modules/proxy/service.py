@@ -972,11 +972,7 @@ class ProxyService(
                 websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
                 response_create_limit=settings.proxy_response_create_limit,
                 compact_response_create_limit=settings.proxy_compact_response_create_limit,
-                admission_wait_timeout_seconds=getattr(
-                    settings,
-                    "proxy_admission_wait_timeout_seconds",
-                    10.0,
-                ),
+                admission_wait_timeout_seconds=getattr(settings, "proxy_admission_wait_timeout_seconds", 10.0),
                 scheduler=self._scheduler,
             )
         return self._work_admission

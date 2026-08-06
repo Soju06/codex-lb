@@ -77,3 +77,21 @@ class RealScheduler:
 
 REAL_CLOCK = RealClock()
 REAL_SCHEDULER = RealScheduler()
+
+
+def scheduler_for(owner: object) -> Scheduler:
+    """Return the scheduler collaborator of ``owner``.
+
+    Proxy lifecycle behavior is spread over mixins that are also reached through
+    partial collaborators, so the seam reads the collaborator instead of
+    requiring every holder to carry one. Anything without an explicit scheduler
+    gets the real ``asyncio`` one, which keeps the production default intact.
+    """
+
+    return getattr(owner, "_scheduler", REAL_SCHEDULER)
+
+
+def clock_for(owner: object) -> Clock:
+    """Return the clock collaborator of ``owner``, defaulting to real time."""
+
+    return getattr(owner, "_clock", REAL_CLOCK)

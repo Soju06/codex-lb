@@ -5775,7 +5775,7 @@ class _SilentBeforeHeadersSseSession:
     def __init__(self, clock: dict[str, float], *, silence_seconds: float) -> None:
         self._clock = clock
         self._silence_seconds = silence_seconds
-        self.timeouts: list[aiohttp.ClientTimeout] = []
+        self.timeouts: list[aiohttp.ClientTimeout | None] = []
 
     def post(
         self,
@@ -6766,7 +6766,9 @@ async def test_stream_responses_reports_idle_timeout_when_headers_never_arrive(m
     ]
 
     # The idle budget, not the two-hour request budget, decides the outcome.
-    assert session.timeouts[0].sock_read == 180.0
+    recorded_timeout = session.timeouts[0]
+    assert recorded_timeout is not None
+    assert recorded_timeout.sock_read == 180.0
     event = json.loads(events[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert event["response"]["error"]["message"] == "Upstream stream idle timeout"

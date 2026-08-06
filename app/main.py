@@ -538,7 +538,7 @@ async def lifespan(app: FastAPI):
         if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
             try:
                 recovery_settlements_drained = await proxy_service.drain_persistence_tasks(
-                    timeout_seconds=settings.shutdown_drain_timeout_seconds,
+                    timeout_seconds=shutdown_state.remaining_drain_timeout_seconds() or 0.0,
                     task_name_prefixes=("http-bridge-recovery-settlement-",),
                 )
             except Exception:

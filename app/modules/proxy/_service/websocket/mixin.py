@@ -5862,7 +5862,7 @@ class _WebSocketMixin:
         try:
             await asyncio.shield(finalization_task)
         except asyncio.CancelledError:
-            remaining_timeout = shutdown_state.remaining_drain_timeout_seconds()
+            remaining_timeout = shutdown_state.remaining_post_drain_cleanup_timeout_seconds()
             timeout_seconds = (
                 _facade()._TASK_CANCEL_TIMEOUT_SECONDS
                 if remaining_timeout is None

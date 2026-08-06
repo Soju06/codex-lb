@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260727_000000_add_sticky_session_continuity_abandoned_at"
-down_revision = "20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads"
+down_revision = "20260726_000000_add_account_plan_downgrade_observations"
 branch_labels = None
 depends_on = None
 

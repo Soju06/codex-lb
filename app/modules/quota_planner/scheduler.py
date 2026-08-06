@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
-from app.db.session import get_background_session
 from app.core.utils.time import to_utc_naive
+from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.load_balancer import _build_states
 from app.modules.quota_planner.logic import build_demand_forecast, plan_shadow_actions, simulate_pool

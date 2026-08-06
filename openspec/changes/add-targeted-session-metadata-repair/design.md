@@ -25,7 +25,9 @@ Codex stores a session provider tag both in the first `session_meta` record of i
 
 3. **Preview and apply use one frozen candidate list.** The preview returns session IDs, source provider, affected JSONL segment count, and affected SQLite row count. Apply accepts only those IDs, revalidates their eligibility, and writes no non-candidate session.
 
-4. **The CLI exposes a consumer-neutral workflow.** Preview and repair are separate subcommands with optional JSON results. The repair command requires explicit session IDs and confirmation. External supervisors remain responsible for process quiescence, presentation, and deciding whether to invoke repair.
+4. **Targeted repair reuses the retag progress protocol.** Backup and JSONL rewrite byte progress plus SQLite update and verification item progress use the existing `CODEX_LB_RETAG_PROGRESS` stream. JSON result mode sends progress to stderr so stdout remains one parseable result document.
+
+5. **The CLI exposes a consumer-neutral workflow.** Preview and repair are separate subcommands with optional JSON results. The repair command requires explicit session IDs and confirmation. External supervisors remain responsible for process quiescence, presentation, and deciding whether to invoke repair.
 
 ## Risks / Trade-offs
 

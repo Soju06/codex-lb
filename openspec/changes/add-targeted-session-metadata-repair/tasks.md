@@ -2,6 +2,7 @@
 
 - [x] 1.1 Add typed mismatch preview and session-ID-scoped retag support to the Codex session metadata module.
 - [x] 1.2 Expose read-only preview and confirmed repair subcommands without altering existing whole-home retag behavior.
+- [x] 1.3 Thread structured progress through targeted backup, rewrite, SQLite update, and verification work.
 
 ## 2. Machine-readable CLI workflow
 
@@ -12,3 +13,4 @@
 
 - [x] 3.1 Add focused Python and CLI regression cases for a SQLite-only mismatch and unrelated-session preservation.
 - [x] 3.2 Run targeted tests and strict OpenSpec validation.
+- [x] 3.3 Verify long JSONL repair progress and JSON result stream separation.

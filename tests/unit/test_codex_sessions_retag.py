@@ -123,6 +123,39 @@ def test_targeted_metadata_preview_rejects_unsupported_sqlite_provider_tag(tmp_p
     assert preview.mismatches == ()
 
 
+def test_targeted_metadata_repair_reports_progress_while_rewriting_large_jsonl(tmp_path: Path) -> None:
+    codex_home = tmp_path / ".codex"
+    session_id = "019f7249-90ee-74c0-a0e6-42117e80bc7f"
+    session_file = codex_home / "sessions" / "2026" / "session.jsonl"
+    session_file.parent.mkdir(parents=True)
+    metadata = json.dumps({"type": "session_meta", "payload": {"id": session_id, "model_provider": "openai"}}).encode()
+    session_file.write_bytes(metadata + b"\n" + b"x" * (8 * 1024 * 1024))
+    original_size = session_file.stat().st_size
+    state_db = codex_home / "state_5.sqlite"
+    _create_state_db(state_db, ["codex-lb"])
+    with closing(sqlite3.connect(state_db)) as conn:
+        conn.execute("UPDATE threads SET id = ?", (session_id,))
+        conn.commit()
+    output: list[str] = []
+
+    result = repair_session_metadata_mismatches(
+        codex_home=codex_home,
+        active_provider="codex-lb",
+        session_ids=[session_id],
+        progress_logger=output.append,
+    )
+
+    progress = [
+        json.loads(line.removeprefix(codex_sessions_retag.PROGRESS_PREFIX))
+        for line in output
+        if line.startswith(codex_sessions_retag.PROGRESS_PREFIX)
+    ]
+    rewrite_progress = [event for event in progress if event["phase"] == "jsonl_rewrite"]
+    assert result.jsonl_files_updated == 1
+    assert any(0 < event["completed"] < event["total"] for event in rewrite_progress)
+    assert rewrite_progress[-1]["completed"] == rewrite_progress[-1]["total"] == original_size
+
+
 def test_dry_run_reports_jsonl_and_sqlite_without_writing(tmp_path: Path) -> None:
     codex_home = tmp_path / ".codex"
     session_file = codex_home / "sessions" / "2026" / "session.jsonl"

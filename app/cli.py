@@ -317,11 +317,13 @@ def _run_session_metadata_mismatch_preview(args: argparse.Namespace) -> None:
 
 def _run_session_metadata_repair(args: argparse.Namespace) -> None:
     _confirm_retag_write(args.yes)
+    progress_stream = sys.stderr if args.json else sys.stdout
     try:
         result = repair_session_metadata_mismatches(
             codex_home=args.codex_home or default_codex_home(),
             active_provider=args.provider,
             session_ids=args.session_ids,
+            progress_logger=lambda message: print(message, file=progress_stream, flush=True),
         )
     except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
         raise SystemExit(str(exc)) from exc

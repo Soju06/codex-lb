@@ -148,16 +148,7 @@ def retag_codex_sessions(
             progress_logger(message)
 
     def emit_progress(phase: str, completed: int, total: int, unit: str, message: str) -> None:
-        if progress_logger is None:
-            return
-        payload = {
-            "phase": phase,
-            "completed": max(0, completed),
-            "total": max(0, total),
-            "unit": unit,
-            "message": message,
-        }
-        progress_logger(PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        _emit_structured_progress(progress_logger, phase, completed, total, unit, message)
 
     source_provider = _normalize_provider(source_provider)
     target_provider = _normalize_provider(target_provider)
@@ -371,8 +362,13 @@ def repair_session_metadata_mismatches(
     active_provider: str,
     session_ids: Sequence[str],
     dry_run: bool = False,
+    progress_logger: ProgressLogger | None = None,
 ) -> SessionMetadataRepairResult:
     """Repair only explicitly supplied, currently eligible mismatch session IDs."""
+
+    def emit_progress(phase: str, completed: int, total: int, unit: str, message: str) -> None:
+        _emit_structured_progress(progress_logger, phase, completed, total, unit, message)
+
     normalized_ids = tuple(dict.fromkeys(session_id.strip() for session_id in session_ids if session_id.strip()))
     if not normalized_ids:
         raise ValueError("at least one session ID is required for targeted metadata repair")
@@ -423,31 +419,75 @@ def repair_session_metadata_mismatches(
         preview.codex_home,
         tuple(target.path for target in jsonl_targets),
         tuple(dict.fromkeys(target.db_path for target in sqlite_targets)),
+        progress_callback=lambda completed, total, message: emit_progress(
+            "backup",
+            completed,
+            total,
+            "bytes",
+            message,
+        ),
     )
     try:
+        jsonl_total_bytes = sum(target.size_bytes for target in jsonl_targets)
+        jsonl_completed_bytes = 0
+        if jsonl_targets:
+            emit_progress("jsonl_rewrite", 0, jsonl_total_bytes, "bytes", "Starting targeted JSONL rewrite")
         for target in jsonl_targets:
             assert target.metadata_line_index is not None
+            base_completed = jsonl_completed_bytes
             _retag_jsonl_file(
                 target.path,
                 opposite_provider,
                 preview.active_provider,
                 target.metadata_line_index,
+                progress_callback=lambda completed, _total, message, base=base_completed: emit_progress(
+                    "jsonl_rewrite",
+                    min(base + completed, jsonl_total_bytes),
+                    jsonl_total_bytes,
+                    "bytes",
+                    message,
+                ),
             )
-        sqlite_rows_updated = sum(
-            _update_sqlite_thread_provider(
+            jsonl_completed_bytes += target.size_bytes
+            emit_progress(
+                "jsonl_rewrite",
+                jsonl_completed_bytes,
+                jsonl_total_bytes,
+                "bytes",
+                f"Rewrote {target.path.name}",
+            )
+        sqlite_rows_updated = 0
+        if sqlite_targets:
+            emit_progress("sqlite_update", 0, len(sqlite_targets), "rows", "Starting targeted SQLite update")
+        for target in sqlite_targets:
+            sqlite_rows_updated += _update_sqlite_thread_provider(
                 target.db_path,
                 target.session_id,
                 opposite_provider,
                 preview.active_provider,
             )
-            for target in sqlite_targets
-        )
+            emit_progress(
+                "sqlite_update",
+                sqlite_rows_updated,
+                len(sqlite_targets),
+                "rows",
+                f"Updated {target.db_path.name}",
+            )
+        verification_items = len(jsonl_targets) + len(sqlite_targets)
+        emit_progress("verification", 0, verification_items, "items", "Verifying targeted metadata repair")
         _verify_targeted_metadata_repair(
             preview.codex_home,
             preview.active_provider,
             normalized_ids,
             jsonl_targets,
             sqlite_targets,
+        )
+        emit_progress(
+            "verification",
+            verification_items,
+            verification_items,
+            "items",
+            "Verified targeted metadata repair",
         )
     except Exception:
         _restore_backup(preview.codex_home, backup_path)
@@ -1107,6 +1147,26 @@ def _report_progress(
 ) -> None:
     if progress_callback is not None:
         progress_callback(completed, total, message)
+
+
+def _emit_structured_progress(
+    progress_logger: ProgressLogger | None,
+    phase: str,
+    completed: int,
+    total: int,
+    unit: str,
+    message: str,
+) -> None:
+    if progress_logger is None:
+        return
+    payload = {
+        "phase": phase,
+        "completed": max(0, completed),
+        "total": max(0, total),
+        "unit": unit,
+        "message": message,
+    }
+    progress_logger(PROGRESS_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 def _methods_used(jsonl_files: Sequence[Path], state_dbs: Sequence[Path]) -> tuple[str, ...]:

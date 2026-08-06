@@ -7,6 +7,7 @@ After a provider change and a Codex update, a session can retain conflicting `op
 - Add a CLI preview that reports session metadata tag mismatches for a supplied active provider.
 - Allow an explicitly confirmed, session-ID-scoped repair to retag only the identified mismatched session metadata; do not run a whole-home retag or change the selected provider.
 - Provide machine-readable JSON so an external supervisor can build its own preview-and-confirm flow without duplicating metadata logic.
+- Stream the existing structured backup, rewrite, SQLite update, and verification progress protocol during targeted repair.
 - Preserve the existing backup, quiescence, and targeted verification guarantees for any repaired metadata.
 
 ## Capabilities

@@ -28,6 +28,12 @@ The system SHALL require an explicit confirmation before changing metadata and S
 - **WHEN** the preview finds no eligible mismatched session IDs
 - **THEN** the system SHALL perform no write and SHALL report that no targeted repair is required
 
+#### Scenario: Long targeted repair reports forward progress
+
+- **WHEN** a confirmed repair backs up or rewrites a large targeted JSONL segment
+- **THEN** the CLI SHALL emit structured progress during backup, JSONL rewrite, SQLite update, and verification phases
+- **AND** JSON result mode SHALL keep the final JSON document separate from the progress stream
+
 ### Requirement: CLI offers an independent targeted-repair workflow
 
 The CLI SHALL expose metadata mismatch preview and session-ID-scoped repair independently of provider selection. The preview SHALL support machine-readable JSON, and the repair SHALL require explicit confirmation and explicit previewed session IDs. Neither command SHALL invoke a profile transition, a whole-home retag, or a config rewrite.

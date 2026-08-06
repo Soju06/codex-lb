@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import pickle
+import subprocess
 import time
 from collections import deque
 from contextlib import nullcontext
@@ -77,7 +78,7 @@ def _durable_owner_lookup(*, process_epoch: str, lease_expires_at: datetime) -> 
     )
 
 
-def test_http_bridge_dead_owner_epoch_is_non_retryable_but_current_owner_silence_is_retryable() -> None:
+def test_http_bridge_dead_owner_epoch_uses_standard_previous_response_not_found_contract() -> None:
     now = datetime.now(UTC).replace(tzinfo=None)
     stale = http_bridge_streaming_module._http_bridge_durable_owner_is_dead(
         _durable_owner_lookup(process_epoch="boot-a", lease_expires_at=now + timedelta(minutes=5)),
@@ -93,12 +94,31 @@ def test_http_bridge_dead_owner_epoch_is_non_retryable_but_current_owner_silence
     assert stale is True
     assert transient is False
 
-    terminal = http_bridge_streaming_module._http_bridge_dead_owner_terminal(response_id="resp-dead-owner")
-    assert terminal["response"]["error"]["code"] == "bridge_continuity_recovery_required"
-    assert "fresh turn" in terminal["response"]["error"]["message"]
-    proxy_error = http_bridge_streaming_module._http_bridge_dead_owner_proxy_error()
+    terminal = http_bridge_streaming_module._http_bridge_dead_owner_previous_response_not_found_terminal(
+        previous_response_id="resp-dead-owner",
+        response_id="resp-dead-owner",
+    )
+    assert terminal["response"]["error"]["type"] == "invalid_request_error"
+    assert terminal["response"]["error"]["code"] == "previous_response_not_found"
+    assert terminal["response"]["error"]["param"] == "previous_response_id"
+    proxy_error = http_bridge_streaming_module._http_bridge_dead_owner_previous_response_not_found_proxy_error(
+        previous_response_id="resp-dead-owner",
+    )
     assert proxy_error.status_code == 400
     assert proxy_error.payload["error"]["type"] == "invalid_request_error"
+    assert proxy_error.payload["error"]["code"] == "previous_response_not_found"
+    assert proxy_error.payload["error"]["param"] == "previous_response_id"
+
+
+def test_http_bridge_rejected_dead_owner_recovery_code_is_not_emitted_from_app() -> None:
+    result = subprocess.run(
+        ["git", "grep", "-n", "bridge_continuity_recovery_required", "--", "app/"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, result.stdout
 
 
 @pytest.fixture(autouse=True)
@@ -19783,6 +19803,166 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
     assert "encrypted_content" not in captured_text_data[0]
     assert all("id" not in item for item in replay_payload["input"])
     account_neutral_classifier.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_recovers_dead_owner_with_replayable_full_resend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = _make_app_settings(http_responses_session_bridge_instance_id="bridge-instance")
+    owner_metadata: proxy_service.JsonValue = {"turn_id": "turn-owner"}
+    historical_input: list[proxy_service.JsonValue] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "function_call",
+            "id": "fc_owner",
+            "call_id": "call_old",
+            "name": "lookup",
+            "arguments": "{}",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp_completed_anchor",
+            "input": [
+                *historical_input,
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_old",
+                    "output": "old output",
+                    "internal_chat_message_metadata_passthrough": owner_metadata,
+                },
+                {
+                    "type": "message",
+                    "id": "msg_owner",
+                    "role": "assistant",
+                    "status": "completed",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "old answer"}],
+                    "internal_chat_message_metadata_passthrough": owner_metadata,
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "next question"}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+                },
+            ],
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-dead-owner",
+        canonical_kind="session_header",
+        canonical_key="sid-dead-owner",
+        api_key_scope="__anonymous__",
+        account_id="acc-owner",
+        owner_instance_id="bridge-instance",
+        owner_process_epoch="boot-old",
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="sid-dead-owner",
+        latest_response_id="resp_completed_anchor",
+        latest_input_item_count=len(historical_input),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+        model="gpt-5.4",
+    )
+    captured_request_states: list[proxy_service._WebSocketRequestState] = []
+    captured_text_data: list[str] = []
+    captured_keys: list[proxy_service._HTTPBridgeSessionKey] = []
+    captured_kwargs: list[dict[str, Any]] = []
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        captured_keys.append(key)
+        captured_kwargs.append(kwargs)
+        session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        session.account = cast(Any, SimpleNamespace(id="acc-fallback", status=AccountStatus.ACTIVE))
+        session.request_model = payload.model
+        return session
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        **_kwargs: Any,
+    ):
+        captured_request_states.append(request_state)
+        captured_text_data.append(text_data)
+        yield 'data: {"type":"response.created","response":{"id":"resp_recovered"}}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_recovered"}}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "http_bridge_owner_process_epoch", lambda: "boot-new")
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-dead-owner"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == [
+        'data: {"type":"response.created","response":{"id":"resp_recovered"}}\n\n',
+        'data: {"type":"response.completed","response":{"id":"resp_recovered"}}\n\n',
+    ]
+    assert all("response.failed" not in chunk for chunk in chunks)
+    assert len(captured_keys) == 1
+    assert is_http_bridge_account_neutral_replay(
+        kind=captured_keys[0].affinity_kind,
+        key=captured_keys[0].affinity_key,
+    )
+    assert captured_kwargs[0]["previous_response_id"] is None
+    assert captured_kwargs[0]["durable_lookup"] is None
+    assert captured_request_states[0].previous_response_id is None
+    replay_payload = json.loads(captured_text_data[0])
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"][-1]["content"] == [{"type": "input_text", "text": "next question"}]
 
 
 @pytest.mark.asyncio

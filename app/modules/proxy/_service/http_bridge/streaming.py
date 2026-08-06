@@ -80,6 +80,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_payload_looks_like_full_resend,
     _http_bridge_payload_without_previous_response_id,
+    _http_bridge_previous_response_error_envelope,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
@@ -395,34 +396,47 @@ def _verify_durable_full_resend(
     return _VerifiedDurableFullResend._verify(payload, durable_lookup)
 
 
-_HTTP_BRIDGE_DEAD_OWNER_RECOVERY_CODE = "bridge_continuity_recovery_required"
-_HTTP_BRIDGE_DEAD_OWNER_RECOVERY_MESSAGE = (
-    "The previous bridge owner is no longer available; start a fresh turn to continue."
-)
+_HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL = "The previous bridge owner is no longer available."
 
 
-def _http_bridge_dead_owner_terminal(*, response_id: str) -> dict[str, JsonValue]:
-    """Return the non-retryable terminal for a proven-dead continuity owner."""
+def _http_bridge_dead_owner_previous_response_not_found_terminal(
+    *,
+    previous_response_id: str,
+    response_id: str,
+) -> dict[str, JsonValue]:
+    """Return the standard not-found terminal for an unreplayable dead owner."""
 
+    error = _http_bridge_previous_response_error_envelope(
+        previous_response_id,
+        _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL,
+    )["error"]
     return cast(
         dict[str, JsonValue],
         response_failed_event(
-            _HTTP_BRIDGE_DEAD_OWNER_RECOVERY_CODE,
-            _HTTP_BRIDGE_DEAD_OWNER_RECOVERY_MESSAGE,
+            cast(str, error["code"]),
+            cast(str, error["message"]),
+            error_type=cast(str, error["type"]),
             response_id=response_id,
+            error_param=cast(str, error["param"]),
         ),
     )
 
 
-def _http_bridge_dead_owner_proxy_error() -> ProxyResponseError:
+def _http_bridge_dead_owner_previous_response_not_found_proxy_error(
+    *,
+    previous_response_id: str,
+) -> ProxyResponseError:
     return ProxyResponseError(
         400,
-        openai_error(
-            _HTTP_BRIDGE_DEAD_OWNER_RECOVERY_CODE,
-            _HTTP_BRIDGE_DEAD_OWNER_RECOVERY_MESSAGE,
-            error_type="invalid_request_error",
+        _http_bridge_previous_response_error_envelope(
+            previous_response_id,
+            _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL,
         ),
     )
+
+
+def _http_bridge_dead_owner_previous_response_id(request_state: _WebSocketRequestState) -> str:
+    return request_state.previous_response_id or _websocket_downstream_response_id(request_state)
 
 
 def _http_bridge_durable_owner_is_dead(
@@ -434,12 +448,9 @@ def _http_bridge_durable_owner_is_dead(
     """Classify an anchored durable lookup whose owner cannot be live now."""
 
     previous_process_epoch = lookup.owner_process_epoch
+    owner_instance_is_dead = lookup.owner_instance_id is not None and lookup.owner_instance_id != current_instance
     process_epoch_is_dead = previous_process_epoch is not None and previous_process_epoch != current_process_epoch
-    return (
-        lookup.owner_instance_id != current_instance
-        or process_epoch_is_dead
-        or not lookup.lease_is_active(now=utcnow())
-    )
+    return owner_instance_is_dead or process_epoch_is_dead or not lookup.lease_is_active(now=utcnow())
 
 
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
@@ -1004,6 +1015,7 @@ class _HTTPBridgeStreamingMixin:
     ) -> AsyncIterator[str]:
         del suppress_text_done_events
         dead_owner_anchor = False
+        dead_owner_process_epoch_mismatch = False
         request_id = ensure_request_id()
         dashboard_settings = await _service_get_settings_cache().get()
         runtime_config = _http_bridge_runtime_config(dashboard_settings, _service_get_settings())
@@ -1225,6 +1237,10 @@ class _HTTPBridgeStreamingMixin:
         if durable_lookup is not None and durable_lookup.latest_response_id is not None:
             current_instance = _service_get_settings().http_responses_session_bridge_instance_id
             current_process_epoch = http_bridge_owner_process_epoch()
+            dead_owner_process_epoch_mismatch = (
+                durable_lookup.owner_process_epoch is not None
+                and durable_lookup.owner_process_epoch != current_process_epoch
+            )
             dead_owner_anchor = _http_bridge_durable_owner_is_dead(
                 durable_lookup,
                 current_instance=current_instance,
@@ -1706,14 +1722,13 @@ class _HTTPBridgeStreamingMixin:
         fresh_replay_excluded_account_ids: set[str] = set()
         unanchored_fork_spill_attempted = False
 
-        def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+        def durable_full_resend_allows_account_neutral_replay() -> bool:
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
             nonlocal durable_full_resend_retains_prior_output
 
             if (
-                not _http_bridge_is_previous_response_owner_unavailable(exc)
-                or forwarded_request
+                forwarded_request
                 or rewritten_file_account_id is not None
                 or durable_full_resend_anchor_count is None
                 or durable_full_resend_anchor_fingerprint is None
@@ -1753,11 +1768,18 @@ class _HTTPBridgeStreamingMixin:
                 )
             return durable_full_resend_is_account_neutral
 
+        def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
+            return (
+                _http_bridge_is_previous_response_owner_unavailable(exc)
+                and durable_full_resend_allows_account_neutral_replay()
+            )
+
         def switch_to_account_neutral_replay() -> None:
             nonlocal account_neutral_recovery
             nonlocal affinity
             nonlocal bridge_session_key
             nonlocal dead_owner_anchor
+            nonlocal dead_owner_process_epoch_mismatch
             nonlocal durable_full_resend_anchor_count
             nonlocal durable_full_resend_anchor_fingerprint
             nonlocal durable_full_resend_fresh_payload
@@ -1827,6 +1849,7 @@ class _HTTPBridgeStreamingMixin:
             durable_full_resend_is_account_neutral = None
             durable_lookup = None
             dead_owner_anchor = False
+            dead_owner_process_epoch_mismatch = False
             file_required_preferred_account = False
 
         if durable_recovery_attempt_claimed:
@@ -1835,6 +1858,24 @@ class _HTTPBridgeStreamingMixin:
             request_state.recovery_attempt_session_id = durable_recovery_attempt_session_id
             request_state.recovery_attempt_owner_epoch = durable_recovery_attempt_owner_epoch
             request_state.recovery_attempt_claimed = True
+        elif (
+            dead_owner_anchor
+            and durable_lookup is not None
+            and durable_lookup.state == HttpBridgeSessionState.ACTIVE
+            and dead_owner_process_epoch_mismatch
+            and durable_full_resend_allows_account_neutral_replay()
+        ):
+            _log_http_bridge_event(
+                "dead_owner_fresh_resend",
+                bridge_session_key,
+                account_id=request_state.preferred_account_id,
+                model=payload.model,
+                detail="outcome=projected_plaintext_full_resend_without_anchor",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(payload.model) if payload.model else None,
+                owner_check_applied=True,
+            )
+            switch_to_account_neutral_replay()
 
         if required_continuity_owner_missing:
             owner_unavailable = ProxyResponseError(
@@ -3285,7 +3326,9 @@ class _HTTPBridgeStreamingMixin:
             request_state.api_key_reservation = None
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
-                    raise _http_bridge_dead_owner_proxy_error()
+                    raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
+                        previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
+                    )
                 raise ProxyResponseError(
                     503,
                     openai_error(
@@ -3299,7 +3342,8 @@ class _HTTPBridgeStreamingMixin:
             return format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
-                    _http_bridge_dead_owner_terminal(
+                    _http_bridge_dead_owner_previous_response_not_found_terminal(
+                        previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
                         response_id=_websocket_downstream_response_id(request_state),
                     )
                     if request_state.durable_owner_dead
@@ -3422,7 +3466,8 @@ class _HTTPBridgeStreamingMixin:
             terminal_event = format_sse_event(
                 cast(
                     Mapping[str, JsonValue],
-                    _http_bridge_dead_owner_terminal(
+                    _http_bridge_dead_owner_previous_response_not_found_terminal(
+                        previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
                         response_id=_websocket_downstream_response_id(request_state),
                     )
                     if request_state.durable_owner_dead
@@ -3440,7 +3485,9 @@ class _HTTPBridgeStreamingMixin:
             await self._detach_http_bridge_request(session, request_state=request_state)
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
-                    raise _http_bridge_dead_owner_proxy_error()
+                    raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
+                        previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
+                    )
                 raise ProxyResponseError(
                     503,
                     openai_error(
@@ -3677,7 +3724,10 @@ class _HTTPBridgeStreamingMixin:
                                     yield format_sse_event(
                                         cast(
                                             Mapping[str, JsonValue],
-                                            _http_bridge_dead_owner_terminal(
+                                            _http_bridge_dead_owner_previous_response_not_found_terminal(
+                                                previous_response_id=_http_bridge_dead_owner_previous_response_id(
+                                                    request_state
+                                                ),
                                                 response_id=downstream_response_id,
                                             )
                                             if request_state.durable_owner_dead

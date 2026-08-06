@@ -29,30 +29,55 @@ reuse the same canonical session key.
   previous response no longer returns the closed row
 - **AND** rows already owned by `boot-b` remain attachable
 
-### Requirement: Dead durable anchors fail with fresh-turn guidance
+### Requirement: Dead durable anchors recover transparently when safe
 
-The proxy MUST classify proven-dead durable anchors as non-retryable recovery
-boundaries.
+The proxy MUST classify proven-dead durable anchors as automatic recovery
+candidates before returning any client-visible error.
 
 When a continuity-bound HTTP bridge request would otherwise return a retryable
 `stream_idle_timeout` or cooldown terminal, and the durable lookup that supplied
 the request's previous-response anchor is proven dead because its owner
 instance, process owner epoch, or lease is no longer current, the proxy MUST
-return a non-retryable terminal that instructs the client to start a fresh turn.
-The proxy MUST keep the existing retryable `stream_idle_timeout` semantics when
-the durable owner is current and the failure is ordinary transient upstream
-silence.
+dispatch a fresh turn transparently when the request payload has an existing
+safe replay proof, including account-neutral full-context resends and
+proxy-injected anchor requests whose captured fresh body is replay-safe. The
+client MUST receive the normal upstream stream for that fresh turn and MUST NOT
+receive a bridge-specific recovery error.
 
-#### Scenario: Previous-process anchor is not retryable
+When the request is bound to a client-provided anchor that cannot be safely
+replayed as a fresh turn, the proxy MUST return the same OpenAI-compatible
+`previous_response_not_found` error shape and HTTP status used by the existing
+previous-response-not-found path. The proxy MUST NOT expose a
+`bridge_continuity_recovery_required` code to clients. The proxy MUST keep the
+existing retryable `stream_idle_timeout` semantics when the durable owner is
+current and the failure is ordinary transient upstream silence.
+
+#### Scenario: Previous-process anchor with replayable context recovers automatically
 
 - **GIVEN** a request is bound to a durable previous-response anchor
 - **AND** that durable row belongs to the same instance id but a different
   process owner epoch
+- **AND** the payload has a safe full-context replay proof
 - **WHEN** the bridge hits the pre-submit, startup-cooldown, or retry-circuit
   idle terminal path
-- **THEN** the client receives `bridge_continuity_recovery_required`
-- **AND** HTTP error collection uses a non-retryable 400 response
-- **AND** the response does not include `stream_idle_timeout` retry guidance
+- **THEN** the proxy dispatches the request as a fresh turn without the dead
+  previous-response anchor
+- **AND** the client receives the normal streaming response
+- **AND** the response does not include `stream_idle_timeout` retry guidance or
+  a bridge-specific recovery error
+
+#### Scenario: Unreplayable client anchor uses the standard not-found contract
+
+- **GIVEN** a request is bound to a client-provided durable previous-response
+  anchor
+- **AND** that durable row belongs to a dead owner
+- **AND** the payload does not have a safe fresh-turn replay proof
+- **WHEN** the bridge must fail closed
+- **THEN** the client receives the standard `previous_response_not_found`
+  error shape for `previous_response_id`
+- **AND** HTTP error collection uses the standard previous-response-not-found
+  status
+- **AND** the response does not include a bridge-specific recovery code
 
 #### Scenario: Current-owner silence remains retryable
 

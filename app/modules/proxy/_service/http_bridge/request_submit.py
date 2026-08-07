@@ -322,6 +322,26 @@ def _text_with_operation_id(text_data: str, operation_id: str | None) -> str:
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
+def _text_without_operation_id(text_data: str) -> str:
+    """Remove caller-supplied bridge identity before durable fingerprinting."""
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict):
+        return text_data
+    raw_metadata = payload.get("client_metadata")
+    if not isinstance(raw_metadata, dict) or "codex_lb_operation_id" not in raw_metadata:
+        return text_data
+    metadata = dict(raw_metadata)
+    metadata.pop("codex_lb_operation_id", None)
+    if metadata:
+        payload["client_metadata"] = metadata
+    else:
+        payload.pop("client_metadata", None)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
 def _text_with_previous_response_id(text_data: str, response_id: str | None) -> str:
     if not response_id:
         return text_data
@@ -826,6 +846,7 @@ class _HTTPBridgeRequestSubmitMixin:
             and session.durable_session_id is not None
             and session.durable_owner_epoch is not None
         ):
+            text_data = _text_without_operation_id(text_data)
             api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
             operation_fingerprint = durable_bridge_operation_fingerprint(
                 api_key_scope=api_key_scope,

@@ -59,9 +59,7 @@ async def coordinator(async_session_factory: Callable[[], AsyncSession]) -> Dura
 
 
 def test_durable_bridge_live_claim_requires_process_epoch() -> None:
-    parameter = inspect.signature(DurableBridgeSessionCoordinator.claim_live_session).parameters[
-        "owner_process_epoch"
-    ]
+    parameter = inspect.signature(DurableBridgeSessionCoordinator.claim_live_session).parameters["owner_process_epoch"]
 
     assert parameter.default is inspect.Parameter.empty
 

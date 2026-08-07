@@ -94,9 +94,12 @@ def test_http_bridge_dead_owner_epoch_uses_standard_previous_response_not_found_
     assert stale is True
     assert transient is False
 
-    terminal = http_bridge_streaming_module._http_bridge_dead_owner_previous_response_not_found_terminal(
-        previous_response_id="resp-dead-owner",
-        response_id="resp-dead-owner",
+    terminal = cast(
+        dict[str, Any],
+        http_bridge_streaming_module._http_bridge_dead_owner_previous_response_not_found_terminal(
+            previous_response_id="resp-dead-owner",
+            response_id="resp-dead-owner",
+        ),
     )
     assert terminal["response"]["error"]["type"] == "invalid_request_error"
     assert terminal["response"]["error"]["code"] == "previous_response_not_found"

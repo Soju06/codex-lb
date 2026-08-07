@@ -1907,6 +1907,16 @@ class _HTTPBridgeStreamingMixin:
             nonlocal text_data
             nonlocal untrimmed_effective_payload
 
+            preserve_operation_identity = durable_recovery_attempt_claimed
+            prior_operation_id = request_state.operation_id if preserve_operation_identity else None
+            prior_operation_fingerprint = request_state.operation_fingerprint if preserve_operation_identity else None
+            prior_operation_parent_response_id = (
+                request_state.operation_parent_response_id
+                or request_state.previous_response_id
+                if preserve_operation_identity
+                else None
+            )
+            prior_operation_registered = request_state.operation_registered if preserve_operation_identity else False
             failed_owner_id = request_state.preferred_account_id
             _log_http_bridge_event(
                 "owner_unavailable_fresh_resend",
@@ -1931,6 +1941,12 @@ class _HTTPBridgeStreamingMixin:
             if fresh_payload is None:
                 raise RuntimeError("account-neutral replay projection missing after eligibility check")
             request_state, text_data = prepare_bridge_request(fresh_payload)
+            if preserve_operation_identity:
+                request_state.operation_id = prior_operation_id
+                request_state.operation_fingerprint = prior_operation_fingerprint
+                request_state.operation_parent_response_id = prior_operation_parent_response_id
+                request_state.operation_registered = prior_operation_registered
+                request_state.operation_rebind_required = True
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
@@ -2822,6 +2838,18 @@ class _HTTPBridgeStreamingMixin:
                 yield event_block
                 yielded_any = True
         except ProxyResponseError as exc:
+            if (
+                request_state.operation_registered
+                and request_state.operation_id is not None
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+            ):
+                # The API-level recovery loop must only run when this request
+                # has an actual durable operation fence. Settings alone are
+                # insufficient during a rolling migration where the durable
+                # tables may be unavailable and the bridge falls back to an
+                # in-memory session.
+                setattr(exc, "http_bridge_durable_recovery_eligible", True)
             if yielded_any:
                 yield _partial_output_proxy_error_event_block(
                     exc,

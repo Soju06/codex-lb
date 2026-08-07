@@ -495,6 +495,7 @@ class DurableBridgeSessionCoordinator:
         account_id: str | None,
         model: str | None,
         parent_response_id: str | None,
+        api_key_scope: str | None = None,
         request_text: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
@@ -504,6 +505,7 @@ class DurableBridgeSessionCoordinator:
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 request_fingerprint=request_fingerprint,
+                api_key_scope=api_key_scope,
                 account_id=account_id,
                 model=model,
                 parent_response_id=parent_response_id,
@@ -611,10 +613,12 @@ class DurableBridgeSessionCoordinator:
         self,
         *,
         request_fingerprint: str,
+        api_key_scope: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_operation_by_fingerprint(
                 request_fingerprint=request_fingerprint,
+                api_key_scope=api_key_scope,
             )
 
     async def get_latest_completed_operation(
@@ -622,21 +626,27 @@ class DurableBridgeSessionCoordinator:
         *,
         session_id: str,
         parent_response_id: str,
+        request_fingerprint: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_latest_completed_operation(
                 session_id=session_id,
                 parent_response_id=parent_response_id,
+                request_fingerprint=request_fingerprint,
             )
 
     async def get_latest_completed_operation_any_session(
         self,
         *,
         parent_response_id: str,
+        api_key_scope: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_latest_completed_operation_any_session(
                 parent_response_id=parent_response_id,
+                api_key_scope=api_key_scope,
+                request_fingerprint=request_fingerprint,
             )
 
     async def mark_instance_draining(self, *, instance_id: str) -> int:

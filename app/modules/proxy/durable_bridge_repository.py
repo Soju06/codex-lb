@@ -82,6 +82,11 @@ def durable_bridge_hash(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
 
 
+def durable_bridge_operation_fingerprint(*, api_key_scope: str, request_text: str) -> str:
+    """Hash the logical turn together with its authorization namespace."""
+    return durable_bridge_hash(f"{api_key_scope}:{request_text}")
+
+
 def durable_bridge_operation_id(session_id: str, request_fingerprint: str) -> str:
     """Derive a stable, non-secret operation key for a continuity-bound turn."""
     return f"op_{durable_bridge_hash(f'{session_id}:{request_fingerprint}')[:64]}"
@@ -1044,6 +1049,7 @@ class DurableBridgeRepository:
         account_id: str | None,
         model: str | None,
         parent_response_id: str | None,
+        api_key_scope: str | None = None,
         request_text: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         """Create a fenced operation identity, or return the existing one."""
@@ -1066,11 +1072,15 @@ class DurableBridgeRepository:
                 .with_for_update()
             )
             if operation is None:
-                operation = await self._session.scalar(
-                    select(HttpBridgeOperationRecord)
-                    .where(HttpBridgeOperationRecord.request_fingerprint == request_fingerprint)
-                    .with_for_update()
+                fingerprint_statement = select(HttpBridgeOperationRecord).where(
+                    HttpBridgeOperationRecord.request_fingerprint == request_fingerprint
                 )
+                if api_key_scope is not None:
+                    fingerprint_statement = fingerprint_statement.join(
+                        HttpBridgeSessionRecord,
+                        HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                    ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+                operation = await self._session.scalar(fingerprint_statement.with_for_update())
             if operation is not None:
                 rebound = False
                 if operation.state == "failed":
@@ -1086,6 +1096,17 @@ class DurableBridgeRepository:
                         operation.request_text = request_text
                     operation.state = "submitted"
                     operation.response_id = None
+                    # A failed attempt is a new replay attempt.  Remove the
+                    # previous attempt's SSE spool atomically so a later
+                    # successful retry cannot replay a stale response.failed
+                    # event before its fresh response.created sequence.
+                    await self._session.execute(
+                        delete(HttpBridgeOperationEvent).where(
+                            HttpBridgeOperationEvent.operation_id == operation.operation_id
+                        )
+                    )
+                    operation.event_bytes = 0
+                    operation.event_spool_complete = False
                     operation.updated_at = utcnow()
                     rebound = True
                 if request_text is not None and operation.request_text is None:
@@ -1118,11 +1139,15 @@ class DurableBridgeRepository:
                     # fingerprint fence makes that race resolve to the
                     # already-recorded operation instead of dispatching a
                     # duplicate.
-                    operation = await self._session.scalar(
-                        select(HttpBridgeOperationRecord).where(
-                            HttpBridgeOperationRecord.request_fingerprint == request_fingerprint
-                        )
+                    fingerprint_statement = select(HttpBridgeOperationRecord).where(
+                        HttpBridgeOperationRecord.request_fingerprint == request_fingerprint
                     )
+                    if api_key_scope is not None:
+                        fingerprint_statement = fingerprint_statement.join(
+                            HttpBridgeSessionRecord,
+                            HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                        ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+                    operation = await self._session.scalar(fingerprint_statement)
                 if operation is None:
                     raise
                 return _to_operation_snapshot(operation)
@@ -1139,12 +1164,17 @@ class DurableBridgeRepository:
         self,
         *,
         request_fingerprint: str,
+        api_key_scope: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
-        operation = await self._session.scalar(
-            select(HttpBridgeOperationRecord).where(
-                HttpBridgeOperationRecord.request_fingerprint == request_fingerprint
-            )
+        statement = select(HttpBridgeOperationRecord).where(
+            HttpBridgeOperationRecord.request_fingerprint == request_fingerprint
         )
+        if api_key_scope is not None:
+            statement = statement.join(
+                HttpBridgeSessionRecord,
+                HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+            ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+        operation = await self._session.scalar(statement)
         return _to_operation_snapshot(operation) if operation is not None else None
 
     async def get_operation_events(self, *, operation_id: str) -> list[str]:
@@ -1410,15 +1440,18 @@ class DurableBridgeRepository:
         *,
         session_id: str,
         parent_response_id: str,
+        request_fingerprint: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
-        operation = await self._session.scalar(
-            select(HttpBridgeOperationRecord)
-            .where(
+        predicates = [
                 HttpBridgeOperationRecord.session_id == session_id,
                 HttpBridgeOperationRecord.parent_response_id == parent_response_id,
                 HttpBridgeOperationRecord.state == "completed",
                 HttpBridgeOperationRecord.response_id.is_not(None),
-            )
+        ]
+        if request_fingerprint is not None:
+            predicates.append(HttpBridgeOperationRecord.request_fingerprint == request_fingerprint)
+        operation = await self._session.scalar(
+            select(HttpBridgeOperationRecord).where(*predicates)
             .order_by(HttpBridgeOperationRecord.updated_at.desc())
             .limit(1)
         )
@@ -1428,13 +1461,26 @@ class DurableBridgeRepository:
         self,
         *,
         parent_response_id: str,
+        api_key_scope: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
+        statement = select(HttpBridgeOperationRecord)
+        if api_key_scope is not None:
+            statement = statement.join(
+                HttpBridgeSessionRecord,
+                HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+            ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
         operation = await self._session.scalar(
-            select(HttpBridgeOperationRecord)
+            statement
             .where(
                 HttpBridgeOperationRecord.parent_response_id == parent_response_id,
                 HttpBridgeOperationRecord.state == "completed",
                 HttpBridgeOperationRecord.response_id.is_not(None),
+                *(
+                    [HttpBridgeOperationRecord.request_fingerprint == request_fingerprint]
+                    if request_fingerprint is not None
+                    else []
+                ),
             )
             .order_by(HttpBridgeOperationRecord.updated_at.desc())
             .limit(1)
@@ -1588,14 +1634,32 @@ class DurableBridgeRepository:
             session_ids = [candidate.id for candidate in candidates]
             if not session_ids:
                 return deleted_count
+            # Operation rows are the durable recovery ledger.  Never cascade
+            # delete a session that still owns an in-flight or ambiguous
+            # operation; detach it so the next instance can inspect and take
+            # over the ledger instead of losing the only recovery proof.
+            operation_session_ids = set(
+                await self._session.scalars(
+                    select(HttpBridgeOperationRecord.session_id).where(
+                        HttpBridgeOperationRecord.session_id.in_(session_ids),
+                        HttpBridgeOperationRecord.state.in_(("submitted", "unknown", "acknowledged")),
+                    )
+                )
+            )
             retained_recovery_ids = {
                 candidate.id
                 for candidate in candidates
-                if candidate.owner_instance_id == instance_id
-                and (ownerless_cutoff is None or to_utc_naive(candidate.last_seen_at) >= to_utc_naive(ownerless_cutoff))
-                and is_http_bridge_account_neutral_replay(
-                    kind=candidate.session_key_kind,
-                    key=candidate.session_key_value,
+                if candidate.id in operation_session_ids
+                or (
+                    candidate.owner_instance_id == instance_id
+                    and (
+                        ownerless_cutoff is None
+                        or to_utc_naive(candidate.last_seen_at) >= to_utc_naive(ownerless_cutoff)
+                    )
+                    and is_http_bridge_account_neutral_replay(
+                        kind=candidate.session_key_kind,
+                        key=candidate.session_key_value,
+                    )
                 )
             }
             async with sqlite_writer_section():

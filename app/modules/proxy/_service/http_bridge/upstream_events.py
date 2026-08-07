@@ -2342,6 +2342,21 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if retried:
                         return
 
+            capacity_retry_code = _http_bridge_terminal_capacity_retry_error_code(
+                terminal_request_state,
+                event_type=settlement_event_type,
+                payload=settlement_payload,
+                has_other_pending_requests=has_other_pending_requests,
+            )
+            if capacity_retry_code is not None:
+                retried = await self._retry_http_bridge_terminal_capacity_request(
+                    session,
+                    terminal_request_state,
+                    error_code=capacity_retry_code,
+                )
+                if retried:
+                    return
+
         matched_event_queue = (
             completed_event_queue
             if completed_event_queue_claimed and matched_request_state is terminal_request_state

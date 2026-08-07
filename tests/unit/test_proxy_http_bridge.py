@@ -91,6 +91,53 @@ def _without_installation_metadata(text: str) -> dict[str, Any]:
     return payload
 
 
+def test_http_bridge_operation_metadata_is_stable_and_non_destructive() -> None:
+    payload = {"type": "response.create", "previous_response_id": "resp_parent", "input": "continue"}
+    text = json.dumps(payload)
+    with_operation = http_bridge_request_submit_module._text_with_operation_id(text, "op_test")
+    decoded = json.loads(with_operation)
+    assert decoded["previous_response_id"] == "resp_parent"
+    assert decoded["client_metadata"] == {"codex_lb_operation_id": "op_test"}
+    assert http_bridge_request_submit_module._text_with_operation_id(with_operation, "op_test") == with_operation
+
+
+def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-recovery",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp-parent",
+        response_event_count=0,
+        response_id=None,
+        fresh_upstream_request_is_retry_safe=False,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_ambiguous_continuation_recovery_mode="fail_closed"),
+    )
+    assert http_bridge_streaming_module._http_bridge_client_full_history_recovery_enabled(request_state) is False
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="client_full_history_once"
+        ),
+    )
+    assert http_bridge_streaming_module._http_bridge_client_full_history_recovery_enabled(request_state) is True
+    request_state.propagate_http_errors = True
+    assert http_bridge_request_submit_module._http_bridge_client_full_history_recovery_enabled(request_state) is True
+    request_state.response_event_count = 1
+    assert http_bridge_streaming_module._http_bridge_client_full_history_recovery_enabled(request_state) is False
+    assert http_bridge_request_submit_module._http_bridge_client_full_history_recovery_enabled(request_state) is False
+
+
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
 
@@ -24033,3 +24080,23 @@ async def test_http_bridge_has_live_local_session_treats_quarantined_as_absent()
         )
         is True
     )
+@pytest.mark.asyncio
+async def test_http_bridge_eventless_timeout_signal_drains_after_repeated_sessions() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    account = SimpleNamespace(id="acc-eventless-timeouts")
+    session = SimpleNamespace(account=account)
+    record_errors = AsyncMock()
+    service._load_balancer.record_errors = record_errors
+
+    for _ in range(2):
+        await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
+    record_errors.assert_not_awaited()
+
+    await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
+    record_errors.assert_awaited_once_with(account, 2)
+
+    # The evidence window resets after one penalty; another isolated failure
+    # must not immediately apply a second account health penalty.
+    await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
+    await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
+    record_errors.assert_awaited_once_with(account, 2)

@@ -5024,30 +5024,31 @@ async def _stream_responses(
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = _CapacityStartupReadyEvent()
     payload.stream = True
-    if prefer_http_bridge:
-        stream = context.service.stream_http_responses(
-            payload,
-            effective_headers,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=True,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            downstream_turn_state=downstream_turn_state,
-            forwarded_request=forwarded_request,
-            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-            forwarded_legacy_signature=forwarded_legacy_signature,
-            forwarded_affinity_kind=forwarded_affinity_kind,
-            forwarded_affinity_key=forwarded_affinity_key,
-            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
-            client_ip=client_ip,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-            capacity_startup_wait_event=capacity_wait_event,
-            capacity_startup_ready_event=capacity_ready_event,
-        )
-    else:
-        stream = context.service.stream_responses(
+
+    def build_response_stream() -> AsyncIterator[str]:
+        if prefer_http_bridge:
+            return context.service.stream_http_responses(
+                payload,
+                effective_headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=True,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                downstream_turn_state=downstream_turn_state,
+                forwarded_request=forwarded_request,
+                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+                forwarded_legacy_signature=forwarded_legacy_signature,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                capacity_startup_wait_event=capacity_wait_event,
+                capacity_startup_ready_event=capacity_ready_event,
+            )
+        return context.service.stream_responses(
             payload,
             request.headers,
             codex_session_affinity=codex_session_affinity,
@@ -5059,6 +5060,8 @@ async def _stream_responses(
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
+
+    stream = build_response_stream()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
@@ -5087,6 +5090,7 @@ async def _stream_responses(
             stream,
             owns_reservation=owns_reservation,
             reservation=reservation,
+            recovery_stream_factory=build_response_stream if prefer_http_bridge else None,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
@@ -6173,11 +6177,48 @@ async def _stream_response_error_events(
     *,
     owns_reservation: bool,
     reservation: ApiKeyUsageReservationData | None,
+    recovery_stream_factory: Callable[[], AsyncIterator[str]] | None = None,
 ) -> AsyncIterator[str]:
     try:
         async for line in stream:
             yield line
     except ProxyResponseError as exc:
+        error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
+        indefinite_recovery = (
+            get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
+            == "server_indefinite_recovery"
+        )
+        if (
+            recovery_stream_factory is not None
+            and indefinite_recovery
+            and error_code
+            in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+        ):
+            # Keep the client stream alive while the server owns recovery.
+            # The operation remains serialized by the durable operation
+            # fingerprint; each new upstream attempt is still at-least-once.
+            retry_delay = max(1.0, min(30.0, float(exc.retry_after_seconds or 5.0)))
+            while True:
+                yield ": codex-lb recovery in progress\n\n"
+                await asyncio.sleep(retry_delay)
+                try:
+                    retry_stream = recovery_stream_factory()
+                    async for line in retry_stream:
+                        yield line
+                    return
+                except ProxyResponseError as retry_exc:
+                    retry_code = (
+                        retry_exc.payload.get("error", {}).get("code") if isinstance(retry_exc.payload, dict) else None
+                    )
+                    if retry_code not in {
+                        "stream_incomplete",
+                        "stream_idle_timeout",
+                        "upstream_request_timeout",
+                        "upstream_unavailable",
+                    }:
+                        exc = retry_exc
+                        break
+                    retry_delay = max(1.0, min(30.0, float(retry_exc.retry_after_seconds or retry_delay)))
         if owns_reservation:
             try:
                 await _release_reservation(reservation)
@@ -7843,6 +7884,14 @@ def _mask_previous_response_not_found_error(
 ) -> tuple[int, OpenAIErrorEnvelopeModel]:
     if not _is_previous_response_not_found_public_error(envelope.error):
         return default_status if default_status is not None else _status_for_error(envelope.error), envelope
+    # In recovery-first mode, preserve the upstream-shaped 400 so Codex can
+    # drop the ambiguous previous_response_id anchor and resend full local
+    # history. This is intentionally opt-in because the resend is at-least-once
+    # and may duplicate an upstream response that was accepted but not observed.
+    if get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode == (
+        "client_full_history_once"
+    ):
+        return default_status if default_status is not None else 400, envelope
     return (
         502,
         OpenAIErrorEnvelopeModel(

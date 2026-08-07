@@ -731,6 +731,7 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
     _upstream_error_from_openai,
 )
+from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
 )
@@ -936,9 +937,24 @@ class ProxyService(
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
+        self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher(
+            self._durable_bridge,
+            max_bytes=get_settings().http_responses_session_bridge_operation_event_spool_max_bytes,
+            batch_size=get_settings().http_responses_session_bridge_operation_event_spool_batch_size,
+            flush_interval_seconds=get_settings().http_responses_session_bridge_operation_event_spool_flush_interval_seconds,
+            max_pending_events=get_settings().http_responses_session_bridge_operation_event_spool_max_pending_events,
+            max_pending_bytes=get_settings().http_responses_session_bridge_operation_event_spool_max_pending_bytes,
+        )
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
         _initialize_http_bridge_retry_circuit(self)
+        # Eventless upstream timeouts are ambiguous for an individual
+        # response (the request may have been accepted), so they must not
+        # trigger per-request replay. The HTTP bridge keeps a separate,
+        # short-lived account signal so repeated failures across independent
+        # bridge sessions can still drain a bad account for fresh work.
+        self._http_bridge_account_timeout_failures: dict[str, list[float]] = {}
+        self._http_bridge_account_timeout_lock = asyncio.Lock()
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}

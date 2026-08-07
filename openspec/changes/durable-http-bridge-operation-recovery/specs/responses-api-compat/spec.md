@@ -81,12 +81,22 @@ operations, and MUST let normal spool retention remove the operation rows.
 ### Requirement: Continuous transcript retention
 
 Operation transcript cleanup MUST run periodically in a leader-gated scheduler
-and MUST drain all eligible batches during each pass.
+and MUST drain all eligible batches during each pass. Disabling the existing
+sticky-session mapping cleanup switch MUST NOT disable operation transcript
+retention; that switch MAY skip sticky mapping maintenance while durable
+operation retention continues.
 
 #### Scenario: Retention drains all eligible batches
 
 - **WHEN** more rows are eligible than one deletion batch
 - **THEN** one scheduler pass removes every eligible batch
+
+#### Scenario: Sticky cleanup toggle does not disable transcript retention
+
+- **WHEN** sticky-session cleanup is disabled and the durable bridge schema is
+  available
+- **THEN** the leader-gated scheduler still drains expired operation transcript
+  rows while skipping sticky mapping cleanup
 
 ### Requirement: Fresh indefinite-recovery spool
 

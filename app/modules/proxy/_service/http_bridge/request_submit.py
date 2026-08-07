@@ -14,8 +14,9 @@ import anyio
 
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
-from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401
+    CODEX_INSTALLATION_ID_HEADER,
+    CODEX_TURN_METADATA_HEADER,
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -35,6 +36,7 @@ from app.core.clients.proxy import (  # noqa: F401
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
+from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
@@ -359,6 +361,37 @@ def _text_without_operation_id(text_data: str) -> str:
         return text_data
     metadata = dict(raw_metadata)
     metadata.pop("codex_lb_operation_id", None)
+    if metadata:
+        payload["client_metadata"] = metadata
+    else:
+        payload.pop("client_metadata", None)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _text_without_account_installation_id(text_data: str) -> str:
+    """Normalize account-specific installation metadata out of a fingerprint."""
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict):
+        return text_data
+    raw_metadata = payload.get("client_metadata")
+    if not isinstance(raw_metadata, dict):
+        return text_data
+    metadata: dict[str, JsonValue] = {}
+    for key, value in raw_metadata.items():
+        if not isinstance(key, str) or key.lower() == CODEX_INSTALLATION_ID_HEADER:
+            continue
+        if key.lower() == CODEX_TURN_METADATA_HEADER and isinstance(value, str):
+            try:
+                turn_metadata = json.loads(value)
+            except json.JSONDecodeError:
+                turn_metadata = None
+            if isinstance(turn_metadata, dict) and "installation_id" in turn_metadata:
+                turn_metadata.pop("installation_id", None)
+                value = json.dumps(turn_metadata, ensure_ascii=True, separators=(",", ":"))
+        metadata[key] = value
     if metadata:
         payload["client_metadata"] = metadata
     else:
@@ -871,13 +904,14 @@ class _HTTPBridgeRequestSubmitMixin:
             and session.durable_owner_epoch is not None
         ):
             text_data = _text_without_operation_id(text_data)
+            fingerprint_text_data = _text_without_account_installation_id(text_data)
             api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
             operation_fingerprint = (
                 request_state.operation_fingerprint
                 if request_state.operation_rebind_required and request_state.operation_fingerprint is not None
                 else durable_bridge_operation_fingerprint(
                     api_key_scope=api_key_scope,
-                    request_text=text_data,
+                    request_text=fingerprint_text_data,
                 )
             )
             operation_id = (
@@ -942,7 +976,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.hard_continuity_anchor = True
                             operation_fingerprint = durable_bridge_operation_fingerprint(
                                 api_key_scope=api_key_scope,
-                                request_text=text_data,
+                                request_text=_text_without_account_installation_id(text_data),
                             )
                             operation_id = durable_bridge_operation_id(
                                 session.durable_session_id,

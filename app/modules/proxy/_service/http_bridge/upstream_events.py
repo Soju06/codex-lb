@@ -931,14 +931,15 @@ class _HTTPBridgeUpstreamEventsMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
-        operation_states: list[Any] = []
+        # Draining-only requests no longer count against the queue, but their
+        # event-batcher contexts still belong to the disconnected operation
+        # and must be discarded just like ordinary pending requests.
+        operation_states: list[Any] = [
+            request_state
+            for request_state in pending_request_states
+            if getattr(request_state, "operation_id", None)
+        ]
         if failed_pending_count > 0:
-            async with session.pending_lock:
-                operation_states = [
-                    request_state
-                    for request_state in session.pending_requests
-                    if getattr(request_state, "operation_id", None)
-                ]
             for request_state in operation_states:
                 # A shared websocket can carry several logical response.create
                 # requests. Classify each operation from its own event count;

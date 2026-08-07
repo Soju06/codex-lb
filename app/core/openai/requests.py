@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call_item
@@ -604,6 +604,7 @@ class ResponsesTextControls(BaseModel):
 
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -734,6 +735,7 @@ class ResponsesRequest(BaseModel):
 
 class ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod

@@ -1,12 +1,12 @@
 ## 1. Contract and persistence
 
-- [x] 1.1 Add nullable `allowed_reasoning_efforts` persistence and a reversible migration from the current Alembic head.
+- [x] 1.1 Add nullable `allowed_reasoning_efforts` persistence, a policy schema-version guard, and a reversible migration from the current Alembic head.
 - [x] 1.2 Extend API-key request/response schemas, service data, repository updates, and cache-facing mapping with normalized list semantics.
 - [x] 1.3 Validate non-empty supported values and mutual exclusion with `enforced_reasoning_effort` on create and effective PATCH state.
 
 ## 2. Proxy policy
 
-- [x] 2.1 Add a typed OpenAI-compatible permission error and enforce the allowlist in the shared Responses policy after model-alias normalization.
+- [x] 2.1 Add a typed OpenAI-compatible permission error and enforce the allowlist in the shared Responses policy before wire normalization, including accepted aliases.
 - [x] 2.2 Prove the shared policy covers Responses, compact, WebSocket, Chat Completions, aliases, and source-routed chat without reservation or upstream dispatch for rejected requests.
 
 ## 3. Dashboard

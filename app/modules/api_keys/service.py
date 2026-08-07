@@ -493,6 +493,7 @@ class ApiKeysService:
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             allowed_reasoning_efforts=_serialize_allowed_reasoning_efforts(allowed_reasoning_efforts),
+            api_key_policy_schema_version=1,
             enforced_service_tier=enforced_service_tier,
             account_assignment_scope_enabled=bool(assigned_account_ids),
             source_assignment_scope_enabled=bool(assigned_source_ids),

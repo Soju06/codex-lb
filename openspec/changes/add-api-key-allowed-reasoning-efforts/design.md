@@ -98,6 +98,18 @@ When a client supplies conflicting spellings, the outbound values are aligned
 to the already-authorized converted Responses effort so a source cannot select
 a disallowed value from an ignored alias.
 
+The origin route records that policy has already been applied when it forwards
+the signed request to an owner instance. The owner still authenticates the
+internal request and validates model access, but does not re-authorize or
+re-normalize the reasoning effort. This keeps the policy idempotent across the
+HTTP bridge and prevents a client-plane alias such as `xhigh` from being
+mistaken for its wire value `high` on the second pass.
+
+The request model keeps the original client-plane effort in a private field
+while enforcement mutates the payload. This is intentionally not serialized:
+the signed bridge request is trusted only after the origin has completed policy
+enforcement, and the owner receives an explicit internal call-site marker.
+
 ## Risks / Trade-offs
 
 - **Client omits an effort and an upstream default changes**: the request
@@ -119,11 +131,14 @@ a disallowed value from an ignored alias.
 
 ## Migration Plan
 
-The migration adds a nullable column only. Existing rows receive `NULL` and
-retain current unrestricted behavior. Rolling back drops the column; no other
-stored data is changed. Operators can deploy mixed versions safely because an
-older process ignores the new column and a newer process treats its absence in
-old rows as unrestricted until the migration completes.
+The migration adds the nullable allowlist column plus a non-null policy schema
+version. Existing rows are backfilled with version `1` and retain current
+unrestricted behavior because their allowlist remains `NULL`. The database
+also rejects rows that combine a fixed effort with an allowlist. During a
+rolling upgrade, an older writer cannot silently create a new API key without
+the new policy version, and cannot add a fixed effort to an allowlisted row;
+both operations fail closed until that writer is upgraded. Rolling back drops
+the new columns and constraint without changing other stored data.
 
 ## Open Questions
 

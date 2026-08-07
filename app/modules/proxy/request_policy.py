@@ -12,6 +12,7 @@ from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesReasoning,
     ResponsesRequest,
+    normalize_reasoning_aliases,
     responses_input_uses_lite_tools,
 )
 from app.core.openai.strict_schema import (
@@ -154,18 +155,43 @@ def _client_reasoning_effort(payload: ResponsesRequest | ResponsesCompactRequest
     operator-facing client-plane control, so they must compare against the
     original selection rather than that wire representation.
     """
-    alias = _resolve_model_alias_parts(payload.model)
+    model_effort = _client_reasoning_effort_from_model(payload.model)
+    if model_effort is not None:
+        return model_effort
+
+    reasoning = payload.reasoning.model_dump(mode="json", exclude_none=True) if payload.reasoning is not None else None
+    if is_json_mapping(reasoning):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.strip():
+            return effort.strip().lower()
+    extra = payload.model_extra
+    if isinstance(extra, dict):
+        alias_payload = dict(extra)
+        if reasoning is not None:
+            alias_payload["reasoning"] = reasoning
+        if "reasoning_effort" in alias_payload and "reasoningEffort" not in alias_payload:
+            alias_payload["reasoningEffort"] = alias_payload["reasoning_effort"]
+        normalize_reasoning_aliases(alias_payload)
+        normalized_reasoning = alias_payload.get("reasoning")
+        if is_json_mapping(normalized_reasoning):
+            extra_effort = normalized_reasoning.get("effort")
+            if isinstance(extra_effort, str) and extra_effort.strip():
+                return extra_effort.strip().lower()
+
+    return None
+
+
+def _client_reasoning_effort_from_model(model: str | None) -> str | None:
+    alias = _resolve_model_alias_parts(model)
     if alias is not None:
-        normalized_model = payload.model.strip().lower() if isinstance(payload.model, str) else ""
+        normalized_model = model.strip().lower() if isinstance(model, str) else ""
         suffix = normalized_model[len(alias[0]) + 1 :]
         tokens = {token for token in suffix.split("-") if token}
         if "xhigh" in tokens or "extra" in tokens:
             return "xhigh"
         if alias[1] is not None:
             return alias[1]
-    if payload.reasoning is None or payload.reasoning.effort is None:
-        return None
-    return payload.reasoning.effort.strip().lower()
+    return None
 
 
 def apply_api_key_enforcement(
@@ -182,7 +208,8 @@ def apply_api_key_enforcement(
     equal the enforced value (including after ``fast`` canonicalizes to
     ``priority``).
     """
-    client_reasoning_effort = _client_reasoning_effort(payload)
+    client_reasoning_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
+    payload._codex_lb_client_reasoning_effort = client_reasoning_effort
     normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
 
     if api_key is None:
@@ -190,6 +217,7 @@ def apply_api_key_enforcement(
         return False
 
     if api_key.enforced_model:
+        enforced_model_reasoning_effort = _client_reasoning_effort_from_model(api_key.enforced_model)
         requested_model = payload.model
         if requested_model != api_key.enforced_model:
             logger.info(
@@ -200,7 +228,9 @@ def apply_api_key_enforcement(
                 api_key.enforced_model,
             )
         payload.model = api_key.enforced_model
-        client_reasoning_effort = _client_reasoning_effort(payload)
+        if enforced_model_reasoning_effort is not None:
+            client_reasoning_effort = enforced_model_reasoning_effort
+            payload._codex_lb_client_reasoning_effort = client_reasoning_effort
         normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
         if (
             responses_input_uses_lite_tools(payload.input)
@@ -385,7 +415,8 @@ def apply_api_key_enforcement_to_chat_payload(
         if "reasoningEffort" in payload:
             payload["reasoningEffort"] = wire_effort
         if "thinking" in payload:
-            payload["thinking"] = wire_effort
+            thinking = payload["thinking"]
+            payload["thinking"] = {**thinking, "effort": wire_effort} if isinstance(thinking, dict) else wire_effort
         payload.pop("enable_thinking", None)
         reasoning = payload.get("reasoning")
         payload["reasoning"] = (

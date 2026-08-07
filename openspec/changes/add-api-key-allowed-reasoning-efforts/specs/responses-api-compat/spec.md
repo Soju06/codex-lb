@@ -18,6 +18,9 @@ requests. Its WebSocket error event MUST preserve the same error code and
 parameter. It MUST evaluate the client-plane effort before existing
 unsupported-effort fallback and `ultra` to `max` upstream-wire aliasing. A
 request that omits an effort MUST retain current default behavior.
+Applying the policy more than once to the same request, including across a
+signed internal HTTP bridge hop, MUST be idempotent and MUST NOT re-authorize
+an already-normalized wire value as though it were the original client choice.
 
 #### Scenario: Reject max before upstream dispatch
 

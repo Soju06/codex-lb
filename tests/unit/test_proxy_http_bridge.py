@@ -168,6 +168,8 @@ def test_http_bridge_operation_metadata_is_stable_and_non_destructive() -> None:
     supplied = '{"type":"response.create","client_metadata":{"codex_lb_operation_id":"caller-value"}}'
     supplied_result = json.loads(http_bridge_request_submit_module._text_with_operation_id(supplied, "op_test"))
     assert supplied_result["client_metadata"]["codex_lb_operation_id"] == "op_test"
+    normalized = http_bridge_request_submit_module._text_without_operation_id(supplied)
+    assert json.loads(normalized) == {"type": "response.create"}
 
 
 def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_anchor(

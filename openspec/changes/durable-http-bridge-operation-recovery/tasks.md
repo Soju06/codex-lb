@@ -31,6 +31,7 @@
 - [x] 1.28 Return reservation settlement status to timeout health handling.
 - [x] 1.29 Revalidate the final response.create frame after operation metadata injection.
 - [x] 1.30 Require an inactive unknown operation before same-session recovery reset.
+- [x] 1.31 Keep operation transcript retention active when sticky mapping cleanup is disabled.
 
 ## 2. Validation
 
@@ -38,3 +39,4 @@
 - [x] 2.2 Run focused HTTP bridge tests, Ruff, Ty, diff checks, and strict
   OpenSpec validation.
   - Evidence: 612 focused HTTP bridge/API tests passed; Ruff and Ty passed; `git diff --check` passed; `openspec validate durable-http-bridge-operation-recovery --strict` passed; `openspec validate --specs --strict` passed (49 specs, 0 failures).
+- [x] 2.3 Verify disabled sticky cleanup still runs durable transcript retention.

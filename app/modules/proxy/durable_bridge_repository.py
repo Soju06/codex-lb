@@ -1288,7 +1288,14 @@ class DurableBridgeRepository:
             select(HttpBridgeOperationRecord.operation_id)
             .where(
                 HttpBridgeOperationRecord.updated_at < cutoff,
-                HttpBridgeOperationRecord.state.in_(("completed", "failed", "unknown")),
+                # Expire abandoned nonterminal rows as well as terminal
+                # transcripts. Startup intentionally retains sessions that
+                # own operation rows, so stale submitted/acknowledged rows
+                # must eventually be removed or they retain raw request data
+                # indefinitely after a crash.
+                HttpBridgeOperationRecord.state.in_(
+                    ("submitted", "acknowledged", "completed", "failed", "unknown")
+                ),
             )
             .order_by(HttpBridgeOperationRecord.updated_at.asc())
             .limit(batch_size)

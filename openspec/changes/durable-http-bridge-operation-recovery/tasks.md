@@ -10,6 +10,9 @@
   periodic retention batches.
 - [x] 1.8 Reset partial spools before indefinite recovery retries.
 - [x] 1.9 Persist deferred reasoning events in downstream order.
+- [x] 1.10 Classify shared-websocket disconnects per operation event count.
+- [x] 1.11 Expire stale submitted and acknowledged operation rows.
+- [x] 1.12 Preserve acknowledged state after alias persistence failure.
 
 ## 2. Validation
 

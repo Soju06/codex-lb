@@ -4166,6 +4166,7 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
         transport="http",
         skip_request_log=True,
     )
+    request_state.operation_id = "op-alias-persistence-failure"
     session = _make_bridge_session(
         key=_make_account_neutral_replay_session_key("completed-alias-failure"),
         pending_requests=deque([request_state]),
@@ -4173,10 +4174,12 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
     )
     register_previous = AsyncMock(return_value=False)
     finalize = AsyncMock()
+    operation_updates = AsyncMock()
     close_session = AsyncMock()
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_previous)
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
     monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", operation_updates)
 
     await service._process_http_bridge_upstream_text(
         session,
@@ -4212,6 +4215,9 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
     finalize_call = finalize.await_args
     assert finalize_call is not None
     assert finalize_call.kwargs["event_type"] == "response.failed"
+    operation_updates.assert_awaited_once()
+    assert operation_updates.await_args is not None
+    assert operation_updates.await_args.kwargs["state"] == "acknowledged"
 
     assert await service._retire_http_bridge_after_drain_if_ready(session) is True
     close_session.assert_awaited_once_with(session)
@@ -23417,6 +23423,52 @@ async def test_http_bridge_reader_retirement_recovers_concurrent_gate_waiter(
             submit_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await submit_task
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_failure_classifies_each_operation_from_its_own_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    eventless = proxy_service._WebSocketRequestState(
+        request_id="req-eventless-sibling",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        operation_id="op-eventless-sibling",
+        response_event_count=0,
+    )
+    streamed = proxy_service._WebSocketRequestState(
+        request_id="req-streamed-sibling",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        operation_id="op-streamed-sibling",
+        response_event_count=1,
+    )
+    session = _make_bridge_session(
+        key_value="per-operation-close-classification",
+        pending_requests=deque([eventless, streamed]),
+        queued_request_count=2,
+    )
+    update_operation = AsyncMock()
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", update_operation)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
+
+    await service._fail_http_bridge_reader_and_maybe_retire(
+        session,
+        error_code="stream_incomplete",
+        error_message="closed",
+    )
+
+    assert [call.kwargs["state"] for call in update_operation.await_args_list] == ["unknown", "failed"]
 
 
 @pytest.mark.asyncio

@@ -2,4 +2,4 @@
 - [x] Trace `bridge_instance_mismatch` and identify the introducing commit.
 - [x] Allow ownerless durable rows to be claimed with a new owner epoch.
 - [x] Run focused integration and bridge unit regression tests.
-- [ ] Run strict OpenSpec validation.
+- [x] Run strict OpenSpec validation.

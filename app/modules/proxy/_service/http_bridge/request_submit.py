@@ -339,7 +339,9 @@ def _text_with_operation_id(text_data: str, operation_id: str | None) -> str:
         return text_data
     raw_metadata = payload.get("client_metadata")
     metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
-    metadata.setdefault("codex_lb_operation_id", operation_id)
+    # This namespace is reserved by the bridge; never trust a caller-supplied
+    # value to stand in for the durable operation identity.
+    metadata["codex_lb_operation_id"] = operation_id
     payload["client_metadata"] = metadata
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 

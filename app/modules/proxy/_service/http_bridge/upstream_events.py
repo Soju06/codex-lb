@@ -2602,7 +2602,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         terminal_event_queue = (
             completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
         )
-        if terminal_request_state is not matched_request_state and terminal_event_queue is not None:
+        if terminal_request_state is not matched_request_state:
             deferred_texts = _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
             for deferred_text in deferred_texts:
                 if not suppress_downstream_event:
@@ -2613,16 +2613,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                         deferred_text,
                         terminal=False,
                     )
-                await terminal_event_queue.put(deferred_text)
+                if terminal_event_queue is not None:
+                    await terminal_event_queue.put(deferred_text)
             if not suppress_downstream_event:
                 await _persist_http_bridge_operation_event(
                     self,
                     session,
-                    terminal_request_state,
-                    event_block,
-                    terminal=True,
-                )
-            await terminal_event_queue.put(event_block)
+                        terminal_request_state,
+                        event_block,
+                        terminal=True,
+                    )
+            if terminal_event_queue is not None:
+                await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:
             await terminal_event_queue.put(None)
             if completed_event_queue_claimed and completed_delivery_scope is not None:

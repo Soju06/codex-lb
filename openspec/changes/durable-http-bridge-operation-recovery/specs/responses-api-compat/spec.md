@@ -283,3 +283,15 @@ sending it.
 
 - **WHEN** operation metadata makes the final frame exceed the configured limit
 - **THEN** the request is rejected or slimmed before any upstream send
+
+### Requirement: Fence same-session active operations
+
+Server-indefinite recovery MUST NOT reset or redispatch a nonterminal operation
+when another pending request in the same durable session still references that
+operation. Submitted and acknowledged operations MUST remain fail-closed;
+only an inactive `unknown` operation may enter a fresh recovery attempt.
+
+#### Scenario: Active same-session operation is not duplicated
+
+- **WHEN** a duplicate request finds a submitted operation still referenced by another pending request
+- **THEN** the proxy refuses a second dispatch and preserves the existing spool

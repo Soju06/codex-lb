@@ -2148,6 +2148,11 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
                 for constraint in inspector.get_check_constraints("api_keys")
                 if constraint.get("name")
             }
+            assert "ck_api_keys_reasoning_policy_hash_guard" in {
+                constraint["name"]
+                for constraint in inspector.get_check_constraints("api_keys")
+                if constraint.get("name")
+            }
             assert (
                 connection.execute(
                     text("SELECT COUNT(*) FROM api_keys WHERE api_key_policy_schema_version = 1")

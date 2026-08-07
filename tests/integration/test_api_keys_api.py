@@ -2265,6 +2265,77 @@ async def test_api_key_reasoning_effort_allowlist_is_normalized_and_enforced(asy
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/backend-api/codex/responses/compact", "/v1/responses/compact"])
+async def test_api_key_reasoning_allowlist_rejects_compact_before_upstream(async_client, monkeypatch, endpoint):
+    enabled = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enabled.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "compact-allowlist-key", "allowedReasoningEfforts": ["low"]},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    async def fail_upstream(*_args, **_kwargs):
+        raise AssertionError("compact upstream was reached after policy rejection")
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fail_upstream)
+    response = await async_client.post(
+        endpoint,
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "model-alpha", "instructions": "hi", "input": [], "reasoning": {"effort": "max"}},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_api_key_reasoning_allowlist_rejects_chat_completions_before_upstream(async_client, monkeypatch):
+    enabled = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enabled.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "chat-allowlist-key", "allowedReasoningEfforts": ["low"]},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    async def fail_upstream(*_args, **_kwargs):
+        raise AssertionError("chat completions upstream was reached after policy rejection")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_upstream)
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "model-alpha",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "max",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+
+
+@pytest.mark.asyncio
 async def test_stream_usage_logs_actual_service_tier(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

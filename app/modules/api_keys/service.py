@@ -28,6 +28,7 @@ from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer, ge
 from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
+    API_KEY_POLICY_HASH_PREFIX,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ApiKeyUsageTotals,
@@ -486,7 +487,7 @@ class ApiKeysService:
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
             name=_normalize_name(payload.name),
-            key_hash=_hash_key(plain_key),
+            key_hash=_storage_key_hash(plain_key, policy_enabled=allowed_reasoning_efforts is not None),
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
             apply_to_codex_model=bool(payload.apply_to_codex_model),
@@ -667,6 +668,12 @@ class ApiKeysService:
                 allowed_reasoning_efforts=effective_allowed_reasoning_efforts,
             )
 
+        effective_policy_enabled = (
+            effective_allowed_reasoning_efforts is not None
+            if payload.enforced_reasoning_effort_set or payload.allowed_reasoning_efforts_set
+            else existing.allowed_reasoning_efforts is not None
+        )
+
         limit_rows: list[ApiKeyLimit] | None = None
         if payload.limits_set:
             now = utcnow()
@@ -697,6 +704,14 @@ class ApiKeysService:
                 ),
                 allowed_reasoning_efforts=(
                     _serialize_allowed_reasoning_efforts(allowed_reasoning_efforts)
+                    if payload.allowed_reasoning_efforts_set
+                    else _UNSET
+                ),
+                key_hash=(
+                    _storage_key_hash_from_existing(
+                        existing.key_hash,
+                        policy_enabled=effective_policy_enabled,
+                    )
                     if payload.allowed_reasoning_efforts_set
                     else _UNSET
                 ),
@@ -749,7 +764,7 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
-        await get_api_key_cache().invalidate(row.key_hash)
+        await get_api_key_cache().invalidate(_cache_key_hash(row.key_hash))
         poller = get_cache_invalidation_poller()
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)
@@ -786,7 +801,7 @@ class ApiKeysService:
         deleted = await self._repository.delete(key_id)
         if not deleted:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
-        await get_api_key_cache().invalidate(row.key_hash)
+        await get_api_key_cache().invalidate(_cache_key_hash(row.key_hash))
         poller = get_cache_invalidation_poller()
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)
@@ -795,11 +810,11 @@ class ApiKeysService:
         row = await self._repository.get_by_id(key_id)
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
-        old_key_hash = row.key_hash
+        old_key_hash = _cache_key_hash(row.key_hash)
         plain_key = _generate_plain_key()
         updated = await self._repository.update(
             key_id,
-            key_hash=_hash_key(plain_key),
+            key_hash=_storage_key_hash(plain_key, policy_enabled=row.allowed_reasoning_efforts is not None),
             key_prefix=plain_key[:15],
         )
         if updated is None:
@@ -1321,6 +1336,24 @@ def _generate_plain_key() -> str:
 
 def _hash_key(plain_key: str) -> str:
     return sha256(plain_key.encode("utf-8")).hexdigest()
+
+
+def _storage_key_hash(plain_key: str, *, policy_enabled: bool) -> str:
+    key_hash = _hash_key(plain_key)
+    return f"{API_KEY_POLICY_HASH_PREFIX}{key_hash}" if policy_enabled else key_hash
+
+
+def _storage_key_hash_from_existing(key_hash: str, *, policy_enabled: bool) -> str:
+    plain_hash = _cache_key_hash(key_hash)
+    return f"{API_KEY_POLICY_HASH_PREFIX}{plain_hash}" if policy_enabled else plain_hash
+
+
+def _cache_key_hash(storage_hash: str) -> str:
+    return (
+        storage_hash[len(API_KEY_POLICY_HASH_PREFIX) :]
+        if storage_hash.startswith(API_KEY_POLICY_HASH_PREFIX)
+        else storage_hash
+    )
 
 
 def _serialize_allowed_models(allowed_models: list[str] | None) -> str | None:

@@ -37,8 +37,9 @@ either force a single value or leave the key fully unrestricted.
 
 ## Impact
 
-- Database: one nullable `TEXT` column on `api_keys`; existing rows remain
-  unrestricted with no backfill.
+- Database: one nullable `TEXT` column and a policy schema/rolling-upgrade
+  guard on `api_keys`; existing rows remain unrestricted with no policy
+  backfill.
 - Backend: API-key schemas, service, repository, cache-facing data shape, and
   shared proxy policy.
 - Dashboard: API-key create/edit form and request schemas only; no new route,

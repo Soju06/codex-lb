@@ -128,17 +128,25 @@ enforcement, and the owner receives an explicit internal call-site marker.
 - **Operators switch policies through a partial PATCH**: effective-state
   validation rejects a key that would hold both settings; the dashboard sends
   the clearing value in the same request.
+- **Older replicas during a rolling upgrade**: policy-enabled keys store the
+  same digest behind a `policy:` storage prefix. New readers accept both the
+  legacy and protected storage form, while an older reader only looks up the
+  plain digest and therefore fails closed. A database check constraint keeps
+  an older writer's key regeneration from replacing the protected digest with
+  a plain one. Cache invalidation strips the prefix before evicting the
+  client-token digest.
 
 ## Migration Plan
 
 The migration adds the nullable allowlist column plus a non-null policy schema
 version. Existing rows are backfilled with version `1` and retain current
 unrestricted behavior because their allowlist remains `NULL`. The database
-also rejects rows that combine a fixed effort with an allowlist. During a
-rolling upgrade, an older writer cannot silently create a new API key without
-the new policy version, and cannot add a fixed effort to an allowlisted row;
-both operations fail closed until that writer is upgraded. Rolling back drops
-the new columns and constraint without changing other stored data.
+also rejects rows that combine a fixed effort with an allowlist and requires a
+protected storage digest whenever the allowlist is present. During a rolling
+upgrade, an older reader cannot authenticate a policy-enabled key and an older
+writer cannot silently remove that protection while regenerating it; both
+paths fail closed until that writer is upgraded. Rolling back drops the new
+columns and constraints without changing other stored data.
 
 ## Open Questions
 

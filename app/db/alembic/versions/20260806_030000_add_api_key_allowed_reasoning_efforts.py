@@ -26,6 +26,7 @@ _COLUMN = "allowed_reasoning_efforts"
 _SCHEMA_VERSION_COLUMN = "api_key_policy_schema_version"
 _SCHEMA_VERSION = 1
 _POLICY_CHECK = "ck_api_keys_reasoning_policy_exclusive"
+_POLICY_HASH_CHECK = "ck_api_keys_reasoning_policy_hash_guard"
 
 
 def _columns(connection: Connection) -> set[str]:
@@ -64,6 +65,11 @@ def upgrade() -> None:
                 _POLICY_CHECK,
                 f"{_COLUMN} IS NULL OR enforced_reasoning_effort IS NULL",
             )
+        if _POLICY_HASH_CHECK not in constraints:
+            batch_op.create_check_constraint(
+                _POLICY_HASH_CHECK,
+                f"{_COLUMN} IS NULL OR key_hash LIKE 'policy:%'",
+            )
         batch_op.alter_column(_SCHEMA_VERSION_COLUMN, existing_type=sa.Integer(), nullable=False)
 
 
@@ -75,6 +81,8 @@ def downgrade() -> None:
     with op.batch_alter_table(_TABLE) as batch_op:
         if _POLICY_CHECK in _check_constraints(connection):
             batch_op.drop_constraint(_POLICY_CHECK, type_="check")
+        if _POLICY_HASH_CHECK in _check_constraints(connection):
+            batch_op.drop_constraint(_POLICY_HASH_CHECK, type_="check")
         if _SCHEMA_VERSION_COLUMN in columns:
             batch_op.drop_column(_SCHEMA_VERSION_COLUMN)
         if _COLUMN in columns:

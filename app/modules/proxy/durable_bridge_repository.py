@@ -9,7 +9,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any
 
-from sqlalchemy import Row, and_, case, delete, func, or_, select, text, true, update
+from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -1128,6 +1128,11 @@ class DurableBridgeRepository:
                 parent_response_id=parent_response_id,
                 request_text=request_text,
                 state="submitted",
+                # A transcript is replayable only after the event batcher has
+                # drained and finalized it.  Set this explicitly rather than
+                # relying on a backend-specific schema default (notably the
+                # pre-existing SQLite default on migrated databases).
+                event_spool_complete=False,
             )
             self._session.add(operation)
             try:
@@ -1163,6 +1168,48 @@ class DurableBridgeRepository:
             select(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.operation_id == operation_id)
         )
         return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def reset_operation_event_spool(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        """Start a fresh transcript for a server-owned ambiguous retry."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state != "completed",
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            await self._session.execute(
+                delete(HttpBridgeOperationEvent).where(
+                    HttpBridgeOperationEvent.operation_id == operation_id
+                )
+            )
+            operation.event_bytes = 0
+            operation.event_spool_complete = False
+            operation.updated_at = utcnow()
+            await self._session.commit()
+        return True
 
     async def get_operation_by_fingerprint(
         self,
@@ -1650,15 +1697,14 @@ class DurableBridgeRepository:
             session_ids = [candidate.id for candidate in candidates]
             if not session_ids:
                 return deleted_count
-            # Operation rows are the durable recovery ledger.  Never cascade
-            # delete a session that still owns an in-flight or ambiguous
-            # operation; detach it so the next instance can inspect and take
-            # over the ledger instead of losing the only recovery proof.
+            # Operation rows are the durable recovery ledger. Never cascade
+            # delete a session that still owns a retained operation, including
+            # completed replayable transcripts; detach it so the next instance
+            # can inspect and take over without losing continuity history.
             operation_session_ids = set(
                 await self._session.scalars(
                     select(HttpBridgeOperationRecord.session_id).where(
                         HttpBridgeOperationRecord.session_id.in_(session_ids),
-                        HttpBridgeOperationRecord.state.in_(("submitted", "unknown", "acknowledged")),
                     )
                 )
             )
@@ -1680,6 +1726,26 @@ class DurableBridgeRepository:
                 )
             }
             async with sqlite_writer_section():
+                ownerless_operation_ids = {
+                    candidate.id
+                    for candidate in candidates
+                    if candidate.id in retained_recovery_ids
+                    and candidate.id in operation_session_ids
+                    and candidate.owner_instance_id is None
+                }
+                if ownerless_operation_ids:
+                    # The ownerless-cutoff predicate is part of the same
+                    # startup query. Refresh retained rows so the bounded
+                    # loop cannot select them forever while their operation
+                    # transcript is awaiting normal retention cleanup.
+                    await self._session.execute(
+                        update(HttpBridgeSessionRecord)
+                        .where(
+                            HttpBridgeSessionRecord.id.in_(ownerless_operation_ids),
+                            HttpBridgeSessionRecord.owner_instance_id.is_(None),
+                        )
+                        .values(last_seen_at=now, lease_expires_at=now)
+                    )
                 if retained_recovery_ids:
                     await self._session.execute(
                         update(HttpBridgeSessionRecord)
@@ -1780,6 +1846,11 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
                     HttpBridgeSessionRecord.last_seen_at < cutoff,
+                    ~exists(
+                        select(HttpBridgeOperationRecord.operation_id).where(
+                            HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                        )
+                    ),
                 )
                 .order_by(HttpBridgeSessionRecord.last_seen_at.asc())
                 .limit(batch_size)
@@ -1795,6 +1866,11 @@ class DurableBridgeRepository:
                                 HttpBridgeSessionRecord.id.in_(session_ids),
                                 HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
                                 HttpBridgeSessionRecord.last_seen_at < cutoff,
+                                ~exists(
+                                    select(HttpBridgeOperationRecord.operation_id).where(
+                                        HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                                    )
+                                ),
                             )
                         )
                     )
@@ -1804,6 +1880,13 @@ class DurableBridgeRepository:
                     .where(HttpBridgeSessionRecord.id.in_(session_ids))
                     .where(HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED)
                     .where(HttpBridgeSessionRecord.last_seen_at < cutoff)
+                    .where(
+                        ~exists(
+                            select(HttpBridgeOperationRecord.operation_id).where(
+                                HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                            )
+                        )
+                    )
                     .returning(HttpBridgeSessionRecord.id)
                 )
                 await self._session.commit()
@@ -1822,6 +1905,11 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.lease_expires_at < now,
                 ),
                 HttpBridgeSessionRecord.last_seen_at < cutoff,
+                ~exists(
+                    select(HttpBridgeOperationRecord.operation_id).where(
+                        HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                    )
+                ),
             )
             result = await self._session.execute(
                 select(HttpBridgeSessionRecord.id)

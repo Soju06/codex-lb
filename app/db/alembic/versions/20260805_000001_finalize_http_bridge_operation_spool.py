@@ -34,13 +34,32 @@ def upgrade() -> None:
     # Rows written by older releases used true as the implicit value. They
     # cannot be replayed safely unless their event queue is drained again.
     op.execute(sa.text(f"UPDATE {_TABLE} SET event_spool_complete = false"))
-    # SQLite has no ALTER COLUMN syntax. The ORM model supplies the false
-    # default for new rows there; PostgreSQL can update the catalog default.
-    if bind.dialect.name != "sqlite":
+    # SQLite has no direct ALTER COLUMN syntax.  Alembic's batch operation
+    # rebuilds the table and preserves the false default for future inserts;
+    # merely changing the ORM declaration would leave the old true default in
+    # sqlite_master.
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table(_TABLE) as batch_op:
+            batch_op.alter_column(
+                "event_spool_complete",
+                existing_type=sa.Boolean(),
+                existing_nullable=False,
+                server_default=sa.text("false"),
+            )
+    else:
         op.alter_column(_TABLE, "event_spool_complete", server_default=sa.text("false"))
 
 
 def downgrade() -> None:
     bind = op.get_bind()
-    if bind.dialect.name != "sqlite" and _has_table(bind) and _has_column(bind, "event_spool_complete"):
-        op.alter_column(_TABLE, "event_spool_complete", server_default=sa.text("true"))
+    if _has_table(bind) and _has_column(bind, "event_spool_complete"):
+        if bind.dialect.name == "sqlite":
+            with op.batch_alter_table(_TABLE) as batch_op:
+                batch_op.alter_column(
+                    "event_spool_complete",
+                    existing_type=sa.Boolean(),
+                    existing_nullable=False,
+                    server_default=sa.text("true"),
+                )
+        else:
+            op.alter_column(_TABLE, "event_spool_complete", server_default=sa.text("true"))

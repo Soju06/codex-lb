@@ -617,6 +617,22 @@ class DurableBridgeSessionCoordinator:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_operation(operation_id=operation_id)
 
+    async def reset_operation_event_spool(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).reset_operation_event_spool(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+            )
+
     async def get_operation_by_fingerprint(
         self,
         *,

@@ -2512,6 +2512,20 @@ class _HTTPBridgeUpstreamEventsMixin:
             if matched_request_state is not None
             else None
         )
+        matched_deferred_texts = (
+            _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state)
+            if matched_request_state is not None and not suppress_downstream_event
+            else []
+        )
+        if matched_request_state is not None and not suppress_downstream_event:
+            for deferred_text in matched_deferred_texts:
+                await _persist_http_bridge_operation_event(
+                    self,
+                    session,
+                    matched_request_state,
+                    deferred_text,
+                    terminal=False,
+                )
         if matched_request_state is not None and not suppress_downstream_event:
             await _persist_http_bridge_operation_event(
                 self,
@@ -2521,7 +2535,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
             )
         if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
-            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state):
+            for deferred_text in matched_deferred_texts:
                 await matched_event_queue.put(deferred_text)
             await matched_event_queue.put(event_block)
 
@@ -2532,7 +2546,16 @@ class _HTTPBridgeUpstreamEventsMixin:
             completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
         )
         if terminal_request_state is not matched_request_state and terminal_event_queue is not None:
-            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state):
+            deferred_texts = _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
+            for deferred_text in deferred_texts:
+                if not suppress_downstream_event:
+                    await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        terminal_request_state,
+                        deferred_text,
+                        terminal=False,
+                    )
                 await terminal_event_queue.put(deferred_text)
             await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:

@@ -156,6 +156,23 @@ class StickySessionCleanupScheduler:
                                 "Purged expired HTTP bridge retry circuits deleted_count=%s",
                                 retry_circuit_deleted_count,
                             )
+                        operation_cutoff = utcnow() - timedelta(
+                            seconds=get_settings().http_responses_session_bridge_operation_spool_retention_seconds
+                        )
+                        operation_deleted_count = 0
+                        # Drain all eligible batches. A single startup pass is
+                        # bounded to protect latency, but a long-lived process
+                        # must continue pruning old prompt/output transcripts.
+                        while True:
+                            deleted_batch = await bridge_repo.purge_operation_spool(cutoff=operation_cutoff)
+                            operation_deleted_count += deleted_batch
+                            if deleted_batch < 500:
+                                break
+                        if operation_deleted_count > 0:
+                            logger.info(
+                                "Purged expired HTTP bridge operation transcript rows deleted_count=%s",
+                                operation_deleted_count,
+                            )
                 ring_cutoff = utcnow() - timedelta(seconds=RING_MEMBER_RETENTION_SECONDS)
                 ring_deleted_count = await RingMembershipService(SessionLocal).purge_stale_before(ring_cutoff)
                 if ring_deleted_count > 0:

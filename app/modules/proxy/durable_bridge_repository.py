@@ -1318,8 +1318,12 @@ class DurableBridgeRepository:
         delete transaction so an in-flight operation cannot lose its
         duplicate-suppression ledger between selection and deletion.
         """
-        terminal_states = ("completed", "incomplete", "failed", "unknown")
-        nonterminal_states = ("submitted", "acknowledged")
+        terminal_states = ("completed", "incomplete", "failed")
+        # UNKNOWN is an ambiguous, still-live operation while its owner lease
+        # is active. Treat it like the other nonterminal states so retention
+        # cannot delete the duplicate-suppression fence during a long-running
+        # server-indefinite recovery attempt.
+        nonterminal_states = ("submitted", "acknowledged", "unknown")
         stale_owner = or_(
             HttpBridgeSessionRecord.owner_instance_id.is_(None),
             HttpBridgeSessionRecord.lease_expires_at.is_(None),

@@ -1,0 +1,15 @@
+name: agent-probe
+
+on:
+  push:
+    branches:
+      - agent/openai-api-fallback
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "agent workflow probe ok"

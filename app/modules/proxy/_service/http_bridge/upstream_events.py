@@ -921,12 +921,6 @@ class _HTTPBridgeUpstreamEventsMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
-        if (
-            failed_pending_count > 0
-            and observed_response_events == 0
-            and retire_detail == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
-        ):
-            await _record_http_bridge_account_timeout_signal(self, session)
         if failed_pending_count > 0:
             async with session.pending_lock:
                 operation_states = [
@@ -973,6 +967,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 response_create_gate=session.response_create_gate,
                 penalize_account=penalize_account,
             )
+            if (
+                failed_pending_count > 0
+                and observed_response_events == 0
+                and retire_detail == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+            ):
+                # Only penalize the account after pending-request cleanup has
+                # settled its API-key reservations. A failed release must not
+                # be hidden behind an already-recorded timeout health signal.
+                await _record_http_bridge_account_timeout_signal(self, session)
         finally:
             poison_after_deferred_failures = False
             if session.admission_waiter_count > 0 and not force_retire:

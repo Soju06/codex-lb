@@ -940,7 +940,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     ),
                 )
             if not operation.created:
-                if operation.state == "completed" and getattr(operation, "event_spool_complete", False):
+                if operation.state in {"completed", "incomplete"} and getattr(operation, "event_spool_complete", False):
                     get_operation_events = getattr(self._durable_bridge, "get_operation_events", None)
                     replay_events = await get_operation_events(operation_id=operation.operation_id) if callable(
                         get_operation_events
@@ -962,7 +962,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                     == "server_indefinite_recovery"
                 )
-                if indefinite_recovery and operation.state != "completed":
+                if indefinite_recovery and operation.state not in {"completed", "incomplete"}:
                     # A previous owner may have persisted a partial sequence
                     # before its socket died.  A server-owned retry must not
                     # append a second attempt to that transcript; reset the

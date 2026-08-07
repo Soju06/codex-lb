@@ -850,6 +850,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_text=text_data,
             )
             operation_id = durable_bridge_operation_id(session.durable_session_id, operation_fingerprint)
+            # The operation row must not be committed until the exact
+            # operation-tagged frame is known to fit. Otherwise a local size
+            # rejection before ``send_text`` leaves a submitted ledger row
+            # that fences every identical retry as an unknown in-flight turn.
+            operation_tagged_text = _text_with_operation_id(text_data, operation_id)
+            _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
             try:
                 existing_operation = None
                 get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)

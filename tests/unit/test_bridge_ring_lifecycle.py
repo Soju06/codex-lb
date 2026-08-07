@@ -729,6 +729,13 @@ async def test_operation_spool_purge_expires_stale_nonterminal_rows(
             request_text='{"input":"stale"}',
         )
         stale_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=8)
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-stale-operation",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
         await session.execute(
             update(HttpBridgeOperationRecord)
             .where(HttpBridgeOperationRecord.operation_id == operation_id)
@@ -736,8 +743,9 @@ async def test_operation_spool_purge_expires_stale_nonterminal_rows(
         )
         await session.commit()
 
-        # A stale timestamp alone must not delete an operation whose session
-        # is still owned and leased; it may be a long-running request.
+        # A stale timestamp alone must not delete an UNKNOWN operation whose
+        # session is still owned and leased; it may be a long-running recovery
+        # request whose duplicate-suppression fence must remain intact.
         assert await repository.purge_operation_spool(cutoff=datetime.now(timezone.utc).replace(tzinfo=None)) == 0
         await session.execute(
             update(HttpBridgeSessionRecord)

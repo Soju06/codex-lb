@@ -310,6 +310,16 @@ async def _update_http_bridge_operation_state(
         )
 
 
+def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None:
+    return {
+        "response.created": "acknowledged",
+        "response.completed": "completed",
+        "response.incomplete": "incomplete",
+        "response.failed": "failed",
+        "error": "failed",
+    }.get(event_type)
+
+
 async def _persist_http_bridge_operation_event(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -1767,6 +1777,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if grouped_request_state.event_queue is not None:
                         await grouped_request_state.event_queue.put(grouped_event_block)
                         await grouped_request_state.event_queue.put(None)
+                    grouped_operation_state = _http_bridge_operation_state_for_event(grouped_event_type)
+                    if grouped_operation_state is not None:
+                        await _update_http_bridge_operation_state(
+                            self,
+                            session,
+                            grouped_request_state,
+                            state=grouped_operation_state,
+                            response_id=_websocket_downstream_response_id(grouped_request_state),
+                        )
                     await self._finalize_websocket_request_state(
                         grouped_request_state,
                         account=session.account,
@@ -2232,22 +2251,21 @@ class _HTTPBridgeUpstreamEventsMixin:
                 completed_usage = None
                 completed_empty_prewarm = False
 
-        if matched_request_state is not None and isinstance(event_type, str):
-            operation_state = {
-                "response.created": "acknowledged",
-                "response.completed": "completed",
-                "response.incomplete": "incomplete",
-                "response.failed": "failed",
-                "error": "failed",
-            }.get(event_type)
-            if continuity_persistence_failed_after_ack:
-                operation_state = "acknowledged"
-            if operation_state is not None:
+        operation_state = _http_bridge_operation_state_for_event(event_type)
+        if operation_state is not None:
+            operation_request_states: list[Any] = []
+            for candidate in (matched_request_state, terminal_request_state):
+                if candidate is not None and candidate not in operation_request_states:
+                    operation_request_states.append(candidate)
+            for operation_request_state in operation_request_states:
+                request_operation_state = operation_state
+                if continuity_persistence_failed_after_ack and operation_request_state is matched_request_state:
+                    request_operation_state = "acknowledged"
                 await _update_http_bridge_operation_state(
                     self,
                     session,
-                    matched_request_state,
-                    state=operation_state,
+                    operation_request_state,
+                    state=request_operation_state,
                     response_id=response_id,
                 )
 

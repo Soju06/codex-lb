@@ -6,6 +6,7 @@ import logging
 import math
 import random
 from collections import deque
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
@@ -14,8 +15,9 @@ import anyio
 
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
-from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401
+    CODEX_INSTALLATION_ID_HEADER,
+    CODEX_TURN_METADATA_HEADER,
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -35,13 +37,12 @@ from app.core.clients.proxy import (  # noqa: F401
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
+from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
-from app.core.errors import (
-    openai_error,
-)
+from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
     ResponsesRequest,
@@ -188,7 +189,10 @@ from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    durable_bridge_api_key_scope,
     durable_bridge_hash,
+    durable_bridge_operation_fingerprint,
+    durable_bridge_operation_id,
 )
 from app.modules.proxy.fair_share import (
     API_KEY_STREAM_FAIR_SHARE_ERROR_CODE,
@@ -218,6 +222,45 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 )
 
 
+def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether an ambiguous send failure may ask the client to replay."""
+    settings = _service_get_settings()
+    return (
+        request_state.propagate_http_errors
+        and getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        == "client_full_history_once"
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+    )
+
+
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    settings = _service_get_settings()
+    return (
+        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and (
+            request_state.replay_count == 0
+            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+            == "server_indefinite_recovery"
+        )
+    )
+
+
+def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "previous_response_not_found",
+        "Previous response was not found; retry without previous_response_id.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+    return payload
+
+
 async def _rollback_http_bridge_recovery_turn_state_registration(
     service: Any,
     receipt: DurableBridgeAliasRegistrationReceipt,
@@ -232,7 +275,16 @@ async def _send_http_bridge_request_text_with_archive_id(
     session: "_HTTPBridgeSession",
     request_state: _WebSocketRequestState,
     text_data: str,
+    *,
+    on_send_started: Callable[[], None] | None = None,
 ) -> None:
+    text_data = _text_with_operation_id(text_data, request_state.operation_id)
+    # Operation metadata is added after the initial payload sizing pass. Check
+    # the exact frame that will cross the websocket so the metadata cannot
+    # push an otherwise-valid response.create over the upstream limit.
+    _enforce_http_bridge_response_create_text_size(request_state, text_data)
+    if on_send_started is not None:
+        on_send_started()
     token = set_request_id(request_state.archive_request_id)
     try:
         request_state.response_create_sent_at = _service_time().monotonic()
@@ -255,6 +307,89 @@ def _text_with_account_installation_id(text_data: str, codex_installation_id: st
     if not isinstance(payload, dict):
         return text_data
     apply_codex_installation_metadata(cast(dict[str, JsonValue], payload), codex_installation_id)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _text_with_operation_id(text_data: str, operation_id: str | None) -> str:
+    """Attach a stable operation identity without changing the request contract."""
+    if not operation_id:
+        return text_data
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict):
+        return text_data
+    raw_metadata = payload.get("client_metadata")
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    # This namespace is reserved by the bridge; never trust a caller-supplied
+    # value to stand in for the durable operation identity.
+    metadata["codex_lb_operation_id"] = operation_id
+    payload["client_metadata"] = metadata
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _text_without_operation_id(text_data: str) -> str:
+    """Remove caller-supplied bridge identity before durable fingerprinting."""
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict):
+        return text_data
+    raw_metadata = payload.get("client_metadata")
+    if not isinstance(raw_metadata, dict) or "codex_lb_operation_id" not in raw_metadata:
+        return text_data
+    metadata = dict(raw_metadata)
+    metadata.pop("codex_lb_operation_id", None)
+    if metadata:
+        payload["client_metadata"] = metadata
+    else:
+        payload.pop("client_metadata", None)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _text_without_account_installation_id(text_data: str) -> str:
+    """Normalize account-specific installation metadata out of a fingerprint."""
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict):
+        return text_data
+    raw_metadata = payload.get("client_metadata")
+    if not isinstance(raw_metadata, dict):
+        return text_data
+    metadata: dict[str, JsonValue] = {}
+    for key, value in raw_metadata.items():
+        if not isinstance(key, str) or key.lower() == CODEX_INSTALLATION_ID_HEADER:
+            continue
+        if key.lower() == CODEX_TURN_METADATA_HEADER and isinstance(value, str):
+            try:
+                turn_metadata = json.loads(value)
+            except json.JSONDecodeError:
+                turn_metadata = None
+            if isinstance(turn_metadata, dict) and "installation_id" in turn_metadata:
+                turn_metadata.pop("installation_id", None)
+                value = json.dumps(turn_metadata, ensure_ascii=True, separators=(",", ":"))
+        metadata[key] = value
+    if metadata:
+        payload["client_metadata"] = metadata
+    else:
+        payload.pop("client_metadata", None)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
+def _text_with_previous_response_id(text_data: str, response_id: str | None) -> str:
+    if not response_id:
+        return text_data
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict) or not isinstance(payload.get("previous_response_id"), str):
+        return text_data
+    payload["previous_response_id"] = response_id
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 
@@ -618,9 +753,10 @@ class _HTTPBridgeRequestSubmitMixin:
             and request_state.response_event_count == 0
             and request_state.replay_count == 0
         )
+        allow_server_anchored_replay = _http_bridge_server_anchored_replay_enabled(request_state)
         if not await self._http_bridge_precreated_retry_allowed(
             session,
-            allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay,
+            allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay or allow_server_anchored_replay,
         ):
             retry_after_seconds = max(
                 1,
@@ -732,6 +868,251 @@ class _HTTPBridgeRequestSubmitMixin:
                         "Recovered response continuity could not be persisted; retry the request.",
                     ),
                 ) from exc
+        # Account installation metadata is part of the final upstream frame.
+        # Apply and size-check it before recording the operation so a local
+        # payload-too-large rejection cannot leave a submitted retry fence.
+        text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
+        operation_ledger_enabled = bool(
+            getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
+        )
+        record_operation = getattr(self._durable_bridge, "record_operation", None)
+        if (
+            operation_ledger_enabled
+            and callable(record_operation)
+            and (request_state.previous_response_id is not None or request_state.operation_rebind_required)
+            and (request_state.operation_id is None or request_state.operation_rebind_required)
+            and session.durable_session_id is not None
+            and session.durable_owner_epoch is not None
+        ):
+            text_data = _text_without_operation_id(text_data)
+            fingerprint_text_data = _text_without_account_installation_id(text_data)
+            api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
+            operation_fingerprint = (
+                request_state.operation_fingerprint
+                if request_state.operation_rebind_required and request_state.operation_fingerprint is not None
+                else durable_bridge_operation_fingerprint(
+                    api_key_scope=api_key_scope,
+                    request_text=fingerprint_text_data,
+                )
+            )
+            operation_id = (
+                request_state.operation_id
+                if request_state.operation_rebind_required and request_state.operation_id is not None
+                else durable_bridge_operation_id(session.durable_session_id, operation_fingerprint)
+            )
+            operation_parent_response_id = (
+                request_state.operation_parent_response_id
+                if request_state.operation_rebind_required
+                else request_state.previous_response_id
+            )
+            # The operation row must not be committed until the exact
+            # operation-tagged frame is known to fit. Otherwise a local size
+            # rejection before ``send_text`` leaves a submitted ledger row
+            # that fences every identical retry as an unknown in-flight turn.
+            operation_tagged_text = _text_with_operation_id(text_data, operation_id)
+            _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
+            try:
+                existing_operation = None
+                get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)
+                if callable(get_operation_by_fingerprint):
+                    existing_operation = await _call_with_supported_optional_kwargs(
+                        get_operation_by_fingerprint,
+                        optional_kwargs={"api_key_scope": api_key_scope},
+                        request_fingerprint=operation_fingerprint,
+                    )
+                get_operation = getattr(self._durable_bridge, "get_operation", None)
+                if existing_operation is None and callable(get_operation):
+                    existing_operation = await get_operation(operation_id=operation_id)
+                # If another worker durably observed the previous turn's
+                # completion, advance a new continuation to that response
+                # anchor instead of replaying the timed-out turn.
+                if existing_operation is None:
+                    get_latest_completed = getattr(self._durable_bridge, "get_latest_completed_operation", None)
+                    if callable(get_latest_completed):
+                        completed_operation = await _call_with_supported_optional_kwargs(
+                            get_latest_completed,
+                            optional_kwargs={"request_fingerprint": operation_fingerprint},
+                            session_id=session.durable_session_id,
+                            parent_response_id=operation_parent_response_id,
+                        )
+                        if completed_operation is None:
+                            get_latest_completed_any_session = getattr(
+                                self._durable_bridge,
+                                "get_latest_completed_operation_any_session",
+                                None,
+                            )
+                            if callable(get_latest_completed_any_session):
+                                completed_operation = await _call_with_supported_optional_kwargs(
+                                    get_latest_completed_any_session,
+                                    optional_kwargs={
+                                        "api_key_scope": api_key_scope,
+                                        "request_fingerprint": operation_fingerprint,
+                                    },
+                                    parent_response_id=request_state.previous_response_id,
+                                )
+                        completed_response_id = getattr(completed_operation, "response_id", None)
+                        if completed_response_id and completed_response_id != request_state.previous_response_id:
+                            text_data = _text_with_previous_response_id(text_data, completed_response_id)
+                            request_state.previous_response_id = completed_response_id
+                            request_state.hard_continuity_anchor = True
+                            operation_fingerprint = durable_bridge_operation_fingerprint(
+                                api_key_scope=api_key_scope,
+                                request_text=_text_without_account_installation_id(text_data),
+                            )
+                            operation_id = durable_bridge_operation_id(
+                                session.durable_session_id,
+                                operation_fingerprint,
+                            )
+                operation = await record_operation(
+                    operation_id=operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    request_fingerprint=operation_fingerprint,
+                    api_key_scope=api_key_scope,
+                    account_id=session.account.id,
+                    model=request_state.model,
+                    parent_response_id=operation_parent_response_id,
+                    request_text=text_data,
+                )
+            except Exception as exc:
+                session.closed = True
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason="operation_persistence_failed",
+                    previous_response_id=request_state.previous_response_id,
+                    session_id=request_state.session_id,
+                    upstream_error_code="bridge_continuity_persistence_failed",
+                )
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "bridge_continuity_persistence_failed",
+                        "Response operation continuity could not be persisted; retry the request.",
+                    ),
+                ) from exc
+            if operation is None:
+                session.closed = True
+                session.upstream_control.reconnect_requested = True
+                session.upstream_control.retire_after_drain = True
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "bridge_continuity_persistence_failed",
+                        "HTTP responses session ownership changed; retry the request.",
+                    ),
+                )
+            if not operation.created:
+                if operation.state in {"completed", "incomplete"} and getattr(operation, "event_spool_complete", False):
+                    get_operation_events = getattr(self._durable_bridge, "get_operation_events", None)
+                    replay_events = (
+                        await get_operation_events(operation_id=operation.operation_id)
+                        if callable(get_operation_events)
+                        else []
+                    )
+                    if replay_events and request_state.event_queue is not None:
+                        request_state.operation_replay = True
+                        request_state.operation_id = operation.operation_id
+                        request_state.operation_fingerprint = operation_fingerprint
+                        request_state.operation_registered = True
+                        for replay_event in replay_events:
+                            await request_state.event_queue.put(replay_event)
+                        await request_state.event_queue.put(None)
+                        return
+                recovery_mode = getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+                    "fail_closed",
+                )
+                indefinite_recovery = recovery_mode == "server_indefinite_recovery"
+                one_shot_recovery = recovery_mode == "server_anchored_replay_once" and request_state.replay_count == 0
+                async with session.pending_lock:
+                    same_operation_pending = any(
+                        pending_request is not request_state
+                        and getattr(pending_request, "operation_id", None) == operation.operation_id
+                        for pending_request in session.pending_requests
+                    )
+                if (
+                    (indefinite_recovery or one_shot_recovery)
+                    and operation.state == "unknown"
+                    and not same_operation_pending
+                ):
+                    # A previous owner may have persisted a partial sequence
+                    # before its socket died. Claim UNKNOWN atomically with
+                    # the transcript reset so concurrent reconnects cannot
+                    # both pass admission and submit the same operation.
+                    claim_unknown_operation = getattr(
+                        self._durable_bridge,
+                        "claim_unknown_operation_for_recovery",
+                        None,
+                    )
+                    if not callable(claim_unknown_operation):
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP response recovery could not claim the previous operation; retry the request.",
+                            ),
+                        )
+                    claimed = await claim_unknown_operation(
+                        operation_id=operation.operation_id,
+                        session_id=session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=session.durable_owner_epoch,
+                    )
+                    if not claimed:
+                        session.closed = True
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        raise ProxyResponseError(
+                            503,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP response recovery ownership changed; retry the request.",
+                            ),
+                        )
+                    request_state.operation_recovery_claimed = True
+                    # The operation remains fenced to one durable identity.
+                    # One-shot mode consumes its existing replay-count budget;
+                    # indefinite mode may make further serialized attempts
+                    # after cooldown because upstream has no idempotency or
+                    # status endpoint.
+                    request_state.operation_id = operation.operation_id
+                    request_state.operation_fingerprint = operation_fingerprint
+                    request_state.operation_registered = True
+                else:
+                    # A prior dispatch with the same parent and body may have
+                    # been accepted by upstream, or another request may still
+                    # be using the same operation in this session. Without
+                    # upstream idempotency/status proof, never submit it a
+                    # second time.
+                    _record_continuity_fail_closed(
+                        surface="http_bridge",
+                        reason="operation_already_recorded_no_status_proof",
+                        previous_response_id=request_state.previous_response_id,
+                        session_id=request_state.session_id,
+                        upstream_error_code="upstream_operation_status_unknown",
+                    )
+                    retry_after_seconds = max(
+                        1,
+                        math.ceil(await self._http_bridge_precreated_retry_cooldown_seconds(session)),
+                    )
+                    raise ProxyResponseError(
+                        503,
+                        openai_error(
+                            "upstream_operation_status_unknown",
+                            "The previous response operation may still be running; retry after the cooldown.",
+                        ),
+                        retry_after_seconds=retry_after_seconds,
+                    )
+            request_state.operation_id = operation.operation_id
+            request_state.operation_fingerprint = operation_fingerprint
+            request_state.operation_parent_response_id = operation_parent_response_id
+            request_state.operation_registered = True
+            request_state.operation_rebind_required = False
+            request_state.operation_created = operation.created
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(
@@ -1162,6 +1543,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
                     except BaseException:
                         request_state.recovery_attempt_dispatched = True
+                        request_state.operation_dispatched = request_state.operation_id is not None
                         # Publish retirement while lifecycle ownership is still
                         # held; a gate waiter must never reuse an ambiguously sent
                         # response.create socket between unlock and cleanup.
@@ -1170,6 +1552,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         session.upstream_control.retire_after_drain = True
                         raise
                     request_state.recovery_attempt_dispatched = True
+                    request_state.operation_dispatched = request_state.operation_id is not None
                     session.last_used_at = _service_time().monotonic()
                 except asyncio.CancelledError:
                     if recovery_receipt is not None and not upstream_send_started:
@@ -1257,13 +1640,56 @@ class _HTTPBridgeRequestSubmitMixin:
                 counted_in_queue=True,
                 admission_waiter_registered=admission_waiter_registered,
             )
+            # Once the operation-tagged frame has been handed to the socket,
+            # the transport exception is ambiguous: upstream may have
+            # accepted it even though this worker saw no acknowledgement. Do
+            # not leave the durable row SUBMITTED, because recovery admission
+            # only accepts an explicitly UNKNOWN operation. Persist UNKNOWN
+            # under the owner fence before exposing a retryable error.
+            failure_error_message = str(exc) or "Upstream websocket closed before response.completed"
+            if (
+                request_state.operation_dispatched
+                and request_state.operation_registered
+                and request_state.operation_id is not None
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+            ):
+                mark_operation_unknown = getattr(self._durable_bridge, "mark_operation_unknown", None)
+                marked_unknown = False
+                if callable(mark_operation_unknown):
+                    try:
+                        marked_unknown = await mark_operation_unknown(
+                            operation_id=request_state.operation_id,
+                            session_id=session.durable_session_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=session.durable_owner_epoch,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to mark ambiguous HTTP bridge operation UNKNOWN operation_id=%s",
+                            request_state.operation_id,
+                            exc_info=True,
+                        )
+                if not marked_unknown:
+                    # A stale owner must not advertise durable recovery
+                    # eligibility when the ambiguity could not be fenced.
+                    request_state.operation_registered = False
+                    error_code = "bridge_continuity_persistence_failed"
+                    failure_error_message = "Ambiguous response operation could not be persisted; retry the request."
+                    _record_continuity_fail_closed(
+                        surface="http_bridge",
+                        reason="ambiguous_operation_unknown_persistence_failed",
+                        previous_response_id=request_state.previous_response_id,
+                        session_id=request_state.session_id,
+                        upstream_error_code=error_code,
+                    )
             await self._fail_pending_websocket_requests(
                 account=session.account,
                 account_id_value=session.account.id,
                 pending_requests=deque([request_state]),
                 pending_lock=anyio.Lock(),
                 error_code=error_code,
-                error_message=str(exc) or "Upstream websocket closed before response.completed",
+                error_message=failure_error_message,
                 api_key=None,
                 response_create_gate=session.response_create_gate,
                 penalize_account=not account_neutral,
@@ -1273,11 +1699,16 @@ class _HTTPBridgeRequestSubmitMixin:
                 await session.upstream.close()
             except Exception:
                 logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
-            # Always raise 502 so the client can retry with
-            # previous_response_id intact.  Returning 400
-            # previous_response_not_found causes the client to drop
-            # previous_response_id and resend the full conversation
-            # history, inflating per-turn context by ~20x.
+            # The safe default remains 502 so the client retries with the
+            # anchor intact. Recovery-first mode intentionally returns 400
+            # previous_response_not_found instead, allowing Codex to drop the
+            # ambiguous anchor and resend its full local history. That is
+            # at-least-once delivery and may duplicate an accepted response.
+            if _http_bridge_client_full_history_recovery_enabled(request_state):
+                raise ProxyResponseError(
+                    400,
+                    _http_bridge_client_full_history_recovery_error(),
+                ) from exc
             raise ProxyResponseError(
                 502,
                 openai_error(error_code, str(exc) or "Upstream websocket closed"),
@@ -1520,6 +1951,58 @@ class _HTTPBridgeRequestSubmitMixin:
             if admission_waiter_registered:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
             retire_closed_session = session.closed and session.admission_waiter_count == 0
+        if (
+            request_state.operation_recovery_claimed
+            and request_state.operation_registered
+            and request_state.operation_id is not None
+            and not request_state.operation_dispatched
+            and session.durable_session_id is not None
+            and session.durable_owner_epoch is not None
+        ):
+            mark_operation_unknown = getattr(self._durable_bridge, "mark_operation_unknown", None)
+            restored = False
+            if callable(mark_operation_unknown):
+                try:
+                    restored = await mark_operation_unknown(
+                        operation_id=request_state.operation_id,
+                        session_id=session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=session.durable_owner_epoch,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to restore pre-dispatch HTTP bridge recovery operation UNKNOWN operation_id=%s",
+                        request_state.operation_id,
+                        exc_info=True,
+                    )
+            if restored:
+                request_state.operation_recovery_claimed = False
+        elif (
+            request_state.operation_created
+            and request_state.operation_registered
+            and request_state.operation_id is not None
+            and not request_state.operation_dispatched
+            and session.durable_session_id is not None
+            and session.durable_owner_epoch is not None
+        ):
+            rollback_operation = getattr(self._durable_bridge, "rollback_operation_before_dispatch", None)
+            if callable(rollback_operation):
+                try:
+                    rolled_back = await rollback_operation(
+                        operation_id=request_state.operation_id,
+                        session_id=session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=session.durable_owner_epoch,
+                    )
+                except Exception:
+                    rolled_back = False
+                    logger.warning(
+                        "Failed to roll back pre-dispatch HTTP bridge operation operation_id=%s",
+                        request_state.operation_id,
+                        exc_info=True,
+                    )
+                if rolled_back:
+                    request_state.operation_registered = False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         if request_state.response_create_gate is not None:
             if gate_acquired or request_state.response_create_gate_acquired:
@@ -1705,6 +2188,15 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.event_queue = None
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
+            if request_state.operation_replay:
+                # Replay requests are delivered from the durable transcript
+                # without entering pending ownership, so the normal detach
+                # branch cannot settle their API-key reservation.
+                self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+                await self._release_websocket_request_state_reservation(request_state)
+                request_state.api_key_reservation = None
+                request_state.operation_replay = False
+                return False
             if request_state.terminal_settlement_phase == "abandoned":
                 # Belt-and-braces for issue #1594: terminal bookkeeping
                 # claimed this request out of pending ownership, aborted, and
@@ -1971,6 +2463,7 @@ class _HTTPBridgeRequestSubmitMixin:
 
         fresh_hard_request_account_switch_candidate = False
         proof_gated_continuity_replay_candidate = False
+        server_anchored_replay_candidate = False
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -1995,10 +2488,13 @@ class _HTTPBridgeRequestSubmitMixin:
                         and candidate.response_event_count == 0
                         and candidate.replay_count == 0
                     )
+                    server_anchored_replay_candidate = _http_bridge_server_anchored_replay_enabled(candidate)
         if not await self._http_bridge_precreated_retry_allowed(
             session,
             allow_fresh_hard_account_switch=fresh_hard_request_account_switch_candidate,
-            allow_proof_gated_continuity_replay=proof_gated_continuity_replay_candidate,
+            allow_proof_gated_continuity_replay=(
+                proof_gated_continuity_replay_candidate or server_anchored_replay_candidate
+            ),
         ):
             return False
 
@@ -2460,6 +2956,13 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         reconnected = False
+        operation_rebound_for_retry = False
+        security_retry_send_started = False
+
+        def mark_security_retry_send_started() -> None:
+            nonlocal security_retry_send_started
+            security_retry_send_started = True
+
         try:
             request_state.precreated_replay_account_id = session.account.id
             await self._release_request_state_account_response_create_lease(request_state)
@@ -2494,14 +2997,83 @@ class _HTTPBridgeRequestSubmitMixin:
                             session.account.id,
                             kind=previous_session_affinity.kind,
                         )
+            if (
+                request_state.operation_registered
+                and request_state.operation_id is not None
+                and request_state.operation_fingerprint is not None
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+            ):
+                record_operation = getattr(self._durable_bridge, "record_operation", None)
+                if not callable(record_operation):
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "Security-work recovery operation could not be re-fenced; retry the request.",
+                        ),
+                    )
+                rebound_operation = await record_operation(
+                    operation_id=request_state.operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    request_fingerprint=request_state.operation_fingerprint,
+                    api_key_scope=durable_bridge_api_key_scope(session.key.api_key_id),
+                    account_id=session.account.id,
+                    model=request_state.model,
+                    parent_response_id=request_state.operation_parent_response_id or request_state.previous_response_id,
+                )
+                if rebound_operation is None or getattr(rebound_operation, "state", None) != "submitted":
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "Security-work recovery operation could not be re-fenced; retry the request.",
+                        ),
+                    )
+                operation_rebound_for_retry = True
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
-            await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
+            await _send_http_bridge_request_text_with_archive_id(
+                session,
+                request_state,
+                retry_text,
+                on_send_started=mark_security_retry_send_started,
+            )
             session.last_used_at = _service_time().monotonic()
             return True
         except UpstreamWebSocketTransportError:
             raise
         except Exception as exc:
             logger.warning("HTTP bridge security-work retry failed", exc_info=True)
+            if (
+                operation_rebound_for_retry
+                and not security_retry_send_started
+                and request_state.operation_id is not None
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+            ):
+                update_operation = getattr(self._durable_bridge, "update_operation", None)
+                if callable(update_operation):
+                    try:
+                        restored = await update_operation(
+                            operation_id=request_state.operation_id,
+                            session_id=session.durable_session_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=session.durable_owner_epoch,
+                            state="failed",
+                        )
+                        if not restored:
+                            logger.info(
+                                "HTTP bridge security retry failed to restore operation fence operation_id=%s",
+                                request_state.operation_id,
+                            )
+                    except Exception:
+                        logger.warning(
+                            "Failed to restore HTTP bridge security retry operation operation_id=%s",
+                            request_state.operation_id,
+                            exc_info=True,
+                        )
             if isinstance(exc, ProxyResponseError):
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)

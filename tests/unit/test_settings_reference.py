@@ -51,7 +51,12 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # gate, issue #1535). Not a hardcoded default because the right congestion
 # threshold depends on pool size and workload mix, and 0-means-off is the P1
 # default-off switch; the companion min-guarantee constant stayed hardcoded.
-MAX_SETTINGS_FIELDS = 117
+# 117 -> 125: durable HTTP bridge continuity controls (operation ledger,
+# ambiguous-continuation recovery, and best-effort transcript spool, #1657).
+# These remain operator-selectable because deployments differ in recovery
+# safety policy and available persistence/latency budgets; their conservative
+# defaults preserve fail-closed behavior and bound background write work.
+MAX_SETTINGS_FIELDS = 125
 
 
 def test_generated_settings_reference_matches_code() -> None:

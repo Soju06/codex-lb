@@ -2118,6 +2118,100 @@ def test_connection_request_kind_migration_is_additive_without_backfill(tmp_path
         engine.dispose()
 
 
+def test_http_bridge_operation_migrations_round_trip_existing_rows_and_rebuild_sqlite_defaults(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "http-bridge-operation-round-trip.db"
+    url = _db_url(db_path)
+    parent_revision = "20260804_000001_add_global_http_bridge_operation_fingerprint"
+    spool_revision = "20260805_000001_finalize_http_bridge_operation_spool"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_sessions (
+                        id, session_key_kind, session_key_value, session_key_hash, api_key_scope,
+                        owner_epoch, state, last_seen_at, created_at, updated_at
+                    )
+                    VALUES (
+                        'migration-operation-session', 'session_header', 'migration-operation-key',
+                        'migration-operation-hash', '__anonymous__', 1, 'active', CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_operations (
+                        operation_id, session_id, request_fingerprint, account_id, model,
+                        parent_response_id, state, response_id
+                    )
+                    VALUES (
+                        'migration-operation', 'migration-operation-session', 'migration-fingerprint',
+                        NULL, 'gpt-5.6', 'migration-parent', 'submitted', NULL
+                    )
+                    """
+                )
+            )
+
+        command.upgrade(config, spool_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            operation_columns = {column["name"]: column for column in inspector.get_columns("http_bridge_operations")}
+            assert {"request_text", "event_bytes", "event_spool_complete"} <= operation_columns.keys()
+            row = connection.execute(
+                text(
+                    """
+                    SELECT request_text, event_bytes, event_spool_complete
+                    FROM http_bridge_operations
+                    WHERE operation_id = 'migration-operation'
+                    """
+                )
+            ).one()
+            assert row == (None, 0, False)
+            assert inspector.has_table("http_bridge_operation_events")
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert inspector.has_table("http_bridge_operations")
+            assert not inspector.has_table("http_bridge_operation_events")
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT request_fingerprint FROM http_bridge_operations "
+                        "WHERE operation_id = 'migration-operation'"
+                    )
+                ).scalar_one()
+                == "migration-fingerprint"
+            )
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            operation_columns = {column["name"] for column in inspector.get_columns("http_bridge_operations")}
+            assert {"request_text", "event_bytes", "event_spool_complete"} <= operation_columns
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT event_spool_complete FROM http_bridge_operations "
+                        "WHERE operation_id = 'migration-operation'"
+                    )
+                ).scalar_one()
+                == 0
+            )
+            assert inspector.has_table("http_bridge_operation_events")
+    finally:
+        engine.dispose()
+
+
 def test_check_schema_drift_detects_missing_dashboard_hot_path_indexes(tmp_path: Path) -> None:
     db_path = tmp_path / "missing-hot-path-indexes.db"
     url = _db_url(db_path)

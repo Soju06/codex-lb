@@ -13617,6 +13617,7 @@ async def test_get_or_create_http_bridge_session_preserves_explicit_forwarded_af
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        require_security_work_authorized: bool = False,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,
@@ -13628,6 +13629,7 @@ async def test_get_or_create_http_bridge_session_preserves_explicit_forwarded_af
             preferred_account_id,
             require_preferred_account,
             fallback_on_preferred_account_unavailable,
+            require_security_work_authorized,
         )
         captured["key"] = create_key
         return created_session
@@ -13702,6 +13704,7 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        require_security_work_authorized: bool = False,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,
@@ -13713,6 +13716,7 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
             preferred_account_id,
             require_preferred_account,
             fallback_on_preferred_account_unavailable,
+            require_security_work_authorized,
         )
         captured["key"] = create_key
         return created_session
@@ -13788,6 +13792,7 @@ async def test_get_or_create_http_bridge_session_preserves_durable_canonical_pro
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        **_kwargs: Any,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,

@@ -200,6 +200,20 @@ def _add_columns(bind: Connection) -> None:
                     "ON usage_history (coalesce(\"window\", 'primary'), account_id, recorded_at DESC)"
                 )
             )
+            op.execute(
+                sa.text(
+                    "CREATE INDEX IF NOT EXISTS idx_usage_window_account_time_covering "
+                    "ON usage_history (coalesce(\"window\", 'primary'), account_id, recorded_at, "
+                    'used_percent, reset_at, window_minutes, id, "window")'
+                )
+            )
+            op.execute(
+                sa.text(
+                    "CREATE INDEX IF NOT EXISTS idx_usage_window_raw_account_time_covering "
+                    'ON usage_history ("window", account_id, recorded_at, used_percent, reset_at, '
+                    "window_minutes, id)"
+                )
+            )
 
     sticky = _columns(bind, "sticky_sessions")
     if sticky:

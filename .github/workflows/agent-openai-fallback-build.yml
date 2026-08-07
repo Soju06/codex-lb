@@ -77,10 +77,38 @@ jobs:
           # anchor and are patched one occurrence per call.
           sed -i 's/if count != 1:/if count < 1:/' scripts/agent_apply_openai_fallback.py
 
+          # The first draft used a generic `payload.stream` anchor for the
+          # non-streaming collector. Pin it to the collector's turn-state block
+          # so it cannot accidentally patch the streaming helper instead.
+          uv run python - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/agent_apply_openai_fallback.py')
+          text = path.read_text()
+          start = text.index('# Non-streaming Responses collection: same strict trigger, same reservation.')
+          next_call = text.index(
+              'replace_once(\n    "app/modules/proxy/api.py",\n    """    try:\\n',
+              start,
+          )
+          replacement = r'''# Non-streaming Responses collection: same strict trigger, same reservation.
+          replace_once(
+              "app/modules/proxy/api.py",
+              """    turn_state_headers = (\n        proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)\n        if downstream_turn_state is not None\n        else {}\n    )\n    payload.stream = True\n    if prefer_http_bridge:\n        stream = context.service.stream_http_responses(\n""",
+              """    turn_state_headers = (\n        proxy_affinity_module.build_downstream_turn_state_response_headers(downstream_turn_state)\n        if downstream_turn_state is not None\n        else {}\n    )\n    fallback = await _prepare_subscription_fallback(\n        context, payload, request.headers, api_key, require_streaming=False\n    )\n    payload.stream = True\n    if prefer_http_bridge:\n        stream = context.service.stream_http_responses(\n""",
+          )
+          '''
+          path.write_text(text[:start] + replacement + text[next_call:])
+          PY
+
           if [ "$status" -eq 0 ]; then
             ALEMBIC_HEAD="$ALEMBIC_HEAD" run uv run python scripts/agent_apply_openai_fallback.py || status=$?
           fi
           if [ "$status" -eq 0 ]; then run uv run ruff format app tests/unit/test_subscription_fallback.py || status=$?; fi
+          if [ "$status" -eq 0 ]; then
+            run uv run ruff check --fix \
+              app/db/alembic/versions/20260807_163500_add_model_source_subscription_fallback.py \
+              app/modules/proxy/subscription_fallback.py || status=$?
+          fi
           if [ "$status" -eq 0 ]; then run git diff --check || status=$?; fi
           if [ "$status" -eq 0 ]; then run uv run pytest -q tests/unit/test_subscription_fallback.py || status=$?; fi
           if [ "$status" -eq 0 ]; then run make lint || status=$?; fi

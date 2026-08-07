@@ -1019,6 +1019,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.operation_id = operation.operation_id
             request_state.operation_fingerprint = operation_fingerprint
             request_state.operation_registered = True
+            request_state.operation_created = operation.created
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
             _log_http_bridge_event(
@@ -1814,6 +1815,32 @@ class _HTTPBridgeRequestSubmitMixin:
             if admission_waiter_registered:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
             retire_closed_session = session.closed and session.admission_waiter_count == 0
+        if (
+            request_state.operation_created
+            and request_state.operation_registered
+            and request_state.operation_id is not None
+            and not request_state.operation_dispatched
+            and session.durable_session_id is not None
+            and session.durable_owner_epoch is not None
+        ):
+            rollback_operation = getattr(self._durable_bridge, "rollback_operation_before_dispatch", None)
+            if callable(rollback_operation):
+                try:
+                    rolled_back = await rollback_operation(
+                        operation_id=request_state.operation_id,
+                        session_id=session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=session.durable_owner_epoch,
+                    )
+                except Exception:
+                    rolled_back = False
+                    logger.warning(
+                        "Failed to roll back pre-dispatch HTTP bridge operation operation_id=%s",
+                        request_state.operation_id,
+                        exc_info=True,
+                    )
+                if rolled_back:
+                    request_state.operation_registered = False
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         if request_state.response_create_gate is not None:
             if gate_acquired or request_state.response_create_gate_acquired:

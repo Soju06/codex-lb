@@ -211,6 +211,17 @@ class HttpBridgeOperationEventBatcher:
                 exc_info=True,
             )
 
+    async def discard_operation(self, *, operation_id: str) -> None:
+        """Drop an abandoned nonterminal context without finalizing its spool."""
+        async with self._flush_lock:
+            async with self._lock:
+                pending = self._pending.pop(operation_id, [])
+                self._pending_count -= len(pending)
+                self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
+                self._contexts.pop(operation_id, None)
+                self._closing_operations.discard(operation_id)
+                self._dropped_operations.discard(operation_id)
+
     async def close(self) -> None:
         task = self._task
         self._task = None

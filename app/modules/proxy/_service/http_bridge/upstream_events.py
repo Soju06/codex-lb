@@ -880,6 +880,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        operation_states: list[Any] = []
         if failed_pending_count > 0:
             async with session.pending_lock:
                 operation_states = [
@@ -926,6 +927,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                 response_create_gate=session.response_create_gate,
                 penalize_account=penalize_account,
             )
+            discard_operation = getattr(
+                getattr(self, "_http_bridge_operation_event_batcher", None),
+                "discard_operation",
+                None,
+            )
+            if callable(discard_operation):
+                for request_state in operation_states:
+                    operation_id = getattr(request_state, "operation_id", None)
+                    if operation_id:
+                        await discard_operation(operation_id=operation_id)
             if (
                 failed_pending_count > 0
                 and reservations_settled is not False

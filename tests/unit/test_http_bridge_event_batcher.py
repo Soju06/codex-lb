@@ -101,6 +101,29 @@ async def test_dropped_batch_is_never_marked_replayable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_discard_operation_releases_partial_nonterminal_context() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "partial")
+        await batcher.discard_operation(operation_id="op-1")
+        assert batcher._pending == {}
+        assert batcher._contexts == {}
+        assert batcher._pending_count == 0
+        assert batcher._pending_bytes == 0
+        assert durable.batches == []
+        assert durable.finalized == []
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
 async def test_close_cancels_background_flusher() -> None:
     durable = _FakeDurableBridge()
     batcher = HttpBridgeOperationEventBatcher(

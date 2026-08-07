@@ -22,18 +22,20 @@ MaxClock == 3
 (* implicit 6 * 10s = 60s that had no relation to any other budget and was  *)
 (* still reported under the 7200s stream-idle name.  The derivation modeled *)
 (* here is the shipped one: the pre-response bound is the minimum of the    *)
-(* named owner-side gate-retire and stream-idle budgets, floored by the     *)
-(* keepalive cadence, so it can never outlive the owner-side gate and can   *)
+(* named owner-side gate-retire, client-safe cap, and stream-idle budgets,   *)
+(* so it can never outlive the owner-side gate and can                      *)
 (* never be confused with the post-start stream-idle budget.                *)
 (***************************************************************************)
 Min2(x, y) == IF x <= y THEN x ELSE y
+DeadlineFromNow(now, b) == Min2(now + b, MaxClock)
 
 KeepaliveInterval == 1
 MaxKeepaliveCount == 2
 KeepaliveCadenceFloor == KeepaliveInterval * MaxKeepaliveCount
 GateRetireBudget == 2
 StreamIdleBudget == 3
-PreResponseBudget == Min2(GateRetireBudget, StreamIdleBudget)
+ClientSafePreResponseCap == KeepaliveCadenceFloor
+PreResponseBudget == Min2(Min2(GateRetireBudget, ClientSafePreResponseCap), StreamIdleBudget)
 
 (***************************************************************************)
 (* Client retry backoff after a recoverable tear.  The full model assumes   *)
@@ -66,7 +68,8 @@ AnchorKinds == {"none", "client_anchor", "proxy_full_resend_anchor", "proxy_delt
 SafeRecoveryKinds == {"client_anchor", "proxy_full_resend_anchor"}
 Reasons == {"none", "completed", "cancelled", "timeout", "owner_loss"}
 AnchorOwners == Accounts \cup {NoAccount, ForeignAccount}
-InjectionChoices == {NoAccount, ForeignAccount}
+SameAccount == "same_account"
+InjectionChoices == {NoAccount, ForeignAccount, SameAccount}
 RetryStates == {"attached", "torn", "recovered"}
 
 VARIABLES
@@ -235,11 +238,11 @@ QueueTurn(t) ==
   /\ turnState' = [turnState EXCEPT ![t] = "queued"]
   /\ gate' = [gate EXCEPT ![t] = "queued"]
   /\ gateDeadline' = [gateDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN 4 ELSE 3]
-  /\ requestDeadline' = [requestDeadline EXCEPT ![t] = StreamIdleBudget]
-  /\ connectDeadline' = [connectDeadline EXCEPT ![t] = IF WeakSingleTimeout THEN 3 ELSE 1]
-  /\ firstByteDeadline' = [firstByteDeadline EXCEPT ![t] = 2]
-  /\ preResponseDeadline' = [preResponseDeadline EXCEPT ![t] = PreResponseBudget]
-  /\ gateRetireDeadline' = [gateRetireDeadline EXCEPT ![t] = GateRetireBudget]
+  /\ requestDeadline' = [requestDeadline EXCEPT ![t] = gateDeadline'[t]]
+  /\ connectDeadline' = [connectDeadline EXCEPT ![t] = gateDeadline'[t]]
+  /\ firstByteDeadline' = [firstByteDeadline EXCEPT ![t] = gateDeadline'[t]]
+  /\ preResponseDeadline' = [preResponseDeadline EXCEPT ![t] = gateDeadline'[t]]
+  /\ gateRetireDeadline' = [gateRetireDeadline EXCEPT ![t] = gateDeadline'[t]]
   /\ registered' = [registered EXCEPT ![t] = TRUE]
   /\ admittedDuringDrain' = (admittedDuringDrain \/ shutdownPhase # "running")
   /\ UNCHANGED << clock, owner, ownerEpoch, turnReplica, turnAccount, turnEpoch,
@@ -256,9 +259,13 @@ AcquireTurn(t, r, a, inj) ==
   /\ inj \in InjectionChoices
   /\ (owner[a] = NoReplica \/ WeakNonAtomicClaim)
   /\ (WeakNonAtomicClaim \/ LiveOnAccount(a) = {})
-  /\ (inj = NoAccount \/ WeakCrossAccountAnchor)
-  /\ crossAccountDispatch' = (crossAccountDispatch \/ inj # NoAccount)
-  /\ anchor' = [anchor EXCEPT ![t] = IF inj = NoAccount THEN @ ELSE ForeignAnchor]
+  /\ (inj = NoAccount \/ inj = SameAccount \/ WeakCrossAccountAnchor)
+  /\ crossAccountDispatch' = (crossAccountDispatch \/ inj = ForeignAccount)
+  /\ anchor' = [anchor EXCEPT ![t] =
+      CASE inj = NoAccount -> @
+        [] inj = SameAccount -> [kind |-> "client_anchor", account |-> a,
+                                  epoch |-> ownerEpoch[a] + 1, lineageOk |-> TRUE]
+        [] OTHER -> ForeignAnchor]
   /\ owner' = [owner EXCEPT ![a] = r]
   /\ ownerEpoch' = [ownerEpoch EXCEPT ![a] = @ + 1]
   /\ turnState' = [turnState EXCEPT ![t] = "active"]
@@ -268,8 +275,12 @@ AcquireTurn(t, r, a, inj) ==
   /\ acquisitionCount' = [acquisitionCount EXCEPT ![t] = @ + 1]
   /\ reservation' = [reservation EXCEPT ![t] = "held"]
   /\ gate' = [gate EXCEPT ![t] = "holding"]
-  /\ UNCHANGED << clock, settlementCount, gateDeadline, requestDeadline, connectDeadline,
-    firstByteDeadline, preResponseDeadline, gateRetireDeadline, mislabeledKill, anchorUsed,
+  /\ requestDeadline' = [requestDeadline EXCEPT ![t] = DeadlineFromNow(clock, StreamIdleBudget)]
+  /\ connectDeadline' = [connectDeadline EXCEPT ![t] = DeadlineFromNow(clock, IF WeakSingleTimeout THEN 3 ELSE 1)]
+  /\ firstByteDeadline' = [firstByteDeadline EXCEPT ![t] = DeadlineFromNow(clock, 2)]
+  /\ preResponseDeadline' = [preResponseDeadline EXCEPT ![t] = DeadlineFromNow(clock, PreResponseBudget)]
+  /\ gateRetireDeadline' = [gateRetireDeadline EXCEPT ![t] = DeadlineFromNow(clock, GateRetireBudget)]
+  /\ UNCHANGED << clock, settlementCount, gateDeadline, mislabeledKill, anchorUsed,
     badAnchorUse, durableVersion, snapshotVersion, routedWithStaleSnapshot,
     snapshotRouteAttempted, producerTarget, terminalReason, shutdownPhase, registered,
     ownerReleased, poppedFromPending, completedDeliveryClaimed, finalizerOwner,
@@ -283,8 +294,8 @@ StartStream(t, k) ==
   /\ anchor' = [anchor EXCEPT ![t] =
       [kind |-> k, account |-> turnAccount[t], epoch |-> turnEpoch[t], lineageOk |-> TRUE]]
   /\ UNCHANGED << clock, owner, ownerEpoch, turnReplica, turnAccount, turnEpoch,
-    acquisitionCount, settlementCount, reservation, gate, gateDeadline, requestDeadline,
-    connectDeadline, firstByteDeadline, preResponseDeadline, gateRetireDeadline,
+    acquisitionCount, settlementCount, reservation, gate, gateDeadline,
+    requestDeadline, connectDeadline, firstByteDeadline, preResponseDeadline, gateRetireDeadline,
     mislabeledKill, anchorUsed, badAnchorUse, crossAccountDispatch, durableVersion,
     snapshotVersion, routedWithStaleSnapshot, snapshotRouteAttempted, producerTarget,
     terminalReason, shutdownPhase, registered, ownerReleased, poppedFromPending,
@@ -442,7 +453,7 @@ ExpireDeadline(t) ==
   /\ mislabeledKill' =
       (mislabeledKill \/ (KillBudgetFor(t) = "stream_idle" /\ turnState[t] # "streaming"))
   /\ clientRetry' =
-      IF turnState[t] = "active" /\ clientRetry = "attached" THEN "torn" ELSE clientRetry
+      IF turnState[t] = "active" THEN "torn" ELSE clientRetry
   /\ settlementCount' = [settlementCount EXCEPT ![t] =
       IF reservation[t] = "held" THEN Inc(@) ELSE @]
   /\ reservation' = [reservation EXCEPT ![t] =
@@ -753,10 +764,10 @@ Inv10AnchorAccountOwnership ==
 (***************************************************************************)
 Inv11PreResponseBudget ==
   /\ \A t \in Turns :
-       turnState[t] # "new" =>
-         /\ preResponseDeadline[t] = Min2(gateRetireDeadline[t], requestDeadline[t])
+       turnState[t] = "active" =>
+         /\ preResponseDeadline[t] = Min2(Min2(gateRetireDeadline[t], DeadlineFromNow(clock, ClientSafePreResponseCap)), requestDeadline[t])
          /\ preResponseDeadline[t] >= KeepaliveCadenceFloor
-         /\ preResponseDeadline[t] < requestDeadline[t]
+         /\ preResponseDeadline[t] <= requestDeadline[t]
   /\ mislabeledKill = FALSE
 
 TurnTermination ==

@@ -3002,6 +3002,8 @@ class _HTTPBridgeRequestSubmitMixin:
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
         reconnected = False
+        operation_rebound_for_retry = False
+        security_retry_send_started = False
         try:
             request_state.precreated_replay_account_id = session.account.id
             await self._release_request_state_account_response_create_lease(request_state)
@@ -3071,7 +3073,9 @@ class _HTTPBridgeRequestSubmitMixin:
                             "Security-work recovery operation could not be re-fenced; retry the request.",
                         ),
                     )
+                operation_rebound_for_retry = True
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
+            security_retry_send_started = True
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -3079,6 +3083,34 @@ class _HTTPBridgeRequestSubmitMixin:
             raise
         except Exception as exc:
             logger.warning("HTTP bridge security-work retry failed", exc_info=True)
+            if (
+                operation_rebound_for_retry
+                and not security_retry_send_started
+                and request_state.operation_id is not None
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+            ):
+                update_operation = getattr(self._durable_bridge, "update_operation", None)
+                if callable(update_operation):
+                    try:
+                        restored = await update_operation(
+                            operation_id=request_state.operation_id,
+                            session_id=session.durable_session_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=session.durable_owner_epoch,
+                            state="failed",
+                        )
+                        if not restored:
+                            logger.info(
+                                "HTTP bridge security retry failed to restore operation fence operation_id=%s",
+                                request_state.operation_id,
+                            )
+                    except Exception:
+                        logger.warning(
+                            "Failed to restore HTTP bridge security retry operation operation_id=%s",
+                            request_state.operation_id,
+                            exc_info=True,
+                        )
             if isinstance(exc, ProxyResponseError):
                 error = _parse_openai_error(exc.payload)
                 code = _normalize_error_code(error.code if error else None, error.type if error else None)

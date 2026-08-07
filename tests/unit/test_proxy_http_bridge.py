@@ -6252,6 +6252,126 @@ async def test_stream_via_http_bridge_replaces_retired_hard_gate_excludes_stuck_
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_replaces_retired_hard_gate_keeps_pinned_account_unexcluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A waiter whose replacement is already required to land on a specific
+    account (a resolved previous-response owner, or a file-pinned account —
+    simulated here directly via a pre-set preferred_account_id with no
+    previous_response_id) must keep that account, unexcluded, even though it
+    is the same account whose gate just proved stuck. Excluding a waiter's
+    own required account would make its required-account replacement
+    impossible and poison every later recovery call on the request."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": "continue",
+        }
+    )
+    retired_session = _make_bridge_session(key_value="sid-retired-gate-pinned")
+    replacement_session = _make_bridge_session(key_value="sid-retired-gate-pinned")
+    get_or_create = AsyncMock(side_effect=[retired_session, replacement_session])
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-retired-gate-pinned",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        request_text='{"type":"response.create","model":"gpt-5.6-sol"}',
+        event_queue=asyncio.Queue(),
+        preferred_account_id=retired_session.account.id,
+    )
+    gate_timeout_error = http_bridge_helpers_module._http_bridge_startup_wait_timeout_error(
+        "http_bridge_response_create_gate",
+        code="response_create_gate_timeout",
+    )
+
+    def fake_prepare(
+        _prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        **_kwargs: object,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        return request_state, request_state.request_text or "{}"
+
+    async def fake_submit(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del text_data, queue_limit
+        if session is retired_session:
+            retired_session.closed = True
+            request_state.awaiting_response_created = False
+            request_state.response_create_gate = None
+            request_state.response_create_gate_acquired = False
+            raise gate_timeout_error
+        assert session is replacement_session
+        assert request_state.event_queue is not None
+        request_state.event_queue.put_nowait(
+            'data: {"type":"response.completed","response":{"id":"resp-replaced-gate-pinned"}}\n\n'
+        )
+        request_state.event_queue.put_nowait(None)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    submit = AsyncMock(side_effect=fake_submit)
+    detach = AsyncMock()
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", detach)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"session_id": "sid-retired-gate-pinned"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed","response":{"id":"resp-replaced-gate-pinned"}}\n\n']
+    assert get_or_create.await_count == 2
+    _initial_call, replacement_call = get_or_create.await_args_list
+    assert replacement_call.kwargs["preferred_account_id"] == retired_session.account.id
+    assert replacement_call.kwargs["exclude_account_ids"] is None
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_soft_prompt_cache_queue_full_reroutes(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

@@ -23,3 +23,21 @@
       third replacement attempt).
 - [x] Run focused and full test suites, ruff check/format, `ty check`, and
       the proxy architecture-check script.
+- [x] Fix a correctness gap found in review (08-06): the exclusion branch
+      also fired for a waiter whose replacement is already required to land
+      on a specific account (a resolved previous-response owner, or a
+      file-pinned account) — excluding that required account made its own
+      replacement impossible and poisoned later recovery calls on the
+      request, since `excluded_account_ids` persists on `request_state`.
+      Only exclude when the replacement is genuinely unpinned
+      (`replacement_preferred_account_id is None`).
+- [x] Add `test_stream_via_http_bridge_replaces_retired_hard_gate_keeps_pinned_account_unexcluded`
+      covering the pinned-waiter case.
+- [x] Reword the `replay_count` relaxation's justification (in code comments
+      and this spec) away from "reflects client-side reconnect attempts" —
+      it's also incremented at proxy-side resubmission points, so that
+      framing is imprecise. The relaxation is justified by the predicate's
+      other definitively-unsubmitted markers, not by what increments the
+      counter.
+- [x] Re-run focused and full test suites, ruff check/format, `ty check`,
+      and the architecture-check script after the fix.

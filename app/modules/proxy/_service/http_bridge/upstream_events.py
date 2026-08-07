@@ -939,23 +939,22 @@ class _HTTPBridgeUpstreamEventsMixin:
             for request_state in pending_request_states
             if getattr(request_state, "operation_id", None)
         ]
-        if failed_pending_count > 0:
-            for request_state in operation_states:
-                # A shared websocket can carry several logical response.create
-                # requests. Classify each operation from its own event count;
-                # using the session-wide maximum would mark an eventless
-                # sibling as safely retryable after another request streamed.
-                operation_state = (
-                    "unknown"
-                    if getattr(request_state, "response_event_count", 0) == 0
-                    else "acknowledged"
-                )
-                await _update_http_bridge_operation_state(
-                    self,
-                    session,
-                    request_state,
-                    state=operation_state,
-                )
+        for request_state in operation_states:
+            # A shared websocket can carry several logical response.create
+            # requests. Classify each operation from its own event count;
+            # using the session-wide maximum would mark an eventless
+            # sibling as safely retryable after another request streamed.
+            operation_state = (
+                "unknown"
+                if getattr(request_state, "response_event_count", 0) == 0
+                else "acknowledged"
+            )
+            await _update_http_bridge_operation_state(
+                self,
+                session,
+                request_state,
+                state=operation_state,
+            )
         if force_retire and retire_detail:
             _log_http_bridge_event(
                 retire_detail,
@@ -1785,6 +1784,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                     ) = _build_stream_incomplete_terminal_event_for_request(
                         grouped_request_state,
                         reason=grouped_error_reason,
+                    )
+                    await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        grouped_request_state,
+                        grouped_event_block,
+                        terminal=True,
                     )
                     if grouped_request_state.event_queue is not None:
                         await grouped_request_state.event_queue.put(grouped_event_block)

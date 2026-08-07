@@ -1457,6 +1457,7 @@ class _WebSocketMixin:
                         if not await proxy._downstream_websocket_is_idle(
                             pending_requests,
                             pending_lock=pending_lock,
+                            upstream_control=upstream_control,
                             downstream_activity=downstream_activity,
                             idle_timeout_seconds=downstream_idle_timeout_seconds,
                         ):
@@ -1466,6 +1467,7 @@ class _WebSocketMixin:
                             if await proxy._downstream_websocket_is_idle(
                                 pending_requests,
                                 pending_lock=pending_lock,
+                                upstream_control=upstream_control,
                                 downstream_activity=downstream_activity,
                                 idle_timeout_seconds=downstream_idle_timeout_seconds,
                             ):
@@ -5340,11 +5342,16 @@ class _WebSocketMixin:
         pending_requests: deque[_WebSocketRequestState],
         *,
         pending_lock: anyio.Lock,
+        upstream_control: _WebSocketUpstreamControl | None = None,
         downstream_activity: _DownstreamWebSocketActivity,
         idle_timeout_seconds: float,
     ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        if upstream_control is not None:
+            terminal_task = upstream_control.terminal_message_task
+            if terminal_task is not None and not terminal_task.done():
+                return False
         async with pending_lock:
             if pending_requests:
                 return False

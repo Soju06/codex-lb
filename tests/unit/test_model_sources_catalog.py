@@ -220,3 +220,87 @@ def test_source_models_force_codex_lb_provider_metadata() -> None:
 
     assert len(models) == 1
     assert models[0].raw["model_provider"] == "codex-lb"
+
+
+def _reasoning_source(raw_metadata_json: str | None) -> ModelSource:
+    return ModelSource(
+        id="src_reasoning",
+        name="Reasoning",
+        kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+        base_url="http://127.0.0.1:8000/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+        supports_audio_transcriptions=False,
+        models=[
+            ModelSourceModel(
+                model="reasoning-model",
+                is_enabled=True,
+                supports_streaming=True,
+                raw_metadata_json=raw_metadata_json,
+            )
+        ],
+    )
+
+
+def test_source_model_without_metadata_advertises_no_reasoning_levels() -> None:
+    [model] = source_models_to_upstream_models([_reasoning_source(None)])
+    assert model.supported_reasoning_levels == ()
+    assert model.default_reasoning_level is None
+    assert model.supports_reasoning_summaries is False
+
+
+def test_source_model_reasoning_levels_accept_effort_slugs() -> None:
+    raw = json.dumps(
+        {
+            "supported_reasoning_levels": ["low", "medium", "high", "xhigh"],
+            "default_reasoning_level": "high",
+        }
+    )
+    [model] = source_models_to_upstream_models([_reasoning_source(raw)])
+    assert [level.effort for level in model.supported_reasoning_levels] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+    assert model.default_reasoning_level == "high"
+
+
+def test_source_model_reasoning_levels_accept_objects_and_summaries() -> None:
+    raw = json.dumps(
+        {
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Low effort"},
+                {"effort": "max", "description": "Max effort"},
+            ],
+            "default_reasoning_level": "max",
+            "supports_reasoning_summaries": True,
+        }
+    )
+    [model] = source_models_to_upstream_models([_reasoning_source(raw)])
+    assert [(level.effort, level.description) for level in model.supported_reasoning_levels] == [
+        ("low", "Low effort"),
+        ("max", "Max effort"),
+    ]
+    assert model.default_reasoning_level == "max"
+    assert model.supports_reasoning_summaries is True
+
+
+def test_source_model_reasoning_levels_ignore_invalid_entries_and_defaults() -> None:
+    raw = json.dumps(
+        {
+            "supported_reasoning_levels": ["low", "low", {"description": "no effort key"}, 7, {"effort": "high"}],
+            # Not one of the advertised efforts, so it must not be surfaced.
+            "default_reasoning_level": "ultra",
+        }
+    )
+    [model] = source_models_to_upstream_models([_reasoning_source(raw)])
+    assert [level.effort for level in model.supported_reasoning_levels] == ["low", "high"]
+    assert model.default_reasoning_level is None
+
+
+def test_source_model_reasoning_levels_ignore_non_list_metadata() -> None:
+    raw = json.dumps({"supported_reasoning_levels": "high"})
+    [model] = source_models_to_upstream_models([_reasoning_source(raw)])
+    assert model.supported_reasoning_levels == ()

@@ -510,10 +510,12 @@ def _http_bridge_can_replace_retired_gate_session(
     # A gate timeout happens before this waiter is appended or sent.  Once the
     # stale owner has retired the session, only that fully cleaned pre-submit
     # state is safe to carry to a replacement; any response/downstream marker
-    # makes the upstream acceptance boundary ambiguous. A non-zero replay
-    # count reflects client-side reconnect attempts, not upstream progress on
-    # *this* bridge attempt, so it does not by itself make the boundary
-    # ambiguous and must not disqualify replacement on its own.
+    # makes the upstream acceptance boundary ambiguous. replay_count is
+    # incremented at proxy-side resubmission points too, not only on client
+    # reconnects, so it says nothing about upstream progress on *this* bridge
+    # attempt either way; it's the other, definitively-unsubmitted markers
+    # below that establish the boundary is unambiguous, so replay_count must
+    # not disqualify replacement on its own.
     code, _message = _proxy_error_code_message(exc)
     return (
         code == "response_create_gate_timeout"
@@ -2679,12 +2681,18 @@ class _HTTPBridgeStreamingMixin:
                 replacement_preferred_account_id = request_state.preferred_account_id
                 if request_state.previous_response_id is not None and replacement_preferred_account_id is None:
                     replacement_preferred_account_id = session.account.id
-                else:
+                elif replacement_preferred_account_id is None:
                     # The retired owner already proved stuck; a "replacement"
                     # that could legally reselect that same account isn't a
-                    # replacement at all. Continuity turns are exempted above
-                    # because they're pinned to this account by
-                    # replacement_preferred_account_id instead.
+                    # replacement at all. An already-pinned waiter (continuity
+                    # owner resolved above, or a file-pinned account) must
+                    # stay pinned instead — excluding its required account
+                    # here would make that account's own replacement
+                    # impossible (fallback_on_preferred_account_unavailable is
+                    # False for exactly this pinned case below) and would
+                    # keep poisoning every later recovery call on this
+                    # request, since excluded_account_ids persists on
+                    # request_state.
                     request_state.excluded_account_ids.add(session.account.id)
                 while True:
                     try:

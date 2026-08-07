@@ -18,12 +18,16 @@ and remains definitively unsubmitted, with no upstream response or downstream
 sequence markers, the proxy MUST acquire a fresh bridge and submit that
 waiter once within its original request deadline; a non-zero client-visible
 replay counter MUST NOT by itself disqualify a waiter from this replacement,
-since it reflects client-side reconnect attempts rather than upstream
-progress on the current bridge attempt. When the waiter has no
-previous-response account pin, the replacement bridge MUST exclude the
-account whose gate just proved stuck. An anchored waiter MUST remain pinned
-to the previous-response owner account. The proxy MUST NOT reuse the retired
-session object or transparently retry an ambiguously submitted request.
+since the other definitively-unsubmitted markers already establish the
+upstream acceptance boundary is unambiguous regardless of replay count. When
+the replacement is not already required to land on a specific account (no
+previous-response owner resolved, no file-pinned account), the replacement
+bridge MUST exclude the account whose gate just proved stuck. A waiter whose
+replacement is pinned to a required account (a previous-response owner or a
+file-pinned account) MUST remain pinned to that account, and that required
+account MUST NOT be excluded on its behalf. The proxy MUST NOT reuse the
+retired session object or transparently retry an ambiguously submitted
+request.
 
 #### Scenario: Leading rate-limit telemetry does not mask a stuck pre-created request
 
@@ -50,10 +54,17 @@ session object or transparently retry an ambiguously submitted request.
 
 #### Scenario: Replacement bridge excludes the account that just proved stuck
 
-- **GIVEN** a gate waiter with no previous-response account pin is accepted for replacement after its session is retired
+- **GIVEN** an unpinned gate waiter (no previous-response owner, no file-pinned account) is accepted for replacement after its session is retired
 - **WHEN** the proxy builds the replacement bridge session
 - **THEN** account selection for that replacement excludes the retired session's account
-- **AND** a continuity-pinned waiter's replacement remains pinned to its required account instead
+
+#### Scenario: A pinned waiter's replacement keeps its required account, unexcluded
+
+- **GIVEN** a gate waiter's replacement is required to land on a previous-response owner or a file-pinned account
+- **AND** that required account is the same account whose gate just proved stuck
+- **WHEN** the proxy builds the replacement bridge session
+- **THEN** the replacement remains pinned to that required account
+- **AND** that account is not added to the request's excluded-account set
 
 #### Scenario: Healthy active stream is not retired during a normal wait
 

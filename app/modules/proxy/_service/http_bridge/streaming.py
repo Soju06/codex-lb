@@ -3377,7 +3377,9 @@ class _HTTPBridgeStreamingMixin:
                 # unknown operation and suppress the intended one-shot replay.
                 retry_request_state.operation_id = request_state.operation_id
                 retry_request_state.operation_fingerprint = request_state.operation_fingerprint
+                retry_request_state.operation_parent_response_id = request_state.operation_parent_response_id
                 retry_request_state.operation_registered = request_state.operation_registered
+                retry_request_state.operation_rebind_required = request_state.operation_rebind_required
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if durable_recovery_fresh_replay and durable_recovery_attempt_fingerprint is not None:
                     retry_request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint

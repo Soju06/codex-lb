@@ -6349,7 +6349,10 @@ async def _stream_response_error_events(
                         "stream_idle_timeout",
                         "upstream_request_timeout",
                         "upstream_unavailable",
-                    } or retry_saw_downstream_event:
+                    } or retry_saw_downstream_event or (
+                        require_durable_recovery_fence
+                        and not getattr(retry_exc, "http_bridge_durable_recovery_eligible", False)
+                    ):
                         exc = retry_exc
                         break
                     retry_delay = max(1.0, min(30.0, float(retry_exc.retry_after_seconds or retry_delay)))

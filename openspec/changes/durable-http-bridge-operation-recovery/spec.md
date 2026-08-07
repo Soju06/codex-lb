@@ -89,3 +89,16 @@ session.
 Retention MUST NOT delete stale submitted or acknowledged operations while
 their session is actively owned with an unexpired lease. The owner/lease
 predicate MUST be rechecked in the deletion transaction.
+
+### Requirement: Anchored indefinite recovery gate
+
+The server-indefinite recovery loop MUST be installed only for an eventless
+anchored continuation with a durable parent operation. Fresh first-turn
+requests and streams that already emitted downstream response events MUST
+terminate normally rather than being resent indefinitely.
+
+### Requirement: Retry reservation terminalization
+
+If reacquiring API-key usage limits for a recovery attempt fails, the proxy
+MUST settle the prior reservation and emit a terminal `response.failed` SSE
+event instead of aborting the already-started stream.

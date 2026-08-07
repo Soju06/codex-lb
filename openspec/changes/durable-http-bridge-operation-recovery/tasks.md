@@ -16,6 +16,8 @@
 - [x] 1.13 Rebind nonterminal cross-session operations before recovery reset.
 - [x] 1.14 Protect actively leased operations during retention cleanup.
 - [x] 1.15 Keep event-spool settings compatible with legacy test doubles.
+- [x] 1.16 Gate indefinite recovery to eventless anchored operations.
+- [x] 1.17 Convert recovery reservation failures into terminal SSE events.
 
 ## 2. Validation
 

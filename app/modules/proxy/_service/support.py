@@ -881,7 +881,11 @@ class _WebSocketRequestState:
     # stable across client reconnects with the same parent response and body.
     operation_id: str | None = None
     operation_fingerprint: str | None = None
+    operation_parent_response_id: str | None = None
     operation_registered: bool = False
+    # Account-neutral durable recovery keeps the original operation identity
+    # while asking request submission to rebind it to the replacement session.
+    operation_rebind_required: bool = False
     # True only when this request created the durable operation row. A
     # pre-dispatch admission failure may remove that row; an existing row
     # represents an ambiguous upstream attempt and must remain fenced.

@@ -841,18 +841,31 @@ class _HTTPBridgeRequestSubmitMixin:
         if (
             operation_ledger_enabled
             and callable(record_operation)
-            and request_state.previous_response_id is not None
-            and request_state.operation_id is None
+            and (request_state.previous_response_id is not None or request_state.operation_rebind_required)
+            and (request_state.operation_id is None or request_state.operation_rebind_required)
             and session.durable_session_id is not None
             and session.durable_owner_epoch is not None
         ):
             text_data = _text_without_operation_id(text_data)
             api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
-            operation_fingerprint = durable_bridge_operation_fingerprint(
-                api_key_scope=api_key_scope,
-                request_text=text_data,
+            operation_fingerprint = (
+                request_state.operation_fingerprint
+                if request_state.operation_rebind_required and request_state.operation_fingerprint is not None
+                else durable_bridge_operation_fingerprint(
+                    api_key_scope=api_key_scope,
+                    request_text=text_data,
+                )
             )
-            operation_id = durable_bridge_operation_id(session.durable_session_id, operation_fingerprint)
+            operation_id = (
+                request_state.operation_id
+                if request_state.operation_rebind_required and request_state.operation_id is not None
+                else durable_bridge_operation_id(session.durable_session_id, operation_fingerprint)
+            )
+            operation_parent_response_id = (
+                request_state.operation_parent_response_id
+                if request_state.operation_rebind_required
+                else request_state.previous_response_id
+            )
             # The operation row must not be committed until the exact
             # operation-tagged frame is known to fit. Otherwise a local size
             # rejection before ``send_text`` leaves a submitted ledger row
@@ -881,7 +894,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             get_latest_completed,
                             optional_kwargs={"request_fingerprint": operation_fingerprint},
                             session_id=session.durable_session_id,
-                            parent_response_id=request_state.previous_response_id,
+                            parent_response_id=operation_parent_response_id,
                         )
                         if completed_operation is None:
                             get_latest_completed_any_session = getattr(
@@ -920,7 +933,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     api_key_scope=api_key_scope,
                     account_id=session.account.id,
                     model=request_state.model,
-                    parent_response_id=request_state.previous_response_id,
+                    parent_response_id=operation_parent_response_id,
                     request_text=text_data,
                 )
             except Exception as exc:
@@ -1041,7 +1054,9 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
             request_state.operation_id = operation.operation_id
             request_state.operation_fingerprint = operation_fingerprint
+            request_state.operation_parent_response_id = operation_parent_response_id
             request_state.operation_registered = True
+            request_state.operation_rebind_required = False
             request_state.operation_created = operation.created
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:

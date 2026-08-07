@@ -5146,6 +5146,7 @@ async def _stream_responses(
             reservation=reservation,
             recovery_stream_factory=recovery_stream_factory,
             allow_client_full_history_once=bridge_recovery_eligible,
+            require_durable_recovery_fence=bridge_recovery_eligible,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
@@ -5261,7 +5262,10 @@ async def _collect_responses(
         status_code, error = _mask_previous_response_not_found_error(
             error,
             default_status=exc.status_code,
-            allow_client_full_history_once=bridge_recovery_eligible,
+            allow_client_full_history_once=(
+                bridge_recovery_eligible
+                and getattr(exc, "http_bridge_durable_recovery_eligible", False)
+            ),
         )
         return _logged_error_json_response(
             request,
@@ -5274,7 +5278,7 @@ async def _collect_responses(
             error_payload = _error_envelope_from_response(response_payload.error)
             status_code, error_payload = _mask_previous_response_not_found_error(
                 error_payload,
-                allow_client_full_history_once=bridge_recovery_eligible,
+                allow_client_full_history_once=False,
             )
             return _logged_error_json_response(
                 request,
@@ -5288,7 +5292,7 @@ async def _collect_responses(
         )
     status_code, response_payload = _mask_previous_response_not_found_error(
         response_payload,
-        allow_client_full_history_once=bridge_recovery_eligible,
+        allow_client_full_history_once=False,
     )
     return _logged_error_json_response(
         request,
@@ -6245,6 +6249,7 @@ async def _stream_response_error_events(
     reservation: ApiKeyUsageReservationData | None,
     recovery_stream_factory: Callable[[], AsyncIterator[str]] | None = None,
     allow_client_full_history_once: bool = False,
+    require_durable_recovery_fence: bool = False,
 ) -> AsyncIterator[str]:
     saw_downstream_event = False
     try:
@@ -6261,6 +6266,10 @@ async def _stream_response_error_events(
         if (
             recovery_stream_factory is not None
             and indefinite_recovery
+            and (
+                not require_durable_recovery_fence
+                or getattr(exc, "http_bridge_durable_recovery_eligible", False)
+            )
             and not saw_downstream_event
             and error_code
             in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
@@ -6317,7 +6326,10 @@ async def _stream_response_error_events(
         _, envelope = _mask_previous_response_not_found_error(
             envelope,
             default_status=exc.status_code,
-            allow_client_full_history_once=allow_client_full_history_once,
+            allow_client_full_history_once=(
+                allow_client_full_history_once
+                and getattr(exc, "http_bridge_durable_recovery_eligible", False)
+            ),
         )
         error = envelope.error
         retry_hint = ""
@@ -6350,7 +6362,10 @@ def _stream_startup_error_response(
         status_code, envelope = _mask_previous_response_not_found_error(
             envelope,
             default_status=error.status_code,
-            allow_client_full_history_once=allow_client_full_history_once,
+            allow_client_full_history_once=(
+                allow_client_full_history_once
+                and getattr(error, "http_bridge_durable_recovery_eligible", False)
+            ),
         )
         startup_headers = dict(headers)
         if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
@@ -6363,7 +6378,7 @@ def _stream_startup_error_response(
         )
     status_code, envelope = _mask_previous_response_not_found_error(
         error,
-        allow_client_full_history_once=allow_client_full_history_once,
+        allow_client_full_history_once=False,
     )
     return _logged_error_json_response(
         request,

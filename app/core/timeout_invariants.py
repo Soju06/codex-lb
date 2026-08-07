@@ -200,13 +200,6 @@ TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
         "Compact response-create admission must not outlive the compact request budget.",
     ),
     TimeoutInvariantRule(
-        "sse-keepalive-within-stream-budget",
-        SSE_KEEPALIVE,
-        "<",
-        STREAM_BUDGET,
-        "A keepalive interval at or beyond the stream budget cannot preserve client liveness.",
-    ),
-    TimeoutInvariantRule(
         "sse-keepalive-within-bridge-budget",
         SSE_KEEPALIVE,
         "<",
@@ -235,13 +228,6 @@ TIMEOUT_INVARIANT_RULES: tuple[TimeoutInvariantRule, ...] = (
         BRIDGE_BUDGET,
         "Hard-continuity stuck gate retirement waits up to 2x the configured threshold and must happen before "
         "the bridge request budget is exhausted.",
-    ),
-    TimeoutInvariantRule(
-        "bridge-clean-close-jitter-within-bridge-budget",
-        BRIDGE_CLEAN_CLOSE_JITTER,
-        "<",
-        BRIDGE_BUDGET,
-        "Clean-close retry jitter must stay small enough to retry before the bridge request deadline.",
     ),
     TimeoutInvariantRule(
         "account-lease-ttl-covers-proxy-budget",

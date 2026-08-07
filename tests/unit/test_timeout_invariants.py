@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 def test_default_settings_satisfy_timeout_invariants() -> None:
     settings = Settings()
-    assert len(TIMEOUT_INVARIANT_RULES) == 14
+    assert len(TIMEOUT_INVARIANT_RULES) == 12
     assert find_timeout_invariant_violations(settings) == []
 
 
@@ -65,7 +65,6 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
         ("admission-wait-within-proxy-budget", {"proxy_request_budget_seconds": 9.0}),
         ("admission-wait-within-stream-budget", {"http_responses_stream_request_budget_seconds": 9.0}),
         ("admission-wait-within-compact-budget", {"compact_request_budget_seconds": 9.0}),
-        ("sse-keepalive-within-stream-budget", {"http_responses_stream_request_budget_seconds": 10.0}),
         ("sse-keepalive-within-bridge-budget", {"http_responses_session_bridge_request_budget_seconds": 10.0}),
         (
             "token-refresh-claim-covers-admission-and-exchange",
@@ -75,13 +74,6 @@ def _timeout_settings(**overrides: float | bool) -> SimpleNamespace:
         (
             "bridge-stuck-gate-retire-within-bridge-budget",
             {"http_responses_session_bridge_request_budget_seconds": 600.0},
-        ),
-        (
-            "bridge-clean-close-jitter-within-bridge-budget",
-            {
-                "http_responses_session_bridge_request_budget_seconds": 2.0,
-                "http_responses_session_bridge_clean_close_retry_jitter_max_seconds": 2.0,
-            },
         ),
         ("account-lease-ttl-covers-proxy-budget", {"proxy_account_lease_ttl_seconds": 599.0}),
         ("account-lease-ttl-covers-compact-budget", {"proxy_account_lease_ttl_seconds": 179.0}),

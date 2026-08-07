@@ -4968,6 +4968,15 @@ async def _stream_responses(
         else {}
     )
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
+    bridge_recovery_eligible = bool(
+        bridge_active
+        and payload.previous_response_id is not None
+        and getattr(proxy_service_module.get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
+        and not proxy_service_module._responses_request_contains_input_image(payload)
+        and not proxy_service_module._responses_request_uses_image_generation(payload)
+        and len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+        <= proxy_service_module._ws_transport_payload_budget_bytes(proxy_service_module.get_settings())
+    )
     effective_headers = forwarded_headers or request.headers
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
     downstream_turn_state = (
@@ -5156,9 +5165,7 @@ async def _stream_responses(
     # Server-indefinite recovery is only safe for an explicitly anchored
     # continuation. Fresh first-turn requests have no durable parent
     # operation to fence, so do not install the recovery loop for them.
-    recovery_stream_factory = (
-        build_recovery_response_stream if prefer_http_bridge and payload.previous_response_id is not None else None
-    )
+    recovery_stream_factory = build_recovery_response_stream if bridge_recovery_eligible else None
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
             stream,

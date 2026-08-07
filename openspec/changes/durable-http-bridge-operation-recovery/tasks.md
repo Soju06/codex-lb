@@ -13,6 +13,9 @@
 - [x] 1.10 Classify shared-websocket disconnects per operation event count.
 - [x] 1.11 Expire stale submitted and acknowledged operation rows.
 - [x] 1.12 Preserve acknowledged state after alias persistence failure.
+- [x] 1.13 Rebind nonterminal cross-session operations before recovery reset.
+- [x] 1.14 Protect actively leased operations during retention cleanup.
+- [x] 1.15 Keep event-spool settings compatible with legacy test doubles.
 
 ## 2. Validation
 

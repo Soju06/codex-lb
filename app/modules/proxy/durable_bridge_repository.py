@@ -1083,6 +1083,19 @@ class DurableBridgeRepository:
                 operation = await self._session.scalar(fingerprint_statement.with_for_update())
             if operation is not None:
                 rebound = False
+                if operation.session_id != session_id and operation.state != "completed":
+                    # A global fingerprint can outlive the durable session
+                    # that first recorded it. Transfer only nonterminal
+                    # operations to the currently fenced owner before the
+                    # caller resets the attempt spool; completed transcripts
+                    # remain attached to their original session for replay.
+                    operation.session_id = session_id
+                    operation.account_id = account_id
+                    operation.model = model
+                    operation.parent_response_id = parent_response_id
+                    if request_text is not None and operation.request_text is None:
+                        operation.request_text = request_text
+                    operation.updated_at = utcnow()
                 if operation.state == "failed":
                     # An explicit upstream failure is retryable. Rebind the
                     # durable operation to the current owner while preserving
@@ -1279,35 +1292,58 @@ class DurableBridgeRepository:
         return turns
 
     async def purge_operation_spool(self, *, cutoff: datetime, batch_size: int = 500) -> int:
-        """Delete only terminal/ambiguous transcript material past retention."""
-        result = await self._session.execute(
-            select(HttpBridgeOperationRecord.operation_id)
-            .where(
-                HttpBridgeOperationRecord.updated_at < cutoff,
-                # Expire abandoned nonterminal rows as well as terminal
-                # transcripts. Startup intentionally retains sessions that
-                # own operation rows, so stale submitted/acknowledged rows
-                # must eventually be removed or they retain raw request data
-                # indefinitely after a crash.
-                HttpBridgeOperationRecord.state.in_(
-                    ("submitted", "acknowledged", "completed", "failed", "unknown")
-                ),
-            )
-            .order_by(HttpBridgeOperationRecord.updated_at.asc())
-            .limit(batch_size)
+        """Delete eligible transcript material past retention.
+
+        Nonterminal rows are purgeable only after their owning session is
+        ownerless or its lease has expired. Recheck that predicate in the
+        delete transaction so an in-flight operation cannot lose its
+        duplicate-suppression ledger between selection and deletion.
+        """
+        terminal_states = ("completed", "failed", "unknown")
+        nonterminal_states = ("submitted", "acknowledged")
+        stale_owner = or_(
+            HttpBridgeSessionRecord.owner_instance_id.is_(None),
+            HttpBridgeSessionRecord.lease_expires_at.is_(None),
+            HttpBridgeSessionRecord.lease_expires_at < utcnow(),
         )
-        operation_ids = [str(value) for value in result.scalars().all()]
-        if not operation_ids:
-            return 0
+        stale_nonterminal = and_(
+            HttpBridgeOperationRecord.state.in_(nonterminal_states),
+            exists(
+                select(HttpBridgeSessionRecord.id).where(
+                    HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                    stale_owner,
+                )
+            ),
+        )
+        purgeable = or_(HttpBridgeOperationRecord.state.in_(terminal_states), stale_nonterminal)
         async with sqlite_writer_section():
-            await self._session.execute(
-                delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id.in_(operation_ids))
+            selected = await self._session.execute(
+                select(HttpBridgeOperationRecord.operation_id)
+                .where(HttpBridgeOperationRecord.updated_at < cutoff, purgeable)
+                .order_by(HttpBridgeOperationRecord.updated_at.asc())
+                .limit(batch_size)
+                .with_for_update()
             )
-            await self._session.execute(
-                delete(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.operation_id.in_(operation_ids))
+            operation_ids = [str(value) for value in selected.scalars().all()]
+            if not operation_ids:
+                await self._session.commit()
+                return 0
+            deleted = await self._session.execute(
+                delete(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id.in_(operation_ids),
+                    HttpBridgeOperationRecord.updated_at < cutoff,
+                    purgeable,
+                )
+                .returning(HttpBridgeOperationRecord.operation_id)
             )
+            deleted_ids = [str(value) for value in deleted.scalars().all()]
+            if deleted_ids:
+                await self._session.execute(
+                    delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id.in_(deleted_ids))
+                )
             await self._session.commit()
-        return len(operation_ids)
+        return len(deleted_ids)
 
     async def append_operation_event(
         self,

@@ -1595,7 +1595,7 @@ async def _release_websocket_response_create_gate(
 async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
     """Finish response-create lease cleanup before propagating cancellation."""
 
-    task = asyncio.create_task(awaitable)
+    task = asyncio.ensure_future(awaitable)
     with anyio.CancelScope(shield=True):
         while True:
             try:

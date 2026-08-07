@@ -108,7 +108,7 @@ async def test_websocket_security_cleanup_finishes_after_cancellation() -> None:
     )
     request_state.response_create_gate = gate
     request_state.response_create_gate_acquired = True
-    lease = object()
+    lease = proxy_service.AccountLease("lease-ws-security-gate-cancel", account.id, "response_create", 1.0)
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
 

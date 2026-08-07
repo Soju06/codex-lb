@@ -3,34 +3,34 @@ Downloading cpython-3.13.15-linux-x86_64-gnu (download) (33.2MiB)
 Using CPython 3.13.15
 Creating virtual environment at: .venv
    Building codex-lb @ file:///home/runner/work/codex-lb/codex-lb
-Downloading cryptography (4.5MiB)
-Downloading ruff (10.9MiB)
-Downloading psycopg-binary (4.9MiB)
-Downloading zstandard (5.3MiB)
-Downloading virtualenv (7.2MiB)
-Downloading sqlalchemy (3.1MiB)
-Downloading asyncpg (3.4MiB)
-Downloading uvloop (4.2MiB)
-Downloading ty (12.0MiB)
 Downloading brotli (1.4MiB)
-Downloading pygments (1.2MiB)
-Downloading openai (1.6MiB)
 Downloading aiohttp (1.7MiB)
+Downloading zstandard (5.3MiB)
+Downloading psycopg-binary (4.9MiB)
+Downloading asyncpg (3.4MiB)
+Downloading openai (1.6MiB)
+Downloading pygments (1.2MiB)
+Downloading sqlalchemy (3.1MiB)
+Downloading cryptography (4.5MiB)
 Downloading pydantic-core (2.0MiB)
+Downloading virtualenv (7.2MiB)
+Downloading ty (12.0MiB)
+Downloading ruff (10.9MiB)
+Downloading uvloop (4.2MiB)
  Downloaded brotli
  Downloaded pydantic-core
  Downloaded aiohttp
  Downloaded asyncpg
  Downloaded zstandard
  Downloaded psycopg-binary
- Downloaded uvloop
- Downloaded virtualenv
  Downloaded ruff
+ Downloaded virtualenv
  Downloaded ty
+ Downloaded uvloop
  Downloaded cryptography
- Downloaded pygments
  Downloaded sqlalchemy
+ Downloaded pygments
  Downloaded openai
       Built codex-lb @ file:///home/runner/work/codex-lb/codex-lb
-Installed 96 packages in 68ms
+Installed 96 packages in 63ms
 FAILED: No 'script_location' key found in configuration.

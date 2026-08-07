@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from app import cli
+from app.codex_sessions_retag import PROGRESS_PREFIX
 from app.core.runtime_logging import UtcDefaultFormatter
 
 pytestmark = pytest.mark.unit
@@ -485,6 +486,40 @@ def test_codex_sessions_retag_reports_file_access_errors(monkeypatch, tmp_path):
         )
 
 
+def test_codex_sessions_retag_reports_verification_failure_without_traceback(capsys, tmp_path):
+    state_db = tmp_path / "state_5.sqlite"
+    with sqlite3.connect(state_db) as conn:
+        conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)")
+        conn.execute("INSERT INTO threads (id, model_provider) VALUES ('thread-1', 'openai')")
+        conn.execute(
+            """
+            CREATE TRIGGER preserve_provider
+            AFTER UPDATE OF model_provider ON threads
+            BEGIN
+                UPDATE threads SET model_provider = 'openai' WHERE id = NEW.id;
+            END
+            """
+        )
+
+    with pytest.raises(SystemExit, match="SQLite verification failed"):
+        cli.main(
+            [
+                "codex-sessions",
+                "retag",
+                "--from",
+                "openai",
+                "--to",
+                "codex-lb",
+                "--codex-home",
+                str(tmp_path),
+                "--yes",
+            ]
+        )
+
+    captured = capsys.readouterr()
+    assert "Created backup at " in captured.out
+
+
 def test_codex_sessions_retag_yes_updates_jsonl_and_sqlite(capsys, tmp_path):
     session_file = tmp_path / "sessions" / "session.jsonl"
     session_file.parent.mkdir(parents=True)
@@ -515,6 +550,96 @@ def test_codex_sessions_retag_yes_updates_jsonl_and_sqlite(capsys, tmp_path):
     assert json.loads(session_file.read_text(encoding="utf-8"))["model_provider"] == "codex-lb"
     with sqlite3.connect(state_db) as conn:
         assert conn.execute("SELECT model_provider FROM threads").fetchone()[0] == "codex-lb"
+
+
+def test_codex_sessions_metadata_mismatches_returns_only_conflicting_session_as_json(capsys, tmp_path):
+    target_id = "019f7249-90ee-74c0-a0e6-42117e80bc7f"
+    unrelated_id = "019f7249-90ee-74c0-a0e6-42117e80bc70"
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "target.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": target_id, "model_provider": "codex-lb"}}) + "\n",
+        encoding="utf-8",
+    )
+    (sessions_dir / "unrelated.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": unrelated_id, "model_provider": "openai"}}) + "\n",
+        encoding="utf-8",
+    )
+    with sqlite3.connect(tmp_path / "state_5.sqlite") as conn:
+        conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)")
+        conn.executemany(
+            "INSERT INTO threads (id, model_provider) VALUES (?, ?)",
+            [(target_id, "openai"), (unrelated_id, "openai")],
+        )
+
+    cli.main(
+        [
+            "codex-sessions",
+            "metadata-mismatches",
+            "--provider",
+            "codex-lb",
+            "--codex-home",
+            str(tmp_path),
+            "--json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["session_id"] for item in payload["mismatches"]] == [target_id]
+    assert payload["mismatches"][0]["jsonl_paths"] == []
+    assert payload["mismatches"][0]["sqlite_db_paths"] == [str(tmp_path / "state_5.sqlite")]
+
+
+def test_codex_sessions_metadata_mismatches_rejects_unsupported_active_provider(tmp_path):
+    with pytest.raises(SystemExit, match="unsupported active provider bogus"):
+        cli.main(
+            [
+                "codex-sessions",
+                "metadata-mismatches",
+                "--provider",
+                "bogus",
+                "--codex-home",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+
+
+def test_codex_sessions_repair_metadata_streams_progress_to_stderr_with_json(capsys, tmp_path):
+    session_id = "019f7249-90ee-74c0-a0e6-42117e80bc7f"
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "target.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": session_id, "model_provider": "codex-lb"}}) + "\n",
+        encoding="utf-8",
+    )
+    with sqlite3.connect(tmp_path / "state_5.sqlite") as conn:
+        conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)")
+        conn.execute(
+            "INSERT INTO threads (id, model_provider) VALUES (?, ?)",
+            (session_id, "openai"),
+        )
+
+    cli.main(
+        [
+            "codex-sessions",
+            "repair-metadata",
+            "--provider",
+            "codex-lb",
+            "--session-id",
+            session_id,
+            "--codex-home",
+            str(tmp_path),
+            "--yes",
+            "--json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["session_ids"] == [session_id]
+    assert payload["sqlite_rows_updated"] == 1
+    assert PROGRESS_PREFIX in captured.err
 
 
 def test_utc_default_formatter_formats_without_converter_binding_error():

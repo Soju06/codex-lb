@@ -396,6 +396,8 @@ def _verify_durable_full_resend(
     if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
         return None
     return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+
+
 def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:
     """Return whether an ambiguous anchored turn may fall back to client replay.
 
@@ -1822,8 +1824,7 @@ class _HTTPBridgeStreamingMixin:
             prior_operation_id = request_state.operation_id if preserve_operation_identity else None
             prior_operation_fingerprint = request_state.operation_fingerprint if preserve_operation_identity else None
             prior_operation_parent_response_id = (
-                request_state.operation_parent_response_id
-                or request_state.previous_response_id
+                request_state.operation_parent_response_id or request_state.previous_response_id
                 if preserve_operation_identity
                 else None
             )
@@ -3358,15 +3359,11 @@ class _HTTPBridgeStreamingMixin:
                     request_state.request_id,
                     exc.error_code,
                 )
-                if (
-                    getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
-                        "fail_closed",
-                    )
-                    == "server_indefinite_recovery"
-                    and _http_bridge_server_anchored_replay_enabled(request_state)
-                ):
+                if getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+                    "fail_closed",
+                ) == "server_indefinite_recovery" and _http_bridge_server_anchored_replay_enabled(request_state):
                     # Let the outer server-owned recovery loop classify this
                     # eventless transport failure as retryable. Returning a
                     # synthetic response.failed event would make the loop

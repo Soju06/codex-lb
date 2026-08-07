@@ -232,9 +232,7 @@ async def _record_http_bridge_account_timeout_signal(
     async with service._http_bridge_account_timeout_lock:
         failures = service._http_bridge_account_timeout_failures.setdefault(account_id, [])
         failures[:] = [
-            timestamp
-            for timestamp in failures
-            if now - timestamp < _HTTP_BRIDGE_ACCOUNT_TIMEOUT_WINDOW_SECONDS
+            timestamp for timestamp in failures if now - timestamp < _HTTP_BRIDGE_ACCOUNT_TIMEOUT_WINDOW_SECONDS
         ]
         failures.append(now)
         if len(failures) < _HTTP_BRIDGE_ACCOUNT_TIMEOUT_EJECTION_THRESHOLD:
@@ -884,20 +882,14 @@ class _HTTPBridgeUpstreamEventsMixin:
         # event-batcher contexts still belong to the disconnected operation
         # and must be discarded just like ordinary pending requests.
         operation_states: list[Any] = [
-            request_state
-            for request_state in pending_request_states
-            if getattr(request_state, "operation_id", None)
+            request_state for request_state in pending_request_states if getattr(request_state, "operation_id", None)
         ]
         for request_state in operation_states:
             # A shared websocket can carry several logical response.create
             # requests. Classify each operation from its own event count;
             # using the session-wide maximum would mark an eventless
             # sibling as safely retryable after another request streamed.
-            operation_state = (
-                "unknown"
-                if getattr(request_state, "response_event_count", 0) == 0
-                else "acknowledged"
-            )
+            operation_state = "unknown" if getattr(request_state, "response_event_count", 0) == 0 else "acknowledged"
             await _update_http_bridge_operation_state(
                 self,
                 session,
@@ -2515,10 +2507,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                 await _persist_http_bridge_operation_event(
                     self,
                     session,
-                        terminal_request_state,
-                        event_block,
-                        terminal=True,
-                    )
+                    terminal_request_state,
+                    event_block,
+                    terminal=True,
+                )
             if terminal_event_queue is not None:
                 await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:

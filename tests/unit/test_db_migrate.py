@@ -2183,24 +2183,30 @@ def test_http_bridge_operation_migrations_round_trip_existing_rows_and_rebuild_s
             inspector = inspect(connection)
             assert inspector.has_table("http_bridge_operations")
             assert not inspector.has_table("http_bridge_operation_events")
-            assert connection.execute(
-                text(
-                    "SELECT request_fingerprint FROM http_bridge_operations "
-                    "WHERE operation_id = 'migration-operation'"
-                )
-            ).scalar_one() == "migration-fingerprint"
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT request_fingerprint FROM http_bridge_operations "
+                        "WHERE operation_id = 'migration-operation'"
+                    )
+                ).scalar_one()
+                == "migration-fingerprint"
+            )
 
         command.upgrade(config, "head")
         with engine.connect() as connection:
             inspector = inspect(connection)
             operation_columns = {column["name"] for column in inspector.get_columns("http_bridge_operations")}
             assert {"request_text", "event_bytes", "event_spool_complete"} <= operation_columns
-            assert connection.execute(
-                text(
-                    "SELECT event_spool_complete FROM http_bridge_operations "
-                    "WHERE operation_id = 'migration-operation'"
-                )
-            ).scalar_one() == 0
+            assert (
+                connection.execute(
+                    text(
+                        "SELECT event_spool_complete FROM http_bridge_operations "
+                        "WHERE operation_id = 'migration-operation'"
+                    )
+                ).scalar_one()
+                == 0
+            )
             assert inspector.has_table("http_bridge_operation_events")
     finally:
         engine.dispose()

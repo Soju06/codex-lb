@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.config.settings import get_settings
 from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationEventInput
 
 logger = logging.getLogger("app.modules.proxy.http_bridge_event_batcher")
@@ -29,6 +30,29 @@ class HttpBridgeOperationEventBatcher:
     queue overflow therefore loses optional transcript data, never upstream
     work safety.
     """
+
+    @classmethod
+    def from_settings(cls, durable_bridge: Any, settings: Any | None = None) -> "HttpBridgeOperationEventBatcher":
+        """Build the event spooler from the operator-facing settings surface."""
+        settings = settings or get_settings()
+        return cls(
+            durable_bridge,
+            max_bytes=int(
+                getattr(settings, "http_responses_session_bridge_operation_event_spool_max_bytes", 2 * 1024 * 1024)
+            ),
+            batch_size=int(getattr(settings, "http_responses_session_bridge_operation_event_spool_batch_size", 32)),
+            flush_interval_seconds=float(
+                getattr(settings, "http_responses_session_bridge_operation_event_spool_flush_interval_seconds", 0.1)
+            ),
+            max_pending_events=int(
+                getattr(settings, "http_responses_session_bridge_operation_event_spool_max_pending_events", 2048)
+            ),
+            max_pending_bytes=int(
+                getattr(
+                    settings, "http_responses_session_bridge_operation_event_spool_max_pending_bytes", 32 * 1024 * 1024
+                )
+            ),
+        )
 
     def __init__(
         self,

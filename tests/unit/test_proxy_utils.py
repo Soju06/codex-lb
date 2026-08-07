@@ -2507,9 +2507,10 @@ async def test_resolve_websocket_previous_response_owner_force_refresh_replaces_
 
     assert owner == "acc_authoritative"
     assert request_logs.lookup_calls == [("resp_force_refresh", None, "sid-force-refresh")]
-    assert service._websocket_previous_response_account_index[
-        ("resp_force_refresh", None, "sid-force-refresh")
-    ] == "acc_authoritative"
+    assert (
+        service._websocket_previous_response_account_index[("resp_force_refresh", None, "sid-force-refresh")]
+        == "acc_authoritative"
+    )
 
 
 @pytest.mark.asyncio
@@ -42274,6 +42275,7 @@ def test_maybe_dump_oversized_response_create_dedups_via_product_path(monkeypatc
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     original_text = json.dumps(
         {
@@ -42362,6 +42364,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
 @pytest.mark.asyncio
 async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replayed(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_submit_network_failure",
@@ -42436,6 +42439,7 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_checks_queue_before_inlining(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_submit_queue_full_inline",

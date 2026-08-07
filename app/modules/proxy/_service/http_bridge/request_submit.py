@@ -966,7 +966,13 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                     == "server_indefinite_recovery"
                 )
-                if indefinite_recovery and operation.state not in {"completed", "incomplete"}:
+                async with session.pending_lock:
+                    same_operation_pending = any(
+                        pending_request is not request_state
+                        and getattr(pending_request, "operation_id", None) == operation.operation_id
+                        for pending_request in session.pending_requests
+                    )
+                if indefinite_recovery and operation.state == "unknown" and not same_operation_pending:
                     # A previous owner may have persisted a partial sequence
                     # before its socket died.  A server-owned retry must not
                     # append a second attempt to that transcript; reset the
@@ -1001,8 +1007,10 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.operation_registered = True
                 else:
                     # A prior dispatch with the same parent and body may have
-                    # been accepted by upstream. Without upstream
-                    # idempotency/status proof, never submit it a second time.
+                    # been accepted by upstream, or another request may still
+                    # be using the same operation in this session. Without
+                    # upstream idempotency/status proof, never submit it a
+                    # second time.
                     _record_continuity_fail_closed(
                         surface="http_bridge",
                         reason="operation_already_recorded_no_status_proof",

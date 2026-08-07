@@ -30,6 +30,7 @@
 - [x] 1.27 Replay finalized incomplete operations without resetting their terminal spool.
 - [x] 1.28 Return reservation settlement status to timeout health handling.
 - [x] 1.29 Revalidate the final response.create frame after operation metadata injection.
+- [x] 1.30 Require an inactive unknown operation before same-session recovery reset.
 
 ## 2. Validation
 

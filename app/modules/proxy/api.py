@@ -5133,12 +5133,18 @@ async def _stream_responses(
             startup_error,
             headers=rate_limit_headers,
         )
+    # Server-indefinite recovery is only safe for an explicitly anchored
+    # continuation. Fresh first-turn requests have no durable parent
+    # operation to fence, so do not install the recovery loop for them.
+    recovery_stream_factory = (
+        build_recovery_response_stream if prefer_http_bridge and payload.previous_response_id is not None else None
+    )
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
             stream,
             owns_reservation=owns_reservation,
             reservation=reservation,
-            recovery_stream_factory=build_recovery_response_stream if prefer_http_bridge else None,
+            recovery_stream_factory=recovery_stream_factory,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
@@ -6227,8 +6233,11 @@ async def _stream_response_error_events(
     reservation: ApiKeyUsageReservationData | None,
     recovery_stream_factory: Callable[[], AsyncIterator[str]] | None = None,
 ) -> AsyncIterator[str]:
+    saw_downstream_event = False
     try:
         async for line in stream:
+            if line.startswith("data:") or line.startswith("event:"):
+                saw_downstream_event = True
             yield line
     except ProxyResponseError as exc:
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
@@ -6239,6 +6248,7 @@ async def _stream_response_error_events(
         if (
             recovery_stream_factory is not None
             and indefinite_recovery
+            and not saw_downstream_event
             and error_code
             in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
         ):
@@ -6267,6 +6277,20 @@ async def _stream_response_error_events(
                         exc = retry_exc
                         break
                     retry_delay = max(1.0, min(30.0, float(retry_exc.retry_after_seconds or retry_delay)))
+                except (ProxyRateLimitError, ProxyAuthError) as retry_limit_exc:
+                    # A quota revocation or limit can happen between recovery
+                    # attempts. Convert it into the same terminal SSE shape
+                    # as other proxy failures instead of aborting an already
+                    # started response stream without a response.failed event.
+                    exc = ProxyResponseError(
+                        retry_limit_exc.status_code,
+                        openai_error(
+                            retry_limit_exc.code,
+                            retry_limit_exc.message,
+                            error_type=getattr(retry_limit_exc, "error_type", "server_error"),
+                        ),
+                    )
+                    break
         if owns_reservation:
             try:
                 await _release_reservation(reservation)

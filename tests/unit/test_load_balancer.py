@@ -17,6 +17,7 @@ from app.core.balancer import (
     RATE_LIMIT_RESET_MAX_HORIZON_SECONDS,
     RATE_LIMITED_MIN_COOLDOWN_SECONDS,
     ROUTING_POLICY_PRESERVE,
+    TRAFFIC_CLASS_OPPORTUNISTIC,
     AccountState,
     RoutingCost,
     handle_permanent_failure,
@@ -343,6 +344,349 @@ def test_budget_safe_selection_applies_burn_first_after_health_tier_filtering():
     assert result.account.account_id == "normal"
 
 
+def test_fresh_selection_allows_usage_draining_burn_first_with_healthy_fallback():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+
+
+def test_usage_draining_fallback_probe_avoids_discarded_relative_availability_choice(monkeypatch):
+    choices = MagicMock(side_effect=lambda states, *, weights, k: [states[0]])
+    winner_log = MagicMock()
+    monkeypatch.setattr("app.core.balancer.logic.random.choices", choices)
+    monkeypatch.setattr("app.core.balancer.logic._log_relative_availability_winner", winner_log)
+    now = time.time()
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=98.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+            capacity_credits=100.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="relative_availability",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+    choices.assert_called_once()
+    winner_log.assert_called_once()
+
+
+def test_healthy_burn_first_fallback_winner_is_returned_without_redraw(monkeypatch):
+    choices = MagicMock(
+        side_effect=lambda states, *, weights, k: [next(state for state in states if state.account_id == "healthy-a")]
+    )
+    winner_log = MagicMock()
+    monkeypatch.setattr("app.core.balancer.logic.random.choices", choices)
+    monkeypatch.setattr("app.core.balancer.logic._log_relative_availability_winner", winner_log)
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy-a",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+        AccountState(
+            "healthy-b",
+            AccountStatus.ACTIVE,
+            used_percent=30.0,
+            secondary_used_percent=30.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+        AccountState(
+            "draining",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            secondary_used_percent=98.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+            capacity_credits=100.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="relative_availability",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "healthy-a"
+    assert result.account.health_tier == HEALTH_TIER_HEALTHY
+    choices.assert_called_once()
+    winner_log.assert_called_once()
+
+
+def test_no_usage_draining_candidate_skips_relative_availability_fallback_probe(monkeypatch):
+    choices = MagicMock(side_effect=lambda states, *, weights, k: [states[0]])
+    winner_log = MagicMock()
+    monkeypatch.setattr("app.core.balancer.logic.random.choices", choices)
+    monkeypatch.setattr("app.core.balancer.logic._log_relative_availability_winner", winner_log)
+    now = time.time()
+    states = [
+        AccountState(
+            "normal-a",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+        AccountState(
+            "normal-b",
+            AccountStatus.ACTIVE,
+            used_percent=30.0,
+            secondary_used_percent=30.0,
+            secondary_reset_at=int(now + 3600),
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+            capacity_credits=100.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="relative_availability",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal-a"
+    choices.assert_called_once()
+    winner_log.assert_called_once()
+
+
+def test_opportunistic_fresh_selection_preserves_fallback_context_for_usage_draining_burn_first():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+    assert result.account.health_tier == HEALTH_TIER_DRAINING
+
+
+def test_opportunistic_single_usage_draining_burn_first_keeps_emergency_floor_policy():
+    states = [
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=86.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        )
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+
+
+def test_fresh_selection_excludes_error_draining_burn_first():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+            error_count=3,
+            last_error_at=time.time(),
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
+
+
+def test_fresh_selection_without_healthy_fallback_preserves_last_resort_behavior():
+    states = [
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        )
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "burn"
+
+
+def test_fresh_selection_excludes_fully_exhausted_burn_first():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=100.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
+
+
+def test_usage_draining_burn_first_exception_does_not_override_single_account_strategy():
+    states = [
+        AccountState(
+            "normal",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "burn",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="single_account",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "normal"
+
+
 def test_due_probe_precedes_healthy_burn_first_policy():
     now = time.time()
     states = [
@@ -368,6 +712,45 @@ def test_due_probe_precedes_healthy_burn_first_policy():
         prefer_earlier_reset=False,
         routing_strategy="usage_weighted",
         budget_threshold_pct=95.0,
+    )
+
+    assert result.account is not None
+    assert result.account.account_id == "due-probe"
+
+
+def test_due_probe_precedes_usage_draining_burn_first_exception():
+    now = time.time()
+    states = [
+        AccountState(
+            "healthy-fallback",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_HEALTHY,
+        ),
+        AccountState(
+            "usage-draining-burn-first",
+            AccountStatus.ACTIVE,
+            used_percent=98.0,
+            routing_policy="burn_first",
+            health_tier=HEALTH_TIER_DRAINING,
+        ),
+        AccountState(
+            "due-probe",
+            AccountStatus.ACTIVE,
+            used_percent=10.0,
+            routing_policy="normal",
+            health_tier=HEALTH_TIER_PROBING,
+            last_selected_at=now - PROBE_QUIET_SECONDS - 1.0,
+        ),
+    ]
+
+    result = _select_account_preferring_budget_safe(
+        states,
+        prefer_earlier_reset=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+        allow_usage_draining_burn_first=True,
     )
 
     assert result.account is not None

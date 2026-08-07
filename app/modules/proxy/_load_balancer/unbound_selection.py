@@ -62,6 +62,7 @@ class UnboundSelectionRequest(Generic[SelectionInputsT]):
     relative_availability_power: float
     relative_availability_top_k: int
     required_account_id: str | None
+    require_unambiguous_account: bool
     budget_threshold_pct: float
     secondary_budget_threshold_pct: float
     routing_costs_by_account_id: RoutingCostsByAccount | None
@@ -102,6 +103,7 @@ async def run_unbound_selection_path(
     relative_availability_power = request.relative_availability_power
     relative_availability_top_k = request.relative_availability_top_k
     required_account_id = request.required_account_id
+    require_unambiguous_account = request.require_unambiguous_account
     budget_threshold_pct = request.budget_threshold_pct
     secondary_budget_threshold_pct = request.secondary_budget_threshold_pct
     routing_costs_by_account_id = request.routing_costs_by_account_id
@@ -213,6 +215,7 @@ async def run_unbound_selection_path(
                     traffic_class=traffic_class,
                     ignore_standard_quota=False,
                     routing_costs_by_account_id=effective_routing_costs,
+                    allow_usage_draining_burn_first=(required_account_id is None and not require_unambiguous_account),
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                     usage_exhaustion_states=states,
                 )

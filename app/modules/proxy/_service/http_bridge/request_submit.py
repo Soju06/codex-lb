@@ -1090,6 +1090,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 "HTTP response recovery ownership changed; retry the request.",
                             ),
                         )
+                    request_state.operation_recovery_claimed = True
                     # The operation remains fenced to one durable identity.
                     # One-shot mode consumes its existing replay-count budget;
                     # indefinite mode may make further serialized attempts
@@ -1997,6 +1998,32 @@ class _HTTPBridgeRequestSubmitMixin:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
             retire_closed_session = session.closed and session.admission_waiter_count == 0
         if (
+            request_state.operation_recovery_claimed
+            and request_state.operation_registered
+            and request_state.operation_id is not None
+            and not request_state.operation_dispatched
+            and session.durable_session_id is not None
+            and session.durable_owner_epoch is not None
+        ):
+            mark_operation_unknown = getattr(self._durable_bridge, "mark_operation_unknown", None)
+            restored = False
+            if callable(mark_operation_unknown):
+                try:
+                    restored = await mark_operation_unknown(
+                        operation_id=request_state.operation_id,
+                        session_id=session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=session.durable_owner_epoch,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to restore pre-dispatch HTTP bridge recovery operation UNKNOWN operation_id=%s",
+                        request_state.operation_id,
+                        exc_info=True,
+                    )
+            if restored:
+                request_state.operation_recovery_claimed = False
+        elif (
             request_state.operation_created
             and request_state.operation_registered
             and request_state.operation_id is not None
@@ -3009,6 +3036,41 @@ class _HTTPBridgeRequestSubmitMixin:
                             session.account.id,
                             kind=previous_session_affinity.kind,
                         )
+            if (
+                request_state.operation_registered
+                and request_state.operation_id is not None
+                and request_state.operation_fingerprint is not None
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+            ):
+                record_operation = getattr(self._durable_bridge, "record_operation", None)
+                if not callable(record_operation):
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "Security-work recovery operation could not be re-fenced; retry the request.",
+                        ),
+                    )
+                rebound_operation = await record_operation(
+                    operation_id=request_state.operation_id,
+                    session_id=session.durable_session_id,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    owner_epoch=session.durable_owner_epoch,
+                    request_fingerprint=request_state.operation_fingerprint,
+                    api_key_scope=durable_bridge_api_key_scope(session.key.api_key_id),
+                    account_id=session.account.id,
+                    model=request_state.model,
+                    parent_response_id=request_state.operation_parent_response_id or request_state.previous_response_id,
+                )
+                if rebound_operation is None or getattr(rebound_operation, "state", None) != "submitted":
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "Security-work recovery operation could not be re-fenced; retry the request.",
+                        ),
+                    )
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
             await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
             session.last_used_at = _service_time().monotonic()

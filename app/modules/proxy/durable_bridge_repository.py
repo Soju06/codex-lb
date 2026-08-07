@@ -1477,19 +1477,26 @@ class DurableBridgeRepository:
                 select(HttpBridgeSessionRecord.id).where(
                     HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
                     stale_owner,
-                )
+                ).correlate(HttpBridgeOperationRecord)
             ),
         )
         purgeable = or_(HttpBridgeOperationRecord.state.in_(terminal_states), stale_nonterminal)
         async with sqlite_writer_section():
             selected = await self._session.execute(
-                select(HttpBridgeOperationRecord.operation_id)
+                select(HttpBridgeOperationRecord)
+                .join(
+                    HttpBridgeSessionRecord,
+                    HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                )
                 .where(HttpBridgeOperationRecord.updated_at < cutoff, purgeable)
                 .order_by(HttpBridgeOperationRecord.updated_at.asc())
                 .limit(batch_size)
                 .with_for_update()
             )
-            operation_ids = [str(value) for value in selected.scalars().all()]
+            # The joined FOR UPDATE locks both the operation and owning
+            # session on PostgreSQL, serializing retention deletion with
+            # claim_session() on the same continuity row.
+            operation_ids = [str(operation.operation_id) for operation in selected.scalars().all()]
             if not operation_ids:
                 await self._session.commit()
                 return 0

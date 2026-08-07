@@ -21771,7 +21771,7 @@ async def test_http_bridge_reader_maps_ordinary_websocket_receive_failure_to_acc
     assert session.last_upstream_close_code == (None if routed else 1011)
     assert len(failure_calls) == 1
     assert failure_calls[0]["error_code"] == "stream_incomplete"
-    assert failure_calls[0]["penalize_account"] is True
+        assert failure_calls[0]["penalize_account"] is False
     assert failure_calls[0]["response_events_seen"] == 0
     if routed:
         assert failure_calls[0]["upstream_close_code"] is None

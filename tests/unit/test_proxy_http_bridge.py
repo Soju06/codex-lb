@@ -99,6 +99,9 @@ def test_http_bridge_operation_metadata_is_stable_and_non_destructive() -> None:
     assert decoded["previous_response_id"] == "resp_parent"
     assert decoded["client_metadata"] == {"codex_lb_operation_id": "op_test"}
     assert http_bridge_request_submit_module._text_with_operation_id(with_operation, "op_test") == with_operation
+    supplied = '{"type":"response.create","client_metadata":{"codex_lb_operation_id":"caller-value"}}'
+    supplied_result = json.loads(http_bridge_request_submit_module._text_with_operation_id(supplied, "op_test"))
+    assert supplied_result["client_metadata"]["codex_lb_operation_id"] == "op_test"
 
 
 def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_anchor(

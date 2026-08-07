@@ -1238,6 +1238,7 @@ class _HTTPBridgeStreamingMixin:
         durable_recovery_attempt_claimed = False
         durable_recovery_attempt_session_id: str | None = None
         durable_recovery_attempt_owner_epoch: int | None = None
+        durable_recovery_fresh_replay = False
         durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
@@ -1817,7 +1818,7 @@ class _HTTPBridgeStreamingMixin:
             nonlocal text_data
             nonlocal untrimmed_effective_payload
 
-            preserve_operation_identity = durable_recovery_attempt_claimed
+            preserve_operation_identity = durable_recovery_attempt_claimed or durable_recovery_fresh_replay
             prior_operation_id = request_state.operation_id if preserve_operation_identity else None
             prior_operation_fingerprint = request_state.operation_fingerprint if preserve_operation_identity else None
             prior_operation_parent_response_id = (

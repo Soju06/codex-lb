@@ -380,6 +380,12 @@ class ApiKeysRepository:
     async def commit(self) -> None:
         await self._session.commit()
 
+    async def update_last_used(self, key_id: str, *, commit: bool = True) -> None:
+        """Compatibility touch for maintenance and durability checks."""
+        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
+        if commit:
+            await self._session.commit()
+
     async def rollback(self) -> None:
         await self._session.rollback()
 

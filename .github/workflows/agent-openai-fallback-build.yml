@@ -77,9 +77,8 @@ jobs:
           # anchor and are patched one occurrence per call.
           sed -i 's/if count != 1:/if count < 1:/' scripts/agent_apply_openai_fallback.py
 
-          # The first draft used a generic `payload.stream` anchor for the
-          # non-streaming collector. Pin it to the collector's turn-state block
-          # so it cannot accidentally patch the streaming helper instead.
+          # Pin the non-streaming collector patch to its turn-state block so
+          # it cannot accidentally patch the streaming helper instead.
           uv run python - <<'PY'
           from pathlib import Path
 
@@ -104,9 +103,9 @@ jobs:
             ALEMBIC_HEAD="$ALEMBIC_HEAD" run uv run python scripts/agent_apply_openai_fallback.py || status=$?
           fi
 
-          # Startup probing may return either the exception itself or an
-          # already-parsed OpenAI error envelope. Keep the trigger exact in
-          # either representation.
+          # Startup probing returns the OpenAI-model error envelope, while a
+          # direct exception still carries the raw proxy payload. Normalize
+          # both before checking the exact aggregate usage-limit code.
           if [ "$status" -eq 0 ]; then
             run uv run python - <<'PY' || status=$?
           from pathlib import Path
@@ -118,7 +117,7 @@ jobs:
               error = envelope.error
               return error is not None and (error.code == USAGE_LIMIT_REACHED or error.type == USAGE_LIMIT_REACHED)
           '''
-          new = '''def _is_usage_limit_proxy_error(exc: ProxyResponseError | OpenAIErrorEnvelope) -> bool:
+          new = '''def _is_usage_limit_proxy_error(exc: ProxyResponseError | OpenAIErrorEnvelopeModel) -> bool:
               envelope = _parse_error_envelope(exc.payload) if isinstance(exc, ProxyResponseError) else exc
               error = envelope.error
               return error is not None and (error.code == USAGE_LIMIT_REACHED or error.type == USAGE_LIMIT_REACHED)

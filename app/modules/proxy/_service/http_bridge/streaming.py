@@ -2938,7 +2938,10 @@ class _HTTPBridgeStreamingMixin:
                         session,
                         error_code="stream_incomplete",
                         error_message="Upstream websocket closed before response.completed",
-                        preserve_durable_lease=True,
+                        # The retry is moving to a new account-neutral durable
+                        # session. Release the origin lease so record_operation
+                        # can atomically hand off the nonterminal operation.
+                        preserve_durable_lease=False,
                     )
                     switch_to_account_neutral_replay()
                     request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
@@ -3194,6 +3197,11 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.operation_parent_response_id = request_state.operation_parent_response_id
                 retry_request_state.operation_registered = request_state.operation_registered
                 retry_request_state.operation_rebind_required = request_state.operation_rebind_required
+                if recovery_path == "local_previous_response_error":
+                    # The prior response.failed/error made the operation
+                    # terminal. Re-enter record_operation so its owner fence
+                    # atomically moves it back to submitted before send.
+                    retry_request_state.operation_rebind_required = True
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if durable_recovery_fresh_replay and durable_recovery_attempt_fingerprint is not None:
                     retry_request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint

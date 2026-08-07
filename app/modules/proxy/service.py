@@ -937,13 +937,36 @@ class ProxyService(
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
+        bridge_settings = get_settings()
         self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher(
             self._durable_bridge,
-            max_bytes=get_settings().http_responses_session_bridge_operation_event_spool_max_bytes,
-            batch_size=get_settings().http_responses_session_bridge_operation_event_spool_batch_size,
-            flush_interval_seconds=get_settings().http_responses_session_bridge_operation_event_spool_flush_interval_seconds,
-            max_pending_events=get_settings().http_responses_session_bridge_operation_event_spool_max_pending_events,
-            max_pending_bytes=get_settings().http_responses_session_bridge_operation_event_spool_max_pending_bytes,
+            max_bytes=int(
+                getattr(
+                    bridge_settings,
+                    "http_responses_session_bridge_operation_event_spool_max_bytes",
+                    2 * 1024 * 1024,
+                )
+            ),
+            batch_size=int(
+                getattr(bridge_settings, "http_responses_session_bridge_operation_event_spool_batch_size", 32)
+            ),
+            flush_interval_seconds=float(
+                getattr(
+                    bridge_settings,
+                    "http_responses_session_bridge_operation_event_spool_flush_interval_seconds",
+                    0.1,
+                )
+            ),
+            max_pending_events=int(
+                getattr(bridge_settings, "http_responses_session_bridge_operation_event_spool_max_pending_events", 2048)
+            ),
+            max_pending_bytes=int(
+                getattr(
+                    bridge_settings,
+                    "http_responses_session_bridge_operation_event_spool_max_pending_bytes",
+                    32 * 1024 * 1024,
+                )
+            ),
         )
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}

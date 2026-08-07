@@ -75,3 +75,17 @@ If upstream has acknowledged a response but local continuity-alias persistence
 fails, the downstream error MUST NOT transition the durable operation to a
 retryable failed state. The operation MUST remain acknowledged/ambiguous so an
 identical retry cannot dispatch a duplicate upstream turn.
+
+### Requirement: Cross-session nonterminal handoff
+
+When a scoped operation fingerprint is found under a different durable
+session, a nonterminal operation MUST be atomically rebound to the currently
+owned session before its event spool is reset or a recovery attempt is sent.
+Completed replayable operations MUST remain attached to their original
+session.
+
+### Requirement: Lease-aware operation retention
+
+Retention MUST NOT delete stale submitted or acknowledged operations while
+their session is actively owned with an unexpired lease. The owner/lease
+predicate MUST be rechecked in the deletion transaction.

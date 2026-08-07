@@ -4161,9 +4161,7 @@ class _WebSocketMixin:
         session_id_value = _facade()._normalize_session_id(session_id)
         cache_key = (response_id, api_key_id, session_id_value)
         cached_account_id = (
-            None
-            if force_request_log_lookup
-            else proxy._websocket_previous_response_account_index.get(cache_key)
+            None if force_request_log_lookup else proxy._websocket_previous_response_account_index.get(cache_key)
         )
         if cached_account_id is not None:
             _record_lookup_metadata(source="request_cache", outcome="hit")

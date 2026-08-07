@@ -1031,9 +1031,11 @@ class _HTTPBridgeRequestSubmitMixin:
             if not operation.created:
                 if operation.state in {"completed", "incomplete"} and getattr(operation, "event_spool_complete", False):
                     get_operation_events = getattr(self._durable_bridge, "get_operation_events", None)
-                    replay_events = await get_operation_events(operation_id=operation.operation_id) if callable(
-                        get_operation_events
-                    ) else []
+                    replay_events = (
+                        await get_operation_events(operation_id=operation.operation_id)
+                        if callable(get_operation_events)
+                        else []
+                    )
                     if replay_events and request_state.event_queue is not None:
                         request_state.operation_replay = True
                         request_state.operation_id = operation.operation_id

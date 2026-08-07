@@ -5283,8 +5283,7 @@ async def _collect_responses(
             error,
             default_status=exc.status_code,
             allow_client_full_history_once=(
-                bridge_recovery_eligible
-                and getattr(exc, "http_bridge_durable_recovery_eligible", False)
+                bridge_recovery_eligible and getattr(exc, "http_bridge_durable_recovery_eligible", False)
             ),
         )
         return _logged_error_json_response(
@@ -6316,10 +6315,7 @@ async def _stream_response_error_events(
         if (
             recovery_stream_factory is not None
             and indefinite_recovery
-            and (
-                not require_durable_recovery_fence
-                or getattr(exc, "http_bridge_durable_recovery_eligible", False)
-            )
+            and (not require_durable_recovery_fence or getattr(exc, "http_bridge_durable_recovery_eligible", False))
             and not saw_downstream_event
             and error_code
             in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
@@ -6344,14 +6340,19 @@ async def _stream_response_error_events(
                     retry_code = (
                         retry_exc.payload.get("error", {}).get("code") if isinstance(retry_exc.payload, dict) else None
                     )
-                    if retry_code not in {
-                        "stream_incomplete",
-                        "stream_idle_timeout",
-                        "upstream_request_timeout",
-                        "upstream_unavailable",
-                    } or retry_saw_downstream_event or (
-                        require_durable_recovery_fence
-                        and not getattr(retry_exc, "http_bridge_durable_recovery_eligible", False)
+                    if (
+                        retry_code
+                        not in {
+                            "stream_incomplete",
+                            "stream_idle_timeout",
+                            "upstream_request_timeout",
+                            "upstream_unavailable",
+                        }
+                        or retry_saw_downstream_event
+                        or (
+                            require_durable_recovery_fence
+                            and not getattr(retry_exc, "http_bridge_durable_recovery_eligible", False)
+                        )
                     ):
                         exc = retry_exc
                         break
@@ -6380,8 +6381,7 @@ async def _stream_response_error_events(
             envelope,
             default_status=exc.status_code,
             allow_client_full_history_once=(
-                allow_client_full_history_once
-                and getattr(exc, "http_bridge_durable_recovery_eligible", False)
+                allow_client_full_history_once and getattr(exc, "http_bridge_durable_recovery_eligible", False)
             ),
         )
         error = envelope.error
@@ -6416,8 +6416,7 @@ def _stream_startup_error_response(
             envelope,
             default_status=error.status_code,
             allow_client_full_history_once=(
-                allow_client_full_history_once
-                and getattr(error, "http_bridge_durable_recovery_eligible", False)
+                allow_client_full_history_once and getattr(error, "http_bridge_durable_recovery_eligible", False)
             ),
         )
         startup_headers = dict(headers)
@@ -8052,10 +8051,9 @@ def _http_bridge_recovery_request_eligible(payload: ResponsesRequest, *, bridge_
     settings = proxy_service_module.get_settings()
     if not getattr(settings, "http_responses_session_bridge_operation_ledger_enabled", True):
         return False
-    if (
-        proxy_service_module._responses_request_contains_input_image(payload)
-        or proxy_service_module._responses_request_uses_image_generation(payload)
-    ):
+    if proxy_service_module._responses_request_contains_input_image(
+        payload
+    ) or proxy_service_module._responses_request_uses_image_generation(payload):
         return False
     payload_bytes = len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
     return payload_bytes <= proxy_service_module._ws_transport_payload_budget_bytes(settings)

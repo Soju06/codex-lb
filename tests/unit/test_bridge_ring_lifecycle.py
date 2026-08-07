@@ -640,7 +640,7 @@ async def test_operation_ledger_is_fenced_and_idempotent(
             session_id=claim.id,
             instance_id="inst-operation-ledger",
             owner_epoch=claim.owner_epoch,
-            event_text="data: {\"type\":\"response.completed\"}\n\n",
+            event_text='data: {"type":"response.completed"}\n\n',
             max_bytes=1024,
         )
         # Repeated identical SSE blocks are distinct downstream occurrences,
@@ -650,12 +650,12 @@ async def test_operation_ledger_is_fenced_and_idempotent(
             session_id=claim.id,
             instance_id="inst-operation-ledger",
             owner_epoch=claim.owner_epoch,
-            event_text="data: {\"type\":\"response.completed\"}\n\n",
+            event_text='data: {"type":"response.completed"}\n\n',
             max_bytes=1024,
         )
         assert await repository.get_operation_events(operation_id=operation_id) == [
-            "data: {\"type\":\"response.completed\"}\n\n",
-            "data: {\"type\":\"response.completed\"}\n\n",
+            'data: {"type":"response.completed"}\n\n',
+            'data: {"type":"response.completed"}\n\n',
         ]
         # A missing parent turn makes the chain ineligible rather than
         # silently constructing an incomplete conversation.
@@ -690,7 +690,7 @@ async def test_operation_retry_reset_clears_partial_spool(
             session_id=claim.id,
             instance_id="inst-operation-reset",
             owner_epoch=claim.owner_epoch,
-            event_text="data: {\"type\":\"response.output_text.delta\"}\n\n",
+            event_text='data: {"type":"response.output_text.delta"}\n\n',
             max_bytes=1024,
         )
         assert await repository.reset_operation_event_spool(
@@ -733,7 +733,7 @@ async def test_unknown_operation_recovery_claim_is_atomic_and_single_use(
             session_id=claim.id,
             instance_id="inst-operation-claim",
             owner_epoch=claim.owner_epoch,
-            event_text="data: {\"type\":\"response.output_text.delta\"}\n\n",
+            event_text='data: {"type":"response.output_text.delta"}\n\n',
             max_bytes=1024,
         )
         assert await repository.mark_operation_unknown(

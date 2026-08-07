@@ -90,12 +90,12 @@ async def test_indefinite_recovery_does_not_retry_after_downstream_event(monkeyp
         ),
     )
 
-    def recovery() -> AsyncIterator[str]:
+    async def recovery() -> AsyncIterator[str]:
         raise AssertionError("recovery must not run after a downstream event")
         yield ""
 
     async def stream():
-        yield "data: {\"type\":\"response.created\"}\n\n"
+        yield 'data: {"type":"response.created"}\n\n'
         raise ProxyResponseError(
             502,
             {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},

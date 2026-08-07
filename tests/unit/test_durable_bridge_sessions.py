@@ -2743,6 +2743,7 @@ async def test_startup_retention_normalizes_aware_postgres_timestamps() -> None:
     exhausted = SimpleNamespace(all=lambda: [])
     session = SimpleNamespace(
         execute=AsyncMock(side_effect=[selected, SimpleNamespace(), exhausted]),
+        scalars=AsyncMock(return_value=[]),
         commit=AsyncMock(),
     )
     repository = DurableBridgeRepository(cast(AsyncSession, session))

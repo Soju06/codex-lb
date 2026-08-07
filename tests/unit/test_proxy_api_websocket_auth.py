@@ -649,7 +649,11 @@ def test_public_previous_response_not_found_can_enable_client_full_history_recov
         ),
     )
 
-    status_code, preserved = proxy_api_module._mask_previous_response_not_found_error(envelope, default_status=400)
+    status_code, preserved = proxy_api_module._mask_previous_response_not_found_error(
+        envelope,
+        default_status=400,
+        allow_client_full_history_once=True,
+    )
 
     assert status_code == 400
     assert preserved == envelope

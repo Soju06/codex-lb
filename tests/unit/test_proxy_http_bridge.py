@@ -25637,11 +25637,13 @@ async def test_http_bridge_has_live_local_session_treats_quarantined_as_absent()
         )
         is True
     )
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_eventless_timeout_signal_drains_after_repeated_sessions() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     account = SimpleNamespace(id="acc-eventless-timeouts")
-    session = SimpleNamespace(account=account)
+    session = cast(proxy_service._HTTPBridgeSession, SimpleNamespace(account=account))
     record_errors = AsyncMock()
     service._load_balancer.record_errors = record_errors
 

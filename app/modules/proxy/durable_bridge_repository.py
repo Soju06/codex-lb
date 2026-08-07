@@ -1231,9 +1231,7 @@ class DurableBridgeRepository:
                 await self._session.rollback()
                 return False
             await self._session.execute(
-                delete(HttpBridgeOperationEvent).where(
-                    HttpBridgeOperationEvent.operation_id == operation_id
-                )
+                delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id == operation_id)
             )
             operation.event_bytes = 0
             operation.event_spool_complete = False
@@ -1280,9 +1278,7 @@ class DurableBridgeRepository:
                 await self._session.rollback()
                 return False
             await self._session.execute(
-                delete(HttpBridgeOperationEvent).where(
-                    HttpBridgeOperationEvent.operation_id == operation_id
-                )
+                delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id == operation_id)
             )
             operation.state = "submitted"
             operation.response_id = None
@@ -1474,10 +1470,12 @@ class DurableBridgeRepository:
         stale_nonterminal = and_(
             HttpBridgeOperationRecord.state.in_(nonterminal_states),
             exists(
-                select(HttpBridgeSessionRecord.id).where(
+                select(HttpBridgeSessionRecord.id)
+                .where(
                     HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
                     stale_owner,
-                ).correlate(HttpBridgeOperationRecord)
+                )
+                .correlate(HttpBridgeOperationRecord)
             ),
         )
         purgeable = or_(HttpBridgeOperationRecord.state.in_(terminal_states), stale_nonterminal)
@@ -1694,15 +1692,16 @@ class DurableBridgeRepository:
         request_fingerprint: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         predicates = [
-                HttpBridgeOperationRecord.session_id == session_id,
-                HttpBridgeOperationRecord.parent_response_id == parent_response_id,
-                HttpBridgeOperationRecord.state == "completed",
-                HttpBridgeOperationRecord.response_id.is_not(None),
+            HttpBridgeOperationRecord.session_id == session_id,
+            HttpBridgeOperationRecord.parent_response_id == parent_response_id,
+            HttpBridgeOperationRecord.state == "completed",
+            HttpBridgeOperationRecord.response_id.is_not(None),
         ]
         if request_fingerprint is not None:
             predicates.append(HttpBridgeOperationRecord.request_fingerprint == request_fingerprint)
         operation = await self._session.scalar(
-            select(HttpBridgeOperationRecord).where(*predicates)
+            select(HttpBridgeOperationRecord)
+            .where(*predicates)
             .order_by(HttpBridgeOperationRecord.updated_at.desc())
             .limit(1)
         )
@@ -1722,8 +1721,7 @@ class DurableBridgeRepository:
                 HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
             ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
         operation = await self._session.scalar(
-            statement
-            .where(
+            statement.where(
                 HttpBridgeOperationRecord.parent_response_id == parent_response_id,
                 HttpBridgeOperationRecord.state == "completed",
                 HttpBridgeOperationRecord.response_id.is_not(None),

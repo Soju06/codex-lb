@@ -937,47 +937,11 @@ class ProxyService(
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
-        bridge_settings = get_settings()
-        self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher(
-            self._durable_bridge,
-            max_bytes=int(
-                getattr(
-                    bridge_settings,
-                    "http_responses_session_bridge_operation_event_spool_max_bytes",
-                    2 * 1024 * 1024,
-                )
-            ),
-            batch_size=int(
-                getattr(bridge_settings, "http_responses_session_bridge_operation_event_spool_batch_size", 32)
-            ),
-            flush_interval_seconds=float(
-                getattr(
-                    bridge_settings,
-                    "http_responses_session_bridge_operation_event_spool_flush_interval_seconds",
-                    0.1,
-                )
-            ),
-            max_pending_events=int(
-                getattr(bridge_settings, "http_responses_session_bridge_operation_event_spool_max_pending_events", 2048)
-            ),
-            max_pending_bytes=int(
-                getattr(
-                    bridge_settings,
-                    "http_responses_session_bridge_operation_event_spool_max_pending_bytes",
-                    32 * 1024 * 1024,
-                )
-            ),
-        )
+        self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher.from_settings(self._durable_bridge)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
         _initialize_http_bridge_retry_circuit(self)
-        # Eventless upstream timeouts are ambiguous for an individual
-        # response (the request may have been accepted), so they must not
-        # trigger per-request replay. The HTTP bridge keeps a separate,
-        # short-lived account signal so repeated failures across independent
-        # bridge sessions can still drain a bad account for fresh work.
-        self._http_bridge_account_timeout_failures: dict[str, list[float]] = {}
-        self._http_bridge_account_timeout_lock = asyncio.Lock()
+        self._http_bridge_account_timeout_failures, self._http_bridge_account_timeout_lock = {}, asyncio.Lock()
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}

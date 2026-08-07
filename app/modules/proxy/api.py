@@ -5081,6 +5081,54 @@ async def _stream_responses(
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
 
+    def build_recovery_response_stream() -> AsyncIterator[str]:
+        """Build a server-owned retry with a fresh API-key reservation.
+
+        The first bridge generator owns and settles the admission reservation
+        when it terminates.  Indefinite recovery must not reuse that object:
+        each retry gets a new reservation and therefore remains accounted and
+        bounded even when the client connection stays open for a long time.
+        """
+
+        async def _retry() -> AsyncIterator[str]:
+            retry_reservation = reservation
+            if prefer_http_bridge and api_key is not None and reservation is not None:
+                retry_reservation = await _enforce_request_limits(
+                    api_key,
+                    request_model=payload.model,
+                    request_service_tier=(
+                        dict(payload.to_payload()).get("service_tier")
+                        if isinstance(dict(payload.to_payload()).get("service_tier"), str)
+                        else None
+                    ),
+                    request_usage_budget=estimate_api_key_request_usage(payload),
+                )
+            retry_stream = context.service.stream_http_responses(
+                payload,
+                effective_headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=True,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=retry_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                downstream_turn_state=downstream_turn_state,
+                forwarded_request=forwarded_request,
+                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+                forwarded_legacy_signature=forwarded_legacy_signature,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                capacity_startup_wait_event=capacity_wait_event,
+                capacity_startup_ready_event=capacity_ready_event,
+            )
+            async for line in retry_stream:
+                yield line
+
+        return _retry()
+
     stream = build_response_stream()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
@@ -5110,7 +5158,7 @@ async def _stream_responses(
             stream,
             owns_reservation=owns_reservation,
             reservation=reservation,
-            recovery_stream_factory=build_response_stream if prefer_http_bridge else None,
+            recovery_stream_factory=build_recovery_response_stream if prefer_http_bridge else None,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )

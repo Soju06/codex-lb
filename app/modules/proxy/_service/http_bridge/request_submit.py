@@ -190,7 +190,9 @@ from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    durable_bridge_api_key_scope,
     durable_bridge_hash,
+    durable_bridge_operation_fingerprint,
     durable_bridge_operation_id,
 )
 from app.modules.proxy.fair_share import (
@@ -838,13 +840,19 @@ class _HTTPBridgeRequestSubmitMixin:
             and session.durable_session_id is not None
             and session.durable_owner_epoch is not None
         ):
-            operation_fingerprint = durable_bridge_hash(text_data)
+            api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
+            operation_fingerprint = durable_bridge_operation_fingerprint(
+                api_key_scope=api_key_scope,
+                request_text=text_data,
+            )
             operation_id = durable_bridge_operation_id(session.durable_session_id, operation_fingerprint)
             try:
                 existing_operation = None
                 get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)
                 if callable(get_operation_by_fingerprint):
-                    existing_operation = await get_operation_by_fingerprint(
+                    existing_operation = await _call_with_supported_optional_kwargs(
+                        get_operation_by_fingerprint,
+                        optional_kwargs={"api_key_scope": api_key_scope},
                         request_fingerprint=operation_fingerprint,
                     )
                 get_operation = getattr(self._durable_bridge, "get_operation", None)
@@ -856,7 +864,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 if existing_operation is None:
                     get_latest_completed = getattr(self._durable_bridge, "get_latest_completed_operation", None)
                     if callable(get_latest_completed):
-                        completed_operation = await get_latest_completed(
+                        completed_operation = await _call_with_supported_optional_kwargs(
+                            get_latest_completed,
+                            optional_kwargs={"request_fingerprint": operation_fingerprint},
                             session_id=session.durable_session_id,
                             parent_response_id=request_state.previous_response_id,
                         )
@@ -867,7 +877,12 @@ class _HTTPBridgeRequestSubmitMixin:
                                 None,
                             )
                             if callable(get_latest_completed_any_session):
-                                completed_operation = await get_latest_completed_any_session(
+                                completed_operation = await _call_with_supported_optional_kwargs(
+                                    get_latest_completed_any_session,
+                                    optional_kwargs={
+                                        "api_key_scope": api_key_scope,
+                                        "request_fingerprint": operation_fingerprint,
+                                    },
                                     parent_response_id=request_state.previous_response_id,
                                 )
                         completed_response_id = getattr(completed_operation, "response_id", None)
@@ -875,7 +890,10 @@ class _HTTPBridgeRequestSubmitMixin:
                             text_data = _text_with_previous_response_id(text_data, completed_response_id)
                             request_state.previous_response_id = completed_response_id
                             request_state.hard_continuity_anchor = True
-                            operation_fingerprint = durable_bridge_hash(text_data)
+                            operation_fingerprint = durable_bridge_operation_fingerprint(
+                                api_key_scope=api_key_scope,
+                                request_text=text_data,
+                            )
                             operation_id = durable_bridge_operation_id(
                                 session.durable_session_id,
                                 operation_fingerprint,
@@ -886,6 +904,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                     owner_epoch=session.durable_owner_epoch,
                     request_fingerprint=operation_fingerprint,
+                    api_key_scope=api_key_scope,
                     account_id=session.account.id,
                     model=request_state.model,
                     parent_response_id=request_state.previous_response_id,

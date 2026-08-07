@@ -2138,6 +2138,22 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
             assert "allowed_reasoning_efforts" not in before
             assert "api_key_policy_schema_version" not in before
 
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO api_keys "
+                    "(id, name, key_hash, key_prefix, is_active, created_at) "
+                    "VALUES (:id, :name, :key_hash, :key_prefix, :is_active, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "id": "key_reasoning_policy_migration",
+                    "name": "reasoning policy migration",
+                    "key_hash": "hash_reasoning_policy_migration",
+                    "key_prefix": "sk-migration",
+                    "is_active": True,
+                },
+            )
+
         command.upgrade(config, target_revision)
         with engine.connect() as connection:
             inspector = inspect(connection)
@@ -2153,12 +2169,38 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
                 for constraint in inspector.get_check_constraints("api_keys")
                 if constraint.get("name")
             }
+            assert connection.execute(
+                text(
+                    "SELECT api_key_policy_schema_version, allowed_reasoning_efforts "
+                    "FROM api_keys WHERE id = 'key_reasoning_policy_migration'"
+                )
+            ).one() == (1, None)
+            connection.execute(
+                text(
+                    "UPDATE api_keys SET allowed_reasoning_efforts = :allowed, key_hash = :policy_hash "
+                    "WHERE id = 'key_reasoning_policy_migration'"
+                ),
+                {"allowed": '["low"]', "policy_hash": "policy:hash_reasoning_policy_migration"},
+            )
+            connection.commit()
+            # A pre-policy reader hashes without the marker and must not see
+            # a restricted key. A pre-policy writer cannot remove the marker
+            # through an ordinary reasoning-policy update because the check
+            # constraint rejects the mixed-version state.
             assert (
                 connection.execute(
-                    text("SELECT COUNT(*) FROM api_keys WHERE api_key_policy_schema_version = 1")
+                    text("SELECT COUNT(*) FROM api_keys WHERE key_hash = 'hash_reasoning_policy_migration'")
                 ).scalar_one()
                 == 0
             )
+            with pytest.raises(sa_exc.IntegrityError):
+                connection.execute(
+                    text(
+                        "UPDATE api_keys SET enforced_reasoning_effort = 'high' "
+                        "WHERE id = 'key_reasoning_policy_migration'"
+                    )
+                )
+            connection.rollback()
 
         command.downgrade(config, parent_revision)
         with engine.connect() as connection:
@@ -2170,6 +2212,12 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
         with engine.connect() as connection:
             columns = {column["name"] for column in inspect(connection).get_columns("api_keys")}
             assert {"allowed_reasoning_efforts", "api_key_policy_schema_version"} <= columns
+            assert connection.execute(
+                text(
+                    "SELECT api_key_policy_schema_version, allowed_reasoning_efforts "
+                    "FROM api_keys WHERE id = 'key_reasoning_policy_migration'"
+                )
+            ).one() == (1, None)
     finally:
         engine.dispose()
 

@@ -52,6 +52,7 @@ TRAFFIC_CLASS_FOREGROUND = "foreground"
 TRAFFIC_CLASS_OPPORTUNISTIC = "opportunistic"
 _SUPPORTED_TRAFFIC_CLASSES = frozenset({TRAFFIC_CLASS_FOREGROUND, TRAFFIC_CLASS_OPPORTUNISTIC})
 _SUPPORTED_TRANSPORT_POLICY_OVERRIDES = frozenset({"smart", "always_http", "always_websocket"})
+_API_KEY_POLICY_SCHEMA_VERSION = 1
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -494,7 +495,7 @@ class ApiKeysService:
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             allowed_reasoning_efforts=_serialize_allowed_reasoning_efforts(allowed_reasoning_efforts),
-            api_key_policy_schema_version=1,
+            api_key_policy_schema_version=_API_KEY_POLICY_SCHEMA_VERSION,
             enforced_service_tier=enforced_service_tier,
             account_assignment_scope_enabled=bool(assigned_account_ids),
             source_assignment_scope_enabled=bool(assigned_source_ids),
@@ -1586,6 +1587,14 @@ def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
 def _ensure_valid_api_key_row(row: ApiKey | None) -> ApiKey:
     if row is None or not row.is_active:
         raise ApiKeyInvalidError("Invalid API key")
+    if getattr(row, "allowed_reasoning_efforts", None) is not None:
+        # A policy row must be readable by this build and must retain the
+        # protected hash marker. This also makes malformed rows fail closed
+        # when they were written during a mixed-version deployment.
+        if getattr(row, "api_key_policy_schema_version", None) != _API_KEY_POLICY_SCHEMA_VERSION:
+            raise ApiKeyInvalidError("Invalid API key")
+        if not row.key_hash.startswith(API_KEY_POLICY_HASH_PREFIX):
+            raise ApiKeyInvalidError("Invalid API key")
     return row
 
 

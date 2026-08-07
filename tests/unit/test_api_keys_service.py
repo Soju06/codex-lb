@@ -756,6 +756,26 @@ async def test_reasoning_policy_hash_guard_survives_update_and_regeneration() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["api_key_policy_schema_version", "key_hash"])
+async def test_validate_key_rejects_malformed_reasoning_policy_rows(field: str) -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="malformed-policy-row",
+            allowed_models=None,
+            allowed_reasoning_efforts=["low"],
+        )
+    )
+    row = await repo.get_by_id(created.id)
+    assert row is not None
+    setattr(row, field, 0 if field == "api_key_policy_schema_version" else row.key_hash.removeprefix("policy:"))
+
+    with pytest.raises(ApiKeyInvalidError):
+        await service.validate_key(created.key)
+
+
+@pytest.mark.asyncio
 async def test_create_key_rejects_empty_or_conflicting_reasoning_policies() -> None:
     service = ApiKeysService(_FakeApiKeysRepository())
 

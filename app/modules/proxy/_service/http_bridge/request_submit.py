@@ -808,6 +808,10 @@ class _HTTPBridgeRequestSubmitMixin:
                         "Recovered response continuity could not be persisted; retry the request.",
                     ),
                 ) from exc
+        # Account installation metadata is part of the final upstream frame.
+        # Apply and size-check it before recording the operation so a local
+        # payload-too-large rejection cannot leave a submitted retry fence.
+        text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         operation_ledger_enabled = bool(
             getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
         )

@@ -22,6 +22,7 @@ from app.db.models import (
     AccountStatus,
     Base,
     BridgeRingMember,
+    HttpBridgeOperationRecord,
     HttpBridgeRetryCircuit,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
@@ -699,6 +700,41 @@ async def test_operation_retry_reset_clears_partial_spool(
         reset = await repository.get_operation(operation_id=operation_id)
         assert reset is not None
         assert reset.event_spool_complete is False
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_spool_purge_expires_stale_nonterminal_rows(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-stale-operation", session_key_value="sid-stale-operation")
+        fingerprint = durable_bridge_hash("stale-operation")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-stale-operation",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id=None,
+            request_text='{"input":"stale"}',
+        )
+        stale_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=8)
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(updated_at=stale_at)
+        )
+        await session.commit()
+
+        assert await repository.purge_operation_spool(cutoff=datetime.now(timezone.utc).replace(tzinfo=None)) == 1
+        assert await repository.get_operation(operation_id=operation_id) is None
     finally:
         await session.close()
 

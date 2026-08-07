@@ -883,8 +883,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                     for request_state in session.pending_requests
                     if getattr(request_state, "operation_id", None)
                 ]
-            operation_state = "unknown" if observed_response_events == 0 else "failed"
             for request_state in operation_states:
+                # A shared websocket can carry several logical response.create
+                # requests. Classify each operation from its own event count;
+                # using the session-wide maximum would mark an eventless
+                # sibling as safely retryable after another request streamed.
+                operation_state = (
+                    "unknown"
+                    if getattr(request_state, "response_event_count", 0) == 0
+                    else "failed"
+                )
                 await _update_http_bridge_operation_state(
                     self,
                     session,
@@ -1717,6 +1725,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 surface="http_bridge",
             )
 
+        continuity_persistence_failed_after_ack = False
         if (
             event_type == "response.completed"
             and terminal_request_state is not None
@@ -2111,6 +2120,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 event_block = format_sse_event(payload)
                 event = parse_sse_event_payload(payload)
                 event_type = "response.failed"
+                # The upstream response was already acknowledged. The local
+                # alias write failed, so expose a terminal error downstream
+                # but keep the durable operation acknowledged/ambiguous to
+                # prevent an identical retry from dispatching it again.
+                continuity_persistence_failed_after_ack = True
                 completed_usage = None
                 completed_empty_prewarm = False
 
@@ -2121,6 +2135,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                 "response.failed": "failed",
                 "error": "failed",
             }.get(event_type)
+            if continuity_persistence_failed_after_ack:
+                operation_state = "acknowledged"
             if operation_state is not None:
                 await _update_http_bridge_operation_state(
                     self,

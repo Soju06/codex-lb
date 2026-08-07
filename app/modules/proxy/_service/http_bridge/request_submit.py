@@ -1054,29 +1054,39 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                 if indefinite_recovery and operation.state == "unknown" and not same_operation_pending:
                     # A previous owner may have persisted a partial sequence
-                    # before its socket died.  A server-owned retry must not
-                    # append a second attempt to that transcript; reset the
-                    # durable spool under the same owner fence before send.
-                    reset_operation_event_spool = getattr(
+                    # before its socket died. Claim UNKNOWN atomically with
+                    # the transcript reset so concurrent reconnects cannot
+                    # both pass admission and submit the same operation.
+                    claim_unknown_operation = getattr(
                         self._durable_bridge,
-                        "reset_operation_event_spool",
+                        "claim_unknown_operation_for_recovery",
                         None,
                     )
-                    if callable(reset_operation_event_spool):
-                        reset_ok = await reset_operation_event_spool(
-                            operation_id=operation.operation_id,
-                            session_id=session.durable_session_id,
-                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                            owner_epoch=session.durable_owner_epoch,
+                    if not callable(claim_unknown_operation):
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP response recovery could not claim the previous operation; retry the request.",
+                            ),
                         )
-                        if not reset_ok:
-                            raise ProxyResponseError(
-                                502,
-                                openai_error(
-                                    "bridge_continuity_persistence_failed",
-                                    "HTTP response recovery ownership changed; retry the request.",
-                                ),
-                            )
+                    claimed = await claim_unknown_operation(
+                        operation_id=operation.operation_id,
+                        session_id=session.durable_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=session.durable_owner_epoch,
+                    )
+                    if not claimed:
+                        session.closed = True
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        raise ProxyResponseError(
+                            503,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP response recovery ownership changed; retry the request.",
+                            ),
+                        )
                     # The operation remains fenced to one durable identity,
                     # while the server-owned recovery loop may make another
                     # serialized attempt after the upstream cooldown. This
@@ -1643,6 +1653,7 @@ class _HTTPBridgeRequestSubmitMixin:
             # handed to the kernel. Never reconnect-and-resend from this path;
             # only failures proven to precede dispatch may be replayed.
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
+            failure_error_message = str(exc) or "Upstream websocket closed before response.completed"
             # Liveness expiry and local network loss are transport failures,
             # not evidence against the selected account. Keep this in sync
             # with the reader path's shared provenance classification.
@@ -1675,13 +1686,52 @@ class _HTTPBridgeRequestSubmitMixin:
                     counted_in_queue=True,
                     admission_waiter_registered=admission_waiter_registered,
                 )
+                # Once the operation-tagged frame has been handed to the
+                # socket, the transport exception is ambiguous: upstream may
+                # have accepted it even though this worker saw no
+                # acknowledgement. Persist UNKNOWN under the owner fence
+                # before exposing a retryable error.
+                if (
+                    request_state.operation_dispatched
+                    and request_state.operation_registered
+                    and request_state.operation_id is not None
+                    and session.durable_session_id is not None
+                    and session.durable_owner_epoch is not None
+                ):
+                    mark_operation_unknown = getattr(self._durable_bridge, "mark_operation_unknown", None)
+                    marked_unknown = False
+                    if callable(mark_operation_unknown):
+                        try:
+                            marked_unknown = await mark_operation_unknown(
+                                operation_id=request_state.operation_id,
+                                session_id=session.durable_session_id,
+                                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                owner_epoch=session.durable_owner_epoch,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to mark ambiguous HTTP bridge operation UNKNOWN operation_id=%s",
+                                request_state.operation_id,
+                                exc_info=True,
+                            )
+                    if not marked_unknown:
+                        request_state.operation_registered = False
+                        error_code = "bridge_continuity_persistence_failed"
+                        failure_error_message = "Ambiguous response operation could not be persisted; retry the request."
+                        _record_continuity_fail_closed(
+                            surface="http_bridge",
+                            reason="ambiguous_operation_unknown_persistence_failed",
+                            previous_response_id=request_state.previous_response_id,
+                            session_id=request_state.session_id,
+                            upstream_error_code=error_code,
+                        )
                 await self._fail_pending_websocket_requests(
                     account=session.account,
                     account_id_value=session.account.id,
                     pending_requests=deque([request_state]),
                     pending_lock=anyio.Lock(),
                     error_code=error_code,
-                    error_message=str(exc) or "Upstream websocket closed before response.completed",
+                    error_message=failure_error_message,
                     api_key=None,
                     response_create_gate=session.response_create_gate,
                     penalize_account=not account_neutral,
@@ -1703,7 +1753,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 ) from exc
             raise ProxyResponseError(
                 502,
-                openai_error(error_code, str(exc) or "Upstream websocket closed"),
+                openai_error(error_code, failure_error_message),
             ) from exc
 
     async def _maybe_prewarm_http_bridge_session(

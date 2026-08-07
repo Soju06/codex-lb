@@ -633,6 +633,38 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
             )
 
+    async def claim_unknown_operation_for_recovery(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).claim_unknown_operation_for_recovery(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+            )
+
+    async def mark_operation_unknown(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).mark_operation_unknown(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+            )
+
     async def rollback_operation_before_dispatch(
         self,
         *,

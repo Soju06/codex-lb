@@ -2989,7 +2989,7 @@ def test_backend_responses_websocket_lite_visible_replay_trusts_downstream_respo
     assert cast(dict[str, object], visible_reference_payload["client_metadata"])[marker] == "true"
 
 
-def test_backend_responses_websocket_keeps_same_response_distinct_tool_call_ids(
+def test_backend_responses_websocket_suppresses_same_response_duplicate_side_effect_call_ids(
     app_instance,
     monkeypatch,
 ):
@@ -3130,18 +3130,17 @@ def test_backend_responses_websocket_keeps_same_response_distinct_tool_call_ids(
             websocket.send_text(json.dumps(request_payload))
             created_event = json.loads(websocket.receive_text())
             tool_event = json.loads(websocket.receive_text())
-            replay_tool_event = json.loads(websocket.receive_text())
-            terminal_event = json.loads(websocket.receive_text())
+            failed_event = json.loads(websocket.receive_text())
 
     assert created_event["type"] == "response.created"
     assert tool_event["type"] == "response.output_item.done"
     assert tool_event["item"]["call_id"] == "call_first"
-    assert replay_tool_event["type"] == "response.output_item.done"
-    assert replay_tool_event["item"]["call_id"] == "call_replay"
-    assert terminal_event["type"] == "response.completed"
-    assert terminal_event["response"]["id"] == "resp_ws_duplicate_tool"
+    assert failed_event["type"] == "response.failed"
+    assert failed_event["response"]["id"] == "resp_ws_duplicate_tool"
+    assert failed_event["response"]["error"]["code"] == "stream_incomplete"
     assert len(log_calls) == 1
-    assert log_calls[0]["status"] == "success"
+    assert log_calls[0]["status"] == "error"
+    assert log_calls[0]["error_code"] == "stream_incomplete"
 
 
 def test_backend_responses_websocket_preserves_image_generation_tool_advertisement(app_instance, monkeypatch):

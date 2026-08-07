@@ -20,7 +20,7 @@ def _loads_item_arguments(item: Mapping[str, JsonValue]) -> Any:
     return json.loads(arguments)
 
 
-def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_call_ids_with_same_arguments():
+def test_mark_duplicate_tool_call_downstream_event_suppresses_same_response_side_effect_with_new_call_id():
     upstream_control = proxy_service._WebSocketUpstreamControl()
     first_payload: dict[str, JsonValue] = {
         "type": "response.output_item.done",
@@ -67,7 +67,7 @@ def test_mark_duplicate_tool_call_downstream_event_keeps_distinct_call_ids_with_
             seen_tool_call_keys=upstream_control.seen_tool_call_keys,
             response_id="resp_dupe",
         )
-        is False
+        is True
     )
     assert (
         tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
@@ -115,6 +115,51 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_exec_command_with_
             replay_payload,
             seen_tool_call_keys=upstream_control.seen_tool_call_keys,
             response_id="resp_dupe",
+        )
+        is True
+    )
+
+
+def test_mark_duplicate_tool_call_downstream_event_suppresses_exec_command_same_response_new_call_id():
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    command = (
+        "psql -X -d kom -Atc \"select 'global', total_chunks, "
+        'chunks_with_any_embedding from rag_embedding_global_stats;"'
+    )
+
+    def payload(call_id: str, *, max_output_tokens: int) -> dict[str, JsonValue]:
+        return {
+            "type": "response.output_item.done",
+            "response_id": "resp_live_duplicate",
+            "item": {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": json.dumps(
+                    {
+                        "cmd": command,
+                        "workdir": "/home/kom/Dropbox/Reemxy/tasks-loop",
+                        "yield_time_ms": 10000,
+                        "max_output_tokens": max_output_tokens,
+                    },
+                    separators=(",", ":"),
+                ),
+                "call_id": call_id,
+            },
+        }
+
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            payload("call_first", max_output_tokens=12000),
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_live_duplicate",
+        )
+        is False
+    )
+    assert (
+        tool_call_dedupe.mark_duplicate_tool_call_downstream_event(
+            payload("call_second", max_output_tokens=48000),
+            seen_tool_call_keys=upstream_control.seen_tool_call_keys,
+            response_id="resp_live_duplicate",
         )
         is True
     )
@@ -1224,7 +1269,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_side_effect_replay
                 response_id=tool_call_dedupe.response_id_from_payload(payload),
                 scope_side_effects_by_response_id=False,
             )
-            is True
+            is False
         )
 
 
@@ -1263,7 +1308,7 @@ def test_mark_duplicate_tool_call_downstream_event_suppresses_apply_patch_call_r
             seen_tool_call_keys=upstream_control.seen_tool_call_keys,
             response_id="resp_dupe",
         )
-        is False
+        is True
     )
 
 

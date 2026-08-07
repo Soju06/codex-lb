@@ -1241,6 +1241,51 @@ class DurableBridgeRepository:
             await self._session.commit()
         return True
 
+    async def rollback_operation_before_dispatch(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        """Remove a newly-created operation that never reached upstream."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state == "submitted",
+                    HttpBridgeOperationRecord.response_id.is_(None),
+                    HttpBridgeOperationRecord.event_bytes == 0,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            has_events = await self._session.scalar(
+                select(HttpBridgeOperationEvent.event_id)
+                .where(HttpBridgeOperationEvent.operation_id == operation_id)
+                .limit(1)
+            )
+            if has_events is not None:
+                await self._session.rollback()
+                return False
+            await self._session.delete(operation)
+            await self._session.commit()
+        return True
+
     async def get_operation_by_fingerprint(
         self,
         *,

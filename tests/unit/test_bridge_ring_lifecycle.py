@@ -708,6 +708,42 @@ async def test_operation_retry_reset_clears_partial_spool(
 
 
 @pytest.mark.asyncio
+async def test_pre_dispatch_operation_rollback_removes_only_empty_new_row(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-rollback",
+            session_key_value="sid-operation-rollback",
+        )
+        fingerprint = durable_bridge_hash("operation-rollback")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None and operation.created is True
+        assert await repository.rollback_operation_before_dispatch(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-rollback",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.get_operation(operation_id=operation_id) is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_operation_spool_purge_expires_stale_nonterminal_rows(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

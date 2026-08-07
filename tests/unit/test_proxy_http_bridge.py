@@ -4703,6 +4703,34 @@ async def test_http_bridge_startup_cooldown_releases_api_key_reservation(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_replay_detach_releases_reservation_without_pending_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-replay-reservation")
+    reservation = cast(Any, object())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-replay-reservation",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        operation_replay=True,
+    )
+    release = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
+
+    assert await service._detach_http_bridge_request(session, request_state=request_state) is False
+
+    release.assert_awaited_once_with(request_state)
+    assert request_state.api_key_reservation is None
+    assert request_state.operation_replay is False
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_post_submit_cooldown_race_detaches_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

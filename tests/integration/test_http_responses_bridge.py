@@ -34,6 +34,7 @@ from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
+from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoff,
@@ -9662,6 +9663,104 @@ async def test_http_bridge_stale_gate_retires_after_leading_rate_limit_telemetry
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_stale_gate_direct_retirement_quarantines_wedged_reattach(
+    app_instance,
+    monkeypatch,
+):
+    """Regression for the #1534 quarantine bypass: when the silent reattach is
+    the ONLY stale pending request, the stuck-gate watchdog retires the whole
+    session directly (no partial cleanup, no reader-failure funnel). That
+    direct retirement must still quarantine the key, or the next request
+    rebuilds the identical anchored wedge."""
+    app_settings = _make_app_settings(
+        enabled=True,
+        admission_wait_timeout_seconds=0.001,
+    )
+    app_settings.http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=app_settings,
+        dashboard_settings=_make_dashboard_settings(),
+    )
+    service = get_proxy_service_for_app(app_instance)
+    http_bridge_quarantine_module._http_bridge_quarantine_registry(service).clear()
+    upstream = _SilentUpstreamWebSocket()
+    key = proxy_module._HTTPBridgeSessionKey("session_header", "quarantine-direct-retire-all-stale", None)
+    gate = asyncio.Semaphore(1)
+    await gate.acquire()
+    wedged_reattach = proxy_module._WebSocketRequestState(
+        request_id="req-wedged-direct-retire",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic() - 1.0,
+        transport="http",
+        response_create_gate=gate,
+        response_create_gate_acquired=True,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+    )
+    # The #1534 wedge shape: a proxy-injected reattach whose response.create
+    # was sent and that streamed response events, but whose response.created
+    # was never assigned.
+    wedged_reattach.proxy_injected_previous_response_id = True
+    wedged_reattach.previous_response_id = "resp_wedged_direct_retire"
+    wedged_reattach.response_create_sent_at = time.monotonic() - 1.0
+    wedged_reattach.response_event_count = 3
+    wedged_reattach.last_upstream_activity_at = time.monotonic() - 1.0
+    session = proxy_module._HTTPBridgeSession(
+        key=key,
+        headers={},
+        affinity=proxy_module._AffinityPolicy(key="quarantine-direct-retire-all-stale"),
+        request_model="gpt-5.6-sol",
+        account=cast(Account, SimpleNamespace(id="acct-quarantine-direct-retire", status=AccountStatus.ACTIVE)),
+        upstream=cast(proxy_module.UpstreamWebSocket, upstream),
+        upstream_control=proxy_module._WebSocketUpstreamControl(),
+        pending_requests=deque([wedged_reattach]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=gate,
+        queued_request_count=1,
+        last_used_at=time.monotonic(),
+        idle_ttl_seconds=120.0,
+    )
+    service._http_bridge_sessions[key] = session
+
+    waiter = proxy_module._WebSocketRequestState(
+        request_id="req-waiting-behind-wedged-reattach",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort="high",
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        transport="http",
+        downstream_visible=True,
+    )
+    try:
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            await service._acquire_request_state_response_create_admission(
+                waiter,
+                response_create_gate=gate,
+                bridge_session=session,
+            )
+    finally:
+        if gate.locked():
+            gate.release()
+
+    assert exc_info.value.payload["error"]["code"] == "response_create_gate_timeout"
+    assert session.closed is True
+    assert key not in service._http_bridge_sessions
+    assert upstream.closed is True
+    # The direct all-stale retirement must record the quarantine so the next
+    # request takes the fresh no-anchor path instead of re-attaching.
+    assert session.quarantined is True
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, key) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[key]
+    assert entry.reason == "reattach_missing_response_created"
+    http_bridge_quarantine_module._http_bridge_quarantine_registry(service).clear()
+
+
+@pytest.mark.asyncio
 async def test_codex_responses_http_bridge_replaces_retired_gate_without_client_retry(
     async_client,
     app_instance,
@@ -14092,3 +14191,365 @@ async def test_prepare_http_bridge_request_preserves_existing_client_metadata(ap
     assert first_request_state.request_id.startswith("ws_")
     assert second_request_state.request_id.startswith("ws_")
     assert first_request_state.request_id != second_request_state.request_id
+
+
+class _EventsWithoutCreatedUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Streams response events but never ``response.created``, then closes.
+
+    Models the #1534 production wedge: a reattached HTTP-bridge stream that
+    delivers upstream response events whose ``response.created`` is never
+    assigned, so the turn can only end without a completed response.
+    """
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        for delta in ("thinking", " harder"):
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {"type": "response.reasoning_summary_text.delta", "delta": delta},
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+        await self._messages.put(_FakeUpstreamMessage("close", close_code=1000))
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_quarantines_reattach_that_streams_without_response_created(
+    async_client, app_instance, monkeypatch
+):
+    """Regression for #1534: a reattach that streams events but never gets
+    ``response.created`` must quarantine the session so the next request does
+    not rebuild the identical anchored reattach and instead completes on the
+    fresh no-anchor path."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quarantine_silent",
+        "http-bridge-quarantine-silent@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    http_bridge_quarantine_module._http_bridge_quarantine_registry(service).clear()
+    first_upstream = _ClosingInterruptedCustomToolUpstreamWebSocket("resp_quarantine_source")
+    wedged_upstream = _EventsWithoutCreatedUpstreamWebSocket("resp_quarantine_wedge")
+    fresh_upstream = _FakeBridgeUpstreamWebSocket("resp_quarantine_fresh")
+    upstreams = [first_upstream, wedged_upstream, fresh_upstream]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        nonlocal connect_count
+        del headers, access_token, account_id_header, base_url, session
+        connect_count += 1
+        return upstreams[connect_count - 1]
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    session_headers = {"x-codex-session-id": "quarantine-silent-reattach"}
+    historical_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "canonical Lite instructions"}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first question"}],
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_historical_shell",
+            "name": "shell",
+            "input": "printf historical",
+        },
+        {
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "historical control"}],
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_historical_shell",
+            "output": "historical",
+        },
+    ]
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": historical_input,
+            },
+            headers=session_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200, first.text
+
+    full_resend = [
+        *historical_input,
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_custom_shell",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_custom_shell",
+            "output": "/workspace",
+        },
+    ]
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": full_resend,
+            },
+            headers=session_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    # The reattach injected the durable anchor and then wedged: events flowed
+    # but response.created never arrived, so the turn fails terminally.
+    assert second.status_code != 200
+    assert len(wedged_upstream.sent_text) == 1
+    wedged_payload = json.loads(wedged_upstream.sent_text[0])
+    assert wedged_payload["previous_response_id"] == "resp_bridge_custom_1"
+    quarantined_entries = [
+        entry
+        for entry in http_bridge_quarantine_module._http_bridge_quarantine_registry(service).values()
+        if entry.quarantined_until > time.monotonic()
+    ]
+    assert len(quarantined_entries) == 1
+    assert quarantined_entries[0].reason == "reattach_missing_response_created"
+
+    third = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": full_resend,
+            },
+            headers=session_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    # The quarantined key must not rebuild the identical anchored reattach:
+    # the client's own full resend goes upstream unanchored and completes.
+    assert third.status_code == 200, third.text
+    assert third.json()["id"] == "resp_quarantine_fresh_1"
+    assert connect_count == 3
+    assert len(fresh_upstream.sent_text) == 1
+    fresh_payload = json.loads(fresh_upstream.sent_text[0])
+    assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == full_resend
+    # The completed response on the fresh path clears the quarantine again.
+    assert not [
+        entry
+        for entry in http_bridge_quarantine_module._http_bridge_quarantine_registry(service).values()
+        if entry.quarantined_until > time.monotonic()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatches_unanchored(
+    async_client, app_instance, monkeypatch
+):
+    """Regression for the #1534 session-state side door: a quarantined
+    full-resend whose durable prefix is trimmable but whose fresh suffix does
+    NOT retain the prior output must go upstream genuinely unanchored. Before
+    the fix, the early durable-anchor injection was suppressed but session
+    hydration restored ``last_completed_response_id`` and the session-level
+    injection re-added the same anchor and trimmed the prefix — rebuilding the
+    wedge despite the ``fresh_reattach_anchor_skipped_quarantined`` log."""
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_quarantine_unsafe_suffix",
+        "http-bridge-quarantine-unsafe-suffix@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    http_bridge_quarantine_module._http_bridge_quarantine_registry(service).clear()
+    first_upstream = _ClosingInterruptedCustomToolUpstreamWebSocket("resp_quarantine_unsafe_source")
+    wedged_upstream = _EventsWithoutCreatedUpstreamWebSocket("resp_quarantine_unsafe_wedge")
+    fresh_upstream = _FakeBridgeUpstreamWebSocket("resp_quarantine_unsafe_fresh")
+    upstreams = [first_upstream, wedged_upstream, fresh_upstream]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        nonlocal connect_count
+        del headers, access_token, account_id_header, base_url, session
+        connect_count += 1
+        return upstreams[connect_count - 1]
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    # The turn-state header makes the bridge session a true Codex continuity
+    # session (``session.codex_session``), which is what arms the session-level
+    # anchor injection this regression guards against.
+    session_headers = {
+        "x-codex-session-id": "quarantine-unsafe-suffix-reattach",
+        "x-codex-turn-state": "quarantine-unsafe-suffix-turn",
+    }
+    historical_input = [
+        {"role": "user", "content": [{"type": "input_text", "text": "leading question"}]},
+        {
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": [{"type": "custom", "name": "shell"}],
+        },
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "canonical Lite instructions"}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first question"}],
+        },
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_historical_shell",
+            "name": "shell",
+            "input": "printf historical",
+        },
+        {
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "historical control"}],
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_historical_shell",
+            "output": "historical",
+        },
+    ]
+    first = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": historical_input,
+            },
+            headers=session_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    assert first.status_code == 200, first.text
+
+    full_resend = [
+        *historical_input,
+        {
+            "type": "custom_tool_call",
+            "call_id": "call_custom_shell",
+            "name": "shell",
+            "input": "pwd",
+        },
+        {
+            "type": "custom_tool_call_output",
+            "call_id": "call_custom_shell",
+            "output": "/workspace",
+        },
+    ]
+    second = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": full_resend,
+            },
+            headers=session_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    # The reattach injected the durable anchor and then wedged: the key is now
+    # quarantined.
+    assert second.status_code != 200
+    assert len(wedged_upstream.sent_text) == 1
+    assert json.loads(wedged_upstream.sent_text[0])["previous_response_id"] == "resp_bridge_custom_1"
+    assert [
+        entry
+        for entry in http_bridge_quarantine_module._http_bridge_quarantine_registry(service).values()
+        if entry.quarantined_until > time.monotonic()
+    ]
+
+    # Full resend whose durable prefix is trimmable but whose fresh suffix is
+    # a plain user turn: it neither retains the prior output nor matches the
+    # pending tool calls, so the safe-fresh-context proof fails.
+    unsafe_suffix_resend = [
+        *historical_input,
+        {"role": "user", "content": [{"type": "input_text", "text": "follow-up without prior output"}]},
+    ]
+    third = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": unsafe_suffix_resend,
+            },
+            headers=session_headers,
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    # The dispatch must be genuinely unanchored: no early durable injection,
+    # no session-level re-injection of the same anchor, no prefix trim.
+    assert third.status_code == 200, third.text
+    assert third.json()["id"] == "resp_quarantine_unsafe_fresh_1"
+    assert connect_count == 3
+    assert len(fresh_upstream.sent_text) == 1
+    fresh_payload = json.loads(fresh_upstream.sent_text[0])
+    assert "previous_response_id" not in fresh_payload
+    assert fresh_payload["input"] == unsafe_suffix_resend

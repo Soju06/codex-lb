@@ -101,6 +101,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
 )
+from app.modules.proxy._service.http_bridge.quarantine import (
+    _http_bridge_session_key_quarantined,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
     _codex_keepalive_frame,
@@ -1194,6 +1197,12 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
         payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(payload)
+        # Set when the quarantine check below suppresses the durable-anchor
+        # injection for a full-resend payload; the session hydration and the
+        # session-level anchor injection further down must honor it so the
+        # dispatch genuinely goes unanchored instead of rebuilding the same
+        # wedged reattach through the session-state side door.
+        fresh_reattach_anchor_suppressed_quarantined = False
 
         def classify_durable_full_resend(
             lookup: DurableBridgeLookup,
@@ -1411,6 +1420,31 @@ class _HTTPBridgeStreamingMixin:
                 and durable_lookup.latest_response_id is not None
                 and (not payload_looks_like_full_resend or durable_anchor_trimmable)
             )
+            if payload_looks_like_full_resend and _http_bridge_session_key_quarantined(self, bridge_session_key):
+                # The previous attach on this key proved silent/wedged
+                # (#1534). The client's own payload already carries the full
+                # conversation, so send it unanchored on the fresh path
+                # instead of rebuilding the same reattach. Delta-only
+                # payloads keep the anchor: it is their only way to convey
+                # prior context (same boundary as the fenced anchor clear).
+                # Evaluated independently of the fresh-reattach eligibility
+                # above: even when that gate is already false (for example a
+                # conversation-scoped payload, a live alias session, or an
+                # active-owner forward that later falls back to a local
+                # rebind), the suppression must still reach the session
+                # hydration, session-level injection, and recovery injection
+                # paths below.
+                fresh_reattach_can_use_durable_anchor = False
+                fresh_reattach_anchor_suppressed_quarantined = True
+                _log_http_bridge_event(
+                    "fresh_reattach_anchor_skipped_quarantined",
+                    bridge_session_key,
+                    account_id=durable_lookup.account_id,
+                    model=payload.model,
+                    detail=f"response_id={durable_lookup.latest_response_id}",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(payload.model) if payload.model else None,
+                )
             if (
                 fresh_reattach_can_use_durable_anchor
                 and payload_looks_like_full_resend
@@ -2164,6 +2198,10 @@ class _HTTPBridgeStreamingMixin:
                 recovery_anchor_input_fingerprint: str | None = None
                 if (
                     not owner_forward_fresh_replay
+                    # The quarantine skip (#1534) applies to the local recovery
+                    # rebind as well: re-injecting the suppressed anchor here
+                    # would rebuild the same wedged reattach.
+                    and not fresh_reattach_anchor_suppressed_quarantined
                     and not durable_full_resend_has_safe_fresh_context
                     and recovery_payload.previous_response_id is None
                     and durable_lookup is not None
@@ -2293,7 +2331,12 @@ class _HTTPBridgeStreamingMixin:
                 return
         session = session_or_forward
         if (
-            not durable_full_resend_has_safe_fresh_context
+            # A quarantine-suppressed anchor (#1534) must not be rehydrated
+            # into the session either: doing so would let the session-level
+            # injection below re-add the exact anchor the quarantine skipped
+            # and trim the prefix, rebuilding the wedged reattach.
+            not fresh_reattach_anchor_suppressed_quarantined
+            and not durable_full_resend_has_safe_fresh_context
             and durable_full_resend_anchor_count is not None
             and durable_full_resend_anchor_fingerprint is not None
             and durable_lookup is not None
@@ -2339,6 +2382,9 @@ class _HTTPBridgeStreamingMixin:
         ) and (not _http_bridge_payload_looks_like_full_resend(effective_payload) or session_anchor_trimmable)
         if (
             session.codex_session
+            # Honor the quarantine decision end to end: the durable anchor
+            # skipped above must not come back as a session-level injection.
+            and not fresh_reattach_anchor_suppressed_quarantined
             and not proxy_injected_previous_response_id
             and effective_payload.previous_response_id is None
             and session.last_completed_response_id is not None

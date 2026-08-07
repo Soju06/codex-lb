@@ -68,6 +68,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _normalized_http_bridge_instance_ring,
     _sticky_key_from_turn_state_header,
 )
+from app.modules.proxy._service.http_bridge.quarantine import (
+    _http_bridge_session_key_quarantined,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _headers_with_authorization,
     _partial_output_proxy_error_event_block,
@@ -217,6 +220,16 @@ class _HTTPBridgeOwnerForwardingMixin:
             for candidate_key in candidate_keys:
                 session = self._http_bridge_sessions.get(candidate_key)
                 if session is None or session.closed or not _http_bridge_session_account_active(session):
+                    continue
+                if _http_bridge_session_key_quarantined(self, session.key):
+                    # A session under a quarantined key (#1534) is rejected and
+                    # detached at lookup time, so for durable-anchor selection
+                    # it must count as absent: a delta-only payload then keeps
+                    # the durable anchor on the fresh session instead of
+                    # silently losing its prior context. The registry verdict
+                    # is authoritative for the key — a freshly created
+                    # replacement session (flag still False) under a
+                    # still-quarantined key counts as absent too.
                     continue
                 if _durable_recovery_supersedes_local_session(durable_lookup, session):
                     _drop_superseded_local_recovery_aliases_locked(

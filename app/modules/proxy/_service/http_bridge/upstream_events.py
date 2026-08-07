@@ -62,6 +62,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _normalize_http_bridge_error_event,
     _record_http_bridge_stuck_retire,
 )
+from app.modules.proxy._service.http_bridge.quarantine import (
+    _clear_http_bridge_quarantine,
+    _record_http_bridge_quarantine_eventless_timeout,
+    _record_http_bridge_quarantine_wedged_pending,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
     _await_cancelled_task,
@@ -682,6 +687,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 (getattr(request_state, "response_event_count", 0) for request_state in session.pending_requests),
                 default=0,
             )
+            pending_request_states = list(session.pending_requests)
+        # The #1534 wedge shape: a reattached stream that streamed response
+        # events whose ``response.created`` was never assigned. The eventless
+        # watchdog and the durable-anchor clear both key on
+        # ``response_event_count == 0`` and never trip on it, so quarantine
+        # the session here so later requests stop re-attaching to it.
+        _record_http_bridge_quarantine_wedged_pending(self, session, pending_request_states)
         observed_close_code = (
             upstream_close_code if upstream_close_code is not None else session.last_upstream_close_code
         )
@@ -925,6 +937,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 # generic reader-crash account penalty path.
                                 if expired_proxy_injected_anchor:
                                     await _clear_durable_http_bridge_response_anchor(self, session)
+                                _record_http_bridge_quarantine_eventless_timeout(self, session)
                                 session.closed = True
                                 await self._fail_http_bridge_reader_and_maybe_retire(
                                     session,
@@ -940,6 +953,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # to persist the durable-anchor invalidation.
                             if expired_proxy_injected_anchor:
                                 await _clear_durable_http_bridge_response_anchor(self, session)
+                            # Count the eventless retire toward the repeated-
+                            # wedge quarantine; the first strike still goes
+                            # through the bounded pre-created recovery below.
+                            _record_http_bridge_quarantine_eventless_timeout(self, session)
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,
@@ -2057,6 +2074,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             and not terminal_request_state.skip_request_log
         ):
             await self._clear_http_bridge_retry_circuit(session)
+            _clear_http_bridge_quarantine(self, session)
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract

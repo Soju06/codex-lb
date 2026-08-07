@@ -1037,6 +1037,11 @@ class _HTTPBridgeSession:
     # settlement owner for every other close, including an already-closed
     # session whose still-running transport later loses heartbeat liveness.
     liveness_settlement_owner: Literal["send"] | None = None
+    # Set when the session proved silent/wedged (reattached stream with
+    # response events but no ``response.created``, or repeated eventless
+    # timeouts). A quarantined session must never be selected for reuse or
+    # re-attach; later requests take the fresh session/no-anchor path.
+    quarantined: bool = False
     # Set while a reader handoff is replacing the socket. Idle pruning must
     # retain the registered session during this short transition even though
     # ``closed`` is fail-closed for normal request reuse.

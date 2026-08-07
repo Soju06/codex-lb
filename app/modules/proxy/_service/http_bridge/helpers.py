@@ -1297,12 +1297,28 @@ def _http_bridge_session_reusable_for_lookup(
     require_preferred_account: bool,
     service_tier_supported: bool,
     allow_closed_admission_handoff: bool,
+    session_key_quarantined: bool,
 ) -> bool:
+    if session.quarantined and not session_key_quarantined:
+        # The quarantine registry TTL is the source of truth
+        # (``_http_bridge_session_key_quarantined``): pruning drops the
+        # registry entry without touching the per-session flag, so a live
+        # session that outlives its quarantine window must become reusable
+        # again instead of staying rejected forever. Reset the stale flag so
+        # session state agrees with the registry.
+        session.quarantined = False
     live_or_retained = _http_bridge_session_account_active(session) and (
         not session.closed or (allow_closed_admission_handoff and _http_bridge_session_has_admission_waiter(session))
     )
     return (
         live_or_retained
+        # A quarantined key has proven silent/wedged; a new request must take
+        # the fresh session path instead of re-attaching. The registry verdict
+        # is authoritative for the key in both directions: a freshly created
+        # replacement session (flag still False) under a still-quarantined key
+        # is not reusable either, so a concurrent full-resend cannot restore
+        # the suppressed durable anchor through session hydration.
+        and not session_key_quarantined
         and _http_bridge_session_allows_api_key(session, api_key)
         and _http_bridge_session_reusable_for_request(
             session=session,

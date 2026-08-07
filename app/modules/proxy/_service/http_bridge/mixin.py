@@ -125,6 +125,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy._service.http_bridge.owner_forwarding import _HTTPBridgeOwnerForwardingMixin
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.http_bridge.proxy_failover import _HTTPBridgePreDispatchFailover
+from app.modules.proxy._service.http_bridge.quarantine import (
+    _http_bridge_session_key_quarantined,
+)
 from app.modules.proxy._service.http_bridge.request_submit import _HTTPBridgeRequestSubmitMixin
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _await_cancelled_task,
@@ -683,6 +686,7 @@ class _HTTPBridgeMixin(
                     require_preferred_account=require_preferred_account,
                     service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
                     allow_closed_admission_handoff=retained_handoff,
+                    session_key_quarantined=_http_bridge_session_key_quarantined(self, existing.key),
                 )
                 fork_key = _http_bridge_parallel_fork_key(
                     key=key,

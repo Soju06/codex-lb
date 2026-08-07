@@ -14,6 +14,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal, engine, relax_commit_durability
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository, UsageWindowWrite
@@ -161,6 +162,9 @@ async def test_usage_reservation_creation_and_settlement_relax_commit_durability
         await repo.create(_make_api_key(key_id))
 
         reservation_id = f"res-{uuid4().hex[:8]}"
+        used_at = utcnow()
+        coalescer = ApiKeyLastUsedCoalescer()
+        coalescer.record(key_id, used_at)
         with _captured_statements() as statements:
             await repo.create_usage_reservation(reservation_id, key_id=key_id, model="gpt-5", items=[])
             await repo.commit()
@@ -175,11 +179,13 @@ async def test_usage_reservation_creation_and_settlement_relax_commit_durability
                 cached_input_tokens=0,
                 cost_microdollars=0,
             )
-            await repo.update_last_used(key_id, commit=False)
             await repo.commit()
         _assert_relaxed_before(statements, "UPDATE api_key_usage_reservations")
-        # The last_used_at touch rides the same relaxed settlement transaction.
-        assert any("UPDATE api_keys" in statement for statement in statements)
+        assert coalescer.pending_snapshot() == {key_id: used_at}
+        assert await coalescer.flush() == 1
+        updated = await repo.get_by_id(key_id)
+        assert updated is not None
+        assert updated.last_used_at == used_at
 
 
 @pytest.mark.asyncio

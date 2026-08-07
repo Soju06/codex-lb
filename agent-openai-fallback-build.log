@@ -1,36 +1,134 @@
-Downloading cpython-3.13.15-linux-x86_64-gnu (download) (33.2MiB)
- Downloaded cpython-3.13.15-linux-x86_64-gnu (download)
-Using CPython 3.13.15
-Creating virtual environment at: .venv
-   Building codex-lb @ file:///home/runner/work/codex-lb/codex-lb
-Downloading brotli (1.4MiB)
-Downloading aiohttp (1.7MiB)
-Downloading zstandard (5.3MiB)
-Downloading psycopg-binary (4.9MiB)
-Downloading asyncpg (3.4MiB)
-Downloading openai (1.6MiB)
-Downloading pygments (1.2MiB)
-Downloading sqlalchemy (3.1MiB)
-Downloading cryptography (4.5MiB)
-Downloading pydantic-core (2.0MiB)
-Downloading virtualenv (7.2MiB)
-Downloading ty (12.0MiB)
-Downloading ruff (10.9MiB)
-Downloading uvloop (4.2MiB)
- Downloaded brotli
- Downloaded pydantic-core
- Downloaded aiohttp
- Downloaded asyncpg
- Downloaded zstandard
- Downloaded psycopg-binary
- Downloaded ruff
- Downloaded virtualenv
- Downloaded ty
- Downloaded uvloop
- Downloaded cryptography
- Downloaded sqlalchemy
- Downloaded pygments
- Downloaded openai
-      Built codex-lb @ file:///home/runner/work/codex-lb/codex-lb
-Installed 96 packages in 63ms
-FAILED: No 'script_location' key found in configuration.
+Alembic head: 20260806_020000_add_usage_history_bulk_covering_indexes
+> uv run python scripts/agent_apply_openai_fallback.py
+> uv run ruff format app tests/unit/test_subscription_fallback.py
+3 files reformatted, 550 files left unchanged
+> git diff --check
+> uv run pytest -q tests/unit/test_subscription_fallback.py
+...                                                                      [100%]
+3 passed in 0.08s
+> make lint
+python scripts/check_proxy_architecture.py
+proxy architecture checks passed
+uv run ruff check .
+I001 [*] Import block is un-sorted or un-formatted
+  --> app/db/alembic/versions/20260807_163500_add_model_source_subscription_fallback.py:7:1
+   |
+ 5 |   """
+ 6 |
+ 7 | / from alembic import op
+ 8 | | import sqlalchemy as sa
+   | |_______________________^
+ 9 |
+10 |   revision = "20260807_163500_add_model_source_subscription_fallback"
+   |
+help: Organize imports
+  |
+6 |
+7 + import sqlalchemy as sa
+8 | from alembic import op
+  - import sqlalchemy as sa
+9 |
+  |
+
+F821 Undefined name `fallback`
+    --> app/modules/proxy/api.py:5271:47
+     |
+5269 |     captured_turn_state_headers: dict[str, str] = {}
+5270 |     try:
+5271 |         with usage_limit_reservation_transfer(fallback is not None):
+     |                                               ^^^^^^^^
+5272 |             response_payload = await _collect_responses_payload(
+5273 |                 stream,
+     |
+
+F821 Undefined name `fallback`
+    --> app/modules/proxy/api.py:5277:12
+     |
+5275 |             )
+5276 |     except ProxyResponseError as exc:
+5277 |         if fallback is not None and _is_usage_limit_proxy_error(exc):
+     |            ^^^^^^^^
+5278 |             logger.info(
+5279 |                 "subscription_fallback_dispatch source_id=%s requested_model=%s fallback_model=%s",
+     |
+
+F821 Undefined name `fallback`
+    --> app/modules/proxy/api.py:5280:17
+     |
+5278 |             logger.info(
+5279 |                 "subscription_fallback_dispatch source_id=%s requested_model=%s fallback_model=%s",
+5280 |                 fallback.source.id,
+     |                 ^^^^^^^^
+5281 |                 payload.model,
+5282 |                 fallback.payload.model,
+     |
+
+F821 Undefined name `fallback`
+    --> app/modules/proxy/api.py:5282:17
+     |
+5280 |                 fallback.source.id,
+5281 |                 payload.model,
+5282 |                 fallback.payload.model,
+     |                 ^^^^^^^^
+5283 |             )
+5284 |             fallback.payload.stream = False
+     |
+
+F821 Undefined name `fallback`
+    --> app/modules/proxy/api.py:5284:13
+     |
+5282 |                 fallback.payload.model,
+5283 |             )
+5284 |             fallback.payload.stream = False
+     |             ^^^^^^^^
+5285 |             return await _source_responses_response(
+5286 |                 request,
+     |
+
+F821 Undefined name `fallback`
+    --> app/modules/proxy/api.py:5287:17
+     |
+5285 |             return await _source_responses_response(
+5286 |                 request,
+5287 |                 fallback.payload,
+     |                 ^^^^^^^^
+5288 |                 source=fallback.source,
+5289 |                 api_key=api_key,
+     |
+
+F821 Undefined name `fallback`
+    --> app/modules/proxy/api.py:5288:24
+     |
+5286 |                 request,
+5287 |                 fallback.payload,
+5288 |                 source=fallback.source,
+     |                        ^^^^^^^^
+5289 |                 api_key=api_key,
+5290 |                 rate_limit_headers={**turn_state_headers, **rate_limit_headers},
+     |
+
+I001 [*] Import block is un-sorted or un-formatted
+ --> app/modules/proxy/subscription_fallback.py:1:1
+  |
+1 | / from __future__ import annotations
+2 | |
+3 | | from contextlib import contextmanager
+4 | | from contextvars import ContextVar
+5 | | from collections.abc import Iterator
+  | |____________________________________^
+6 |
+7 |   _usage_limit_reservation_transfer: ContextVar[bool] = ContextVar(
+  |
+help: Organize imports
+  |
+2 |
+3 + from collections.abc import Iterator
+4 | from contextlib import contextmanager
+5 | from contextvars import ContextVar
+  - from collections.abc import Iterator
+6 |
+  |
+
+Found 9 errors.
+[*] 2 fixable with the `--fix` option.
+make: *** [Makefile:82: lint] Error 1

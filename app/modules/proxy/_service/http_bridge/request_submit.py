@@ -1652,7 +1652,6 @@ class _HTTPBridgeRequestSubmitMixin:
                             session_id=session.durable_session_id,
                             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                             owner_epoch=session.durable_owner_epoch,
-                            state="unknown",
                         )
                     except Exception:
                         logger.warning(

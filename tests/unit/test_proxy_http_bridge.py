@@ -22212,7 +22212,7 @@ async def test_http_bridge_reader_failure_classifies_each_operation_from_its_own
         error_message="closed",
     )
 
-    assert [call.kwargs["state"] for call in update_operation.await_args_list] == ["unknown", "failed"]
+    assert [call.kwargs["state"] for call in update_operation.await_args_list] == ["unknown", "acknowledged"]
 
 
 @pytest.mark.asyncio

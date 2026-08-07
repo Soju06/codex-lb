@@ -98,3 +98,23 @@ async def test_dropped_batch_is_never_marked_replayable() -> None:
         assert durable.finalized == []
     finally:
         await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_background_flusher() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    await _enqueue(batcher, "one")
+    task = batcher._task
+    assert task is not None
+
+    await batcher.close()
+
+    assert batcher._task is None
+    assert task.done()

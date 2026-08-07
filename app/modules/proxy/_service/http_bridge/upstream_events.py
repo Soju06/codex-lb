@@ -891,7 +891,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 operation_state = (
                     "unknown"
                     if getattr(request_state, "response_event_count", 0) == 0
-                    else "failed"
+                    else "acknowledged"
                 )
                 await _update_http_bridge_operation_state(
                     self,

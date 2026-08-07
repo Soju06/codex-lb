@@ -102,3 +102,27 @@ terminate normally rather than being resent indefinitely.
 If reacquiring API-key usage limits for a recovery attempt fails, the proxy
 MUST settle the prior reservation and emit a terminal `response.failed` SSE
 event instead of aborting the already-started stream.
+
+### Requirement: Partial disconnect acknowledgement
+
+When a bridge disconnects after an operation has emitted any response event but
+before a terminal event, the durable operation MUST remain acknowledged or
+ambiguous. It MUST NOT be classified as retryable failed solely because the
+disconnect was non-terminal.
+
+### Requirement: Retry output stops indefinite recovery
+
+An indefinite recovery attempt MUST stop retrying once that attempt emits any
+downstream response event, even if the attempt later fails with a retryable
+transport error.
+
+### Requirement: Preserve repeated event occurrences
+
+The durable event spool MUST preserve repeated identical SSE blocks as distinct
+ordered occurrences. Event identity MUST include its operation-local sequence
+position rather than content alone.
+
+### Requirement: Stop event persistence during shutdown
+
+Proxy shutdown MUST close the HTTP bridge event batcher and cancel its
+background flusher before the process exits.

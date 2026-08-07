@@ -106,6 +106,24 @@ def test_http_bridge_operation_metadata_is_stable_and_non_destructive() -> None:
     assert json.loads(normalized) == {"type": "response.create"}
 
 
+def test_http_bridge_operation_fingerprint_strips_account_installation_metadata() -> None:
+    request = (
+        '{"type":"response.create","previous_response_id":"resp_parent",'
+        '"client_metadata":{"x-codex-installation-id":"account-a",'
+        '"x-codex-turn-metadata":"{\\"installation_id\\":\\"account-a\\",\\"turn_id\\":\\"t1\\"}",'
+        '"caller":"stable"}}'
+    )
+    normalized = json.loads(http_bridge_request_submit_module._text_without_account_installation_id(request))
+    assert normalized == {
+        "type": "response.create",
+        "previous_response_id": "resp_parent",
+        "client_metadata": {
+            "x-codex-turn-metadata": '{"turn_id":"t1"}',
+            "caller": "stable",
+        },
+    }
+
+
 def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_anchor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

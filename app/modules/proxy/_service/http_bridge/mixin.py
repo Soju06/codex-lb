@@ -1520,6 +1520,7 @@ class _HTTPBridgeMixin(
                         "preferred_account_is_continuity_owner",
                         "deferred_account_backoff_lifecycle",
                         "defer_account_health_writes",
+                        "require_security_work_authorized",
                     ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)

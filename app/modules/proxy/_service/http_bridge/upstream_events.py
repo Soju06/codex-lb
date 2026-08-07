@@ -1173,11 +1173,24 @@ class _HTTPBridgeUpstreamEventsMixin:
                         retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
-                untyped_close_account_neutral = message.error_code is None
                 close_classification = (
                     _classify_upstream_close(message.close_code, response_events_seen=response_events_seen)
                     if message.close_code is not None
                     else None
+                )
+                close_is_untyped = message.error_code is None
+                close_is_clean = (
+                    message.kind == "close"
+                    and _classify_upstream_close(
+                        message.close_code,
+                        response_events_seen=response_events_seen,
+                    )
+                    == "clean"
+                )
+                account_neutral_close = (
+                    message.error_code in {"proxy_network_unavailable", "upstream_keepalive_timeout"}
+                    or close_is_untyped
+                    or close_is_clean
                 )
                 async with session.lifecycle_lock:
                     await self._fail_http_bridge_reader_and_maybe_retire(
@@ -1191,19 +1204,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             if close_classification is not None
                             else "websocket_transport_error"
                         ),
-                        penalize_account=(
-                            message.error_code != "proxy_network_unavailable"
-                            and message.error_code != "upstream_keepalive_timeout"
-                            and not untyped_close_account_neutral
-                            and not (
-                                message.kind == "close"
-                                and _classify_upstream_close(
-                                    message.close_code,
-                                    response_events_seen=response_events_seen,
-                                )
-                                == "clean"
-                            )
-                        ),
+                        penalize_account=not account_neutral_close,
                     )
                 break
         except asyncio.CancelledError:

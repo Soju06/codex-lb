@@ -44,7 +44,8 @@ class TimeoutSettings(Protocol):
     http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float
     proxy_admission_wait_timeout_seconds: float
     proxy_account_lease_ttl_seconds: float
-    model_registry_snapshot_max_age_seconds: float
+    @property
+    def model_registry_snapshot_max_age_seconds(self) -> int | float: ...
     timeout_invariant_validation_strict: bool
 
 

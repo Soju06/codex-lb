@@ -107,9 +107,7 @@ class ApiKeysRepository:
         self._session = session
 
     async def update_last_used(self, key_id: str, *, commit: bool = True) -> None:
-        await self._session.execute(
-            update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow())
-        )
+        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
         if commit:
             await self._session.commit()
 

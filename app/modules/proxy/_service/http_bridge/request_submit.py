@@ -1707,18 +1707,18 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
     ) -> bool:
         detached = False
-        async with session.pending_lock:
-            if request_state in session.pending_requests and not request_state.draining_until_terminal:
-                request_state.draining_until_terminal = True
-                request_state.downstream_visible = False
-                session.queued_request_count = max(0, session.queued_request_count - 1)
-                session.upstream_control.reconnect_requested = True
-                session.upstream_control.retire_after_drain = True
-                detached = True
-            # Queue revocation and pending ownership use the same lock. A
-            # completed handler that wins first keeps its local queue reference;
-            # a detach that wins first leaves no queue for that handler to claim.
-            request_state.event_queue = None
+        # Revoke downstream delivery immediately; lifecycle ownership below
+        # may legitimately be held by a reconnect owner for an arbitrary wait.
+        request_state.event_queue = None
+        async with session.lifecycle_lock:
+            async with session.pending_lock:
+                if request_state in session.pending_requests and not request_state.draining_until_terminal:
+                    request_state.draining_until_terminal = True
+                    request_state.downstream_visible = False
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
+                    detached = True
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             if request_state.terminal_settlement_phase == "abandoned":
@@ -1941,7 +1941,7 @@ class _HTTPBridgeRequestSubmitMixin:
             return False
 
     async def _retry_http_bridge_terminal_capacity_request(
-        self,
+        self: Any,
         session: "_HTTPBridgeSession",
         request_state: _WebSocketRequestState,
         *,

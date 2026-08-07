@@ -6,6 +6,7 @@ import logging
 import math
 import random
 from collections import deque
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Literal, Mapping, cast
 from uuid import uuid4
@@ -274,12 +275,16 @@ async def _send_http_bridge_request_text_with_archive_id(
     session: "_HTTPBridgeSession",
     request_state: _WebSocketRequestState,
     text_data: str,
+    *,
+    on_send_started: Callable[[], None] | None = None,
 ) -> None:
     text_data = _text_with_operation_id(text_data, request_state.operation_id)
     # Operation metadata is added after the initial payload sizing pass. Check
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.
     _enforce_http_bridge_response_create_text_size(request_state, text_data)
+    if on_send_started is not None:
+        on_send_started()
     token = set_request_id(request_state.archive_request_id)
     try:
         request_state.response_create_sent_at = _service_time().monotonic()
@@ -2951,6 +2956,11 @@ class _HTTPBridgeRequestSubmitMixin:
         reconnected = False
         operation_rebound_for_retry = False
         security_retry_send_started = False
+
+        def mark_security_retry_send_started() -> None:
+            nonlocal security_retry_send_started
+            security_retry_send_started = True
+
         try:
             request_state.precreated_replay_account_id = session.account.id
             await self._release_request_state_account_response_create_lease(request_state)
@@ -3022,8 +3032,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                 operation_rebound_for_retry = True
             retry_text = self._http_bridge_text_with_account_installation_id(session, request_state, retry_text)
-            security_retry_send_started = True
-            await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text)
+            await _send_http_bridge_request_text_with_archive_id(
+                session,
+                request_state,
+                retry_text,
+                on_send_started=mark_security_retry_send_started,
+            )
             session.last_used_at = _service_time().monotonic()
             return True
         except UpstreamWebSocketTransportError:

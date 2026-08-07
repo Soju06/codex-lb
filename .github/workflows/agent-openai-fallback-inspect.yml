@@ -5,32 +5,39 @@ on:
     branches: [agent/openai-api-fallback]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect fallback integration seams
+      - name: Capture fallback integration seams
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== ModelSource model ==='
-          grep -n -A90 -B5 '^class ModelSource(Base)' app/db/models.py
-          echo '=== responses source call sites ==='
-          grep -R -n -B12 -A30 'forward_responses\|stream_responses' app tests | head -n 500 || true
-          echo '=== usage limit terminal branch ==='
-          grep -n -B50 -A100 'selection.error_code == USAGE_LIMIT_REACHED' app/modules/proxy/_service/streaming/retry.py
-          echo '=== reservation/finally anchors ==='
-          grep -n -B15 -A30 'settlement' app/modules/proxy/_service/streaming/retry.py | tail -n 500
-          echo '=== source route helpers ==='
-          grep -R -n -B15 -A50 'find_responses_source_for_model' app | head -n 500 || true
-          echo '=== frontend form ==='
-          sed -n '1,260p' frontend/src/features/model-sources/components/model-source-form.ts
-          echo '=== frontend fields ==='
-          sed -n '1,320p' frontend/src/features/model-sources/components/model-source-form-fields.tsx
-          echo '=== migrations ==='
-          ls -1 alembic/versions | tail -n 30 || ls -1 migrations/versions | tail -n 30 || true
-          echo '=== CI setup commands ==='
-          grep -n -E -B4 -A8 'setup-python|setup-bun|pytest|ruff|mypy|bun (install|run|test)' .github/workflows/ci.yml | head -n 500
+          {
+            echo '=== ModelSource model ==='
+            grep -n -A90 -B5 '^class ModelSource(Base)' app/db/models.py
+            echo '=== responses source call sites ==='
+            grep -R -n -B12 -A35 'forward_responses\|stream_responses' app tests | head -n 900 || true
+            echo '=== usage limit terminal branch ==='
+            grep -n -B80 -A140 'selection.error_code == USAGE_LIMIT_REACHED' app/modules/proxy/_service/streaming/retry.py
+            echo '=== source route helpers ==='
+            grep -R -n -B20 -A80 'find_responses_source_for_model' app | head -n 900 || true
+            echo '=== frontend form ==='
+            sed -n '1,300p' frontend/src/features/model-sources/components/model-source-form.ts
+            echo '=== frontend fields ==='
+            sed -n '1,380p' frontend/src/features/model-sources/components/model-source-form-fields.tsx
+            echo '=== frontend edit ==='
+            sed -n '1,360p' frontend/src/features/model-sources/components/model-source-edit-dialog.tsx
+            echo '=== migrations ==='
+            (ls -1 alembic/versions 2>/dev/null || ls -1 migrations/versions 2>/dev/null) | tail -n 40 || true
+            echo '=== CI setup commands ==='
+            grep -n -E -B4 -A10 'setup-python|setup-bun|pytest|ruff|mypy|bun (install|run|test)' .github/workflows/ci.yml | head -n 800
+          } > agent-openai-fallback-inspect.txt
+          git config user.name 'Oleh Formaniuk'
+          git config user.email 'zjklee@gmail.com'
+          git add agent-openai-fallback-inspect.txt
+          git commit -m 'chore: capture fallback integration context'
+          git push

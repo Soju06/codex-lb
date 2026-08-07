@@ -420,11 +420,11 @@ def _http_bridge_dead_owner_previous_response_not_found_terminal(
     return cast(
         dict[str, JsonValue],
         response_failed_event(
-            cast(str, error["code"]),
-            cast(str, error["message"]),
-            error_type=cast(str, error["type"]),
+            error["code"],
+            error["message"],
+            error_type=error["type"],
             response_id=response_id,
-            error_param=cast(str, error["param"]),
+            error_param=error["param"],
         ),
     )
 

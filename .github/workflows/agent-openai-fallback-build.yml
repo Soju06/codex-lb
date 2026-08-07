@@ -103,6 +103,32 @@ jobs:
           if [ "$status" -eq 0 ]; then
             ALEMBIC_HEAD="$ALEMBIC_HEAD" run uv run python scripts/agent_apply_openai_fallback.py || status=$?
           fi
+
+          # Startup probing may return either the exception itself or an
+          # already-parsed OpenAI error envelope. Keep the trigger exact in
+          # either representation.
+          if [ "$status" -eq 0 ]; then
+            run uv run python - <<'PY' || status=$?
+          from pathlib import Path
+
+          path = Path('app/modules/proxy/api.py')
+          text = path.read_text()
+          old = '''def _is_usage_limit_proxy_error(exc: ProxyResponseError) -> bool:
+              envelope = _parse_error_envelope(exc.payload)
+              error = envelope.error
+              return error is not None and (error.code == USAGE_LIMIT_REACHED or error.type == USAGE_LIMIT_REACHED)
+          '''
+          new = '''def _is_usage_limit_proxy_error(exc: ProxyResponseError | OpenAIErrorEnvelope) -> bool:
+              envelope = _parse_error_envelope(exc.payload) if isinstance(exc, ProxyResponseError) else exc
+              error = envelope.error
+              return error is not None and (error.code == USAGE_LIMIT_REACHED or error.type == USAGE_LIMIT_REACHED)
+          '''
+          if old not in text:
+              raise SystemExit('usage-limit helper anchor missing')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          fi
+
           if [ "$status" -eq 0 ]; then run uv run ruff format app tests/unit/test_subscription_fallback.py || status=$?; fi
           if [ "$status" -eq 0 ]; then
             run uv run ruff check --fix \

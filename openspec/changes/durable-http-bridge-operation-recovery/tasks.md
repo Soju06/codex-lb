@@ -34,6 +34,7 @@
 
 ## 2. Validation
 
-- [ ] 2.1 Add or update focused repository and request-submit regressions.
-- [ ] 2.2 Run focused HTTP bridge tests, Ruff, Ty, diff checks, and strict
+- [x] 2.1 Add or update focused repository and request-submit regressions.
+- [x] 2.2 Run focused HTTP bridge tests, Ruff, Ty, diff checks, and strict
   OpenSpec validation.
+  - Evidence: 612 focused HTTP bridge/API tests passed; Ruff and Ty passed; `git diff --check` passed; `openspec validate durable-http-bridge-operation-recovery --strict` passed; `openspec validate --specs --strict` passed (49 specs, 0 failures).

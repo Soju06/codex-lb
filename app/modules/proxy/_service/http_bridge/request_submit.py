@@ -274,6 +274,10 @@ async def _send_http_bridge_request_text_with_archive_id(
     text_data: str,
 ) -> None:
     text_data = _text_with_operation_id(text_data, request_state.operation_id)
+    # Operation metadata is added after the initial payload sizing pass. Check
+    # the exact frame that will cross the websocket so the metadata cannot
+    # push an otherwise-valid response.create over the upstream limit.
+    _enforce_http_bridge_response_create_text_size(request_state, text_data)
     token = set_request_id(request_state.archive_request_id)
     try:
         request_state.response_create_sent_at = _service_time().monotonic()

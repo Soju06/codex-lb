@@ -28,6 +28,8 @@
 - [x] 1.25 Place all response-compatibility requirements in the capability delta path.
 - [x] 1.26 Record timeout health only after pending reservation settlement.
 - [x] 1.27 Replay finalized incomplete operations without resetting their terminal spool.
+- [x] 1.28 Return reservation settlement status to timeout health handling.
+- [x] 1.29 Revalidate the final response.create frame after operation metadata injection.
 
 ## 2. Validation
 

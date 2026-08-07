@@ -905,7 +905,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
         try:
-            await self._fail_pending_websocket_requests(
+            reservations_settled = await self._fail_pending_websocket_requests(
                 account=session.account,
                 account_id_value=session.account.id,
                 pending_requests=session.pending_requests,
@@ -918,6 +918,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             if (
                 failed_pending_count > 0
+                and reservations_settled is not False
                 and observed_response_events == 0
                 and retire_detail == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
             ):

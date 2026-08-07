@@ -643,7 +643,8 @@ async def test_operation_ledger_is_fenced_and_idempotent(
             event_text="data: {\"type\":\"response.completed\"}\n\n",
             max_bytes=1024,
         )
-        # The event fingerprint fence makes a replayed upstream block idempotent.
+        # Repeated identical SSE blocks are distinct downstream occurrences,
+        # so replay must preserve both copies rather than hash-deduplicating.
         assert await repository.append_operation_event(
             operation_id=operation_id,
             session_id=claim.id,
@@ -653,7 +654,8 @@ async def test_operation_ledger_is_fenced_and_idempotent(
             max_bytes=1024,
         )
         assert await repository.get_operation_events(operation_id=operation_id) == [
-            "data: {\"type\":\"response.completed\"}\n\n"
+            "data: {\"type\":\"response.completed\"}\n\n",
+            "data: {\"type\":\"response.completed\"}\n\n",
         ]
         # A missing parent turn makes the chain ineligible rather than
         # silently constructing an incomplete conversation.

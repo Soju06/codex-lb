@@ -18,6 +18,10 @@
 - [x] 1.15 Keep event-spool settings compatible with legacy test doubles.
 - [x] 1.16 Gate indefinite recovery to eventless anchored operations.
 - [x] 1.17 Convert recovery reservation failures into terminal SSE events.
+- [x] 1.18 Preserve acknowledged state after partial response output and disconnect.
+- [x] 1.19 Stop indefinite recovery after a retry attempt emits downstream output.
+- [x] 1.20 Include sequence position in event fingerprints so repeated SSE blocks survive replay.
+- [x] 1.21 Close the event batcher flusher from the proxy shutdown path.
 
 ## 2. Validation
 

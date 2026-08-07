@@ -1360,7 +1360,6 @@ class DurableBridgeRepository:
         max_bytes: int,
     ) -> bool:
         """Append one replayable SSE block under the durable owner fence."""
-        event_fingerprint = durable_bridge_hash(event_text)
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
                 select(HttpBridgeSessionRecord.id)
@@ -1382,15 +1381,6 @@ class DurableBridgeRepository:
             if owner_exists is None or operation is None:
                 await self._session.rollback()
                 return False
-            existing = await self._session.scalar(
-                select(HttpBridgeOperationEvent.event_id).where(
-                    HttpBridgeOperationEvent.operation_id == operation_id,
-                    HttpBridgeOperationEvent.event_fingerprint == event_fingerprint,
-                )
-            )
-            if existing is not None:
-                await self._session.commit()
-                return True
             event_size = len(event_text.encode("utf-8"))
             if event_size > max_bytes or int(operation.event_bytes or 0) + event_size > max_bytes:
                 operation.event_spool_complete = False
@@ -1401,11 +1391,14 @@ class DurableBridgeRepository:
                     HttpBridgeOperationEvent.operation_id == operation_id,
                 )
             )
+            sequence = int(next_sequence or 1)
             self._session.add(
                 HttpBridgeOperationEvent(
                     operation_id=operation_id,
-                    sequence_number=int(next_sequence or 1),
-                    event_fingerprint=event_fingerprint,
+                    sequence_number=sequence,
+                    # Include occurrence position so identical downstream
+                    # blocks remain distinct in replay transcripts.
+                    event_fingerprint=durable_bridge_hash(f"{sequence}:{event_text}"),
                     event_text=event_text,
                 )
             )
@@ -1452,44 +1445,40 @@ class DurableBridgeRepository:
             if owner_exists is None or operation is None:
                 await self._session.rollback()
                 return False
-            fingerprints = [durable_bridge_hash(event.event_text) for event in events]
-            existing_fingerprints = set(
-                await self._session.scalars(
-                    select(HttpBridgeOperationEvent.event_fingerprint).where(
-                        HttpBridgeOperationEvent.operation_id == first.operation_id,
-                        HttpBridgeOperationEvent.event_fingerprint.in_(fingerprints),
-                    )
+            next_sequence = await self._session.scalar(
+                select(func.coalesce(func.max(HttpBridgeOperationEvent.sequence_number), 0) + 1).where(
+                    HttpBridgeOperationEvent.operation_id == first.operation_id,
                 )
             )
-            pending: list[tuple[str, str, int]] = []
+            sequence = int(next_sequence or 1)
+            pending: list[tuple[str, int, str, int]] = []
             total_bytes = int(operation.event_bytes or 0)
-            for event, fingerprint in zip(events, fingerprints, strict=True):
-                if fingerprint in existing_fingerprints or any(item[1] == fingerprint for item in pending):
-                    continue
+            for event in events:
                 event_size = len(event.event_text.encode("utf-8"))
                 if total_bytes + event_size > max_bytes:
                     operation.event_spool_complete = False
                     await self._session.commit()
                     return False
                 total_bytes += event_size
-                pending.append((event.event_text, fingerprint, event_size))
-            if pending:
-                next_sequence = await self._session.scalar(
-                    select(func.coalesce(func.max(HttpBridgeOperationEvent.sequence_number), 0) + 1).where(
-                        HttpBridgeOperationEvent.operation_id == first.operation_id,
+                pending.append(
+                    (
+                        event.event_text,
+                        sequence,
+                        durable_bridge_hash(f"{sequence}:{event.event_text}"),
+                        event_size,
                     )
                 )
-                sequence = int(next_sequence or 1)
-                for event_text, fingerprint, event_size in pending:
+                sequence += 1
+            if pending:
+                for event_text, sequence_number, fingerprint, event_size in pending:
                     self._session.add(
                         HttpBridgeOperationEvent(
                             operation_id=first.operation_id,
-                            sequence_number=sequence,
+                            sequence_number=sequence_number,
                             event_fingerprint=fingerprint,
                             event_text=event_text,
                         )
                     )
-                    sequence += 1
                 operation.event_bytes = total_bytes
             await self._session.commit()
         return True

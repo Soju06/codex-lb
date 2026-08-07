@@ -1611,6 +1611,10 @@ class _HTTPBridgeMixin(
         for session in sessions_to_close:
             await self._close_http_bridge_session(session)
         await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
+        event_batcher = getattr(self, "_http_bridge_operation_event_batcher", None)
+        close_batcher = getattr(event_batcher, "close", None)
+        if callable(close_batcher):
+            await close_batcher()
 
     async def mark_http_bridge_draining(self) -> None:
         try:

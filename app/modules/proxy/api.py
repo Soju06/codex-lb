@@ -6311,7 +6311,11 @@ async def _stream_response_error_events(
                 await asyncio.sleep(retry_delay)
                 try:
                     retry_stream = recovery_stream_factory()
+                    retry_saw_downstream_event = False
                     async for line in retry_stream:
+                        if line.startswith("data:") or line.startswith("event:"):
+                            retry_saw_downstream_event = True
+                            saw_downstream_event = True
                         yield line
                     return
                 except ProxyResponseError as retry_exc:
@@ -6323,7 +6327,7 @@ async def _stream_response_error_events(
                         "stream_idle_timeout",
                         "upstream_request_timeout",
                         "upstream_unavailable",
-                    }:
+                    } or retry_saw_downstream_event:
                         exc = retry_exc
                         break
                     retry_delay = max(1.0, min(30.0, float(retry_exc.retry_after_seconds or retry_delay)))

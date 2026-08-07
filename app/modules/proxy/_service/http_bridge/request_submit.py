@@ -1834,6 +1834,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 for request_state in session.pending_requests
             )
             completed_response_id = session.last_completed_response_id
+        # The snapshot above avoids awaiting pending_lock while the global
+        # registry lock is held, preserving bounded cleanup for other sessions.
         caller_response_events_seen = response_events_seen or 0
         became_healthy_during_suspend = current_response_events_seen > caller_response_events_seen or (
             caller_response_events_seen == 0 and (current_response_created or completed_response_id is not None)

@@ -2492,6 +2492,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                         terminal=False,
                     )
                 await terminal_event_queue.put(deferred_text)
+            if not suppress_downstream_event:
+                await _persist_http_bridge_operation_event(
+                    self,
+                    session,
+                    terminal_request_state,
+                    event_block,
+                    terminal=True,
+                )
             await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:
             await terminal_event_queue.put(None)

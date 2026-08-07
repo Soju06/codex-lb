@@ -251,3 +251,24 @@ unknown in-flight state.
 
 - **WHEN** upstream emits `response.incomplete`
 - **THEN** the operation is terminalized and its drained transcript is eligible for replay
+
+### Requirement: Settle reservations before timeout health
+
+When an eventless timeout retires a keyed bridge, the proxy MUST settle all
+pending request reservations before recording the account timeout health signal.
+If settlement fails, the health signal MUST NOT claim that cleanup completed.
+
+#### Scenario: Failed reservation release does not poison health state
+
+- **WHEN** the timeout cleanup cannot release a pending reservation
+- **THEN** the account timeout signal is not recorded before that failure is surfaced
+
+### Requirement: Replay finalized incomplete operations
+
+A finalized `incomplete` operation transcript MUST be replayed for an identical
+request and MUST NOT be reset or treated as an unknown in-flight operation.
+
+#### Scenario: Reconnect receives stored incomplete transcript
+
+- **WHEN** an identical request finds a finalized incomplete operation
+- **THEN** the stored terminal transcript is delivered without a new upstream dispatch

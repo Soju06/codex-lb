@@ -26,6 +26,8 @@
 - [x] 1.23 Keep eventless local transport failures retryable in indefinite recovery.
 - [x] 1.24 Terminalize and persist `response.incomplete` operation outcomes.
 - [x] 1.25 Place all response-compatibility requirements in the capability delta path.
+- [x] 1.26 Record timeout health only after pending reservation settlement.
+- [x] 1.27 Replay finalized incomplete operations without resetting their terminal spool.
 
 ## 2. Validation
 

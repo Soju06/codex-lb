@@ -196,10 +196,15 @@ _TaskResultT = TypeVar("_TaskResultT")
 _HTTP_BRIDGE_PENDING_COUNT_WARNING_INTERVAL_SECONDS = 60.0
 _http_bridge_pending_count_warning_last_logged: dict[tuple[str, str, str], float] = {}
 _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
-# A healthy upstream acknowledges response.create promptly. Keep the
-# Keep the owner-side watchdog within the client-safe contract while honoring
-# the configured stuck-gate threshold when it is shorter.
-_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
+# A healthy upstream usually acknowledges response.create promptly, but a
+# persistent Responses session may legitimately spend longer preparing a
+# server-side continuation (especially after a large tool-heavy turn). Keep
+# the owner-side watchdog within the 240-second client-safe contract while
+# honoring the configured stuck-gate threshold when it is shorter. A shorter
+# cap falsely retires these sessions and opens their retry circuits before
+# upstream has had a chance to emit response.created.
+_HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 240.0
+_HTTP_BRIDGE_FRESH_EVENTLESS_RECOVERY_MAX_SECONDS = 60.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
 T = TypeVar("T")
 
@@ -740,10 +745,12 @@ def _http_bridge_eventless_precreated_deadline(
     # the generic activity marker, but it must not extend the response.create
     # acknowledgement deadline. The eventless watchdog is intentionally
     # anchored to the send time until a response-lifecycle event is observed.
-    return sent_at + min(
-        float(stuck_gate_retire_after_seconds),
-        _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
+    max_seconds = (
+        _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
+        if request_state.previous_response_id is not None or request_state.hard_continuity_anchor
+        else _HTTP_BRIDGE_FRESH_EVENTLESS_RECOVERY_MAX_SECONDS
     )
+    return sent_at + min(float(stuck_gate_retire_after_seconds), max_seconds)
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:

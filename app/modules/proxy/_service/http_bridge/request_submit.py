@@ -55,6 +55,7 @@ from app.core.utils.request_id import (
     reset_request_id,
     set_request_id,
 )
+from app.core.utils.retry import backoff_seconds
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -245,6 +246,24 @@ async def _send_http_bridge_request_text_with_archive_id(
             raise
     finally:
         reset_request_id(token)
+
+
+def _prepare_http_bridge_terminal_capacity_replay(request_state: _WebSocketRequestState) -> str | None:
+    request_text = request_state.request_text
+    if not isinstance(request_text, str) or not request_text:
+        return None
+    if request_state.response_id is None or request_state.replay_count >= 1:
+        return None
+    if request_state.upstream_model_output_seen:
+        return None
+    request_state.replay_count += 1
+    request_state.awaiting_response_created = True
+    request_state.response_id = None
+    request_state.response_event_count = 0
+    request_state.latency_response_created_ms = None
+    request_state.upstream_model_output_seen = False
+    _clear_websocket_request_error_overrides(request_state)
+    return request_text
 
 
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
@@ -1688,18 +1707,18 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state: _WebSocketRequestState,
     ) -> bool:
         detached = False
-        async with session.pending_lock:
-            if request_state in session.pending_requests and not request_state.draining_until_terminal:
-                request_state.draining_until_terminal = True
-                request_state.downstream_visible = False
-                session.queued_request_count = max(0, session.queued_request_count - 1)
-                session.upstream_control.reconnect_requested = True
-                session.upstream_control.retire_after_drain = True
-                detached = True
-            # Queue revocation and pending ownership use the same lock. A
-            # completed handler that wins first keeps its local queue reference;
-            # a detach that wins first leaves no queue for that handler to claim.
-            request_state.event_queue = None
+        # Revoke downstream delivery immediately; lifecycle ownership below
+        # may legitimately be held by a reconnect owner for an arbitrary wait.
+        request_state.event_queue = None
+        async with session.lifecycle_lock:
+            async with session.pending_lock:
+                if request_state in session.pending_requests and not request_state.draining_until_terminal:
+                    request_state.draining_until_terminal = True
+                    request_state.downstream_visible = False
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
+                    session.upstream_control.reconnect_requested = True
+                    session.upstream_control.retire_after_drain = True
+                    detached = True
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             if request_state.terminal_settlement_phase == "abandoned":
@@ -1920,6 +1939,119 @@ class _HTTPBridgeRequestSubmitMixin:
         except Exception:
             logger.warning("HTTP bridge retry on fresh upstream failed", exc_info=True)
             return False
+
+    async def _retry_http_bridge_terminal_capacity_request(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        request_state: _WebSocketRequestState,
+        *,
+        error_code: str,
+        preserve_for_reader_failure: bool = False,
+    ) -> bool:
+        original_account_id = session.account.id
+        original_response_id = request_state.response_id
+        original_response_event_count = request_state.response_event_count
+        original_replay_count = request_state.replay_count
+        original_output_seen = request_state.upstream_model_output_seen
+        original_preferred_account_id = request_state.preferred_account_id
+        original_error_overrides = (
+            request_state.error_code_override,
+            request_state.error_message_override,
+            request_state.error_type_override,
+            request_state.error_param_override,
+            request_state.error_http_status_override,
+        )
+        async with session.pending_lock:
+            if (
+                (session.pending_requests and session.pending_requests != deque([request_state]))
+                or request_state.replay_count >= 1
+                or session.admission_waiter_count
+            ):
+                return False
+            if not session.pending_requests:
+                session.pending_requests.appendleft(request_state)
+                session.queued_request_count += 1
+
+        async def owns_request() -> bool:
+            if session.closed or session.upstream_control.retire_after_drain:
+                return False
+            async with session.pending_lock:
+                return len(session.pending_requests) == 1 and session.pending_requests[0] is request_state
+
+        retry_sent = False
+        try:
+            await self._acquire_request_state_response_create_admission(
+                request_state,
+                response_create_gate=session.response_create_gate,
+                account_id=original_account_id,
+                surface="http_bridge_capacity_retry",
+                bridge_session=session,
+            )
+            if not await owns_request():
+                return False
+            delay = backoff_seconds(original_replay_count + 1)
+            if request_state.bridge_request_deadline is not None:
+                remaining = max(0.0, request_state.bridge_request_deadline - _service_time().monotonic())
+                if remaining <= 0:
+                    return False
+                delay = min(delay, remaining)
+            await asyncio.sleep(delay)
+            if (
+                request_state.bridge_request_deadline is not None
+                and _service_time().monotonic() >= request_state.bridge_request_deadline
+            ):
+                return False
+            async with session.lifecycle_lock:
+                if not await owns_request():
+                    return False
+                request_state.preferred_account_id = original_account_id
+                await self._reconnect_http_bridge_session(
+                    session,
+                    request_state=request_state,
+                    require_preferred_account=True,
+                )
+                if session.account.id != original_account_id or not await owns_request():
+                    return False
+                request_text = _prepare_http_bridge_terminal_capacity_replay(request_state)
+                if request_text is None:
+                    return False
+                request_text = self._http_bridge_text_with_account_installation_id(session, request_state, request_text)
+                await _send_http_bridge_request_text_with_archive_id(session, request_state, request_text)
+                session.last_used_at = _service_time().monotonic()
+            retry_sent = True
+            return True
+        except UpstreamWebSocketTransportError:
+            raise
+        except Exception:
+            logger.warning("HTTP bridge terminal capacity retry failed", exc_info=True)
+            return False
+        finally:
+            if not retry_sent and not preserve_for_reader_failure:
+                async with session.pending_lock:
+                    if request_state in session.pending_requests:
+                        session.pending_requests.remove(request_state)
+                        session.queued_request_count = sum(
+                            1
+                            for pending in session.pending_requests
+                            if _http_bridge_request_counts_against_queue(pending)
+                        )
+                if (
+                    request_state.response_create_gate_acquired
+                    or request_state.account_response_create_lease is not None
+                ):
+                    await _release_websocket_response_create_gate(request_state, session.response_create_gate)
+                request_state.response_id = original_response_id
+                request_state.response_event_count = original_response_event_count
+                request_state.replay_count = original_replay_count
+                request_state.upstream_model_output_seen = original_output_seen
+                request_state.preferred_account_id = original_preferred_account_id
+                (
+                    request_state.error_code_override,
+                    request_state.error_message_override,
+                    request_state.error_type_override,
+                    request_state.error_param_override,
+                    request_state.error_http_status_override,
+                ) = original_error_overrides
 
     async def _retry_http_bridge_precreated_request(
         self: Any,

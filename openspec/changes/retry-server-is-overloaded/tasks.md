@@ -3,4 +3,13 @@
 - [x] Add unit coverage for classification without an HTTP 5xx status.
 - [x] Add integration coverage proving the public Responses route retries the first terminal overload event.
 - [x] Cover the production-default HTTP responses session bridge retry path.
+- [x] Retry one native Codex continuation overload that arrives after
+  `response.created` but before model output, with same-account backoff and
+  preserved completed-response continuity.
+- [x] Retry one native Codex continuation whose upstream websocket closes after
+  lifecycle-only events but before model output, with the same safety gates.
+- [x] Add lifecycle negative controls for public SDK streams, prior model
+  output, and exhausted replay budget.
+- [x] Keep unreplayable untyped bridge closes and previous-response close
+  suffixes account-neutral.
 - [x] Update the Responses compatibility requirement and validate OpenSpec.

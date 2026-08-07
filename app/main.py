@@ -706,7 +706,6 @@ def create_app() -> FastAPI:
     add_backend_api_codex_v1_alias_middleware(app)
     add_app_version_middleware(app)
     add_exception_handlers(app)
-    add_trusted_proxy_headers_middleware(app)
 
     @app.middleware("http")
     async def codex_alpha_search_cors_middleware(request: Request, call_next: Any) -> Response:
@@ -714,6 +713,8 @@ def create_app() -> FastAPI:
         if request.url.path == "/backend-api/codex/alpha/search":
             response.headers.update(proxy_api._codex_alpha_search_cors_headers(request))
         return response
+
+    add_trusted_proxy_headers_middleware(app)
 
     app.include_router(proxy_api.realtime_call_router)
     app.include_router(proxy_api.codex_preflight_router)

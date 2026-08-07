@@ -18,6 +18,14 @@ another instance takes ownership.
   parent.
 - Use a no-op Alembic merge revision to converge the operation-ledger branch
   with additive migrations already present on main.
+- Treat the event spool as incomplete until the asynchronous batcher drains it;
+  SQLite's table default is rebuilt explicitly because SQLite does not support
+  a direct ALTER COLUMN operation.
+- Run transcript retention from the existing leader-gated sticky-session
+  cleanup loop, draining bounded repository batches without adding a new
+  scheduler process.
+- Reset partial operation events before server-owned indefinite retries and
+  persist deferred reasoning blocks before the visible block they precede.
 
 ## Failure modes
 

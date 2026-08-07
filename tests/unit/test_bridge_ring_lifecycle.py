@@ -594,6 +594,7 @@ async def test_operation_ledger_is_fenced_and_idempotent(
         assert created.created is True
         assert created.state == "submitted"
         assert created.request_text == '{"model":"gpt-5.6","input":"turn"}'
+        assert created.event_spool_complete is False
 
         existing = await repository.record_operation(
             operation_id=operation_id,
@@ -655,6 +656,87 @@ async def test_operation_ledger_is_fenced_and_idempotent(
         # A missing parent turn makes the chain ineligible rather than
         # silently constructing an incomplete conversation.
         assert await repository.get_replayable_transcript(response_id="resp-completed") is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_retry_reset_clears_partial_spool(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-operation-reset", session_key_value="sid-operation-reset")
+        fingerprint = durable_bridge_hash("continuation-reset")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-reset",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-reset",
+            owner_epoch=claim.owner_epoch,
+            event_text="data: {\"type\":\"response.output_text.delta\"}\n\n",
+            max_bytes=1024,
+        )
+        assert await repository.reset_operation_event_spool(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-reset",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.get_operation_events(operation_id=operation_id) == []
+        reset = await repository.get_operation(operation_id=operation_id)
+        assert reset is not None
+        assert reset.event_spool_complete is False
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_retains_completed_operation_session(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-completed-retain", session_key_value="sid-completed-retain")
+        fingerprint = durable_bridge_hash("completed-retain")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-completed-retain",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-completed-retain",
+            owner_epoch=claim.owner_epoch,
+            state="completed",
+            response_id="resp-completed",
+        )
+        assert await repository.purge_owned_sessions_on_startup(instance_id="inst-completed-retain") == 0
+        retained = await repository.get_operation(operation_id=operation_id)
+        assert retained is not None
+        owner = await repository.get_session_by_id(claim.id)
+        assert owner is not None
+        assert owner.owner_instance_id is None
     finally:
         await session.close()
 

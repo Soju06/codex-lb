@@ -939,6 +939,30 @@ class _HTTPBridgeRequestSubmitMixin:
                     == "server_indefinite_recovery"
                 )
                 if indefinite_recovery and operation.state != "completed":
+                    # A previous owner may have persisted a partial sequence
+                    # before its socket died.  A server-owned retry must not
+                    # append a second attempt to that transcript; reset the
+                    # durable spool under the same owner fence before send.
+                    reset_operation_event_spool = getattr(
+                        self._durable_bridge,
+                        "reset_operation_event_spool",
+                        None,
+                    )
+                    if callable(reset_operation_event_spool):
+                        reset_ok = await reset_operation_event_spool(
+                            operation_id=operation.operation_id,
+                            session_id=session.durable_session_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=session.durable_owner_epoch,
+                        )
+                        if not reset_ok:
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "bridge_continuity_persistence_failed",
+                                    "HTTP response recovery ownership changed; retry the request.",
+                                ),
+                            )
                     # The operation remains fenced to one durable identity,
                     # while the server-owned recovery loop may make another
                     # serialized attempt after the upstream cooldown. This

@@ -1038,21 +1038,24 @@ class _HTTPBridgeRequestSubmitMixin:
                             await request_state.event_queue.put(replay_event)
                         await request_state.event_queue.put(None)
                         return
-                indefinite_recovery = (
-                    getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
-                        "fail_closed",
-                    )
-                    == "server_indefinite_recovery"
+                recovery_mode = getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+                    "fail_closed",
                 )
+                indefinite_recovery = recovery_mode == "server_indefinite_recovery"
+                one_shot_recovery = recovery_mode == "server_anchored_replay_once" and request_state.replay_count == 0
                 async with session.pending_lock:
                     same_operation_pending = any(
                         pending_request is not request_state
                         and getattr(pending_request, "operation_id", None) == operation.operation_id
                         for pending_request in session.pending_requests
                     )
-                if indefinite_recovery and operation.state == "unknown" and not same_operation_pending:
+                if (
+                    (indefinite_recovery or one_shot_recovery)
+                    and operation.state == "unknown"
+                    and not same_operation_pending
+                ):
                     # A previous owner may have persisted a partial sequence
                     # before its socket died. Claim UNKNOWN atomically with
                     # the transcript reset so concurrent reconnects cannot
@@ -1087,11 +1090,11 @@ class _HTTPBridgeRequestSubmitMixin:
                                 "HTTP response recovery ownership changed; retry the request.",
                             ),
                         )
-                    # The operation remains fenced to one durable identity,
-                    # while the server-owned recovery loop may make another
-                    # serialized attempt after the upstream cooldown. This
-                    # is explicitly at-least-once because upstream has no
-                    # idempotency/status endpoint.
+                    # The operation remains fenced to one durable identity.
+                    # One-shot mode consumes its existing replay-count budget;
+                    # indefinite mode may make further serialized attempts
+                    # after cooldown because upstream has no idempotency or
+                    # status endpoint.
                     request_state.operation_id = operation.operation_id
                     request_state.operation_fingerprint = operation_fingerprint
                     request_state.operation_registered = True

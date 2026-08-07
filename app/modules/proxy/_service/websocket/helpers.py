@@ -1583,9 +1583,7 @@ async def _release_websocket_response_create_gate(
         request_state.response_create_admission.release()
         request_state.response_create_admission = None
     if account_response_create_lease is not None and account_response_create_release is not None:
-        await _await_cleanup_deferring_cancellation(
-            account_response_create_release(account_response_create_lease)
-        )
+        await _await_cleanup_deferring_cancellation(account_response_create_release(account_response_create_lease))
     request_state.awaiting_response_created = False
     request_state.response_create_gate = None
     if not request_state.response_create_gate_acquired:

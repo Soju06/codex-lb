@@ -781,6 +781,12 @@ async def test_nonterminal_operation_rebinds_before_cross_session_recovery_reset
             parent_response_id="resp-parent",
             request_text='{"input":"cross-session"}',
         )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == original.id)
+            .values(owner_instance_id=None, lease_expires_at=None)
+        )
+        await session.commit()
         rebound = await repository.record_operation(
             operation_id=operation_id,
             session_id=replacement.id,
@@ -799,6 +805,56 @@ async def test_nonterminal_operation_rebinds_before_cross_session_recovery_reset
             instance_id="inst-replacement-operation",
             owner_epoch=replacement.owner_epoch,
         )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_operation_does_not_rebind_from_live_prior_owner(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        original = await _claim(
+            repository,
+            instance_id="inst-live-original-operation",
+            session_key_value="sid-live-original-operation",
+        )
+        replacement = await _claim(
+            repository,
+            instance_id="inst-live-replacement-operation",
+            session_key_value="sid-live-replacement-operation",
+        )
+        fingerprint = durable_bridge_hash("live-cross-session-operation")
+        operation_id = durable_bridge_operation_id(original.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=original.id,
+            instance_id="inst-live-original-operation",
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+
+        existing = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=replacement.id,
+            instance_id="inst-live-replacement-operation",
+            owner_epoch=replacement.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-replacement",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+
+        assert existing is not None
+        assert existing.session_id == original.id
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.session_id == original.id
     finally:
         await session.close()
 

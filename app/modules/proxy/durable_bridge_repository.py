@@ -1087,20 +1087,37 @@ class DurableBridgeRepository:
                 operation = await self._session.scalar(fingerprint_statement.with_for_update())
             if operation is not None:
                 rebound = False
-                if operation.session_id != session_id and operation.state != "completed":
+                handoff_allowed = True
+                if operation.session_id != session_id and operation.state not in {"completed", "incomplete"}:
                     # A global fingerprint can outlive the durable session
-                    # that first recorded it. Transfer only nonterminal
-                    # operations to the currently fenced owner before the
-                    # caller resets the attempt spool; completed transcripts
-                    # remain attached to their original session for replay.
-                    operation.session_id = session_id
-                    operation.account_id = account_id
-                    operation.model = model
-                    operation.parent_response_id = parent_response_id
-                    if request_text is not None and operation.request_text is None:
-                        operation.request_text = request_text
-                    operation.updated_at = utcnow()
-                if operation.state == "failed":
+                    # that first recorded it. Do not steal an operation from
+                    # a still-live owner: its stream may still be dispatching
+                    # the turn, and rebinding would fence its writes while a
+                    # second owner sends a duplicate upstream request.
+                    previous_session = await self._session.scalar(
+                        select(HttpBridgeSessionRecord)
+                        .where(HttpBridgeSessionRecord.id == operation.session_id)
+                        .with_for_update()
+                    )
+                    now = utcnow()
+                    handoff_allowed = previous_session is None or not (
+                        previous_session.owner_instance_id is not None
+                        and previous_session.lease_expires_at is not None
+                        and previous_session.lease_expires_at > now
+                    )
+                    if handoff_allowed:
+                        # Transfer only nonterminal operations to the currently
+                        # fenced owner before the caller resets the attempt
+                        # spool; completed transcripts remain attached to
+                        # their original session for replay.
+                        operation.session_id = session_id
+                        operation.account_id = account_id
+                        operation.model = model
+                        operation.parent_response_id = parent_response_id
+                        if request_text is not None and operation.request_text is None:
+                            operation.request_text = request_text
+                        operation.updated_at = now
+                if operation.state == "failed" and handoff_allowed:
                     # An explicit upstream failure is retryable. Rebind the
                     # durable operation to the current owner while preserving
                     # its global identity; concurrent reconnects will see the
@@ -1206,7 +1223,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state != "completed",
+                    HttpBridgeOperationRecord.state.not_in(("completed", "incomplete")),
                 )
                 .with_for_update()
             )
@@ -1253,7 +1270,7 @@ class DurableBridgeRepository:
         operation = await self._session.scalar(
             select(HttpBridgeOperationRecord).where(
                 HttpBridgeOperationRecord.response_id == response_id,
-                HttpBridgeOperationRecord.state == "completed",
+                HttpBridgeOperationRecord.state.in_(("completed", "incomplete")),
             )
         )
         return _to_operation_snapshot(operation) if operation is not None else None
@@ -1282,7 +1299,9 @@ class DurableBridgeRepository:
             if operation is None or operation.request_text is None or not operation.event_spool_complete:
                 return None
             events = await self.get_operation_events(operation_id=operation.operation_id)
-            if not events or not any("response.completed" in event for event in events):
+            if not events or not any(
+                "response.completed" in event or "response.incomplete" in event for event in events
+            ):
                 return None
             turn_bytes = len(operation.request_text.encode("utf-8")) + sum(
                 len(event.encode("utf-8")) for event in events
@@ -1303,7 +1322,7 @@ class DurableBridgeRepository:
         delete transaction so an in-flight operation cannot lose its
         duplicate-suppression ledger between selection and deletion.
         """
-        terminal_states = ("completed", "failed", "unknown")
+        terminal_states = ("completed", "incomplete", "failed", "unknown")
         nonterminal_states = ("submitted", "acknowledged")
         stale_owner = or_(
             HttpBridgeSessionRecord.owner_instance_id.is_(None),
@@ -1507,7 +1526,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state == "completed",
+                    HttpBridgeOperationRecord.state.in_(("completed", "incomplete")),
                     HttpBridgeOperationRecord.event_spool_complete.is_(False),
                 )
                 .values(event_spool_complete=True, updated_at=utcnow())

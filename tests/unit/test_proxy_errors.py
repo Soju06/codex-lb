@@ -152,6 +152,51 @@ async def test_indefinite_recovery_converts_retry_reservation_failure_to_sse(mon
     assert any("rate_limit_exceeded" in event and "response.failed" in event for event in events)
 
 
+@pytest.mark.asyncio
+async def test_indefinite_recovery_stops_after_retry_output_then_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        proxy_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+        ),
+    )
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay: _completed_asyncio_sleep())
+    attempts = 0
+
+    async def stream():
+        if False:
+            yield ""
+        raise ProxyResponseError(
+            502,
+            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
+        )
+
+    async def recovery_stream():
+        nonlocal attempts
+        attempts += 1
+        yield 'data: {"type":"response.created"}\n\n'
+        raise ProxyResponseError(
+            502,
+            {"error": {"code": "upstream_request_timeout", "message": "stalled", "type": "server_error"}},
+        )
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+            recovery_stream_factory=lambda: recovery_stream(),
+        )
+    ]
+
+    assert attempts == 1
+    assert any('"type":"response.created"' in event for event in events)
+
+
 async def _completed_asyncio_sleep(_delay: float = 0.0) -> None:
     return None
 

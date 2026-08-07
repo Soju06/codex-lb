@@ -1178,6 +1178,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if message.close_code is not None
                     else None
                 )
+                # Keep this classification independent from retry eligibility:
+                # a blocked untyped close is still account-neutral.
                 close_is_untyped = message.error_code is None
                 close_is_clean = (
                     message.kind == "close"

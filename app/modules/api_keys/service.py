@@ -671,7 +671,7 @@ class ApiKeysService:
         effective_policy_enabled = (
             effective_allowed_reasoning_efforts is not None
             if payload.enforced_reasoning_effort_set or payload.allowed_reasoning_efforts_set
-            else existing.allowed_reasoning_efforts is not None
+            else getattr(existing, "allowed_reasoning_efforts", None) is not None
         )
 
         limit_rows: list[ApiKeyLimit] | None = None
@@ -814,7 +814,10 @@ class ApiKeysService:
         plain_key = _generate_plain_key()
         updated = await self._repository.update(
             key_id,
-            key_hash=_storage_key_hash(plain_key, policy_enabled=row.allowed_reasoning_efforts is not None),
+            key_hash=_storage_key_hash(
+                plain_key,
+                policy_enabled=getattr(row, "allowed_reasoning_efforts", None) is not None,
+            ),
             key_prefix=plain_key[:15],
         )
         if updated is None:

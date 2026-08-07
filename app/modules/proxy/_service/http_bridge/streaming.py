@@ -3296,6 +3296,27 @@ class _HTTPBridgeStreamingMixin:
                     request_state.request_id,
                     exc.error_code,
                 )
+                if (
+                    getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+                        "fail_closed",
+                    )
+                    == "server_indefinite_recovery"
+                    and _http_bridge_server_anchored_replay_enabled(request_state)
+                ):
+                    # Let the outer server-owned recovery loop classify this
+                    # eventless transport failure as retryable. Returning a
+                    # synthetic response.failed event would make the loop
+                    # believe the attempt completed successfully after one try.
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "stream_idle_timeout",
+                            str(exc),
+                            error_type="server_error",
+                        ),
+                    ) from exc
                 return (
                     False,
                     format_sse_event(

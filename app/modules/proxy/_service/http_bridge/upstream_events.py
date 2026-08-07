@@ -2132,6 +2132,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             operation_state = {
                 "response.created": "acknowledged",
                 "response.completed": "completed",
+                "response.incomplete": "incomplete",
                 "response.failed": "failed",
                 "error": "failed",
             }.get(event_type)

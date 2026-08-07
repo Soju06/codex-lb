@@ -4075,6 +4075,55 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_incomplete_event_terminalizes_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-incomplete-terminal",
+        response_id="resp-incomplete-terminal",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-incomplete-terminal"
+    session = _make_bridge_session(
+        key_value="incomplete-terminal",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    operation_updates = AsyncMock()
+    finalize = AsyncMock()
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", operation_updates)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "id": "resp-incomplete-terminal",
+                    "object": "response",
+                    "status": "incomplete",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    operation_updates.assert_awaited_once()
+    assert operation_updates.await_args is not None
+    assert operation_updates.await_args.kwargs["state"] == "incomplete"
+    finalize.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_ordinary_completed_alias_rejection_preserves_successful_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

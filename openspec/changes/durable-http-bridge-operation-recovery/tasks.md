@@ -22,6 +22,10 @@
 - [x] 1.19 Stop indefinite recovery after a retry attempt emits downstream output.
 - [x] 1.20 Include sequence position in event fingerprints so repeated SSE blocks survive replay.
 - [x] 1.21 Close the event batcher flusher from the proxy shutdown path.
+- [x] 1.22 Refuse cross-session handoff while the prior session lease is active.
+- [x] 1.23 Keep eventless local transport failures retryable in indefinite recovery.
+- [x] 1.24 Terminalize and persist `response.incomplete` operation outcomes.
+- [x] 1.25 Place all response-compatibility requirements in the capability delta path.
 
 ## 2. Validation
 

@@ -112,9 +112,7 @@ def _reasoning_levels_from_metadata(raw: dict[str, JsonValue]) -> tuple[Reasonin
                 continue
             effort = effort_value
             description_value = item.get("description")
-            description = (
-                description_value if isinstance(description_value, str) else f"{effort} reasoning effort"
-            )
+            description = description_value if isinstance(description_value, str) else f"{effort} reasoning effort"
         else:
             continue
         if not effort or effort in seen:

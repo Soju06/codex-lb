@@ -1173,6 +1173,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
+                untyped_close_account_neutral = message.error_code is None
                 close_classification = (
                     _classify_upstream_close(message.close_code, response_events_seen=response_events_seen)
                     if message.close_code is not None
@@ -1193,6 +1194,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         penalize_account=(
                             message.error_code != "proxy_network_unavailable"
                             and message.error_code != "upstream_keepalive_timeout"
+                            and not untyped_close_account_neutral
                             and not (
                                 message.kind == "close"
                                 and _classify_upstream_close(

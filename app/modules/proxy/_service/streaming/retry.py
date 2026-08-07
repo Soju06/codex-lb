@@ -1384,20 +1384,6 @@ class _StreamingRetryMixin:
                             client_ip=client_ip,
                         )
                         return
-                    if last_exhausted_transient_exc is not None:
-                        error = _parse_openai_error(last_exhausted_transient_exc.payload)
-                        error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-                        error_message = error.message if error else None
-                        event = response_failed_event(
-                            error_code or "upstream_error",
-                            error_message or "Upstream error",
-                            error_type=(error.type if error else None) or "server_error",
-                            response_id=request_id,
-                            error_param=error.param if error else None,
-                        )
-                        _apply_error_metadata(event["response"]["error"], error)
-                        yield format_sse_event(event)
-                        return
                     if last_security_work_retry_error is not None:
                         message = (
                             last_security_work_retry_error.error.get("message")
@@ -1428,6 +1414,20 @@ class _StreamingRetryMixin:
                             conversation_id=conversation_id,
                             client_ip=client_ip,
                         )
+                        return
+                    if last_exhausted_transient_exc is not None:
+                        error = _parse_openai_error(last_exhausted_transient_exc.payload)
+                        error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                        error_message = error.message if error else None
+                        event = response_failed_event(
+                            error_code or "upstream_error",
+                            error_message or "Upstream error",
+                            error_type=(error.type if error else None) or "server_error",
+                            response_id=request_id,
+                            error_param=error.param if error else None,
+                        )
+                        _apply_error_metadata(event["response"]["error"], error)
+                        yield format_sse_event(event)
                         return
                     no_accounts_msg = selection.error_message or "No active accounts available"
                     error_code = selection.error_code or "no_accounts"

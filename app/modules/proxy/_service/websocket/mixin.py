@@ -5843,10 +5843,10 @@ class _WebSocketMixin:
         status: str = "error",
         penalize_account: bool = True,
         suppress_sequenced_downstream_errors: bool = False,
-    ) -> None:
+    ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        finalization_task: asyncio.Task[None] | None = None
+        finalization_task: asyncio.Task[bool] | None = None
         await pending_lock.acquire()
         try:
             remaining = list(pending_requests)
@@ -5878,10 +5878,10 @@ class _WebSocketMixin:
             pending_lock.release()
 
         if finalization_task is None:
-            return
+            return True
 
         try:
-            await asyncio.shield(finalization_task)
+            settlement_succeeded = await asyncio.shield(finalization_task)
         except asyncio.CancelledError:
             remaining_timeout = shutdown_state.remaining_drain_timeout_seconds()
             timeout_seconds = (
@@ -5894,6 +5894,7 @@ class _WebSocketMixin:
                 # the claimed states and remains visible to lifespan draining.
                 await asyncio.wait({finalization_task}, timeout=timeout_seconds)
             raise
+        return settlement_succeeded
 
     async def _finalize_claimed_websocket_requests(
         self,
@@ -5911,7 +5912,7 @@ class _WebSocketMixin:
         status: str,
         penalize_account: bool,
         suppress_sequenced_downstream_errors: bool,
-    ) -> None:
+    ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
 
@@ -5980,6 +5981,7 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
+
             if response_create_gate is not None:
                 await _release_websocket_response_create_ownership_for_cleanup(
                     request_state,
@@ -6145,6 +6147,8 @@ class _WebSocketMixin:
                         penalty_code,
                         exc_info=True,
                     )
+
+        return reservation_release_succeeded
 
     async def _emit_websocket_terminal_error(
         self,

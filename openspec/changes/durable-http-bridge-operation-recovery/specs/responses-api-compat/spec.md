@@ -272,3 +272,14 @@ request and MUST NOT be reset or treated as an unknown in-flight operation.
 
 - **WHEN** an identical request finds a finalized incomplete operation
 - **THEN** the stored terminal transcript is delivered without a new upstream dispatch
+
+### Requirement: Validate final response.create size
+
+After adding durable operation metadata, the proxy MUST revalidate the exact
+serialized `response.create` frame against the upstream size limit before
+sending it.
+
+#### Scenario: Metadata cannot create an oversized frame
+
+- **WHEN** operation metadata makes the final frame exceed the configured limit
+- **THEN** the request is rejected or slimmed before any upstream send

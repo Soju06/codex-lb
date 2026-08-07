@@ -2026,6 +2026,15 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.event_queue = None
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
+            if request_state.operation_replay:
+                # Replay requests are delivered from the durable transcript
+                # without entering pending ownership, so the normal detach
+                # branch cannot settle their API-key reservation.
+                self._cancel_request_state_api_key_reservation_heartbeat(request_state)
+                await self._release_websocket_request_state_reservation(request_state)
+                request_state.api_key_reservation = None
+                request_state.operation_replay = False
+                return False
             if request_state.terminal_settlement_phase == "abandoned":
                 # Belt-and-braces for issue #1594: terminal bookkeeping
                 # claimed this request out of pending ownership, aborted, and

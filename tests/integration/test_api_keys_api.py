@@ -2210,7 +2210,7 @@ async def test_api_key_update_accepts_extended_enforced_reasoning(async_client):
 @pytest.mark.asyncio
 async def test_api_key_reasoning_effort_allowlist_is_normalized_and_enforced(async_client):
     created = await async_client.post(
-        "/api/api-keys/",
+        "/api/api-keys/v2/",
         json={
             "name": "bounded-reasoning-key",
             "allowedReasoningEfforts": ["XHIGH", "low", "high", "low"],
@@ -2222,14 +2222,14 @@ async def test_api_key_reasoning_effort_allowlist_is_normalized_and_enforced(asy
     assert created.json()["allowedReasoningEfforts"] == ["low", "high", "xhigh"]
 
     conflicting_update = await async_client.patch(
-        f"/api/api-keys/{key_id}",
+        f"/api/api-keys/v2/{key_id}",
         json={"enforcedReasoningEffort": "low"},
     )
     assert conflicting_update.status_code == 400
     assert conflicting_update.json()["error"]["code"] == "invalid_api_key_payload"
 
     empty_create = await async_client.post(
-        "/api/api-keys/",
+        "/api/api-keys/v2/",
         json={"name": "empty-reasoning-key", "allowedReasoningEfforts": []},
     )
     assert empty_create.status_code == 400
@@ -2278,7 +2278,7 @@ async def test_api_key_reasoning_allowlist_rejects_compact_before_upstream(async
     )
     assert enabled.status_code == 200
     created = await async_client.post(
-        "/api/api-keys/",
+        "/api/api-keys/v2/",
         json={"name": "compact-allowlist-key", "allowedReasoningEfforts": ["low"]},
     )
     assert created.status_code == 200
@@ -2311,7 +2311,7 @@ async def test_api_key_reasoning_allowlist_rejects_chat_completions_before_upstr
     )
     assert enabled.status_code == 200
     created = await async_client.post(
-        "/api/api-keys/",
+        "/api/api-keys/v2/",
         json={"name": "chat-allowlist-key", "allowedReasoningEfforts": ["low"]},
     )
     assert created.status_code == 200

@@ -170,7 +170,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as ReasoningEffortType,
-      allowedReasoningEfforts: draft.selectedReasoningEfforts.length > 0 ? draft.selectedReasoningEfforts : null,
+      ...(draft.selectedReasoningEfforts.length > 0 || apiKey.allowedReasoningEfforts !== null
+        ? { allowedReasoningEfforts: draft.selectedReasoningEfforts.length > 0 ? draft.selectedReasoningEfforts : null }
+        : {}),
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,

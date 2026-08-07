@@ -128,7 +128,9 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
         draft.enforcedReasoningEffort === "none"
           ? null
           : draft.enforcedReasoningEffort as ReasoningEffortType,
-      allowedReasoningEfforts: draft.selectedReasoningEfforts.length > 0 ? draft.selectedReasoningEfforts : null,
+      ...(draft.selectedReasoningEfforts.length > 0
+        ? { allowedReasoningEfforts: draft.selectedReasoningEfforts }
+        : {}),
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,

@@ -1508,7 +1508,7 @@ async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(as
     model = "source-reasoning-policy"
     source_id = await _create_model_source(async_client, name="source-reasoning-policy", model=model, base_url=base_url)
     created = await async_client.post(
-        "/api/api-keys/",
+        "/api/api-keys/v2/",
         json={
             "name": "source-reasoning-policy-key",
             "assignedSourceIds": [source_id],

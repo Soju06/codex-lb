@@ -133,8 +133,10 @@ enforcement, and the owner receives an explicit internal call-site marker.
   legacy and protected storage form, while an older reader only looks up the
   plain digest and therefore fails closed. A database check constraint keeps
   an older writer's key regeneration from replacing the protected digest with
-  a plain one. Cache invalidation strips the prefix before evicting the
-  client-token digest.
+  a plain one. The dashboard sends create and policy-bearing update requests
+  to `/api/api-keys/v2/`, which does not exist on an older replica, so those
+  writes fail closed instead of silently dropping the new field. Cache
+  invalidation strips the prefix before evicting the client-token digest.
 
 ## Migration Plan
 
@@ -144,9 +146,10 @@ unrestricted behavior because their allowlist remains `NULL`. The database
 also rejects rows that combine a fixed effort with an allowlist and requires a
 protected storage digest whenever the allowlist is present. During a rolling
 upgrade, an older reader cannot authenticate a policy-enabled key and an older
-writer cannot silently remove that protection while regenerating it; both
-paths fail closed until that writer is upgraded. Rolling back drops the new
-columns and constraints without changing other stored data.
+writer cannot silently remove that protection while regenerating it. The
+versioned dashboard write path also refuses policy mutations on an older
+replica. Rolling back drops the new columns and constraints without changing
+other stored data.
 
 ## Open Questions
 

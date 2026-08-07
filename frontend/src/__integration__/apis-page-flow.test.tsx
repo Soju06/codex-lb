@@ -58,7 +58,7 @@ describe("apis page integration", () => {
 		const user = userEvent.setup();
 		let requestBody: unknown;
 		server.use(
-			http.post("/api/api-keys/", async ({ request }) => {
+			http.post("/api/api-keys/v2/", async ({ request }) => {
 				requestBody = await request.json();
 				return HttpResponse.json(createApiKeyCreateResponse({ name: "Selectable effort key" }));
 			}),

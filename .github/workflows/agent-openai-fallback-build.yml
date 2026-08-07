@@ -39,15 +39,39 @@ jobs:
           }
 
           status=0
-          heads_output="$(uv run alembic heads 2>&1)" || status=$?
-          printf '%s\n' "$heads_output" | tee -a /tmp/fallback-build.log
-          if [ "$status" -eq 0 ]; then
-            ALEMBIC_HEAD="$(printf '%s\n' "$heads_output" | awk '/\(head\)/ {print $1}')"
-            if [ -z "$ALEMBIC_HEAD" ] || [ "$(printf '%s\n' "$heads_output" | grep -c '(head)')" -ne 1 ]; then
-              echo "Expected exactly one Alembic head" | tee -a /tmp/fallback-build.log
-              status=1
-            fi
-          fi
+          ALEMBIC_HEAD="$(uv run python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          revisions = set()
+          parents = set()
+          for path in Path('app/db/alembic/versions').glob('*.py'):
+              tree = ast.parse(path.read_text(), filename=str(path))
+              revision = None
+              down_revision = None
+              for node in tree.body:
+                  if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                      continue
+                  target = node.targets[0]
+                  if not isinstance(target, ast.Name):
+                      continue
+                  if target.id == 'revision':
+                      revision = ast.literal_eval(node.value)
+                  elif target.id == 'down_revision':
+                      down_revision = ast.literal_eval(node.value)
+              if isinstance(revision, str):
+                  revisions.add(revision)
+              if isinstance(down_revision, str):
+                  parents.add(down_revision)
+              elif isinstance(down_revision, (tuple, list)):
+                  parents.update(item for item in down_revision if isinstance(item, str))
+          heads = sorted(revisions - parents)
+          if len(heads) != 1:
+              raise SystemExit(f'expected exactly one migration head, found: {heads}')
+          print(heads[0])
+          PY
+          )" || status=$?
+          echo "Alembic head: $ALEMBIC_HEAD" | tee -a /tmp/fallback-build.log
 
           # Some create/update schema blocks intentionally share the same
           # anchor and are patched one occurrence per call.

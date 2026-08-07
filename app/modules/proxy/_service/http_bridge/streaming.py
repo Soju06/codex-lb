@@ -3314,6 +3314,29 @@ class _HTTPBridgeStreamingMixin:
                     retry_payload,
                     reservation=retry_api_key_reservation,
                 )
+                if (
+                    recovery_path == "local_previous_response_error"
+                    and request_state.operation_registered
+                    and request_state.operation_id is not None
+                    and session.durable_session_id is not None
+                    and session.durable_owner_epoch is not None
+                ):
+                    reset_operation_event_spool = getattr(self._durable_bridge, "reset_operation_event_spool", None)
+                    if callable(reset_operation_event_spool):
+                        reset_ok = await reset_operation_event_spool(
+                            operation_id=request_state.operation_id,
+                            session_id=session.durable_session_id,
+                            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                            owner_epoch=session.durable_owner_epoch,
+                        )
+                        if not reset_ok:
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "bridge_continuity_persistence_failed",
+                                    "HTTP response recovery spool could not be reset; retry the request.",
+                                ),
+                            )
                 # A recovery request is the one bounded server-side replay;
                 # prevent a second cooldown bypass if this fresh socket also
                 # fails before response.created.

@@ -4968,15 +4968,7 @@ async def _stream_responses(
         else {}
     )
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
-    bridge_recovery_eligible = bool(
-        bridge_active
-        and payload.previous_response_id is not None
-        and getattr(proxy_service_module.get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
-        and not proxy_service_module._responses_request_contains_input_image(payload)
-        and not proxy_service_module._responses_request_uses_image_generation(payload)
-        and len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
-        <= proxy_service_module._ws_transport_payload_budget_bytes(proxy_service_module.get_settings())
-    )
+    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(payload, bridge_active=bridge_active)
     effective_headers = forwarded_headers or request.headers
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
     downstream_turn_state = (
@@ -5161,6 +5153,7 @@ async def _stream_responses(
             request,
             startup_error,
             headers=rate_limit_headers,
+            allow_client_full_history_once=bridge_recovery_eligible,
         )
     # Server-indefinite recovery is only safe for an explicitly anchored
     # continuation. Fresh first-turn requests have no durable parent
@@ -5172,6 +5165,7 @@ async def _stream_responses(
             owns_reservation=owns_reservation,
             reservation=reservation,
             recovery_stream_factory=recovery_stream_factory,
+            allow_client_full_history_once=bridge_recovery_eligible,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
@@ -5239,6 +5233,7 @@ async def _collect_responses(
 
     rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
+    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(payload, bridge_active=bridge_active)
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
@@ -5283,7 +5278,11 @@ async def _collect_responses(
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
-        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
+        status_code, error = _mask_previous_response_not_found_error(
+            error,
+            default_status=exc.status_code,
+            allow_client_full_history_once=bridge_recovery_eligible,
+        )
         return _logged_error_json_response(
             request,
             status_code,
@@ -5293,7 +5292,10 @@ async def _collect_responses(
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
-            status_code, error_payload = _mask_previous_response_not_found_error(error_payload)
+            status_code, error_payload = _mask_previous_response_not_found_error(
+                error_payload,
+                allow_client_full_history_once=bridge_recovery_eligible,
+            )
             return _logged_error_json_response(
                 request,
                 status_code,
@@ -5304,7 +5306,10 @@ async def _collect_responses(
             content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
         )
-    status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
+    status_code, response_payload = _mask_previous_response_not_found_error(
+        response_payload,
+        allow_client_full_history_once=bridge_recovery_eligible,
+    )
     return _logged_error_json_response(
         request,
         status_code,
@@ -6289,6 +6294,7 @@ async def _stream_response_error_events(
     owns_reservation: bool,
     reservation: ApiKeyUsageReservationData | None,
     recovery_stream_factory: Callable[[], AsyncIterator[str]] | None = None,
+    allow_client_full_history_once: bool = False,
 ) -> AsyncIterator[str]:
     saw_downstream_event = False
     try:
@@ -6358,7 +6364,11 @@ async def _stream_response_error_events(
             except Exception:
                 logger.warning("Failed to release stream reservation after upstream proxy error", exc_info=True)
         envelope = _parse_error_envelope(exc.payload)
-        _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
+        _, envelope = _mask_previous_response_not_found_error(
+            envelope,
+            default_status=exc.status_code,
+            allow_client_full_history_once=allow_client_full_history_once,
+        )
         error = envelope.error
         retry_hint = ""
         if exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
@@ -6383,10 +6393,15 @@ def _stream_startup_error_response(
     error: ProxyResponseError | OpenAIErrorEnvelopeModel,
     *,
     headers: Mapping[str, str],
+    allow_client_full_history_once: bool = False,
 ) -> JSONResponse:
     if isinstance(error, ProxyResponseError):
         envelope = _parse_error_envelope(error.payload)
-        status_code, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+        status_code, envelope = _mask_previous_response_not_found_error(
+            envelope,
+            default_status=error.status_code,
+            allow_client_full_history_once=allow_client_full_history_once,
+        )
         startup_headers = dict(headers)
         if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
             startup_headers.setdefault("Retry-After", str(error.retry_after_seconds))
@@ -6396,7 +6411,10 @@ def _stream_startup_error_response(
             envelope.model_dump(mode="json", exclude_none=True),
             headers=startup_headers,
         )
-    status_code, envelope = _mask_previous_response_not_found_error(error)
+    status_code, envelope = _mask_previous_response_not_found_error(
+        error,
+        allow_client_full_history_once=allow_client_full_history_once,
+    )
     return _logged_error_json_response(
         request,
         status_code,
@@ -8010,10 +8028,26 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
     )
 
 
+def _http_bridge_recovery_request_eligible(payload: ResponsesRequest, *, bridge_active: bool) -> bool:
+    if not bridge_active or payload.previous_response_id is None:
+        return False
+    settings = proxy_service_module.get_settings()
+    if not getattr(settings, "http_responses_session_bridge_operation_ledger_enabled", True):
+        return False
+    if (
+        proxy_service_module._responses_request_contains_input_image(payload)
+        or proxy_service_module._responses_request_uses_image_generation(payload)
+    ):
+        return False
+    payload_bytes = len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+    return payload_bytes <= proxy_service_module._ws_transport_payload_budget_bytes(settings)
+
+
 def _mask_previous_response_not_found_error(
     envelope: OpenAIErrorEnvelopeModel,
     *,
     default_status: int | None = None,
+    allow_client_full_history_once: bool = False,
 ) -> tuple[int, OpenAIErrorEnvelopeModel]:
     if not _is_previous_response_not_found_public_error(envelope.error):
         return default_status if default_status is not None else _status_for_error(envelope.error), envelope
@@ -8021,8 +8055,10 @@ def _mask_previous_response_not_found_error(
     # drop the ambiguous previous_response_id anchor and resend full local
     # history. This is intentionally opt-in because the resend is at-least-once
     # and may duplicate an upstream response that was accepted but not observed.
-    if get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode == (
-        "client_full_history_once"
+    if (
+        allow_client_full_history_once
+        and get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
+        == "client_full_history_once"
     ):
         return default_status if default_status is not None else 400, envelope
     return (

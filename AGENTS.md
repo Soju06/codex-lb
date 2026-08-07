@@ -6,6 +6,13 @@
 - GitHub auth for git/API is available via env vars: `GITHUB_USER`, `GITHUB_TOKEN` (PAT). Do not hardcode or commit tokens.
 - For authenticated git over HTTPS in automation, use: `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<repo>.git`
 
+## Active Codex Session Safety
+
+- While any Codex project task is active, do not change the Codex server connection path or provider state. This prohibition includes editing provider/base-URL settings in `~/.codex/config.toml`, changing endpoint-related process/user/machine environment variables, running ProviderSwitcher profile switching or recovery, and changing project or Docker settings that redirect the active Codex client.
+- While any Codex project task is active, do not build, pull, load, tag, retag, remove, replace, recreate, or update Docker/OCI images or service containers used by Codex. Do not update the stable or beta image behind ports 2455/2456.
+- Do not write or retag Codex session metadata while Codex, Codex CLI, an IDE Codex integration, or a code-mode host is running. Read-only diagnostics are allowed.
+- If one of these changes is required, defer it until the active task is completed or handed off. Then require explicit user approval, stop all Codex-related processes, capture a rollback point, perform the change, verify the direct OpenAI or approved codex-lb path end to end, and only then start a new task.
+
 ## Code Conventions
 
 The `/project-conventions` skill is auto-activated on code edits (PreToolUse guard).

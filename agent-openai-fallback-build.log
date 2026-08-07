@@ -1,5 +1,6 @@
 Alembic head: 20260806_020000_add_usage_history_bulk_covering_indexes
 > uv run python scripts/agent_apply_openai_fallback.py
+> uv run python -
 > uv run ruff format app tests/unit/test_subscription_fallback.py
 3 files reformatted, 550 files left unchanged
 > uv run ruff check --fix app/db/alembic/versions/20260807_163500_add_model_source_subscription_fallback.py app/modules/proxy/subscription_fallback.py
@@ -19,17 +20,23 @@ uv run ruff format --check .
 uv sync --dev --frozen
 Checked 96 packages in 1ms
 uv run ty check
+error[unresolved-attribute]: Attribute `error` is not defined on `OpenAIErrorEnvelope` in union `app.core.openai.models.OpenAIErrorEnvelope | app.core.errors.OpenAIErrorEnvelope`
+    --> app/modules/proxy/api.py:4085:13
+     |
+4085 |     error = envelope.error
+     |             ^^^^^^^^^^^^^^
+
 error[invalid-argument-type]: Argument to function `_is_usage_limit_proxy_error` is incorrect
     --> app/modules/proxy/api.py:5137:65
      |
 5137 |         if fallback is not None and _is_usage_limit_proxy_error(startup_error):
-     |                                                                 ^^^^^^^^^^^^^ Expected `ProxyResponseError`, found `ProxyResponseError | OpenAIErrorEnvelope`
-info: element `OpenAIErrorEnvelope` of union `ProxyResponseError | OpenAIErrorEnvelope` is not assignable to `ProxyResponseError`
+     |                                                                 ^^^^^^^^^^^^^ Expected `ProxyResponseError | app.core.errors.OpenAIErrorEnvelope`, found `ProxyResponseError | app.core.openai.models.OpenAIErrorEnvelope`
+info: element `OpenAIErrorEnvelope` of union `ProxyResponseError | OpenAIErrorEnvelope` is not assignable to `ProxyResponseError | OpenAIErrorEnvelope`
 info: Function defined here
     --> app/modules/proxy/api.py:4083:5
      |
-4083 | def _is_usage_limit_proxy_error(exc: ProxyResponseError) -> bool:
-     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ ----------------------- Parameter declared here
+4083 | def _is_usage_limit_proxy_error(exc: ProxyResponseError | OpenAIErrorEnvelope) -> bool:
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ --------------------------------------------- Parameter declared here
 
-Found 1 diagnostic
+Found 2 diagnostics
 make: *** [Makefile:90: typecheck] Error 1

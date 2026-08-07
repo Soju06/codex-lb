@@ -520,6 +520,55 @@ async def test_http_bridge_failed_send_disarms_eventless_deadline(
     )
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_send_started_callback_runs_after_exact_frame_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_state = _make_eventless_http_bridge_owner()
+    session = _make_bridge_session()
+    send_started = Mock()
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+
+    def fail_preflight(_request_state: object, _text_data: str) -> None:
+        raise proxy_service.ProxyResponseError(400, {"error": {"code": "payload_too_large"}})
+
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_enforce_http_bridge_response_create_text_size",
+        fail_preflight,
+    )
+
+    with pytest.raises(proxy_service.ProxyResponseError):
+        await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+            session,
+            request_state,
+            "request",
+            on_send_started=send_started,
+        )
+
+    send_started.assert_not_called()
+    send_text.assert_not_awaited()
+
+    monkeypatch.setattr(
+        http_bridge_request_submit_module,
+        "_enforce_http_bridge_response_create_text_size",
+        lambda _request_state, _text_data: None,
+    )
+    await http_bridge_request_submit_module._send_http_bridge_request_text_with_archive_id(
+        session,
+        request_state,
+        "request",
+        on_send_started=send_started,
+    )
+
+    send_started.assert_called_once()
+    send_text.assert_awaited_once()
+
+
 def _make_account_neutral_replay_session_key(
     nonce: str,
     api_key_id: str | None = None,

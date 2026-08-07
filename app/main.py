@@ -288,6 +288,15 @@ async def lifespan(app: FastAPI):
                     "deleted": deleted_bridge_rows,
                 },
             )
+        purged_operation_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_operation_spool(
+            cutoff=utcnow()
+            - timedelta(seconds=settings.http_responses_session_bridge_operation_spool_retention_seconds),
+        )
+        if purged_operation_rows > 0:
+            logger.info(
+                "Purged expired durable HTTP bridge operation transcript rows",
+                extra={"deleted": purged_operation_rows},
+            )
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
         NAMESPACE_ACCOUNT_ROUTING,

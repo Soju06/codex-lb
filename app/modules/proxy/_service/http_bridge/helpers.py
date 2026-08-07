@@ -2399,6 +2399,14 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
         "bridge_instance_mismatch",
     }:
         return True
+    if code in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout"}:
+        # Recovery-first server mode permits exactly one anchored retry on a
+        # fresh upstream socket. This keeps Codex unchanged; delivery remains
+        # at-least-once because upstream acceptance is ambiguous.
+        return _service_get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode in {
+            "server_anchored_replay_once",
+            "server_indefinite_recovery",
+        }
     param_value = error.get("param")
     param = param_value.strip() if isinstance(param_value, str) and param_value.strip() else None
     message_value = error.get("message")

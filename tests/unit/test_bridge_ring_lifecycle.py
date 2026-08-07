@@ -36,6 +36,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
     durable_bridge_hash,
+    durable_bridge_operation_id,
 )
 from app.modules.proxy.ring_membership import RingMembershipService
 
@@ -565,6 +566,96 @@ async def test_recovery_attempt_pre_dispatch_claim_can_be_rolled_back(
         )
         assert restored is not None
         assert restored.state.value == "unknown"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_ledger_is_fenced_and_idempotent(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-operation-ledger", session_key_value="sid-operation")
+        fingerprint = durable_bridge_hash("continuation-body")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        created = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            request_text='{"model":"gpt-5.6","input":"turn"}',
+        )
+        assert created is not None
+        assert created.created is True
+        assert created.state == "submitted"
+        assert created.request_text == '{"model":"gpt-5.6","input":"turn"}'
+
+        existing = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert existing is not None
+        assert existing.created is False
+        assert existing.operation_id == operation_id
+
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            state="completed",
+            response_id="resp-completed",
+        )
+        completed = await repository.get_latest_completed_operation(
+            session_id=claim.id,
+            parent_response_id="resp-parent",
+        )
+        assert completed is not None
+        assert completed.response_id == "resp-completed"
+        by_fingerprint = await repository.get_operation_by_fingerprint(request_fingerprint=fingerprint)
+        assert by_fingerprint is not None
+        assert by_fingerprint.operation_id == operation_id
+        cross_session_completed = await repository.get_latest_completed_operation_any_session(
+            parent_response_id="resp-parent",
+        )
+        assert cross_session_completed is not None
+        assert cross_session_completed.response_id == "resp-completed"
+
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            event_text="data: {\"type\":\"response.completed\"}\n\n",
+            max_bytes=1024,
+        )
+        # The event fingerprint fence makes a replayed upstream block idempotent.
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            event_text="data: {\"type\":\"response.completed\"}\n\n",
+            max_bytes=1024,
+        )
+        assert await repository.get_operation_events(operation_id=operation_id) == [
+            "data: {\"type\":\"response.completed\"}\n\n"
+        ]
+        # A missing parent turn makes the chain ineligible rather than
+        # silently constructing an incomplete conversation.
+        assert await repository.get_replayable_transcript(response_id="resp-completed") is None
     finally:
         await session.close()
 

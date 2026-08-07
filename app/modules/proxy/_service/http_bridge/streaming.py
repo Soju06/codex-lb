@@ -36,6 +36,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.errors import (
+    OpenAIErrorEnvelope,
     openai_error,
     response_failed_event,
 )
@@ -397,6 +398,50 @@ def _verify_durable_full_resend(
     if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
         return None
     return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether an ambiguous anchored turn may fall back to client replay.
+
+    The client can recover an unknown upstream handoff by dropping
+    ``previous_response_id`` and resending its full local history. This is
+    intentionally opt-in: upstream acceptance is still ambiguous and the
+    fallback therefore has at-least-once (possible duplicate) semantics.
+    """
+    settings = _service_get_settings()
+    return (
+        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        == "client_full_history_once"
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and not request_state.fresh_upstream_request_is_retry_safe
+    )
+
+
+def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the one permitted server-side anchored replay is unused."""
+    settings = _service_get_settings()
+    return (
+        getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "fail_closed")
+        in {"server_anchored_replay_once", "server_indefinite_recovery"}
+        and request_state.previous_response_id is not None
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and (
+            request_state.replay_count == 0
+            or getattr(settings, "http_responses_session_bridge_ambiguous_continuation_recovery_mode", "")
+            == "server_indefinite_recovery"
+        )
+    )
+
+
+def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
+    payload = openai_error(
+        "previous_response_not_found",
+        "Previous response was not found; retry without previous_response_id.",
+        error_type="invalid_request_error",
+    )
+    payload["error"]["param"] = "previous_response_id"
+    return payload
 
 
 _HTTP_BRIDGE_DEAD_OWNER_NOT_FOUND_DETAIL = "The previous bridge owner is no longer available."
@@ -1683,11 +1728,32 @@ class _HTTPBridgeStreamingMixin:
                 session_id=request_state.session_id,
                 surface="http_bridge",
             )
-            request_state.preferred_account_id = resolve_required_account_id(
-                ("durable bridge", request_state.preferred_account_id),
-                ("live bridge", local_previous_response_owner),
-                ("previous-response index", indexed_previous_response_owner),
-            )
+            try:
+                request_state.preferred_account_id = resolve_required_account_id(
+                    ("durable bridge", request_state.preferred_account_id),
+                    ("live bridge", local_previous_response_owner),
+                    ("previous-response index", indexed_previous_response_owner),
+                )
+            except ProxyResponseError:
+                # The request-log owner cache is intentionally only a fast
+                # path. If it conflicts with a durable anchor, re-read the
+                # authoritative request-log row once before failing closed;
+                # this repairs stale in-process pins without adding a DB read
+                # to the normal continuation path.
+                if durable_lookup is None or indexed_previous_response_owner is None:
+                    raise
+                indexed_previous_response_owner = await self._resolve_websocket_previous_response_owner(
+                    previous_response_id=request_state.previous_response_id,
+                    api_key=api_key,
+                    session_id=request_state.session_id,
+                    surface="http_bridge",
+                    force_request_log_lookup=True,
+                )
+                request_state.preferred_account_id = resolve_required_account_id(
+                    ("durable bridge", request_state.preferred_account_id),
+                    ("live bridge", local_previous_response_owner),
+                    ("previous-response index", indexed_previous_response_owner),
+                )
         durable_lookup_requires_owner = durable_lookup is not None and (
             request_state.previous_response_id is not None
             or bridge_session_key.strength == "hard"
@@ -3248,6 +3314,18 @@ class _HTTPBridgeStreamingMixin:
                     retry_payload,
                     reservation=retry_api_key_reservation,
                 )
+                # A recovery request is the one bounded server-side replay;
+                # prevent a second cooldown bypass if this fresh socket also
+                # fails before response.created.
+                if recovery_path == "local_previous_response_error":
+                    retry_request_state.replay_count = max(1, request_state.replay_count + 1)
+                # Keep the durable operation identity attached to the
+                # server-owned recovery attempt. Re-registering the same
+                # fingerprint would be interpreted as an already-dispatched
+                # unknown operation and suppress the intended one-shot replay.
+                retry_request_state.operation_id = request_state.operation_id
+                retry_request_state.operation_fingerprint = request_state.operation_fingerprint
+                retry_request_state.operation_registered = request_state.operation_registered
                 retry_request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
                 if durable_recovery_fresh_replay and durable_recovery_attempt_fingerprint is not None:
                     retry_request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
@@ -3420,7 +3498,9 @@ class _HTTPBridgeStreamingMixin:
 
         def continuity_bound_without_safe_replay() -> bool:
             """Do not hold a client stream through a cooldown we cannot use."""
-            return _http_bridge_continuity_bound_without_safe_replay(request_state)
+            return _http_bridge_continuity_bound_without_safe_replay(request_state) and not (
+                _http_bridge_server_anchored_replay_enabled(request_state)
+            )
 
         async def startup_continuity_cooldown_terminal_event() -> str | None:
             if (
@@ -3453,6 +3533,11 @@ class _HTTPBridgeStreamingMixin:
             # non-streaming collector.
             await self._release_websocket_request_state_reservation(request_state)
             request_state.api_key_reservation = None
+            if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(request_state):
+                raise ProxyResponseError(
+                    400,
+                    _http_bridge_client_full_history_recovery_error(),
+                )
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
@@ -3612,6 +3697,11 @@ class _HTTPBridgeStreamingMixin:
             # gate, reservation, and pending queue entry while marking the
             # upstream handoff for retirement.
             await self._detach_http_bridge_request(session, request_state=request_state)
+            if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(request_state):
+                raise ProxyResponseError(
+                    400,
+                    _http_bridge_client_full_history_recovery_error(),
+                )
             if propagate_http_errors:
                 if request_state.durable_owner_dead:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
@@ -3850,6 +3940,13 @@ class _HTTPBridgeStreamingMixin:
                                         retry_cooldown_seconds,
                                         continuity_bound,
                                     )
+                                    if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(
+                                        request_state
+                                    ):
+                                        raise ProxyResponseError(
+                                            400,
+                                            _http_bridge_client_full_history_recovery_error(),
+                                        )
                                     yield format_sse_event(
                                         cast(
                                             Mapping[str, JsonValue],
@@ -3893,6 +3990,13 @@ class _HTTPBridgeStreamingMixin:
                                             retry_cooldown_seconds,
                                             retry_cooldown_remaining_budget,
                                         )
+                                        if propagate_http_errors and _http_bridge_client_full_history_recovery_enabled(
+                                            request_state
+                                        ):
+                                            raise ProxyResponseError(
+                                                400,
+                                                _http_bridge_client_full_history_recovery_error(),
+                                            )
                                         yield format_sse_event(
                                             cast(
                                                 Mapping[str, JsonValue],

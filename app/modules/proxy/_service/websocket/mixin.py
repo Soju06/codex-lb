@@ -4133,6 +4133,7 @@ class _WebSocketMixin:
         session_id: str | None = None,
         surface: str,
         request_state: _WebSocketRequestState | None = None,
+        force_request_log_lookup: bool = False,
     ) -> str | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4159,7 +4160,11 @@ class _WebSocketMixin:
         api_key_id = api_key.id if api_key is not None else None
         session_id_value = _facade()._normalize_session_id(session_id)
         cache_key = (response_id, api_key_id, session_id_value)
-        cached_account_id = proxy._websocket_previous_response_account_index.get(cache_key)
+        cached_account_id = (
+            None
+            if force_request_log_lookup
+            else proxy._websocket_previous_response_account_index.get(cache_key)
+        )
         if cached_account_id is not None:
             _record_lookup_metadata(source="request_cache", outcome="hit")
             _record_continuity_owner_resolution(
@@ -4171,9 +4176,13 @@ class _WebSocketMixin:
             )
             return cached_account_id
         fallback_account_id = (
-            proxy._websocket_previous_response_account_index.get((response_id, api_key_id, None))
-            if session_id_value is not None
-            else None
+            None
+            if force_request_log_lookup
+            else (
+                proxy._websocket_previous_response_account_index.get((response_id, api_key_id, None))
+                if session_id_value is not None
+                else None
+            )
         )
         try:
             async with proxy._repo_factory() as repos:
@@ -4217,6 +4226,10 @@ class _WebSocketMixin:
                 _facade()._previous_response_owner_lookup_failed_error_envelope(),
             ) from exc
         if owner_record is None:
+            if force_request_log_lookup:
+                proxy._websocket_previous_response_account_index.pop(cache_key, None)
+                if session_id_value is not None:
+                    proxy._websocket_previous_response_account_index.pop((response_id, api_key_id, None), None)
             if fallback_account_id is not None:
                 _record_lookup_metadata(source="request_cache_fallback", outcome="hit")
                 _record_continuity_owner_resolution(

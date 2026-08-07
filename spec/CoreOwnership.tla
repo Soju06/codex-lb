@@ -275,16 +275,18 @@ AcquireTurn(t, r, a, inj) ==
   /\ acquisitionCount' = [acquisitionCount EXCEPT ![t] = @ + 1]
   /\ reservation' = [reservation EXCEPT ![t] = "held"]
   /\ gate' = [gate EXCEPT ![t] = "holding"]
+  /\ gateDeadline' = [gateDeadline EXCEPT ![t] = DeadlineFromNow(clock, GateRetireBudget)]
   /\ requestDeadline' = [requestDeadline EXCEPT ![t] = DeadlineFromNow(clock, StreamIdleBudget)]
   /\ connectDeadline' = [connectDeadline EXCEPT ![t] = DeadlineFromNow(clock, IF WeakSingleTimeout THEN 3 ELSE 1)]
   /\ firstByteDeadline' = [firstByteDeadline EXCEPT ![t] = DeadlineFromNow(clock, 2)]
   /\ preResponseDeadline' = [preResponseDeadline EXCEPT ![t] = DeadlineFromNow(clock, PreResponseBudget)]
   /\ gateRetireDeadline' = [gateRetireDeadline EXCEPT ![t] = DeadlineFromNow(clock, GateRetireBudget)]
-  /\ UNCHANGED << clock, settlementCount, gateDeadline, mislabeledKill, anchorUsed,
+  /\ clientRetry' = "attached"
+  /\ UNCHANGED << clock, settlementCount, mislabeledKill, anchorUsed,
     badAnchorUse, durableVersion, snapshotVersion, routedWithStaleSnapshot,
     snapshotRouteAttempted, producerTarget, terminalReason, shutdownPhase, registered,
     ownerReleased, poppedFromPending, completedDeliveryClaimed, finalizerOwner,
-    finalizerAborted, admittedDuringDrain, clientRetry, retryBackoff >>
+    finalizerAborted, admittedDuringDrain, retryBackoff >>
 
 StartStream(t, k) ==
   /\ turnState[t] = "active"

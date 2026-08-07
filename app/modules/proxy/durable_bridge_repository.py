@@ -1237,6 +1237,99 @@ class DurableBridgeRepository:
             await self._session.commit()
         return True
 
+    async def claim_unknown_operation_for_recovery(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        """Atomically claim an UNKNOWN operation for one recovery attempt.
+
+        Recovery admission can be reached by multiple reconnects at once. A
+        reset followed by a later state transition leaves a window where each
+        reconnect can observe UNKNOWN and submit the same operation. Keep the
+        owner fence, state transition, and transcript reset in one serialized
+        write so exactly one caller can move UNKNOWN back to SUBMITTED.
+        """
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state == "unknown",
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            await self._session.execute(
+                delete(HttpBridgeOperationEvent).where(
+                    HttpBridgeOperationEvent.operation_id == operation_id
+                )
+            )
+            operation.state = "submitted"
+            operation.response_id = None
+            operation.event_bytes = 0
+            operation.event_spool_complete = False
+            operation.updated_at = utcnow()
+            await self._session.commit()
+        return True
+
+    async def mark_operation_unknown(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        """Fence an ambiguously dispatched SUBMITTED operation as UNKNOWN.
+
+        The operation event reader can race the send-failure cleanup. Lock the
+        row before changing it and leave an already acknowledged or terminal
+        operation untouched; those states carry stronger evidence than the
+        transport exception and must never be downgraded to UNKNOWN.
+        """
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            if operation.state == "submitted":
+                operation.state = "unknown"
+                operation.updated_at = utcnow()
+            await self._session.commit()
+        return True
+
     async def rollback_operation_before_dispatch(
         self,
         *,

@@ -707,6 +707,67 @@ async def test_operation_retry_reset_clears_partial_spool(
 
 
 @pytest.mark.asyncio
+async def test_unknown_operation_recovery_claim_is_atomic_and_single_use(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-operation-claim", session_key_value="sid-operation-claim")
+        fingerprint = durable_bridge_hash("continuation-claim")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+            event_text="data: {\"type\":\"response.output_text.delta\"}\n\n",
+            max_bytes=1024,
+        )
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+        )
+
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+        )
+        claimed = await repository.get_operation(operation_id=operation_id)
+        assert claimed is not None
+        assert claimed.state == "submitted"
+        assert claimed.response_id is None
+        assert claimed.event_spool_complete is False
+        assert await repository.get_operation_events(operation_id=operation_id) == []
+
+        # The state transition is the claim: a concurrent reconnect that gets
+        # the write lock later cannot reset and submit the same operation.
+        assert not await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_pre_dispatch_operation_rollback_removes_only_empty_new_row(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

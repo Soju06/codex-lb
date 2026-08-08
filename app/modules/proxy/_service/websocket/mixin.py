@@ -1676,8 +1676,21 @@ class _WebSocketMixin:
                     and upstream_control is not None
                     and upstream_control.reconnect_requested
                     and upstream_reader is not None
+                    and (
+                        # Keep receiving downstream controls while a live
+                        # reader still owns pending work; only replay or a
+                        # completed/empty drain needs immediate settlement.
+                        upstream_reader.done()
+                        or upstream_control.replay_request_state is not None
+                        or not pending_requests
+                    )
                 ):
-                    await upstream_reader
+                    try:
+                        await upstream_reader
+                    except asyncio.CancelledError:
+                        current_task = asyncio.current_task()
+                        if current_task is not None and current_task.cancelling():
+                            raise
                     if replay_request_state is None:
                         replay_request_state = upstream_control.replay_request_state
                     upstream_reader = None
@@ -1727,6 +1740,7 @@ class _WebSocketMixin:
                             ("previous response", previous_response_owner_account_id),
                         )
                     except ProxyResponseError as exc:
+                        response_create_request_state = request_state
                         error = _parse_openai_error(exc.payload)
                         error_code = _normalize_error_code(
                             error.code if error else None,
@@ -1735,7 +1749,7 @@ class _WebSocketMixin:
                         error_message = error.message if error and error.message else "Upstream error"
                         error_type = error.type if error and error.type else "server_error"
                         error_param = error.param if error else None
-                        await proxy._release_websocket_request_state_reservation(request_state)
+                        await proxy._release_websocket_request_state_reservation(response_create_request_state)
                         await proxy._write_websocket_connect_failure(
                             account_id=None,
                             api_key=api_key,

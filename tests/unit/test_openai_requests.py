@@ -2393,6 +2393,42 @@ def test_compact_trimming_keeps_selected_tool_calls_with_matching_outputs():
     assert tool_output in dumped_input
 
 
+def test_compact_trimming_keeps_tool_search_outputs_with_matching_calls():
+    tool_call = {
+        "type": "tool_search_call",
+        "call_id": "call_search_tail",
+        "status": "completed",
+        "execution": "client",
+        "arguments": {"query": "spawn_agent multi-agent schema", "limit": 8},
+    }
+    tool_output = {
+        "type": "tool_search_output",
+        "call_id": "call_search_tail",
+        "output": "Found matching tools",
+    }
+    input_items = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "x" * 500_000},
+        tool_call,
+        {"role": "assistant", "content": "y" * 500_000},
+        tool_output,
+        {"role": "user", "content": "latest request"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert tool_call in dumped_input
+    assert tool_output in dumped_input
+
+
 def test_compact_trimming_reconciles_duplicate_tool_call_ids_by_occurrence():
     first_tool_call = {
         "type": "function_call",

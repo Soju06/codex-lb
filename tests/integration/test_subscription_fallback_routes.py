@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import pytest
 
@@ -198,9 +199,7 @@ async def test_fallback_reuses_existing_api_key_reservation(
         "/api/api-keys/",
         json={
             "name": "fallback-reservation-key",
-            "limits": [
-                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000}
-            ],
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000}],
         },
     )
     assert key_response.status_code == 200
@@ -323,8 +322,6 @@ async def test_non_quota_selection_failure_does_not_use_fallback(
 
     assert response.status_code == 200
     failed = _first_failed_event(response.text)
-    response_payload = failed["response"]
-    assert isinstance(response_payload, dict)
-    error = response_payload["error"]
-    assert isinstance(error, dict)
+    response_payload = cast(dict[str, object], failed["response"])
+    error = cast(dict[str, object], response_payload["error"])
     assert error["code"] == "no_accounts"

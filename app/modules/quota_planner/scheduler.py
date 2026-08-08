@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
+from app.core.utils.time import to_utc_naive
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.load_balancer import _build_states
@@ -163,8 +164,18 @@ class QuotaPlannerScheduler:
                         separators=(",", ":"),
                     ),
                 )
-                due = action.scheduled_at is None or action.scheduled_at <= now
-                if settings.mode == "auto" and action.action == "warmup" and due and decision.status == "planned":
+                # Decision timestamps come back from the timezone-naive DB
+                # columns while planner output is timezone-aware. Compare
+                # normalized UTC-naive instants at this boundary.
+                due = action.scheduled_at is None or to_utc_naive(action.scheduled_at) <= to_utc_naive(now)
+                if (
+                    settings.mode == "auto"
+                    and action.action == "warmup"
+                    and due
+                    and decision.status in {"planned", "executing"}
+                ):
+                    # An expired executing row is reclaimed inside warm_now;
+                    # a still-live executing row is read back and left alone.
                     await warmup_service.warm_now(account_id=action.account_id, decision_id=decision.id)
 
 

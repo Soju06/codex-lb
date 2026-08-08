@@ -30,7 +30,7 @@ from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
 from .logic import SHORT_WINDOW_MAX_MINUTES, PlannerSettings
-from .repository import QuotaPlannerRepository
+from .repository import QuotaPlannerRepository, warmup_claim_is_expired
 
 WARMUP_REQUEST_KIND = "warmup"
 # Rows written by the same upstream fetch land within milliseconds of each
@@ -79,11 +79,19 @@ class QuotaWarmupService:
         force_probe: bool = False,
         decision_id: str | None = None,
     ) -> WarmupExecutionResult:
+        decision = await self._planner.get_decision(decision_id) if decision_id is not None else None
+        if decision is not None and decision.status not in {"planned", "executing"}:
+            return WarmupExecutionResult(
+                decision_id=decision.id,
+                status=decision.status,
+                reason=decision.reason or f"decision_{decision.status}",
+                executed_at=decision.executed_at,
+            )
+
         settings = await self._planner.get_settings()
         account = await self._accounts.get_by_id(account_id)
         resolved_model = (model or settings.warmup_model_preference or "gpt-5.4-mini").strip()
         scheduled_at = utcnow()
-        decision = await self._planner.get_decision(decision_id) if decision_id is not None else None
         if decision is None:
             decision = await self._planner.log_decision(
                 mode=settings.mode,
@@ -95,7 +103,7 @@ class QuotaWarmupService:
                 status="planned",
                 idempotency_key=f"manual:{scheduled_at:%Y%m%d%H%M%S}:{account_id}:{uuid4().hex}",
             )
-        elif decision.status != "planned":
+        elif decision.status == "executing" and not warmup_claim_is_expired(decision):
             return WarmupExecutionResult(
                 decision_id=decision.id,
                 status=decision.status,
@@ -109,12 +117,15 @@ class QuotaWarmupService:
             force_probe=force_probe,
         )
         if not allowed:
-            row = await self._planner.update_decision_status(
-                decision.id,
-                status="skipped",
-                reason=reason,
-                expected_status="planned",
-            )
+            if decision.status == "executing" and warmup_claim_is_expired(decision):
+                row = await self._planner.skip_stale_warmup_claim(decision.id, reason=reason)
+            else:
+                row = await self._planner.update_decision_status(
+                    decision.id,
+                    status="skipped",
+                    reason=reason,
+                    expected_status="planned",
+                )
             if row is None:
                 current = await self._planner.get_decision(decision.id)
                 if current is not None:
@@ -139,6 +150,10 @@ class QuotaWarmupService:
         )
         if claimed is None:
             return await self._resolve_refused_claim(decision_id=decision.id, settings=settings)
+        claim_executed_at = claimed.executed_at
+        claim_lease_expires_at = claimed.lease_expires_at
+        assert claim_executed_at is not None
+        assert claim_lease_expires_at is not None
 
         reservation_id: str | None = None
         if api_key_id is not None:
@@ -157,7 +172,10 @@ class QuotaWarmupService:
                     decision.id,
                     status="skipped",
                     reason="api_key_not_found",
+                    executed_at=utcnow(),
                     expected_status="executing",
+                    expected_executed_at=claim_executed_at,
+                    expected_lease_expires_at=claim_lease_expires_at,
                 )
                 return await self._result_from_update_or_current(
                     decision_id=decision.id,
@@ -170,7 +188,10 @@ class QuotaWarmupService:
                     decision.id,
                     status="skipped",
                     reason="api_key_invalid",
+                    executed_at=utcnow(),
                     expected_status="executing",
+                    expected_executed_at=claim_executed_at,
+                    expected_lease_expires_at=claim_lease_expires_at,
                 )
                 return await self._result_from_update_or_current(
                     decision_id=decision.id,
@@ -184,7 +205,10 @@ class QuotaWarmupService:
                     decision.id,
                     status="skipped",
                     reason=reason,
+                    executed_at=utcnow(),
                     expected_status="executing",
+                    expected_executed_at=claim_executed_at,
+                    expected_lease_expires_at=claim_lease_expires_at,
                 )
                 return await self._result_from_update_or_current(
                     decision_id=decision.id,
@@ -236,6 +260,8 @@ class QuotaWarmupService:
                 reason="warmup_executed",
                 executed_at=utcnow(),
                 expected_status="executing",
+                expected_executed_at=claim_executed_at,
+                expected_lease_expires_at=claim_lease_expires_at,
             )
             return await self._result_from_update_or_current(
                 decision_id=decision.id,
@@ -289,6 +315,8 @@ class QuotaWarmupService:
                 reason=f"warmup_failed:{type(exc).__name__}",
                 executed_at=utcnow(),
                 expected_status="executing",
+                expected_executed_at=claim_executed_at,
+                expected_lease_expires_at=claim_lease_expires_at,
             )
             return await self._result_from_update_or_current(
                 decision_id=decision.id,
@@ -328,7 +356,7 @@ class QuotaWarmupService:
         current = await self._planner.get_decision_fresh(decision_id)
         if current is None:
             return WarmupExecutionResult(decision_id=decision_id, status="skipped", reason="decision_missing")
-        if current.status != "planned":
+        if current.status not in {"planned", "executing"}:
             return WarmupExecutionResult(
                 decision_id=current.id,
                 status=current.status,
@@ -341,12 +369,21 @@ class QuotaWarmupService:
             reason = "daily_warmup_count_budget_exhausted"
         else:
             reason = "daily_warmup_credit_budget_exhausted"
-        row = await self._planner.update_decision_status(
-            decision_id,
-            status="skipped",
-            reason=reason,
-            expected_status="planned",
-        )
+        if current.status == "planned":
+            row = await self._planner.update_decision_status(
+                decision_id,
+                status="skipped",
+                reason=reason,
+                expected_status="planned",
+            )
+        elif warmup_claim_is_expired(current):
+            row = await self._planner.skip_stale_warmup_claim(
+                decision_id,
+                reason=reason,
+                executed_at=utcnow(),
+            )
+        else:
+            row = current
         return await self._result_from_update_or_current(
             decision_id=decision_id,
             row=row,

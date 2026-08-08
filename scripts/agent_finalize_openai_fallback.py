@@ -48,8 +48,31 @@ def append_locale_entries(filename: str, entries: dict[str, str]) -> None:
     path.write_text(updated)
 
 
+def patch_route_test_typing() -> None:
+    path = Path("tests/integration/test_subscription_fallback_routes.py")
+    text = path.read_text()
+    if "from typing import cast\n" not in text:
+        text = text.replace("import json\n\n", "import json\nfrom typing import cast\n\n", 1)
+    old = '''    response_payload = failed["response"]
+    assert isinstance(response_payload, dict)
+    error = response_payload["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "no_accounts"
+'''
+    new = '''    response_payload = cast(dict[str, object], failed["response"])
+    error = cast(dict[str, object], response_payload["error"])
+    assert error["code"] == "no_accounts"
+'''
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif new not in text:
+        raise RuntimeError("Fallback route typing anchor changed")
+    path.write_text(text)
+
+
 def main() -> None:
     patch_model_index()
+    patch_route_test_typing()
     append_locale_entries(
         "en.json",
         {

@@ -19,8 +19,17 @@ def upgrade() -> None:
         sa.Column("is_subscription_fallback", sa.Boolean(), nullable=False, server_default=sa.false()),
     )
     op.add_column("model_sources", sa.Column("fallback_model", sa.String(length=255), nullable=True))
+    op.create_index(
+        "uq_model_sources_subscription_fallback",
+        "model_sources",
+        ["is_subscription_fallback"],
+        unique=True,
+        postgresql_where=sa.text("is_subscription_fallback IS TRUE"),
+        sqlite_where=sa.text("is_subscription_fallback = 1"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("uq_model_sources_subscription_fallback", table_name="model_sources")
     op.drop_column("model_sources", "fallback_model")
     op.drop_column("model_sources", "is_subscription_fallback")

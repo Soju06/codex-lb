@@ -1,0 +1,5 @@
+- [x] Reproduce clean-close and previous-response recovery failures on origin/main.
+- [x] Trace `bridge_instance_mismatch` and identify the introducing commit.
+- [x] Allow ownerless durable rows to be claimed with a new owner epoch.
+- [x] Run focused integration and bridge unit regression tests.
+- [x] Run strict OpenSpec validation.

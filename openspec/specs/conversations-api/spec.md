@@ -71,8 +71,7 @@ The membership rule used by `/api/conversations` (any in-window request qualifie
 
 ### Requirement: Conversation membership candidate discovery is bounded
 
-When the conversations list has an effective `since` value, the repository
-MUST discover qualifying conversation IDs from eligible rows with
+When the conversations list has an effective `since` value, the repository MUST discover qualifying conversation IDs from eligible rows with
 `requested_at >= since` before aggregating the list page. The candidate query
 MUST select distinct IDs and MUST include the active search predicate when a
 search term is supplied. The summary and facet aggregates MUST constrain their
@@ -99,8 +98,7 @@ all eligible rows for that conversation, including rows older than `since`.
 
 ### Requirement: Conversation list and detail routes require an admin principal
 
-The `/api/conversations` collection aliases and
-`/api/conversations/{id}` detail route MUST require an `admin` dashboard
+The `/api/conversations` collection aliases and `/api/conversations/{id}` detail route MUST require an `admin` dashboard
 principal before reading conversation data. A non-admin principal MUST receive
 HTTP 403 with error code `admin_access_required`; the route MUST NOT return a
 conversation payload. Admin requests SHALL retain all existing membership,

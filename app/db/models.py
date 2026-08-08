@@ -1179,6 +1179,15 @@ class ApiKeyAccountAssignment(Base):
 
 class ModelSource(Base):
     __tablename__ = "model_sources"
+    __table_args__ = (
+        Index(
+            "uq_model_sources_subscription_fallback",
+            "is_subscription_fallback",
+            unique=True,
+            postgresql_where=text("is_subscription_fallback IS TRUE"),
+            sqlite_where=text("is_subscription_fallback = 1"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
@@ -1209,6 +1218,13 @@ class ModelSource(Base):
         server_default=false(),
         nullable=False,
     )
+    is_subscription_fallback: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    fallback_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     supports_audio_transcriptions: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

@@ -202,6 +202,8 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       baseUrl: values.baseUrl,
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
+      isSubscriptionFallback: draft.isSubscriptionFallback,
+      fallbackModel: draft.fallbackModel.trim() || null,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
     };
 

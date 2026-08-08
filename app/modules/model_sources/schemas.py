@@ -36,6 +36,8 @@ class ModelSourceCreateRequest(DashboardModel):
     api_key: str | None = Field(default=None, min_length=1)
     supports_chat_completions: bool = True
     supports_responses: bool = False
+    is_subscription_fallback: bool = False
+    fallback_model: str | None = Field(default=None, max_length=255)
     supports_audio_transcriptions: bool = False
     timeout_seconds: int | None = Field(default=None, ge=1)
     max_concurrency: int | None = Field(default=None, ge=1)
@@ -49,6 +51,8 @@ class ModelSourceUpdateRequest(DashboardModel):
     is_enabled: bool | None = None
     supports_chat_completions: bool | None = None
     supports_responses: bool | None = None
+    is_subscription_fallback: bool | None = None
+    fallback_model: str | None = Field(default=None, max_length=255)
     supports_audio_transcriptions: bool | None = None
     timeout_seconds: int | None = Field(default=None, ge=1)
     max_concurrency: int | None = Field(default=None, ge=1)
@@ -64,6 +68,8 @@ class ModelSourceResponse(DashboardModel):
     health_status: str
     supports_chat_completions: bool
     supports_responses: bool
+    is_subscription_fallback: bool
+    fallback_model: str | None
     supports_audio_transcriptions: bool
     timeout_seconds: int | None
     max_concurrency: int | None

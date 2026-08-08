@@ -1,0 +1,44 @@
+> uv run python scripts/agent_finalize_openai_fallback.py
+Downloading cpython-3.13.15-linux-x86_64-gnu (download) (33.2MiB)
+ Downloaded cpython-3.13.15-linux-x86_64-gnu (download)
+Using CPython 3.13.15
+Creating virtual environment at: .venv
+   Building codex-lb @ file:///home/runner/work/codex-lb/codex-lb
+      Built codex-lb @ file:///home/runner/work/codex-lb/codex-lb
+Installed 96 packages in 42ms
+> uv run ruff format app/db/models.py app/modules/model_sources/repository.py tests/unit/test_subscription_fallback.py tests/integration/test_subscription_fallback_routes.py
+1 file reformatted, 3 files left unchanged
+> uv run ruff check --fix app/db/models.py app/modules/model_sources/repository.py tests/unit/test_subscription_fallback.py tests/integration/test_subscription_fallback_routes.py
+All checks passed!
+> git diff --check
+> uv run pytest -q tests/unit/test_subscription_fallback.py
+...........                                                              [100%]
+11 passed in 0.09s
+> uv run pytest -q tests/integration/test_subscription_fallback_routes.py
+......                                                                   [100%]
+6 passed in 8.02s
+> uv run pytest -q tests/integration/test_model_source_routing.py -k responses
+..                                                                       [100%]
+2 passed, 31 deselected in 1.13s
+> make lint
+python scripts/check_proxy_architecture.py
+proxy architecture checks passed
+uv run ruff check .
+All checks passed!
+uv run ruff format --check .
+unformatted: File would be reformatted
+  --> scripts/agent_finalize_openai_fallback.py:14:11
+   |
+13 |     old = 'class ModelSource(Base):\n    __tablename__ = "model_sources"\n\n'
+   -     new = '''class ModelSource(Base):
+14 +     new = """class ModelSource(Base):
+15 |     __tablename__ = "model_sources"
+--------------------------------------------------------------------------------
+25 |
+   - '''
+26 + """
+27 |     if text.count(old) != 1:
+   |
+
+1 file would be reformatted, 902 files already formatted
+make: *** [Makefile:83: lint] Error 1

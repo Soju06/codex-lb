@@ -341,10 +341,10 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         *,
         detail: str,
-    ) -> None:
+    ) -> int | None:
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
-            return
+            return None
 
         await self._load_http_bridge_retry_circuit(session)
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
@@ -385,6 +385,7 @@ class _HTTPBridgeRetryCircuitMixin:
         async with self._http_bridge_retry_circuit_lock:
             if self._http_bridge_retry_circuits.get(session.key) is state:
                 self._http_bridge_retry_circuit_loaded_keys.add(session.key)
+            return state.consecutive_failures
 
     async def _clear_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
         if session.key.strength != "hard":

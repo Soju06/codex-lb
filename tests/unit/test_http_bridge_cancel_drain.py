@@ -963,6 +963,7 @@ async def test_response_created_does_not_promote_in_progress_durable_anchor() ->
         session_key_value="thread-undo-edit",
         api_key_id=None,
         instance_id=instance_id,
+        owner_process_epoch="test-process",
         lease_ttl_seconds=60.0,
         account_id="acc-undo-edit",
         model="gpt-5.5",

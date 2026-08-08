@@ -656,6 +656,52 @@ async def _clear_durable_http_bridge_response_anchor(
     )
 
 
+async def _abandon_durable_http_bridge_continuity(
+    service: Any,
+    session: "_HTTPBridgeSession",
+) -> bool:
+    """Clear durable continuity before retiring a repeatedly poisoned bridge.
+
+    ``rebind_session_account(clear_continuity=True)`` is an existing fenced
+    write that clears the durable response/turn anchor and its alias rows while
+    this worker still owns the session. The ordinary retirement path then
+    closes the row and removes the process-local registrations.
+    """
+    if session.durable_session_id is None or session.durable_owner_epoch is None:
+        return False
+    try:
+        cleared = await service._durable_bridge.rebind_session_account(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+            account_id=session.account.id,
+            clear_continuity=True,
+        )
+    except Exception:
+        logger.warning("Failed to abandon poisoned HTTP bridge continuity", exc_info=True)
+        return False
+    if not cleared:
+        logger.warning(
+            "Durable bridge continuity clear was fenced before poisoned anchor retirement",
+            extra={
+                "session_id": session.durable_session_id,
+                "account_id": session.account.id,
+            },
+        )
+        return False
+    _log_http_bridge_event(
+        "durable_anchor_poisoned",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail="repeated_zero_event_idle_timeout",
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+    return True
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
@@ -743,6 +789,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 penalize_account=penalize_account,
             )
         finally:
+            poison_after_deferred_failures = False
             if session.admission_waiter_count > 0 and not force_retire:
                 retry_circuit_detail = None
                 if close_classification == "clean":
@@ -757,20 +804,48 @@ class _HTTPBridgeUpstreamEventsMixin:
                         None,
                     )
                 if failed_pending_count > 0 and retry_circuit_detail is not None:
-                    await self._record_http_bridge_retry_circuit_failure(
+                    consecutive_failures = await self._record_http_bridge_retry_circuit_failure(
                         session,
                         detail=retry_circuit_detail,
                     )
-                _log_http_bridge_event(
-                    "retire_deferred_for_admission_waiter",
-                    session.key,
-                    account_id=session.account.id,
-                    model=session.request_model,
-                    pending_count=session.admission_waiter_count,
-                    detail=retire_detail or error_code,
-                    cache_key_family=session.key.affinity_kind,
-                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                )
+                    poison_after_deferred_failures = bool(
+                        retry_circuit_detail == "stream_idle_timeout"
+                        and observed_response_events == 0
+                        and consecutive_failures is not None
+                        and consecutive_failures
+                        >= _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                    )
+                if poison_after_deferred_failures:
+                    durable_cleared = await _abandon_durable_http_bridge_continuity(self, session)
+                    if durable_cleared:
+                        await self._retire_stale_pending_http_bridge_session(
+                            session,
+                            detail="repeated_zero_event_idle_timeout",
+                            response_events_seen=observed_response_events,
+                        )
+                        force_retire = True
+                    else:
+                        _log_http_bridge_event(
+                            "durable_anchor_poison_clear_failed",
+                            session.key,
+                            account_id=session.account.id,
+                            model=session.request_model,
+                            pending_count=session.admission_waiter_count,
+                            detail="repeated_zero_event_idle_timeout",
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                        )
+                else:
+                    _log_http_bridge_event(
+                        "retire_deferred_for_admission_waiter",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        pending_count=session.admission_waiter_count,
+                        detail=retire_detail or error_code,
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                    )
             else:
                 if close_classification == "clean" and failed_pending_count > 0:
                     await self._retire_stale_pending_http_bridge_session(

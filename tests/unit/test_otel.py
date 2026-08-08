@@ -846,7 +846,7 @@ async def test_lifespan_marks_bridge_membership_stale_on_shutdown(monkeypatch: p
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         http_responses_session_bridge_instance_id="pod-a",
     )
     settings_cache = SimpleNamespace(
@@ -944,7 +944,7 @@ async def test_lifespan_shutdown_fails_bridge_capacity_waiter_and_cancels_usage_
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         http_responses_session_bridge_instance_id="pod-a",
     )
     settings_cache = SimpleNamespace(
@@ -1111,7 +1111,7 @@ async def test_lifespan_marks_bridge_membership_stale_for_hostname_shared_ids(
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_advertise_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
     )
@@ -1193,7 +1193,7 @@ async def test_lifespan_registers_bridge_without_waiting_for_advertise_self_prob
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_advertise_base_url="http://pod-a.bridge.default.svc.cluster.local:2455",
     )
@@ -1285,7 +1285,7 @@ async def test_lifespan_fails_fast_when_bridge_durable_schema_is_missing(monkeyp
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
     )
     settings_cache = SimpleNamespace(invalidate=AsyncMock())
     rate_limit_cache = SimpleNamespace(invalidate=AsyncMock())
@@ -1327,7 +1327,7 @@ async def test_lifespan_allows_missing_bridge_schema_when_fail_fast_disabled(mon
         otel_enabled=False,
         otel_exporter_endpoint="",
         metrics_enabled=False,
-        shutdown_drain_timeout_seconds=0,
+        shutdown_drain_timeout_seconds=1,
         database_migrations_fail_fast=False,
     )
     settings_cache = SimpleNamespace(

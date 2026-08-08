@@ -448,7 +448,7 @@ class Settings(BaseSettings):
     otel_exporter_endpoint: str = ""
 
     # Shutdown drain
-    shutdown_drain_timeout_seconds: int = 30
+    shutdown_drain_timeout_seconds: int = Field(default=30, gt=0, le=300)
 
     # HTTP connector limits
     http_connector_limit: int = 100

@@ -4,6 +4,7 @@ import json
 
 from app.core.openai.model_registry import (
     MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+    ReasoningLevel,
     UpstreamModel,
 )
 from app.core.types import JsonValue
@@ -58,15 +59,17 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
 
     input_modalities = ("text", "image") if source_model.supports_vision else ("text",)
     display_name = source_model.display_name or source_model.model
+    reasoning_levels = _reasoning_levels_from_metadata(raw)
+    default_reasoning_level = _default_reasoning_level_from_metadata(raw, reasoning_levels)
     return UpstreamModel(
         slug=source_model.model,
         display_name=display_name,
         description=display_name,
         context_window=context_window,
         input_modalities=input_modalities,
-        supported_reasoning_levels=(),
-        default_reasoning_level=None,
-        supports_reasoning_summaries=False,
+        supported_reasoning_levels=reasoning_levels,
+        default_reasoning_level=default_reasoning_level,
+        supports_reasoning_summaries=raw.get("supports_reasoning_summaries") is True,
         support_verbosity=False,
         default_verbosity=None,
         prefer_websockets=False,
@@ -79,6 +82,57 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
         source_id=source.id,
         raw=raw,
     )
+
+
+def _reasoning_levels_from_metadata(raw: dict[str, JsonValue]) -> tuple[ReasoningLevel, ...]:
+    """Reasoning efforts advertised for a source model.
+
+    Source catalogs have no first-class reasoning schema, so operators declare
+    the efforts their backend accepts under ``supported_reasoning_levels`` in
+    ``raw_metadata_json``. Both shapes are accepted::
+
+        ["low", "high", "max"]
+        [{"effort": "low", "description": "Low reasoning effort"}]
+
+    Anything else is ignored, keeping the previous no-reasoning default for
+    models that never opted in.
+    """
+    declared = raw.get("supported_reasoning_levels")
+    if not is_json_list(declared):
+        return ()
+    levels: list[ReasoningLevel] = []
+    seen: set[str] = set()
+    for item in declared:
+        if isinstance(item, str):
+            effort = item
+            description = f"{item} reasoning effort"
+        elif is_json_mapping(item):
+            effort_value = item.get("effort")
+            if not isinstance(effort_value, str):
+                continue
+            effort = effort_value
+            description_value = item.get("description")
+            description = description_value if isinstance(description_value, str) else f"{effort} reasoning effort"
+        else:
+            continue
+        if not effort or effort in seen:
+            continue
+        seen.add(effort)
+        levels.append(ReasoningLevel(effort=effort, description=description))
+    return tuple(levels)
+
+
+def _default_reasoning_level_from_metadata(
+    raw: dict[str, JsonValue],
+    levels: tuple[ReasoningLevel, ...],
+) -> str | None:
+    """Operator-declared default effort, restricted to the advertised levels."""
+    declared = raw.get("default_reasoning_level")
+    if not isinstance(declared, str):
+        return None
+    if not any(level.effort == declared for level in levels):
+        return None
+    return declared
 
 
 def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:

@@ -95,6 +95,7 @@ from app.modules.api_keys.service import (
     ApiKeyInvalidError,
     ApiKeysService,
 )
+from app.modules.model_sources.selection import responses_model_is_source_owned
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -3272,6 +3273,44 @@ class _WebSocketMixin:
     ) -> Account | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        if await responses_model_is_source_owned(model, api_key):
+            # Model sources are only reachable from the HTTP request path. Fail
+            # the WebSocket session instead of dispatching a source-owned model
+            # to a subscription account, which the upstream rejects with
+            # "The '<model>' model is not supported when using Codex with a
+            # ChatGPT account." Codex clients fall back to the HTTP transport
+            # when the WebSocket session fails, and that path routes to the
+            # source correctly.
+            message = (
+                f"Model {model!r} is served by an OpenAI-compatible model source, which is only "
+                "reachable over the HTTP transport; retry the request over HTTPS."
+            )
+            _facade().logger.info(
+                "Websocket model source requires http transport request_id=%s model=%s api_key_present=%s",
+                request_state.request_log_id or request_state.request_id,
+                model,
+                api_key is not None,
+            )
+            await proxy._emit_websocket_connect_failure(
+                websocket,
+                client_send_lock=client_send_lock,
+                account_id=None,
+                api_key=api_key,
+                request_state=request_state,
+                # 503 (not 4xx) is deliberate: Codex clients only fall back to
+                # the HTTP transport when a WebSocket connect fails at the
+                # service level. A 4xx is treated as terminal and surfaces to
+                # the user instead of retrying over HTTPS.
+                status_code=503,
+                payload=openai_error(
+                    "model_source_requires_http_transport",
+                    message,
+                    error_type="server_error",
+                ),
+                error_code="model_source_requires_http_transport",
+                error_message=message,
+            )
+            return None
         while True:
             try:
                 selection = await proxy._select_account_with_budget_compatible(

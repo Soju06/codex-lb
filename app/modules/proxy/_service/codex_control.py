@@ -53,6 +53,7 @@ class _CodexControlServiceProtocol(Protocol):
         *,
         affinity: _AffinityPolicy,
         api_key: ApiKeyData | None,
+        allowed_account_ids: frozenset[str] | None = None,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
@@ -205,15 +206,23 @@ class _CodexControlMixin:
         *,
         affinity: _AffinityPolicy,
         api_key: ApiKeyData | None,
+        allowed_account_ids: frozenset[str] | None = None,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account | None:
         proxy = cast(_CodexControlServiceProtocol, self)
-        scoped_account_ids = (
+        key_scoped_account_ids = (
             set(api_key.assigned_account_ids)
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
+        )
+        scoped_account_ids = (
+            key_scoped_account_ids
+            if allowed_account_ids is None
+            else set(allowed_account_ids)
+            if key_scoped_account_ids is None
+            else key_scoped_account_ids.intersection(allowed_account_ids)
         )
         settings = await _service_get_settings_cache().get()
         if _routing_strategy(settings) == "single_account":
@@ -253,6 +262,7 @@ class _CodexControlMixin:
         headers: Mapping[str, str],
         codex_session_affinity: bool = True,
         api_key: ApiKeyData | None = None,
+        allowed_account_ids: frozenset[str] | None = None,
         success_gate: Callable[[str, CodexControlResponse], Awaitable[bool]] | None = None,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> CodexControlResponse:
@@ -318,6 +328,7 @@ class _CodexControlMixin:
                 request_id=request_id,
                 kind=request_kind,
                 api_key=api_key,
+                allowed_account_ids=allowed_account_ids,
                 affinity_policy=affinity,
                 prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
@@ -330,6 +341,7 @@ class _CodexControlMixin:
                 account = await proxy._select_codex_control_account_without_budget(
                     affinity=affinity,
                     api_key=api_key,
+                    allowed_account_ids=allowed_account_ids,
                     traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC
                     if api_key is not None and api_key.traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC
                     else TRAFFIC_CLASS_FOREGROUND,
@@ -391,6 +403,7 @@ class _CodexControlMixin:
                     request_id=request_id,
                     kind=request_kind,
                     api_key=api_key,
+                    allowed_account_ids=allowed_account_ids,
                     sticky_key=affinity.selection_key,
                     sticky_kind=affinity.kind,
                     reallocate_sticky=affinity.reallocate_sticky,
@@ -483,6 +496,7 @@ class _CodexControlMixin:
                                     request_id=request_id,
                                     kind=request_kind,
                                     api_key=api_key,
+                                    allowed_account_ids=allowed_account_ids,
                                     sticky_key=affinity.selection_key,
                                     sticky_kind=affinity.kind,
                                     reallocate_sticky=affinity.reallocate_sticky,

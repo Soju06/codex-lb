@@ -1642,6 +1642,54 @@ async def test_request_usage_time_rollups_migration_upgrade_and_downgrade(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_oauth_live_policy_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'oauth-live-policy.sqlite'}"
+    parent_revision = "20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads"
+    policy_revision = "20260804_000000_add_oauth_live_policies"
+    tables = {"oauth_live_global_policy", "oauth_live_global_policy_accounts"}
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        present = {table for table in tables if inspector.has_table(table)}
+        allowed_indexes = (
+            {index["name"] for index in inspector.get_indexes("oauth_live_global_policy_accounts")}
+            if "oauth_live_global_policy_accounts" in present
+            else set()
+        )
+        return present, allowed_indexes
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) == (set(), set())
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, policy_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            present, indexes = await conn.run_sync(_schema_state)
+            row_counts = {
+                table: (await conn.execute(text(f"SELECT COUNT(*) FROM {table}"))).scalar_one() for table in tables
+            }
+        assert present == tables
+        assert "ix_oauth_live_global_policy_accounts_allowed_account_id" in indexes
+        assert row_counts == {table: 0 for table in tables}
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) == (set(), set())
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == policy_revision
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect

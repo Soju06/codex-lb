@@ -2,47 +2,69 @@
 
 ## Purpose and Scope
 
-This capability preserves account continuity between private Codex Live Voice call creation and its control sideband in a pooled proxy. It covers the installed Codex app's private compatibility routes and the existing operator and dashboard contracts around them. It does not implement the documented public Realtime API or proxy WebRTC media.
+This capability preserves account continuity between private Codex Live Voice call creation and its control sideband in a pooled proxy. It covers the installed Codex app's private compatibility routes and the operator contracts around them. WebRTC media remains peer-to-peer.
 
 See `openspec/specs/realtime-api-compat/spec.md` for normative requirements and `docs/live-voice.md` for the rendered user guide.
 
+## Supported caller profiles
+
+| Profile | Client authorization | Serving-account scope |
+| --- | --- | --- |
+| Built-in `openai` | Locally admitted official ChatGPT OAuth bearer plus `chatgpt-account-id` | Settings → Live Voice global OAuth pool |
+| Registered Key | `sk-clb-` bearer from `env_key`; Codex keeps `requires_openai_auth = true` | Existing Key assignments and limits |
+
+The built-in profile preserves the official OpenAI provider and requires no client-side Codex-LB Key. It inherits the ordinary proxy's zero-key origin boundary. The registered-Key profile preserves the established codex-lb contract. Both profiles route call creation and sideband through codex-lb.
+
 ## Rationale and Decisions
 
-- **Final success owns the call:** The generic Codex control request may refresh or fail over before returning a response. Ownership is captured only after the final successful account returns a supported call `Location`.
-- **Possession is key-scoped:** A call id is not authorization. The registered proxy-key id participates in the ownership digest, so another key cannot attach even if it knows the id.
-- **Ownership is durable but opaque:** The existing sticky-session store holds a bounded digest and owner reference in a reserved namespace. Raw call ids, credentials, SDP, attestation values, and frames are excluded.
-- **Attachment is hard continuity:** Every ingress resolves the exact owner, rechecks current assignment and account state, loads current persisted identity, and acquires one stream lease. It does not refresh or select a replacement account.
+- **Bearer dispatch is explicit:** `sk-clb-` bearers enter strict Proxy Key validation. Every other bearer enters the keyless lane.
+- **Zero-key origin admission is shared:** Keyless Live calls reuse the ordinary proxy's loopback, trusted-proxy consensus, preserved raw-socket peer, and existing unauthenticated CIDR checks. Global API-key mode closes this lane.
+- **The normalized account header defines the keyless scope:** A purpose-separated HMAC of this locally unverified value participates in the ownership digest. Bearer rotation preserves the scope, while sideband attachment still requires the call id; the network boundary remains the authorization decision.
+- **Final success owns the call:** Ownership is captured after the final successful account returns a supported call `Location`.
+- **Ownership is durable and opaque:** The sticky-session store holds a bounded digest and owner reference. Raw call ids, credentials, SDP, attestation values, and frames remain outside persistence.
+- **Attachment enforces hard continuity:** Every ingress recomputes caller scope, resolves the exact owner, rechecks policy and account state, loads current persisted upstream identity, and acquires one stream lease.
+- **Capacity remains account-scoped:** Keyless sideband uses `api_key_id = NULL`, while still counting toward pool inflight and the serving Account's stream-capacity limit. API-key-specific fair-share admission remains exclusive to registered Key callers.
 - **Protocols stay explicit:** Current-app and v3 ingress connect to `/v1/live/{call_id}`. Legacy ingress preserves remaining ordered query fields and appends one normalized `call_id` to `/v1/realtime`.
-- **Private authorization does not add base setup:** Live Voice requires an existing registered proxy key even when ordinary proxy authentication is disabled. The untouched proxy and dashboard remain zero-config.
-- **Public boundaries stay visible:** Related SDK-documented `POST /v1/realtime/calls` and `POST /v1/realtime/client_secrets` routes provide protocol context only and are not implemented by this capability.
+- **Base setup remains zero-config:** OAuth Live starts disabled. Registered-Key Live keeps its existing configuration and behavior.
 
 ## Constraints
 
 - All ids, mappings, batches, waits, messages, close reasons, and cleanup work are bounded.
-- Missing or invalid keys fail before account selection; attachment rechecks current assignment and capacity.
-- SDP, audio, transcripts, attestation values, frame bodies, tokens, and raw call ids are absent from persistence and diagnostics. Private call creation also keeps AuthManager metadata and shared-refresh warnings account-safe; the process-global refresh singleflight uses content-free task diagnostics regardless of caller order.
-- No new setting, dependency, migration, public model, dashboard navigation item, README section, `.env.example` entry, background scheduler, or public Realtime endpoint is introduced.
-- The connector does not infer a protocol, synthesize `OpenAI-Beta` or `Sec-WebSocket-Protocol`, or interpret event payloads. Client-offered WebSocket subprotocols retain their exact order through transport negotiation; downstream receives only an upstream-selected offered value.
-- Reserved ownership is hidden from and protected against ordinary sticky-session list and delete operations.
+- Missing credentials and connections outside the zero-key boundary fail before policy lookup and account selection.
+- OAuth policy lookup returns only active imported Accounts from its explicit pool.
+- The HMAC key is derived from the existing persistent encryption key with a dedicated domain label; no new secret or setting is introduced.
+- SDP, audio, transcripts, attestation values, frame bodies, tokens, account headers, and raw call ids remain absent from persistence and diagnostics.
+- The feature adds one reversible migration and one Settings card. It adds no environment setting, dependency, dashboard navigation item, README section, `.env.example` entry, background scheduler, public model, or public Realtime endpoint.
+- The connector preserves client-offered WebSocket subprotocol order and returns only an upstream-selected offered value.
+- Reserved ownership stays hidden from ordinary sticky-session list and delete operations.
 
 ## Failure Modes
 
-- **Missing or unsupported successful `Location` or durable binding failure:** Persist the single private request row as an error, replace the unusable success with one credential-safe `503 realtime_call_binding_failed`, and never replay the created call through another account.
+- **Source outside the zero-key boundary or global API-key mode enabled:** Deny the keyless lane with `401 invalid_api_key`.
+- **OAuth policy inactive or empty:** Deny keyless Live before account selection with `403 oauth_live_not_enabled`.
+- **Bearer changed with the same account header:** The ownership namespace remains stable and sideband can reconnect to the bound owner.
+- **Account header or encryption key changed:** The ownership namespace changes; an existing sideband receives the credential-safe not-found response.
+- **Missing or unsupported successful `Location` or durable binding failure:** Persist one private error request row and return `503 realtime_call_binding_failed`.
 - **Conflicting immutable owner:** Preserve the original owner and fail closed.
-- **Expired, cross-key, reassigned, paused, deleted, capped, or unavailable owner:** Deny attachment without substitution.
-- **Routed handshake denial or network failure:** Preserve normalized safe context and do not replay or penalize the account; ordinary Responses network fallback remains unchanged.
-- **Peer disconnect, oversize, cancellation, or close timeout:** Cancel owned work, bound both initial close and post-cancel drain, consume any late close-task result, close peers at most once, and release the lease once without waiting indefinitely for cancellation-resistant transport cleanup.
-- **Reserved operator action:** Hide the row from lists and reject or skip single, bulk, filtered, and delete-all operations.
+- **Expired ownership or owner outside the current caller scope:** Deny attachment without account substitution.
+- **Routed handshake denial or network failure:** Preserve normalized safe context and avoid replaying or penalizing the account.
+- **Peer disconnect, oversize, cancellation, or close timeout:** Cancel owned work, bound drain time, close peers at most once, and release the lease once.
 
-## Sanitized Example
+## Examples
 
-1. Registered key `key_a` sends a call-creation request to `POST /backend-api/codex/realtime/calls`.
-2. The final upstream account returns a successful response and `Location: /v1/realtime/calls/rtc_example`.
-3. codex-lb stores only a key-scoped ownership digest for `rtc_example` and returns the valid response.
-4. The app opens `WS /backend-api/codex/rtc_example`.
-5. The shared sideband service reloads and leases the bound owner, then connects upstream to `/v1/live/rtc_example` with current persisted identity.
-6. A credential-safe `realtime_live` WebSocket request remains visible in Recent Requests while the internal ownership row remains absent from sticky-session operator views.
+### Built-in OAuth profile
+
+1. Codex uses `model_provider = "openai"` and sends official ChatGPT OAuth credentials from loopback.
+2. codex-lb applies its existing zero-key origin guard and derives an opaque account-stable scope locally.
+3. The final serving Account owns the new call under that scope.
+4. Sideband presents the same account identity with the current bearer and reconnects to that exact owner.
+
+### Registered-Key profile
+
+1. Codex uses a custom provider, `requires_openai_auth = true`, and `env_key = "CODEX_LB_API_KEY"`.
+2. The registered Key keeps its existing account assignments, limits, request attribution, and affinity input.
+3. Normal conversations and Live Voice calls traverse the Key-authenticated proxy contract.
 
 ## Operational Notes
 
-The capability ships as one zero-config unit and uses existing request-log retention and sticky-session storage. There is no new rollout or monitoring setting. If a binding is no longer valid, create a new call rather than attempting account substitution. The dashboard parser correction is user-visible and remains subject to the repository's media evidence gate.
+Both realtime base URLs must point at codex-lb. Each bundled Codex upgrade receives a call-create route probe, sideband route probe, normal-conversation check, and audible Live Voice check. Loopback requires no CIDR configuration. The existing unauthenticated raw-peer CIDR setting remains an advanced operator opt-in.

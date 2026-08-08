@@ -32,6 +32,8 @@ from app.modules.limit_warmup.repository import LimitWarmupRepository
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.service import ModelSourcesService
 from app.modules.oauth.service import OauthService
+from app.modules.oauth_live.repository import OAuthLivePolicyRepository
+from app.modules.oauth_live.service import OAuthLivePolicyService
 from app.modules.proxy.capability_lineage_repository import CapabilityLineageRepository
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
@@ -72,6 +74,13 @@ class UsageContext:
 @dataclass(slots=True)
 class OauthContext:
     service: OauthService
+
+
+@dataclass(slots=True)
+class OAuthLivePolicyContext:
+    session: AsyncSession
+    repository: OAuthLivePolicyRepository
+    service: OAuthLivePolicyService
 
 
 @dataclass(slots=True)
@@ -230,6 +239,17 @@ def get_oauth_context(
 ) -> OauthContext:
     accounts_repository = AccountsRepository(session)
     return OauthContext(service=OauthService(accounts_repository, repo_factory=_accounts_repo_context))
+
+
+def get_oauth_live_policy_context(
+    session: AsyncSession = Depends(get_session),
+) -> OAuthLivePolicyContext:
+    repository = OAuthLivePolicyRepository(session)
+    return OAuthLivePolicyContext(
+        session=session,
+        repository=repository,
+        service=OAuthLivePolicyService(repository),
+    )
 
 
 def get_dashboard_auth_context(

@@ -51,6 +51,16 @@ const WeeklyPaceSmoothingMinutesSchema = z.union([
   z.literal(240),
 ]);
 
+export const OAuthLivePolicySchema = z.object({
+  isActive: z.boolean(),
+  allowedAccountIds: z.array(z.string()),
+});
+
+export const OAuthLivePolicyUpdateRequestSchema = z.object({
+  isActive: z.boolean(),
+  allowedAccountIds: z.array(z.string()),
+});
+
 export const DashboardSettingsSchema = z
   .object({
     stickyThreadsEnabled: z.boolean(),
@@ -252,6 +262,11 @@ export const SettingsUpdateRequestSchema = z
       });
     }
   });
+
+export type OAuthLivePolicy = z.infer<typeof OAuthLivePolicySchema>;
+export type OAuthLivePolicyUpdateRequest = z.infer<
+  typeof OAuthLivePolicyUpdateRequestSchema
+>;
 
 type ParsedDashboardSettings = z.infer<typeof DashboardSettingsSchema>;
 type StickyThresholdPresenceFlags = Pick<

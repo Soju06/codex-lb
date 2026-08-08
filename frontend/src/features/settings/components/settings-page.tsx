@@ -8,6 +8,7 @@ import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section"
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
 import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
+import { OAuthLiveSettings } from "@/features/settings/components/oauth-live-settings";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
@@ -135,6 +136,8 @@ export function SettingsPage() {
                 void handleSave(buildSettingsUpdateRequest(settings, { hideUpstreamQuotaFromApiKeys: enabled }))
               }
             />
+
+            <OAuthLiveSettings readOnly={!canWrite} />
 
             <AdvancedSettingsGroup>
               <RoutingSettings

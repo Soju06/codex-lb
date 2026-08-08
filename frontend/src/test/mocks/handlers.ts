@@ -99,6 +99,11 @@ const AccountRoutingPolicyPayloadSchema = z.object({
   routingPolicy: z.enum(["normal", "burn_first", "preserve"]),
 });
 
+const OAuthLivePolicyPayloadSchema = z.object({
+  isActive: z.boolean(),
+  allowedAccountIds: z.array(z.string()),
+});
+
 const SettingsPayloadSchema = z.looseObject({
   stickyThreadsEnabled: z.boolean().optional(),
   upstreamStreamTransport: z
@@ -243,6 +248,7 @@ async function parseJsonBody<T>(
 
 type MockState = {
   accounts: AccountSummary[];
+  oauthLivePolicy: { isActive: boolean; allowedAccountIds: string[] };
   requestLogs: RequestLogEntry[];
   conversations: ConversationEntry[];
   conversationDetails: ConversationDetails[];
@@ -328,6 +334,7 @@ type MockState = {
 function createInitialState(): MockState {
   return {
     accounts: createDefaultAccounts(),
+    oauthLivePolicy: { isActive: false, allowedAccountIds: [] },
     requestLogs: createDefaultRequestLogs(),
     conversations: createDefaultConversations(),
     conversationDetails: [
@@ -833,6 +840,22 @@ export const handlers = [
 
   http.get("/api/accounts", () => {
     return HttpResponse.json({ accounts: state.accounts });
+  }),
+
+  http.get("/api/oauth-live-policy", () => {
+    return HttpResponse.json(state.oauthLivePolicy);
+  }),
+
+  http.put("/api/oauth-live-policy", async ({ request }) => {
+    const payload = await parseJsonBody(request, OAuthLivePolicyPayloadSchema);
+    if (!payload || (payload.isActive && payload.allowedAccountIds.length === 0)) {
+      return HttpResponse.json(
+        { error: { code: "invalid_oauth_live_policy", message: "Invalid OAuth Live policy" } },
+        { status: 400 },
+      );
+    }
+    state.oauthLivePolicy = payload;
+    return HttpResponse.json(state.oauthLivePolicy);
   }),
 
   http.post("/api/accounts/import", async () => {

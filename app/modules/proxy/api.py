@@ -38,7 +38,6 @@ from app.core.auth.dependencies import (
     validate_codex_usage_identity,
     validate_proxy_api_key,
     validate_proxy_api_key_authorization,
-    validate_required_proxy_api_key,
     validate_required_proxy_api_key_authorization,
     validate_usage_api_key,
 )
@@ -225,6 +224,7 @@ from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_STREAM_STATE,
     record_images_route_observability,
 )
+from app.modules.proxy.realtime_auth import RealtimeCallerScope, resolve_realtime_caller_scope
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
@@ -799,7 +799,7 @@ class _PassthroughCodexControlAdapter:
 @dataclass(slots=True)
 class _RealtimeCallCodexControlAdapter:
     context: ProxyContext
-    api_key: ApiKeyData
+    caller_scope: RealtimeCallerScope
     _binding_failure_message: str | None = "Realtime call owner could not be determined"
 
     @property
@@ -822,7 +822,7 @@ class _RealtimeCallCodexControlAdapter:
             bound_call_id = await self.context.service.bind_realtime_call_owner(
                 response_headers=response.headers,
                 account_id=account_id,
-                api_key=self.api_key,
+                caller_scope=self.caller_scope,
             )
         except asyncio.CancelledError:
             current_task = asyncio.current_task()
@@ -873,8 +873,10 @@ async def _codex_control_proxy(
     context: ProxyContext,
     api_key: ApiKeyData | None,
     *,
+    allowed_account_ids: frozenset[str] | None = None,
     adapter: _CodexControlAdapter = _PASSTHROUGH_CODEX_CONTROL_ADAPTER,
 ) -> Response:
+    account_scope_kwargs = {} if allowed_account_ids is None else {"allowed_account_ids": allowed_account_ids}
     try:
         response = await context.service.codex_control_request(
             path,
@@ -886,6 +888,7 @@ async def _codex_control_proxy(
             api_key=api_key,
             privacy_policy=adapter.privacy_policy,
             success_gate=adapter.success_gate,
+            **account_scope_kwargs,
         )
     except ProxyResponseError as exc:
         if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
@@ -952,14 +955,20 @@ async def codex_memories_trace_summarize(
 async def codex_realtime_calls(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData = Security(validate_required_proxy_api_key),
 ) -> Response:
+    caller_scope = await resolve_realtime_caller_scope(
+        request,
+        request.headers.get("authorization"),
+        request.headers.get("chatgpt-account-id"),
+        api_key_validator=validate_required_proxy_api_key_authorization,
+    )
     return await _codex_control_proxy(
         request,
         "realtime/calls",
         context,
-        api_key,
-        adapter=_RealtimeCallCodexControlAdapter(context, api_key),
+        caller_scope.api_key,
+        allowed_account_ids=caller_scope.allowed_account_ids,
+        adapter=_RealtimeCallCodexControlAdapter(context, caller_scope),
     )
 
 
@@ -1319,27 +1328,35 @@ async def _proxy_realtime_live_websocket_route(
     redacted_path: str,
 ) -> None:
     _redact_realtime_live_websocket_scope(websocket, path=redacted_path)
-    api_key, denial = await _validate_proxy_websocket_request(websocket, require_api_key=True)
+    denial = await _websocket_firewall_denial_response(websocket)
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    assert api_key is not None
-    try:
-        if protocol is RealtimeWebSocketProtocol.LIVE_V3 and any(key == "call_id" for key, _value in query_params):
-            raise ProxyResponseError(
-                400,
-                openai_error(
+    if protocol is RealtimeWebSocketProtocol.LIVE_V3 and any(key == "call_id" for key, _value in query_params):
+        await websocket.send_denial_response(
+            JSONResponse(
+                status_code=400,
+                content=openai_error(
                     "invalid_realtime_call_id",
                     "Path-based realtime sidebands must not include a call_id query parameter",
                 ),
             )
+        )
+        return
+
+    caller_scope, denial = await _resolve_realtime_caller_websocket_request(websocket)
+    if denial is not None:
+        await websocket.send_denial_response(denial)
+        return
+    assert caller_scope is not None
+    try:
         await context.service.proxy_realtime_live_websocket(
             websocket,
             call_id,
             dict(websocket.headers),
             query_params,
             protocol=protocol,
-            api_key=api_key,
+            caller_scope=caller_scope,
             client_ip=resolve_request_client_host(websocket),
         )
     except ProxyResponseError as exc:
@@ -6353,6 +6370,24 @@ async def _validate_proxy_websocket_request(
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),
         )
     return api_key, None
+
+
+async def _resolve_realtime_caller_websocket_request(
+    websocket: WebSocket,
+) -> tuple[RealtimeCallerScope | None, JSONResponse | None]:
+    try:
+        caller_scope = await resolve_realtime_caller_scope(
+            websocket,
+            websocket.headers.get("authorization"),
+            websocket.headers.get("chatgpt-account-id"),
+            api_key_validator=validate_required_proxy_api_key_authorization,
+        )
+    except ProxyAuthError as exc:
+        return None, JSONResponse(
+            status_code=exc.status_code,
+            content=openai_error(exc.code, exc.message, error_type=exc.error_type),
+        )
+    return caller_scope, None
 
 
 def _redact_realtime_live_websocket_scope(websocket: WebSocket, *, path: str) -> None:

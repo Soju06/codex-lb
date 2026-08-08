@@ -19,6 +19,7 @@ const quotaPlannerSectionMock = vi.fn();
 const stickySessionsSectionMock = vi.fn();
 const modelSourcesSettingsMock = vi.fn();
 const dataRetentionSettingsMock = vi.fn();
+const oauthLiveSettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: () => useSettingsMock(),
@@ -73,6 +74,13 @@ vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);
     return <div>Data Retention Settings</div>;
+  },
+}));
+
+vi.mock("@/features/settings/components/oauth-live-settings", () => ({
+  OAuthLiveSettings: (props: unknown) => {
+    oauthLiveSettingsMock(props);
+    return <div>OAuth Live Settings</div>;
   },
 }));
 
@@ -162,6 +170,7 @@ describe("SettingsPage", () => {
     stickySessionsSectionMock.mockReset();
     modelSourcesSettingsMock.mockReset();
     dataRetentionSettingsMock.mockReset();
+    oauthLiveSettingsMock.mockReset();
   });
 
   async function expandAdvancedSettings() {
@@ -191,7 +200,16 @@ describe("SettingsPage", () => {
     // Core sections stay visible without any interaction.
     expect(screen.getByText("Appearance Settings")).toBeInTheDocument();
     expect(screen.getByText("Import Settings")).toBeInTheDocument();
-    expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    const apiKeysSection = screen.getByText("API Keys Section");
+    const oauthLiveSection = screen.getByText("OAuth Live Settings");
+    const advancedSettingsTrigger = screen.getByRole("button", { name: "Show advanced settings" });
+    expect(apiKeysSection.compareDocumentPosition(oauthLiveSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(oauthLiveSection.compareDocumentPosition(advancedSettingsTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(oauthLiveSettingsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        readOnly: false,
+      }),
+    );
   });
 
   it("mounts every advanced section after one expand interaction", async () => {
@@ -219,6 +237,7 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
     expect(importSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
     expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    expect(oauthLiveSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true }));
 
     await expandAdvancedSettings();
 

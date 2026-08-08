@@ -9,14 +9,17 @@ from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from starlette.testclient import WebSocketDenialResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.websockets import WebSocketDisconnect
 from uvicorn.protocols.utils import get_client_addr, get_path_with_query_string
 
+import app.core.auth.dependencies as auth_dependencies
 import app.core.clients.proxy_websocket as proxy_websocket_module
 import app.modules.proxy.api as proxy_api_module
+import app.modules.proxy.realtime_auth as realtime_auth_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.auth.dependencies import validate_required_proxy_api_key_authorization
@@ -32,6 +35,7 @@ from app.db.models import RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy.account_cache import AccountSelectionCache
+from app.modules.proxy.realtime_auth import OAuthLiveNotEnabledError, RealtimeCallerScope
 
 pytestmark = pytest.mark.integration
 
@@ -62,7 +66,7 @@ def _allow_proxy_websocket_auth(monkeypatch: pytest.MonkeyPatch) -> None:
         return None
 
     async def require_proxy_api_key(authorization):
-        if authorization != "Bearer live-key":
+        if authorization != "Bearer sk-clb-live-key":
             raise ProxyAuthError("Missing API key in Authorization header")
         return SimpleNamespace(id="live-api-key")
 
@@ -168,11 +172,11 @@ def test_realtime_sideband_websocket_aliases_route_to_shared_service(
         query_params,
         *,
         protocol,
-        api_key,
+        caller_scope,
         client_ip=None,
     ):
         del self
-        assert api_key.id == "live-api-key"
+        assert caller_scope.api_key.id == "live-api-key"
         calls.append(
             {
                 "call_id": call_id,
@@ -196,7 +200,7 @@ def test_realtime_sideband_websocket_aliases_route_to_shared_service(
                 headers={
                     "OpenAI-Alpha": "quicksilver=v2",
                     "x-oai-attestation": "attestation",
-                    "Authorization": "Bearer live-key",
+                    "Authorization": "Bearer sk-clb-live-key",
                 },
             ) as websocket:
                 assert websocket.receive_text() == "ready"
@@ -220,6 +224,332 @@ def test_realtime_sideband_websocket_aliases_route_to_shared_service(
     assert f'"WebSocket {logged_path}" [accepted]' in access_messages[0]
     assert expected_call_id not in access_messages[0]
     assert "quicksilver" not in access_messages[0]
+
+
+def test_realtime_sideband_oauth_uses_local_keyless_scope(
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_scopes: list[RealtimeCallerScope] = []
+    allowed_account_id = "allowed-local-account"
+
+    async def load_policy() -> frozenset[str]:
+        return frozenset({allowed_account_id})
+
+    async def fake_proxy_live(
+        self,
+        websocket,
+        call_id,
+        headers,
+        query_params,
+        *,
+        protocol,
+        caller_scope,
+        client_ip=None,
+    ) -> None:
+        del self, call_id, headers, query_params, protocol, client_ip
+        captured_scopes.append(caller_scope)
+        await websocket.accept()
+        await websocket.send_text("ready")
+        await websocket.close(code=1000)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "proxy_realtime_live_websocket", fake_proxy_live)
+    monkeypatch.setattr(realtime_auth_module, "_active_oauth_live_allowed_account_ids", load_policy)
+
+    with TestClient(
+        app_instance,
+        base_url="http://localhost",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        for token in ("oauth-token-before-refresh", "oauth-token-after-refresh"):
+            with client.websocket_connect(
+                "ws://localhost/v1/live/rtc_local_oauth",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "chatgpt-account-id": "workspace-caller",
+                },
+            ) as websocket:
+                assert websocket.receive_text() == "ready"
+
+    assert len(captured_scopes) == 2
+    scope = captured_scopes[0]
+    assert scope.kind == "oauth"
+    assert scope.api_key is None
+    assert scope.allowed_account_ids == frozenset({allowed_account_id})
+    assert scope.affinity_scope_material.startswith("oauth-local:")
+    assert captured_scopes[1].affinity_scope_material == scope.affinity_scope_material
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_code"),
+    [
+        (ProxyAuthError("invalid caller"), 401, "invalid_api_key"),
+        (OAuthLiveNotEnabledError(), 403, "oauth_live_not_enabled"),
+    ],
+)
+def test_realtime_sideband_serializes_typed_caller_denials(
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    async def reject_caller(*_args: object, **_kwargs: object):
+        raise error
+
+    monkeypatch.setattr(proxy_api_module, "resolve_realtime_caller_scope", reject_caller)
+
+    with TestClient(app_instance) as client:
+        with pytest.raises(WebSocketDenialResponse) as raised:
+            with client.websocket_connect(
+                "/v1/live/rtc_denied",
+                headers={
+                    "Authorization": "Bearer oauth-token",
+                    "chatgpt-account-id": "workspace-id",
+                },
+            ):
+                pass
+
+    assert raised.value.status_code == expected_status
+    assert raised.value.json()["error"]["code"] == expected_code
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_create_returns_oauth_policy_denial_before_selection(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reject_caller(*_args: object, **_kwargs: object):
+        raise OAuthLiveNotEnabledError()
+
+    async def fail_selection(*_args: object, **_kwargs: object):
+        raise AssertionError("account selection must remain unreachable")
+
+    monkeypatch.setattr(proxy_api_module, "resolve_realtime_caller_scope", reject_caller)
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", fail_selection)
+
+    response = await async_client.post(
+        "/backend-api/codex/realtime/calls",
+        content=b"offer",
+        headers={
+            "Authorization": "Bearer oauth-token",
+            "chatgpt-account-id": "workspace-id",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "oauth_live_not_enabled"
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_create_oauth_scope_selects_only_allowed_account(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    allowed = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "allowed.json",
+                json.dumps(_auth_json("workspace-allowed", "allowed@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert allowed.status_code == 200
+    allowed_account_id = allowed.json()["accountId"]
+    policy = await async_client.put(
+        "/api/oauth-live-policy",
+        json={"isActive": True, "allowedAccountIds": [allowed_account_id]},
+    )
+    assert policy.status_code == 200
+
+    upstream_account_ids: list[str | None] = []
+
+    async def create_call(*_args: object, account_id: str | None, **_kwargs: object) -> CodexControlResponse:
+        upstream_account_ids.append(account_id)
+        return CodexControlResponse(
+            status_code=201,
+            body=b"answer",
+            headers={"location": "/v1/realtime/calls/rtc_oauth_allowed"},
+        )
+
+    async def reject_usage_validation(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Live admission must not call the OpenAI usage endpoint")
+
+    monkeypatch.setattr(auth_dependencies, "fetch_usage", reject_usage_validation)
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", create_call)
+    service = get_proxy_service_for_app(async_client._transport.app)
+    original_write_request_log = service._write_request_log
+    request_log_calls: list[dict[str, object]] = []
+
+    async def capture_request_log(**kwargs: object) -> None:
+        request_log_calls.append(kwargs)
+        await cast(Any, original_write_request_log)(**kwargs)
+
+    monkeypatch.setattr(service, "_write_request_log", capture_request_log)
+
+    response = await async_client.post(
+        "/backend-api/codex/realtime/calls",
+        content=b"offer",
+        headers={
+            "Authorization": "Bearer oauth-token",
+            "chatgpt-account-id": "workspace-caller",
+        },
+    )
+
+    assert response.status_code == 201
+    assert upstream_account_ids == ["workspace-allowed"]
+    assert request_log_calls[0]["api_key"] is None
+    request_log_id = cast(str, request_log_calls[0]["request_id"])
+    deadline = asyncio.get_running_loop().time() + 1
+    persisted = None
+    while persisted is None:
+        assert await service.drain_persistence_tasks(timeout_seconds=1)
+        async with SessionLocal() as session:
+            persisted = (
+                await session.execute(select(RequestLog).where(RequestLog.request_id == request_log_id))
+            ).scalar_one_or_none()
+        if persisted is not None:
+            break
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("OAuth realtime call-create request log was not persisted")
+        await asyncio.sleep(0.01)
+    assert persisted.api_key_id is None
+
+
+@pytest.mark.asyncio
+async def test_oauth_live_sideband_reconnects_after_downstream_bearer_rotation(
+    app_instance,
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={
+            "auth_json": (
+                "allowed.json",
+                json.dumps(_auth_json("workspace-allowed", "allowed@example.com")),
+                "application/json",
+            )
+        },
+    )
+    assert imported.status_code == 200
+    policy = await async_client.put(
+        "/api/oauth-live-policy",
+        json={"isActive": True, "allowedAccountIds": [imported.json()["accountId"]]},
+    )
+    assert policy.status_code == 200
+
+    async def create_call(*_args: object, **_kwargs: object) -> CodexControlResponse:
+        return CodexControlResponse(
+            status_code=201,
+            body=b"answer",
+            headers={"location": "/v1/realtime/calls/rtc_oauth_rotated"},
+        )
+
+    class Upstream:
+        uses_proxy = False
+
+        def __init__(self) -> None:
+            self.messages = [
+                UpstreamWebSocketMessage(kind="text", text="ready"),
+                UpstreamWebSocketMessage(kind="close", close_code=1000, close_reason="done"),
+            ]
+
+        async def send_text(self, _text: str) -> None:
+            return None
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def receive(self) -> UpstreamWebSocketMessage:
+            return self.messages.pop(0)
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            del code, reason
+
+        def response_header(self, _name: str) -> str | None:
+            return None
+
+        def archive_received(self, _message: UpstreamWebSocketMessage) -> None:
+            return None
+
+    connector_calls: list[tuple[str, str | None]] = []
+
+    async def connect_upstream(
+        _headers: dict[str, str],
+        access_token: str,
+        account_id: str | None,
+        **_kwargs: object,
+    ) -> Upstream:
+        connector_calls.append((access_token, account_id))
+        return Upstream()
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", create_call)
+    monkeypatch.setattr(proxy_websocket_module, "_connect_upstream_websocket", connect_upstream)
+
+    created = await async_client.post(
+        "/backend-api/codex/realtime/calls",
+        content=b"offer",
+        headers={
+            "Authorization": "Bearer oauth-token-before-refresh",
+            "chatgpt-account-id": "workspace-caller",
+        },
+    )
+    assert created.status_code == 201
+    service = get_proxy_service_for_app(app_instance)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+    with TestClient(
+        app_instance,
+        base_url="http://localhost",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        with client.websocket_connect(
+            "ws://localhost/v1/live/rtc_oauth_rotated",
+            headers={
+                "Authorization": "Bearer oauth-token-after-refresh",
+                "chatgpt-account-id": "workspace-caller",
+            },
+        ) as websocket:
+            assert websocket.receive_text() == "ready"
+            close_message = websocket.receive()
+            assert close_message["type"] == "websocket.close"
+            assert close_message["code"] == 1000
+        assert client.portal is not None
+        assert client.portal.call(lambda: service.drain_persistence_tasks(timeout_seconds=1))
+
+    assert connector_calls == [("access-token", "workspace-allowed")]
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_create_rejects_remote_oauth_before_account_selection(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_selection(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("remote OAuth must be denied before account selection")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "codex_control_request", fail_selection)
+    app = async_client._transport.app
+    transport = ASGITransport(app=app, client=("203.0.113.10", 50000))
+    async with AsyncClient(transport=transport, base_url="http://lb.example") as remote_client:
+        response = await remote_client.post(
+            "/backend-api/codex/realtime/calls",
+            content=b"offer",
+            headers={
+                "Authorization": "Bearer oauth-token",
+                "chatgpt-account-id": "workspace-caller",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"] == {
+        "code": "invalid_api_key",
+        "message": "Proxy authentication must be configured before remote access is allowed",
+        "type": "authentication_error",
+    }
 
 
 @pytest.mark.parametrize(
@@ -295,7 +625,7 @@ def test_duplicated_prefix_live_alias_logs_redacted_rejection(
 
     def observe_rejection(client: TestClient, path: str) -> tuple[str, int | None, bytes | str | None]:
         try:
-            with client.websocket_connect(path, headers={"Authorization": "Bearer live-key"}):
+            with client.websocket_connect(path, headers={"Authorization": "Bearer sk-clb-live-key"}):
                 pass
         except WebSocketDenialResponse as exc:
             return "denial", exc.status_code, exc.content
@@ -342,27 +672,41 @@ def test_duplicated_prefix_live_alias_logs_redacted_rejection(
     ],
     ids=["current-app", "v3"],
 )
-def test_path_realtime_sideband_rejects_query_call_id_before_service(
+def test_path_realtime_sideband_rejects_query_call_id_before_caller_resolution_and_service(
     app_instance,
     monkeypatch,
     path: str,
 ):
+    caller_resolution_called = False
     service_called = False
+
+    async def fail_resolve_caller(*_args, **_kwargs):
+        nonlocal caller_resolution_called
+        caller_resolution_called = True
+        raise AssertionError("path call_id conflict must fail before caller resolution")
 
     async def fail_proxy_live(*_args, **_kwargs):
         nonlocal service_called
         service_called = True
         raise AssertionError("path call_id conflict must fail before the sideband service")
 
+    monkeypatch.setattr(proxy_api_module, "resolve_realtime_caller_scope", fail_resolve_caller)
     monkeypatch.setattr(proxy_module.ProxyService, "proxy_realtime_live_websocket", fail_proxy_live)
 
     with TestClient(app_instance) as client:
         with pytest.raises(WebSocketDenialResponse) as raised:
-            with client.websocket_connect(path, headers={"Authorization": "Bearer live-key"}):
+            with client.websocket_connect(
+                path,
+                headers={
+                    "Authorization": "Bearer oauth-live-token",
+                    "chatgpt-account-id": "workspace-live",
+                },
+            ):
                 pass
 
     assert raised.value.status_code == 400
     assert json.loads(raised.value.content)["error"]["code"] == "invalid_realtime_call_id"
+    assert caller_resolution_called is False
     assert service_called is False
 
 
@@ -383,7 +727,7 @@ def test_generic_backend_codex_websocket_path_does_not_enter_live_service(
         with pytest.raises((WebSocketDenialResponse, WebSocketDisconnect)):
             with client.websocket_connect(
                 "/backend-api/codex/ordinary-control",
-                headers={"Authorization": "Bearer live-key"},
+                headers={"Authorization": "Bearer sk-clb-live-key"},
             ):
                 pass
 
@@ -415,8 +759,18 @@ def test_constrained_live_routes_enter_live_service_with_raw_call_id(
 ) -> None:
     calls: list[str] = []
 
-    async def fake_proxy_live(self, websocket, call_id, headers, query_params, *, protocol, api_key, client_ip=None):
-        del self, headers, query_params, protocol, api_key, client_ip
+    async def fake_proxy_live(
+        self,
+        websocket,
+        call_id,
+        headers,
+        query_params,
+        *,
+        protocol,
+        caller_scope,
+        client_ip=None,
+    ):
+        del self, headers, query_params, protocol, caller_scope, client_ip
         calls.append(call_id)
         await websocket.accept()
         await websocket.close(code=1000)
@@ -424,7 +778,7 @@ def test_constrained_live_routes_enter_live_service_with_raw_call_id(
     monkeypatch.setattr(proxy_module.ProxyService, "proxy_realtime_live_websocket", fake_proxy_live)
 
     with TestClient(app_instance) as client:
-        with client.websocket_connect(path, headers={"Authorization": "Bearer live-key"}):
+        with client.websocket_connect(path, headers={"Authorization": "Bearer sk-clb-live-key"}):
             pass
 
     assert calls == [expected_call_id]
@@ -465,7 +819,7 @@ def test_constrained_live_routes_reject_malformed_call_ids_before_live_service(
 
     with TestClient(app_instance) as client:
         with pytest.raises((WebSocketDenialResponse, WebSocketDisconnect)):
-            with client.websocket_connect(path, headers={"Authorization": "Bearer live-key"}):
+            with client.websocket_connect(path, headers={"Authorization": "Bearer sk-clb-live-key"}):
                 pass
 
     assert service_called is False
@@ -821,7 +1175,7 @@ async def test_realtime_sideband_unexpected_setup_log_is_content_free(
             with pytest.raises(WebSocketDenialResponse) as denied:
                 with client.websocket_connect(
                     "/v1/live/rtc_setup_failure",
-                    headers={"Authorization": "Bearer live-key"},
+                    headers={"Authorization": "Bearer sk-clb-live-key"},
                 ):
                     pass
 
@@ -1153,7 +1507,7 @@ def test_v1_live_websocket_unknown_api_key_scoped_binding_is_denied(app_instance
         with pytest.raises(WebSocketDenialResponse) as raised:
             with client.websocket_connect(
                 "/v1/live/rtc_missing",
-                headers={"Authorization": "Bearer live-key"},
+                headers={"Authorization": "Bearer sk-clb-live-key"},
             ):
                 pass
 
@@ -1179,7 +1533,7 @@ def test_realtime_sideband_websocket_rejects_malformed_call_id_before_selection(
         with pytest.raises(WebSocketDenialResponse) as raised:
             with client.websocket_connect(
                 path,
-                headers={"Authorization": "Bearer live-key"},
+                headers={"Authorization": "Bearer sk-clb-live-key"},
             ):
                 pass
 
@@ -1204,7 +1558,7 @@ def test_v1_live_unconstrained_path_does_not_enter_live_service(
         with pytest.raises((WebSocketDenialResponse, WebSocketDisconnect)):
             with client.websocket_connect(
                 "/v1/live/call_not_realtime",
-                headers={"Authorization": "Bearer live-key"},
+                headers={"Authorization": "Bearer sk-clb-live-key"},
             ):
                 pass
 

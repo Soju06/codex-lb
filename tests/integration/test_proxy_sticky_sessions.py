@@ -23,6 +23,7 @@ from app.modules.proxy._service.realtime_live import (
     realtime_call_affinity_key,
 )
 from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.realtime_auth import RealtimeCallerScope
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -1821,6 +1822,28 @@ def test_realtime_call_affinity_key_is_scoped_and_opaque() -> None:
     assert key_a != key_b
     assert "rtc_secret" not in key_a
     assert "api-key-a" not in key_a
+
+
+def test_realtime_call_affinity_key_preserves_registered_key_digest_bytes() -> None:
+    api_key = cast(ApiKeyData, SimpleNamespace(id="api-key-a"))
+    scope = RealtimeCallerScope.for_api_key(api_key)
+
+    assert realtime_call_affinity_key("rtc_secret", scope) == (
+        "\ncodex_live_call:9852ed42d5f5680e4f4cbf32d661da59e29eccca89b87c8a65cac39385faa72e"
+    )
+
+
+def test_realtime_call_affinity_key_scopes_oauth_by_credential_digest() -> None:
+    scope_a = RealtimeCallerScope.for_oauth(
+        affinity_scope_material="oauth-local:caller-a",
+        allowed_account_ids={"upstream-a"},
+    )
+    scope_b = RealtimeCallerScope.for_oauth(
+        affinity_scope_material="oauth-local:caller-b",
+        allowed_account_ids={"upstream-a"},
+    )
+
+    assert realtime_call_affinity_key("rtc_secret", scope_a) != realtime_call_affinity_key("rtc_secret", scope_b)
 
 
 @pytest.mark.asyncio

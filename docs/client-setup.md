@@ -31,6 +31,15 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
+### Live Voice profiles
+
+Codex Live Voice supports two profiles:
+
+- Keep `model_provider = "openai"` when the client must use official ChatGPT OAuth without a Codex-LB API Key. Enable the global account pool under **Settings → Live Voice**.
+- Use the `codex-lb` provider with `env_key = "CODEX_LB_API_KEY"` when the client should use a registered Proxy API Key and its assignments, limits, and attribution.
+
+Both profiles must route WebRTC call creation and the control sideband to codex-lb. See [Codex Live Voice](live-voice.md) for the complete configuration and security boundary.
+
 This documented `requires_openai_auth = true` setup uses Codex-backed authentication and does not need an `x-openai-actor-authorization` marker to be eligible for Codex's built-in `$imagegen` tool. Provider configurations that intentionally skip OpenAI login have a different eligibility path; see the [Images compatibility context](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/images-api-compat/context.md#codex-provider-eligibility).
 
 ### WebSocket transport
@@ -286,4 +295,4 @@ print(response.choices[0].message.content)
 
 ---
 
-*Specs: [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [chat-completions-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/chat-completions-compat) · [model-catalog-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-catalog-compat) · [runtime-portability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/runtime-portability)*
+*Specs: [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [chat-completions-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/chat-completions-compat) · [model-catalog-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/model-catalog-compat) · [runtime-portability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/runtime-portability) · [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat)*

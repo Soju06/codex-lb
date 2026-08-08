@@ -37,6 +37,9 @@ describe("AccountMultiSelect", () => {
 
     expect(await screen.findByText("5h 82% left")).toBeInTheDocument();
     expect(screen.getByText("7d 67% left")).toBeInTheDocument();
+    const quotaOption = screen.getByRole("menuitemcheckbox", { name: /quota@example\.com/i });
+    expect(quotaOption).toHaveClass("[&>span:first-child]:top-[11px]");
+    expect(quotaOption).toHaveClass("[&>span:first-child]:translate-y-0");
     expect(screen.queryByText(/GPT-5\.3-Codex-Spark/i)).not.toBeInTheDocument();
   });
 
@@ -54,6 +57,48 @@ describe("AccountMultiSelect", () => {
     });
   });
 
+  it("keeps an empty explicit selection empty and hides the all-accounts choice", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+
+    renderWithProviders(
+      <AccountMultiSelect
+        value={[]}
+        onChange={onChange}
+        selectionMode="explicit"
+        placeholder="Select allowed accounts"
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Select allowed accounts" }));
+
+    expect(screen.queryByRole("menuitemcheckbox", { name: "All accounts" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
+    expect(onChange).toHaveBeenCalledWith(["acc_primary"]);
+  });
+
+  it("renders a compact email-only list with right-aligned selection marks", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_primary"]}
+        onChange={vi.fn()}
+        selectionMode="explicit"
+        presentation="compact"
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "1 account selected" }));
+
+    const option = screen.getByRole("menuitemcheckbox", { name: "primary@example.com" });
+    expect(option).toHaveClass("[&>span:first-child]:right-2");
+    expect(option).toHaveClass("[&>span:first-child]:top-1/2");
+    expect(screen.queryByText("Pro")).not.toBeInTheDocument();
+    expect(screen.queryByText(/left$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("primary@example.com", { selector: "[data-slot='badge']" })).not.toBeInTheDocument();
+  });
+
   it("pluralizes the selected account count", async () => {
     renderWithProviders(
       <AccountMultiSelect value={["acc_primary", "acc_secondary"]} onChange={vi.fn()} />,
@@ -62,7 +107,7 @@ describe("AccountMultiSelect", () => {
     expect(await screen.findByRole("button", { name: "2 accounts selected" })).toBeInTheDocument();
   });
 
-  it("excludes hard-blocked accounts from new selections", async () => {
+  it("keeps selected hard-blocked accounts removable while hiding unselected ones", async () => {
     server.use(
       http.get("/api/accounts", () =>
         HttpResponse.json({
@@ -96,17 +141,27 @@ describe("AccountMultiSelect", () => {
     );
 
     const user = userEvent.setup();
+    const onChange = vi.fn();
 
-    renderWithProviders(<AccountMultiSelect value={["acc_reauth_picker"]} onChange={vi.fn()} />);
+    renderWithProviders(
+      <AccountMultiSelect
+        value={["acc_reauth_picker"]}
+        onChange={onChange}
+        selectionMode="explicit"
+        presentation="compact"
+      />,
+    );
 
-    expect(await screen.findByText("reauth-picker@example.com")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "1 account selected" }));
+    await user.click(await screen.findByRole("button", { name: "1 account selected" }));
 
     expect(await screen.findByRole("menuitemcheckbox", { name: /active-picker@example\.com/i })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitemcheckbox", { name: /reauth-picker@example\.com/i })).not.toBeInTheDocument();
+    const selectedUnavailable = screen.getByRole("menuitemcheckbox", { name: /reauth-picker@example\.com/i });
+    expect(selectedUnavailable).toBeChecked();
     expect(screen.queryByRole("menuitemcheckbox", { name: /paused-picker@example\.com/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitemcheckbox", { name: /deactivated-picker@example\.com/i })).not.toBeInTheDocument();
+
+    await user.click(selectedUnavailable);
+    expect(onChange).toHaveBeenCalledWith([]);
   });
 
   it("can include paused accounts while keeping other hard-blocked accounts hidden", async () => {

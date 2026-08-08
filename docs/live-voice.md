@@ -1,39 +1,113 @@
 # Codex Live Voice
 
-codex-lb keeps Codex Live Voice call creation and its control sideband on the same ChatGPT account. This matters in an account pool: the account that successfully creates a call is the only account that can safely join its sideband.
+codex-lb keeps Live Voice call creation and its control sideband on the same upstream ChatGPT account. This preserves call ownership when several upstream accounts share one pool.
 
 !!! note "Private Codex compatibility"
-    This capability supports the private routes used by the installed Codex app. It does not implement OpenAI's public Realtime API, `POST /v1/realtime/calls`, or `POST /v1/realtime/client_secrets`, and it does not proxy WebRTC media.
+    This capability covers the private routes used by Codex. WebRTC media remains peer-to-peer.
 
-## Requirement: a registered proxy key
+## How it works
 
-Live Voice routes always require an existing registered [proxy API key](api-keys.md), even when ordinary proxy API-key authentication is disabled. Missing or unregistered keys are rejected before codex-lb selects or contacts an upstream account.
+```mermaid
+flowchart LR
+    OAuth["Built-in openai provider\nOfficial OAuth"] --> Origin["Zero-key origin admission"]
+    Origin --> GlobalPool["Settings-managed Live Voice pool"]
 
-No new `CODEX_LB_*` setting, migration, dependency, or setup step is required. Operators who do not use Live Voice can continue running the base proxy and dashboard unchanged.
+    Key["Registered sk-clb-* key"] --> KeyAuth["Key assignments and limits"]
+    KeyAuth --> KeyPool["Key account pool"]
+
+    GlobalPool --> Create["Create Live call"]
+    KeyPool --> Create
+    Create --> Owner["Bind final serving account"]
+    Owner --> Sideband["Route sideband to the same account"]
+```
+
+The OAuth and registered-Key lanes share call ownership handling. Their admission rules and account pools remain independent.
+
+## Caller authentication
+
+The same private routes accept two caller types:
+
+- Registered [proxy API keys](api-keys.md) keep their existing account assignments, limits, attribution, and affinity behavior.
+- Official Codex OAuth credentials use the global policy under **Settings → Live Voice** after passing the ordinary zero-key proxy origin check.
+
+The OAuth lane is available when global proxy API-key authentication is disabled and the request comes from loopback or an existing explicitly allowed raw socket CIDR. Loopback needs no CIDR configuration. Other remote clients use registered Proxy API Keys.
+
+codex-lb derives an opaque caller scope locally from the normalized `chatgpt-account-id` header. A bearer remains required on every Live request, but bearer rotation does not change the scope. codex-lb does not verify the bearer or account header through OpenAI usage. The network boundary grants keyless access; admitted clients using the same account id share one ownership namespace and still need the call id to attach.
+
+## Configure the OAuth Live pool
+
+1. Import the upstream ChatGPT Accounts that may carry Live calls.
+2. Open **Settings → Live Voice**.
+3. Select the allowed upstream Accounts.
+4. Enable **OAuth Live access** and save.
+
+The global policy starts disabled with an empty pool. Enabling it requires at least one Account. Runtime routing uses only Accounts that remain active. A selected Account that later becomes paused, deactivated, or requires reauthentication stays visible in the selector so it can be removed.
+
+This policy controls the OAuth lane only. Registered Proxy API Keys continue using their own assignments and limits.
+
+## Built-in OpenAI provider (OAuth)
+
+Use this profile when Codex must retain the built-in `openai` provider. It keeps official ChatGPT OAuth for conversations and Live Voice and requires no Codex-LB API Key in the client.
+
+Enable **Settings → Live Voice → OAuth Live access**, select the upstream Accounts allowed to carry these calls, keep global proxy API-key authentication disabled, and route both Live Voice legs to codex-lb:
+
+```toml
+model_provider = "openai"
+experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:2455/backend-api/codex"
+experimental_realtime_ws_base_url = "http://127.0.0.1:2455/v1"
+```
+
+## Registered Proxy API Key
+
+Use this existing profile when the client should follow one registered Key's assignments, limits, and attribution. `requires_openai_auth = true` keeps the Codex app's ChatGPT account capabilities and Live Voice entry visible. `env_key` supplies the Codex-LB bearer used by conversations and Live routes.
+
+```toml
+model_provider = "codex-lb"
+experimental_realtime_webrtc_call_base_url = "http://127.0.0.1:2455/backend-api/codex"
+experimental_realtime_ws_base_url = "http://127.0.0.1:2455/v1"
+
+[model_providers.codex-lb]
+name = "openai"
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+env_key = "CODEX_LB_API_KEY"
+supports_websockets = true
+requires_openai_auth = true
+```
+
+```bash
+export CODEX_LB_API_KEY="sk-clb-..."
+```
+
+This profile uses the registered-Key lane and remains independent from the OAuth Live policy on the Settings page.
+
+## Client route compatibility
+
+The current client appends `/realtime/calls` to the WebRTC base and `/realtime?intent=...&call_id=...` to the WebSocket base. Repeat a real route probe after each bundled Codex upgrade because these keys remain experimental.
 
 ## Supported private routes
 
-A compatible Codex client uses these routes as one account-bound workflow:
+- `POST /backend-api/codex/realtime/calls`
+- `WS /backend-api/codex/{call_id}`
+- `WS /v1/live/{call_id}`
+- `WS /v1/realtime?call_id={call_id}`
 
-- `POST /backend-api/codex/realtime/calls` creates the call.
-- `WS /backend-api/codex/{call_id}` joins through the current installed-app form for bounded `rtc_...` or canonical UUID call ids; unrelated Codex WebSocket paths keep their ordinary behavior.
-- `WS /v1/live/{call_id}` joins through the v3 form.
-- `WS /v1/realtime?call_id={call_id}` joins through the legacy form.
+After call creation succeeds, codex-lb binds the returned call id to the final serving account under the caller scope. Every sideband form recomputes that scope, reloads the exact owner, and confirms the current policy still allows it.
 
-codex-lb validates the call id returned in the successful call-creation `Location`, ignoring private query or fragment context after the first `?`, binds it to the final successful account under the caller's proxy key, and routes every supported sideband form back to that exact account. Attachment fails closed if the key, assignment, account state, or ownership binding is no longer valid; codex-lb does not refresh credentials or substitute another account after a call is created.
+OAuth bearer rotation preserves the caller scope when `chatgpt-account-id` remains stable, so sideband can reconnect to the existing call. Changing the account header or encryption key changes the scope; sideband then receives the credential-safe not-found response.
 
 ## Privacy and request history
 
-The ownership record contains only an API-key-scoped digest and the owning account reference. Raw call ids, proxy keys, OAuth tokens, SDP, attestation values, and realtime frame bodies are not stored in that record. Call-creation SDP is excluded from payload traces, and sideband frames are not added to Responses archives.
-
-The dashboard's Recent Requests data accepts the sideband as a typed `realtime_live` WebSocket request. Private call-creation and sideband rows omit account identity, model content, upstream error text, failure metadata, live query text, and credentials. The internal ownership record stays hidden from ordinary sticky-session lists and delete operations.
+Ownership records contain a caller-scoped digest and the owning account reference. Credentials, account headers, raw call ids, SDP, attestation values, realtime frames, audio, and transcripts stay out of persistence and request payload traces. OAuth Live request logs use nullable API-key attribution.
 
 ## Failure behavior
 
-- `401 invalid_api_key` means the request did not carry a registered proxy key.
-- `400 invalid_realtime_call_id` means the sideband supplied a malformed or ambiguous call id.
-- `503 realtime_call_binding_failed` means a successful upstream call could not be bound safely; codex-lb does not replay that call through another account.
+- `401 invalid_api_key`: caller authentication or zero-key origin admission failed.
+- `403 oauth_live_not_enabled`: the global OAuth Live policy is inactive or has no active eligible account.
+- `400 invalid_realtime_call_id`: the sideband supplied an invalid call id.
+- `404 realtime_call_not_found`: ownership is missing or the account scope changed.
+- `503 realtime_call_binding_failed`: a successful upstream call could not be bound safely.
 
----
+For client-side symptoms and route checks, see [Troubleshooting](troubleshooting.md#live-voice).
 
-*Spec: [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat)*
+*Specs: [realtime-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/realtime-api-compat) · [database-migrations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/database-migrations) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture)*

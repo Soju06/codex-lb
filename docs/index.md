@@ -12,12 +12,14 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 - **API keys** — per-key rate limits by token, cost, window, model
 - **Dashboard auth** — password + optional TOTP
 - **OpenAI-compatible** — Codex CLI, OpenCode, any OpenAI client
+- **Live Voice affinity** — built-in Codex OAuth and registered Proxy API Key profiles stay on one upstream account across call creation and sideband
 - **Auto model sync** — available models fetched from upstream
 
 ## Where to go
 
 - [Getting Started](getting-started.md) — Docker / uvx quick start, remote bootstrap token
 - [Client Setup](client-setup.md) — Codex CLI, OpenCode, OpenClaw, Python SDK
+- [Live Voice](live-voice.md) — OAuth and Proxy API Key profiles, account-pool policy, affinity, and failure behavior
 - [Configuration](configuration.md) — the few settings that matter
 - [Authentication](authentication.md) — dashboard auth modes
 - [Conversations](conversations.md) — dashboard view and conversation APIs

@@ -1674,6 +1674,7 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
                         session_key_hash VARCHAR(64) NOT NULL,
                         api_key_scope VARCHAR(255) NOT NULL,
                         owner_instance_id VARCHAR(255),
+                        owner_process_epoch VARCHAR(64),
                         owner_epoch INTEGER NOT NULL DEFAULT 0,
                         lease_expires_at DATETIME,
                         state VARCHAR(16) NOT NULL DEFAULT 'active',

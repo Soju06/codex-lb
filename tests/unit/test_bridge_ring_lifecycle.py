@@ -81,6 +81,7 @@ async def _claim(
         session_key_value=session_key_value,
         api_key_scope="__anonymous__",
         instance_id=instance_id,
+        owner_process_epoch="test-process",
         lease_ttl_seconds=lease_ttl_seconds,
         account_id="acc-1",
         model="gpt-5.4",

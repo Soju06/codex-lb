@@ -56,6 +56,7 @@ from app.core.resilience.memory_monitor import configure as configure_memory_mon
 from app.core.retention.scheduler import build_data_retention_scheduler
 from app.core.scheduling.leader_election import get_leader_election
 from app.core.shutdown import close_control_plane_task_admission
+from app.core.timeout_invariants import validate_runtime_timeout_invariants
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
@@ -255,6 +256,7 @@ async def lifespan(app: FastAPI):
     reload_additional_quota_registry()
     settings = get_settings()
     warn_removed_settings()
+    validate_runtime_timeout_invariants(settings)
     # Anchor round-robin tie-break decorrelation to this replica's stable bridge
     # instance identity so peer replicas spread exact ties across equally-good
     # accounts instead of all herding onto the lexicographically-first account.

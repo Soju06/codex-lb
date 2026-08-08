@@ -18,3 +18,7 @@ See `openspec/specs/proxy-runtime-observability/spec.md` for normative requireme
 - Use request ids to correlate inbound proxy logs, outbound upstream traces, and client-visible failures.
 - Prefer summary tracing in normal debugging sessions; enable payload tracing only when the exact normalized outbound request matters.
 - For direct compact `5xx` failures, look for `proxy_compact_failure` alongside `upstream_request_complete`; together they show the compact failure phase, failure detail, exception type, retry metadata, and affinity source.
+- Timeout invariant violation logs describe startup `Settings` and imported
+  constant validation only. They intentionally avoid request-scoped overrides,
+  runtime-derived effective timeout values, payloads, API keys, access tokens,
+  raw affinity keys, account emails, and other high-cardinality identifiers.

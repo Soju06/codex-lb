@@ -10,6 +10,48 @@ fixed, and how removed settings are retired.
 See `openspec/specs/deployment-installation/spec.md` for normative
 requirements.
 
+## Timeout Invariant Linter Scope
+
+The timeout invariant linter is a startup `Settings` guardrail. Strict mode is
+an opt-in startup or CI failure path for violating startup configuration, not a
+general runtime timeout validator.
+
+Validated inputs:
+
+- The `Settings` object materialized at startup.
+- Explicitly imported code constants used by the two constant-backed rules:
+  model-registry refresh cadence and durable HTTP bridge retry-circuit TTL.
+
+Known non-goals and follow-ups:
+
+- Per-request `ContextVar` overrides are not revalidated. Current anchors:
+  `app/core/clients/proxy.py:3450-3467`,
+  `app/modules/proxy/_service/streaming/helpers.py:861-868`,
+  `app/modules/proxy/_service/compact.py:727-738`,
+  `app/modules/proxy/_service/transcribe.py:230-232`,
+  `app/core/clients/files.py:77-90`, and
+  `app/modules/proxy/service.py:1464-1478`.
+- Runtime clamps and derived effective values are not fully modeled. Current
+  anchors: `app/core/clients/proxy.py:1049-1088`,
+  `app/core/auth/refresh.py:391-395`, and
+  `app/modules/proxy/load_balancer.py:1846-1856`.
+- Runtime DB, API-key, and model-source settings can affect timeout-bearing
+  paths without startup revalidation. Current anchors:
+  `app/core/config/settings_cache.py:22-36`,
+  `app/modules/settings/api.py:547-710`,
+  `app/modules/proxy/_service/streaming/retry.py:153-165`, and
+  `app/modules/model_sources/forwarding.py:112-221`.
+
+Example: `python -m app.core.timeout_invariants --strict` validates the
+startup `Settings` view and exits nonzero when any enforced rule fails.
+Running the same command without `--strict` reports violations but exits zero,
+matching the default startup behavior.
+
+`CODEX_LB_TIMEOUT_INVARIANT_VALIDATION_STRICT` is intentionally a setting
+rather than a hard default because existing deployments may carry legacy timeout
+values that deserve CRITICAL diagnostics first, not surprise startup refusal.
+The default remains non-strict; operators and CI opt into fail-fast behavior.
+
 ## Helm termination-grace upgrade contract
 
 The graceful-shutdown chart adds a render-time guard:

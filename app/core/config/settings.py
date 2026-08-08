@@ -437,6 +437,7 @@ class Settings(BaseSettings):
     workers_per_instance: int = Field(default=1, ge=1)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
+    timeout_invariant_validation_strict: bool = False
 
     # Local memory-pressure guard (0 = disabled). Requests are rejected with
     # 503 once RSS reaches the threshold; a warning is logged from 80% of it

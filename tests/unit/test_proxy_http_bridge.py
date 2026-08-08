@@ -3946,6 +3946,7 @@ async def test_http_bridge_precreated_completed_terminal_falls_back_to_unresolve
     ]
     assert request_state.response_id == "resp_precreated_completed"
     assert session.last_completed_response_id == "resp_precreated_completed"
+    assert session.last_completed_response_account_id == session.account.id
     assert session.queued_request_count == 0
     assert not session.pending_requests
     assert session.key not in retry_circuits
@@ -4071,6 +4072,7 @@ async def test_ordinary_completed_alias_rejection_preserves_successful_response(
     assert completed["type"] == "response.completed"
     assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
     assert session.last_completed_response_id == "resp_ordinary_completed"
+    assert session.last_completed_response_account_id == session.account.id
     assert session.upstream_control.reconnect_requested is False
     assert session.upstream_control.retire_after_drain is False
     finalize.assert_awaited_once()
@@ -8510,6 +8512,155 @@ async def test_stream_via_http_bridge_skips_session_anchor_injection_when_trim_w
     assert prepared_previous_response_ids == [None]
 
 
+async def _run_session_anchor_owner_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    account_id: str,
+    anchor_owner_account_id: str | None,
+) -> list[proxy_service.ResponsesRequest]:
+    """Drive _stream_via_http_bridge for a trimmable session-anchor turn.
+
+    The stored prefix matches the incoming input (so the trim branch WOULD
+    apply); the only variable is whether the serving account owns the anchor.
+    Returns the payloads passed to each prepare call.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    prefix_items: list[proxy_service.JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "a"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "b"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "c"}]},
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": [*prefix_items, {"role": "user", "content": [{"type": "input_text", "text": "d"}]}],
+        },
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-session-anchor-owner",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    await event_queue.put(None)
+    prepared_payloads: list[proxy_service.ResponsesRequest] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        prepared_payloads.append(prepared_payload)
+        return request_state, '{"type":"response.create"}'
+
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-anchor-owner", None),
+        headers={"x-codex-session-id": "sid-anchor-owner"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-anchor-owner",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id=account_id, status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+        codex_session=True,
+        last_completed_response_id="resp_session_latest",
+        last_completed_response_account_id=anchor_owner_account_id,
+        last_completed_input_count=3,
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(prefix_items),
+    )
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_enabled=True,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    async for _chunk in service._stream_via_http_bridge(
+        payload,
+        headers={"x-codex-session-id": "sid-anchor-owner"},
+        codex_session_affinity=True,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+    ):
+        pass
+    return prepared_payloads
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_injects_session_anchor_when_account_owns_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Serving account owns the anchor -> the compact anchor is injected as normal.
+    prepared = await _run_session_anchor_owner_stream(monkeypatch, account_id="acc-1", anchor_owner_account_id="acc-1")
+    # Injection re-prepares the payload, so the final (sent) request carries the anchor.
+    assert prepared[-1].previous_response_id == "resp_session_latest"
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_skips_session_anchor_after_cross_account_failover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Anchor was created on acc-1 but the session now serves on acc-2 (failover).
+    # A previous_response_id is account-scoped upstream, so injecting it here would
+    # send an unresolvable anchor with the history trimmed away -> upstream never
+    # emits response.created -> the response-create gate wedges. It must be skipped
+    # and the full history resent instead.
+    prepared = await _run_session_anchor_owner_stream(monkeypatch, account_id="acc-2", anchor_owner_account_id="acc-1")
+    assert all(payload.previous_response_id != "resp_session_latest" for payload in prepared)
+    assert prepared[-1].input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "a"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "b"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "c"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "d"}]},
+    ]
+
+
 @pytest.mark.asyncio
 async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_anchor_for_full_resend_payload(
     monkeypatch: pytest.MonkeyPatch,
@@ -8984,6 +9135,7 @@ async def test_stream_via_http_bridge_preserves_only_safe_trimmable_full_resend_
     )
     assert creation.kwargs["preferred_account_id"] == "acc-1"
     assert session.last_completed_response_id == (None if preserves_full_resend else "resp_latest")
+    assert session.last_completed_response_account_id == (None if preserves_full_resend else "acc-1")
     if not preserves_full_resend:
         assert request_state.proxy_injected_previous_response_id is True
         assert request_state.fresh_upstream_request_is_retry_safe is False
@@ -10521,7 +10673,16 @@ async def test_stream_via_http_bridge_preserves_context_after_owner_unavailable(
                 )
             raise owner_unavailable
         key = cast(proxy_service._HTTPBridgeSessionKey, args[0])
-        return _make_bridge_session(key=key, key_value=key.affinity_key)
+        recovery_session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        preferred_account_id = cast("str | None", kwargs.get("preferred_account_id"))
+        if preferred_account_id is not None:
+            # The real creation path pins the recovery session to the required
+            # continuity owner, so the durable anchor stays on its own account.
+            recovery_session.account = cast(
+                Any,
+                SimpleNamespace(id=preferred_account_id, status=AccountStatus.ACTIVE, plan_type="plus"),
+            )
+        return recovery_session
 
     forwarded_payloads: list[proxy_service.ResponsesRequest] = []
 
@@ -12739,6 +12900,189 @@ async def test_stream_via_http_bridge_owner_forward_recovery_without_pending_sta
     )
 
     assert prepared_inputs == [input_items, input_items]
+
+
+async def _run_owner_forward_recovery_durable_anchor_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    durable_owner_account_id: str,
+    recovery_account_id: str,
+) -> list[proxy_service.ResponsesRequest]:
+    """Drive owner-forward failure -> local rebind with a durable anchor available.
+
+    The bootstrap rebind is explicitly allowed to bind the recovery session to an
+    account other than the durable owner, so this is the second site where a
+    proxy-injected ``previous_response_id`` can cross an account boundary.
+    Returns the payloads handed to each prepare call.
+    """
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    started_at = time.monotonic()
+    stored_items: list[dict[str, Any]] = [{"role": "user", "content": "first question"}]
+    # Full resend whose suffix carries no prior assistant output, so the
+    # account-neutral fresh-replay projection is unavailable and the durable
+    # anchor is the only continuity candidate the recovery path can reach for.
+    input_items: list[dict[str, Any]] = [*stored_items, {"role": "user", "content": "second question"}]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {"model": "gpt-5.4", "instructions": "hi", "input": input_items}
+    )
+    prepared_payloads: list[proxy_service.ResponsesRequest] = []
+
+    def fake_prepare(
+        prepared_payload: proxy_service.ResponsesRequest,
+        _headers: dict[str, str] | Any,
+        *,
+        api_key: proxy_service.ApiKeyData | None,
+        api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        request_id: str,
+        client_ip: str | None = None,
+    ) -> tuple[proxy_service._WebSocketRequestState, str]:
+        del api_key, api_key_reservation, request_id, client_ip
+        prepared_payloads.append(prepared_payload)
+        state = proxy_service._WebSocketRequestState(
+            request_id=f"req-{len(prepared_payloads)}",
+            model="gpt-5.4",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=started_at,
+            event_queue=asyncio.Queue(),
+            transport="http",
+            previous_response_id=prepared_payload.previous_response_id,
+        )
+        return state, '{"type":"response.create"}'
+
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="instance-b",
+        owner_endpoint="http://instance-b",
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-recover", None),
+    )
+    recovery_session = _make_owner_forward_recovery_session()
+    recovery_session.account = cast(Any, SimpleNamespace(id=recovery_account_id, status=AccountStatus.ACTIVE))
+
+    async def fake_forward_http_bridge_request_to_owner(**kwargs: object):
+        del kwargs
+        raise ProxyResponseError(
+            502,
+            proxy_service.openai_error("bridge_owner_unreachable", "owner instance unreachable"),
+        )
+        yield ""
+
+    async def fake_submit_http_bridge_request(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del _session, text_data, queue_limit
+        event_queue = request_state.event_queue
+        assert event_queue is not None
+        await event_queue.put('data: {"type":"response.completed"}\n\n')
+        await event_queue.put(None)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_request_targets",
+        AsyncMock(
+            return_value=proxy_service.DurableBridgeLookup(
+                session_id="sess-recover",
+                canonical_kind="session_header",
+                canonical_key="sid-recover",
+                api_key_scope="__anonymous__",
+                account_id=durable_owner_account_id,
+                owner_instance_id="instance-b",
+                owner_epoch=1,
+                lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+                state=HttpBridgeSessionState.ACTIVE,
+                latest_turn_state=None,
+                latest_response_id="resp_durable_owner_1",
+                latest_input_item_count=len(stored_items),
+                latest_input_full_fingerprint=proxy_service._fingerprint_input_items(
+                    cast(list[proxy_service.JsonValue], stored_items)
+                ),
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(
+        service,
+        "_get_or_create_http_bridge_session",
+        AsyncMock(side_effect=[owner_forward, recovery_session]),
+    )
+    monkeypatch.setattr(service, "_forward_http_bridge_request_to_owner", fake_forward_http_bridge_request_to_owner)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit_http_bridge_request)
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    async for _chunk in service._stream_via_http_bridge(
+        payload,
+        headers={"x-codex-session-id": "sid-recover"},
+        codex_session_affinity=True,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=900.0,
+        max_sessions=8,
+        queue_limit=4,
+    ):
+        pass
+    return prepared_payloads
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_owner_forward_recovery_injects_durable_anchor_on_owner_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The rebind stayed on the durable owner account, so the compact anchor is
+    # still the cheapest correct continuity and must be injected as before.
+    prepared = await _run_owner_forward_recovery_durable_anchor_stream(
+        monkeypatch,
+        durable_owner_account_id="acc-1",
+        recovery_account_id="acc-1",
+    )
+    assert prepared[-1].previous_response_id == "resp_durable_owner_1"
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_owner_forward_recovery_skips_cross_account_durable_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The rebind landed on another account. Replaying the durable owner's anchor
+    # there sends a previous_response_id upstream cannot resolve with the history
+    # trimmed away, so the recovery request must keep the full input instead.
+    prepared = await _run_owner_forward_recovery_durable_anchor_stream(
+        monkeypatch,
+        durable_owner_account_id="acc-1",
+        recovery_account_id="acc-2",
+    )
+    assert all(prepared_payload.previous_response_id is None for prepared_payload in prepared)
+    assert prepared[-1].input == [
+        {"role": "user", "content": "first question"},
+        {"role": "user", "content": "second question"},
+    ]
 
 
 @pytest.mark.asyncio

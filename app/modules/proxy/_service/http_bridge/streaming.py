@@ -2211,29 +2211,58 @@ class _HTTPBridgeStreamingMixin:
                     and isinstance(recovery_payload.input, list)
                     and len(recovery_payload.input) > durable_full_resend_anchor_count
                 ):
-                    recovery_input = cast(list[JsonValue], recovery_payload.input)
-                    recovery_anchor_input_count = len(recovery_input)
-                    recovery_anchor_input_fingerprint = _fingerprint_input_items(recovery_input)
-                    recovery_payload = recovery_payload.model_copy(
-                        update={
-                            "previous_response_id": durable_lookup.latest_response_id,
-                            "input": recovery_input[durable_full_resend_anchor_count:],
-                        }
-                    )
-                    if durable_lookup.latest_response_id != session.last_completed_response_id:
-                        session.last_pending_tool_calls = {}
-                    session.last_completed_response_id = durable_lookup.latest_response_id
-                    session.last_completed_input_count = durable_full_resend_anchor_count
-                    session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
-                    _log_http_bridge_event(
-                        "owner_forward_recovery_anchor_injected",
-                        bridge_session_key,
-                        account_id=durable_lookup.account_id,
-                        model=recovery_payload.model,
-                        detail=f"response_id={durable_lookup.latest_response_id}",
-                        cache_key_family=bridge_session_key.affinity_kind,
-                        model_class=_extract_model_class(recovery_payload.model) if recovery_payload.model else None,
-                    )
+                    # The recovery rebind above is allowed to bind this session to
+                    # an account other than the durable owner. A previous_response_id
+                    # is account-scoped upstream, so replaying the durable anchor on
+                    # a different account sends an anchor upstream cannot resolve
+                    # with the history trimmed away: no response.created arrives and
+                    # the per-bridge response-create gate wedges. Resend the full
+                    # history on the serving account instead.
+                    if durable_lookup.account_id != session.account.id:
+                        _log_http_bridge_event(
+                            "cross_account_anchor_declined",
+                            bridge_session_key,
+                            account_id=session.account.id,
+                            model=recovery_payload.model,
+                            detail=(
+                                "site=owner_forward_recovery, "
+                                f"response_id={durable_lookup.latest_response_id}, "
+                                f"anchor_account_id={durable_lookup.account_id}, "
+                                "outcome=full_history_resend"
+                            ),
+                            cache_key_family=bridge_session_key.affinity_kind,
+                            model_class=_extract_model_class(recovery_payload.model)
+                            if recovery_payload.model
+                            else None,
+                            owner_check_applied=True,
+                        )
+                    else:
+                        recovery_input = cast(list[JsonValue], recovery_payload.input)
+                        recovery_anchor_input_count = len(recovery_input)
+                        recovery_anchor_input_fingerprint = _fingerprint_input_items(recovery_input)
+                        recovery_payload = recovery_payload.model_copy(
+                            update={
+                                "previous_response_id": durable_lookup.latest_response_id,
+                                "input": recovery_input[durable_full_resend_anchor_count:],
+                            }
+                        )
+                        if durable_lookup.latest_response_id != session.last_completed_response_id:
+                            session.last_pending_tool_calls = {}
+                        session.last_completed_response_id = durable_lookup.latest_response_id
+                        session.last_completed_response_account_id = durable_lookup.account_id
+                        session.last_completed_input_count = durable_full_resend_anchor_count
+                        session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
+                        _log_http_bridge_event(
+                            "owner_forward_recovery_anchor_injected",
+                            bridge_session_key,
+                            account_id=durable_lookup.account_id,
+                            model=recovery_payload.model,
+                            detail=f"response_id={durable_lookup.latest_response_id}",
+                            cache_key_family=bridge_session_key.affinity_kind,
+                            model_class=_extract_model_class(recovery_payload.model)
+                            if recovery_payload.model
+                            else None,
+                        )
                 recovery_injected_input = _http_bridge_interrupted_tool_outputs_input(
                     session,
                     payload=recovery_payload,
@@ -2348,6 +2377,12 @@ class _HTTPBridgeStreamingMixin:
                 # must not trigger interrupted-output injection.
                 session.last_pending_tool_calls = {}
             session.last_completed_response_id = durable_lookup.latest_response_id
+            # The durable anchor is owned by the durable session's account, which
+            # may differ from this session's account after a failover. Record the
+            # owner so the session-anchor injection below can refuse to replay a
+            # cross-account previous_response_id (upstream cannot resolve it and
+            # would stall with no response.created — a wedged response-create gate).
+            session.last_completed_response_account_id = durable_lookup.account_id
             session.last_completed_input_count = durable_full_resend_anchor_count
             session.last_completed_input_prefix_fingerprint = durable_full_resend_anchor_fingerprint
         # --- Session-level previous_response_id injection ---
@@ -2376,11 +2411,22 @@ class _HTTPBridgeStreamingMixin:
             stored_count=stored_count_preview,
             stored_fingerprint=stored_fingerprint_preview,
         )
+        # A previous_response_id is account-scoped upstream: only the account that
+        # created the response can resume it. If this session's serving account is
+        # not the anchor's owner (e.g. the session failed over after the durable
+        # owner became unavailable), injecting the anchor sends an unresolvable
+        # previous_response_id upstream with the history trimmed away — upstream
+        # then never emits response.created and the response-create gate wedges
+        # ("idle timeout waiting for SSE"). Fall through to a full-history resend.
+        session_anchor_account_owned = (
+            session.last_completed_response_account_id is not None
+            and session.last_completed_response_account_id == session.account.id
+        )
         recovery_session_can_anchor = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         ) and (not _http_bridge_payload_looks_like_full_resend(effective_payload) or session_anchor_trimmable)
-        if (
+        session_anchor_candidate = (
             session.codex_session
             # Honor the quarantine decision end to end: the durable anchor
             # skipped above must not come back as a session-level injection.
@@ -2389,7 +2435,24 @@ class _HTTPBridgeStreamingMixin:
             and effective_payload.previous_response_id is None
             and session.last_completed_response_id is not None
             and (session_anchor_trimmable or recovery_session_can_anchor)
-        ):
+        )
+        if session_anchor_candidate and not session_anchor_account_owned:
+            _log_http_bridge_event(
+                "cross_account_anchor_declined",
+                session.key,
+                account_id=session.account.id,
+                model=effective_payload.model,
+                detail=(
+                    "site=session_anchor, "
+                    f"response_id={session.last_completed_response_id}, "
+                    f"anchor_account_id={session.last_completed_response_account_id}, "
+                    "outcome=full_history_resend"
+                ),
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                owner_check_applied=True,
+            )
+        if session_anchor_candidate and session_anchor_account_owned:
             fresh_upstream_request_text = text_data
             session_level_payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(
                 effective_payload

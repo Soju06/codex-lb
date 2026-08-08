@@ -42,6 +42,8 @@ frontend/coverage/
 .local/
 .worktrees/
 certs/
+/backups/
+encryption.key.backup
 
 .codex-lb/
 .sisyphus/

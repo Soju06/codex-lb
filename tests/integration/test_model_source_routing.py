@@ -1495,6 +1495,44 @@ async def test_allowlisted_source_model_routes_through(async_client, source_upst
 
 
 @pytest.mark.asyncio
+async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    source_hits = 0
+
+    async def completion(_request: web.Request) -> web.Response:
+        nonlocal source_hits
+        source_hits += 1
+        return web.json_response(_chat_completion_body("source-reasoning-policy"))
+
+    base_url = await source_upstream(completion)
+    model = "source-reasoning-policy"
+    source_id = await _create_model_source(async_client, name="source-reasoning-policy", model=model, base_url=base_url)
+    created = await async_client.post(
+        "/api/api-keys/v2/",
+        json={
+            "name": "source-reasoning-policy-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["low"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "max",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+    assert source_hits == 0
+
+
+@pytest.mark.asyncio
 async def test_scoped_key_does_not_route_to_unassigned_source(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
     unassigned_hits = 0

@@ -1084,6 +1084,7 @@ async def responses(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        api_key_policy_already_applied=True,
         prohibit_fast_mode=prohibit_fast_mode,
         # The Codex CLI consumes codex.* vendor events and the upstream's
         # native event ordering, while OpenAI SDK clients pointed at this
@@ -1212,6 +1213,7 @@ async def v1_responses(
             codex_session_affinity=False,
             openai_cache_affinity=True,
             prefer_http_bridge=True,
+            api_key_policy_already_applied=True,
             prohibit_fast_mode=prohibit_fast_mode,
         )
     else:
@@ -1223,6 +1225,7 @@ async def v1_responses(
             codex_session_affinity=False,
             openai_cache_affinity=True,
             prefer_http_bridge=True,
+            api_key_policy_already_applied=True,
             prohibit_fast_mode=prohibit_fast_mode,
         )
     return _mark_subscription_prompt_cache_fallback(response, responses_payload)
@@ -1282,6 +1285,7 @@ async def internal_bridge_responses(
         codex_session_affinity=forwarded_request_context.context.codex_session_affinity,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        api_key_policy_already_applied=True,
         skip_limit_enforcement=skip_limit_enforcement,
         api_key_reservation_override=forwarded_request_context.context.reservation,
         include_rate_limit_headers=False,
@@ -3868,6 +3872,13 @@ async def v1_chat_completions(
             source=source,
             model=request_model,
             api_key=api_key,
+            allowed_reasoning_effort=(
+                responses_payload.reasoning.effort
+                if api_key is not None
+                and api_key.allowed_reasoning_efforts is not None
+                and responses_payload.reasoning is not None
+                else None
+            ),
             reservation=reservation,
             rate_limit_headers=rate_limit_headers,
         )
@@ -4514,13 +4525,18 @@ async def _source_chat_completion_response(
     source: ModelSource,
     model: str,
     api_key: ApiKeyData | None,
+    allowed_reasoning_effort: str | None,
     reservation: ApiKeyUsageReservationData | None,
     rate_limit_headers: Mapping[str, str],
 ) -> Response:
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
     source_payload["stream"] = bool(payload.stream)
-    apply_api_key_enforcement_to_chat_payload(source_payload, api_key)
+    apply_api_key_enforcement_to_chat_payload(
+        source_payload,
+        api_key,
+        allowed_reasoning_effort=allowed_reasoning_effort,
+    )
     sanitize_source_chat_payload(
         source_payload,
         allow_reasoning=source_model_supports_reasoning(source, model),
@@ -4868,6 +4884,7 @@ async def _stream_responses(
     forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
+    api_key_policy_already_applied: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
     # Owner-forwarded payloads have already passed API-key enforcement,
@@ -4876,11 +4893,13 @@ async def _stream_responses(
     # signed effective tier: an owner with an older/staler model snapshot must
     # not re-add a tier that the origin authoritatively removed.
     forwarded_effective_service_tier = payload.service_tier if forwarded_request else None
-    service_tier_was_enforced = apply_api_key_enforcement(
-        payload,
-        api_key,
-        prohibit_fast_mode=prohibit_fast_mode,
-    )
+    service_tier_was_enforced = False
+    if not api_key_policy_already_applied:
+        service_tier_was_enforced = apply_api_key_enforcement(
+            payload,
+            api_key,
+            prohibit_fast_mode=prohibit_fast_mode,
+        )
     if forwarded_request:
         payload.service_tier = forwarded_effective_service_tier
     else:
@@ -5130,13 +5149,16 @@ async def _collect_responses(
     openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
     prefer_http_bridge: bool = False,
+    api_key_policy_already_applied: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
-    service_tier_was_enforced = apply_api_key_enforcement(
-        payload,
-        api_key,
-        prohibit_fast_mode=prohibit_fast_mode,
-    )
+    service_tier_was_enforced = False
+    if not api_key_policy_already_applied:
+        service_tier_was_enforced = apply_api_key_enforcement(
+            payload,
+            api_key,
+            prohibit_fast_mode=prohibit_fast_mode,
+        )
     apply_enforced_service_tier_model_fallback(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,

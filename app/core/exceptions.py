@@ -8,8 +8,15 @@ class AppError(Exception):
     code: str = "internal_error"
     message: str = "Unexpected error"
 
-    def __init__(self, message: str | None = None, *, code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        code: str | None = None,
+        param: str | None = None,
+    ) -> None:
         self.message = message or self.__class__.message
+        self.param = param
         if code is not None:
             self.code = code
         super().__init__(self.message)
@@ -27,6 +34,12 @@ class ProxyAuthError(AppError):
 class ProxyModelNotAllowed(AppError):
     status_code = 403
     code = "model_not_allowed"
+    error_type = "permission_error"
+
+
+class ProxyReasoningEffortNotAllowed(AppError):
+    status_code = 403
+    code = "reasoning_effort_not_allowed"
     error_type = "permission_error"
 
 

@@ -33,6 +33,8 @@ from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP
 from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_hourly_window
 from app.modules.api_keys.limit_windows import advance_limit_reset
 
+API_KEY_POLICY_HASH_PREFIX = "policy:"
+
 
 @dataclass(frozen=True, slots=True)
 class ReservationResult:
@@ -169,7 +171,9 @@ class ApiKeysRepository:
         return result.scalar_one_or_none()
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
-        result = await self._session.execute(self._select_api_key().where(ApiKey.key_hash == key_hash))
+        result = await self._session.execute(
+            self._select_api_key().where(ApiKey.key_hash.in_((key_hash, f"{API_KEY_POLICY_HASH_PREFIX}{key_hash}")))
+        )
         return result.scalar_one_or_none()
 
     async def list_all(self) -> list[ApiKey]:
@@ -304,6 +308,7 @@ class ApiKeysRepository:
         apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
+        allowed_reasoning_efforts: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
@@ -334,6 +339,9 @@ class ApiKeysRepository:
         if enforced_reasoning_effort is not _UNSET:
             assert enforced_reasoning_effort is None or isinstance(enforced_reasoning_effort, str)
             row.enforced_reasoning_effort = enforced_reasoning_effort
+        if allowed_reasoning_efforts is not _UNSET:
+            assert allowed_reasoning_efforts is None or isinstance(allowed_reasoning_efforts, str)
+            row.allowed_reasoning_efforts = allowed_reasoning_efforts
         if enforced_service_tier is not _UNSET:
             assert enforced_service_tier is None or isinstance(enforced_service_tier, str)
             row.enforced_service_tier = enforced_service_tier

@@ -28,6 +28,7 @@ from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer, ge
 from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
+    API_KEY_POLICY_HASH_PREFIX,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ApiKeyUsageTotals,
@@ -51,6 +52,7 @@ TRAFFIC_CLASS_FOREGROUND = "foreground"
 TRAFFIC_CLASS_OPPORTUNISTIC = "opportunistic"
 _SUPPORTED_TRAFFIC_CLASSES = frozenset({TRAFFIC_CLASS_FOREGROUND, TRAFFIC_CLASS_OPPORTUNISTIC})
 _SUPPORTED_TRANSPORT_POLICY_OVERRIDES = frozenset({"smart", "always_http", "always_websocket"})
+_API_KEY_POLICY_SCHEMA_VERSION = 1
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -85,6 +87,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         apply_to_codex_model: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
+        allowed_reasoning_efforts: str | None | _Unset = ...,
         enforced_service_tier: str | None | _Unset = ...,
         traffic_class: str | _Unset = ...,
         transport_policy_override: str | None | _Unset = ...,
@@ -270,6 +273,7 @@ class ApiKeyCreateData:
     apply_to_codex_model: bool = False
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
+    allowed_reasoning_efforts: list[str] | None = None
     enforced_service_tier: str | None = None
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
@@ -292,6 +296,8 @@ class ApiKeyUpdateData:
     enforced_model_set: bool = False
     enforced_reasoning_effort: str | None = None
     enforced_reasoning_effort_set: bool = False
+    allowed_reasoning_efforts: list[str] | None = None
+    allowed_reasoning_efforts_set: bool = False
     enforced_service_tier: str | None = None
     enforced_service_tier_set: bool = False
     traffic_class: str | None = None
@@ -326,6 +332,7 @@ class ApiKeyData:
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    allowed_reasoning_efforts: list[str] | None = None
     apply_to_codex_model: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
@@ -468,20 +475,27 @@ class ApiKeysService:
         assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
+        allowed_reasoning_efforts = _normalize_allowed_reasoning_efforts(payload.allowed_reasoning_efforts)
         enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
         traffic_class = _normalize_traffic_class(payload.traffic_class)
         transport_policy_override = _normalize_transport_policy_override(payload.transport_policy_override)
         usage_sections = _normalize_usage_sections(payload.usage_sections)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
+        _validate_reasoning_effort_policy(
+            enforced_reasoning_effort=enforced_reasoning_effort,
+            allowed_reasoning_efforts=allowed_reasoning_efforts,
+        )
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
             name=_normalize_name(payload.name),
-            key_hash=_hash_key(plain_key),
+            key_hash=_storage_key_hash(plain_key, policy_enabled=allowed_reasoning_efforts is not None),
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
             apply_to_codex_model=bool(payload.apply_to_codex_model),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
+            allowed_reasoning_efforts=_serialize_allowed_reasoning_efforts(allowed_reasoning_efforts),
+            api_key_policy_schema_version=_API_KEY_POLICY_SCHEMA_VERSION,
             enforced_service_tier=enforced_service_tier,
             account_assignment_scope_enabled=bool(assigned_account_ids),
             source_assignment_scope_enabled=bool(assigned_source_ids),
@@ -607,6 +621,11 @@ class ApiKeysService:
         else:
             enforced_reasoning_effort = None
 
+        if payload.allowed_reasoning_efforts_set:
+            allowed_reasoning_efforts = _normalize_allowed_reasoning_efforts(payload.allowed_reasoning_efforts)
+        else:
+            allowed_reasoning_efforts = None
+
         if payload.enforced_service_tier_set:
             enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
         else:
@@ -633,6 +652,28 @@ class ApiKeysService:
                 enforced_model=effective_enforced_model,
                 allowed_models=effective_allowed_models,
             )
+
+        if payload.enforced_reasoning_effort_set or payload.allowed_reasoning_efforts_set:
+            effective_enforced_reasoning_effort = (
+                enforced_reasoning_effort
+                if payload.enforced_reasoning_effort_set
+                else _normalize_reasoning_effort_lenient(existing.enforced_reasoning_effort)
+            )
+            effective_allowed_reasoning_efforts = (
+                allowed_reasoning_efforts
+                if payload.allowed_reasoning_efforts_set
+                else _deserialize_allowed_reasoning_efforts(existing.allowed_reasoning_efforts)
+            )
+            _validate_reasoning_effort_policy(
+                enforced_reasoning_effort=effective_enforced_reasoning_effort,
+                allowed_reasoning_efforts=effective_allowed_reasoning_efforts,
+            )
+
+        effective_policy_enabled = (
+            effective_allowed_reasoning_efforts is not None
+            if payload.enforced_reasoning_effort_set or payload.allowed_reasoning_efforts_set
+            else getattr(existing, "allowed_reasoning_efforts", None) is not None
+        )
 
         limit_rows: list[ApiKeyLimit] | None = None
         if payload.limits_set:
@@ -661,6 +702,19 @@ class ApiKeysService:
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
+                ),
+                allowed_reasoning_efforts=(
+                    _serialize_allowed_reasoning_efforts(allowed_reasoning_efforts)
+                    if payload.allowed_reasoning_efforts_set
+                    else _UNSET
+                ),
+                key_hash=(
+                    _storage_key_hash_from_existing(
+                        existing.key_hash,
+                        policy_enabled=effective_policy_enabled,
+                    )
+                    if payload.allowed_reasoning_efforts_set
+                    else _UNSET
                 ),
                 enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
                 traffic_class=traffic_class_update,
@@ -699,6 +753,7 @@ class ApiKeysService:
             or payload.apply_to_codex_model_set
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
+            or payload.allowed_reasoning_efforts_set
             or payload.enforced_service_tier_set
             or payload.traffic_class_set
             or payload.transport_policy_override_set
@@ -710,7 +765,7 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
-        await get_api_key_cache().invalidate(row.key_hash)
+        await get_api_key_cache().invalidate(_cache_key_hash(row.key_hash))
         poller = get_cache_invalidation_poller()
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)
@@ -747,7 +802,7 @@ class ApiKeysService:
         deleted = await self._repository.delete(key_id)
         if not deleted:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
-        await get_api_key_cache().invalidate(row.key_hash)
+        await get_api_key_cache().invalidate(_cache_key_hash(row.key_hash))
         poller = get_cache_invalidation_poller()
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)
@@ -756,11 +811,14 @@ class ApiKeysService:
         row = await self._repository.get_by_id(key_id)
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
-        old_key_hash = row.key_hash
+        old_key_hash = _cache_key_hash(row.key_hash)
         plain_key = _generate_plain_key()
         updated = await self._repository.update(
             key_id,
-            key_hash=_hash_key(plain_key),
+            key_hash=_storage_key_hash(
+                plain_key,
+                policy_enabled=getattr(row, "allowed_reasoning_efforts", None) is not None,
+            ),
             key_prefix=plain_key[:15],
         )
         if updated is None:
@@ -1284,10 +1342,34 @@ def _hash_key(plain_key: str) -> str:
     return sha256(plain_key.encode("utf-8")).hexdigest()
 
 
+def _storage_key_hash(plain_key: str, *, policy_enabled: bool) -> str:
+    key_hash = _hash_key(plain_key)
+    return f"{API_KEY_POLICY_HASH_PREFIX}{key_hash}" if policy_enabled else key_hash
+
+
+def _storage_key_hash_from_existing(key_hash: str, *, policy_enabled: bool) -> str:
+    plain_hash = _cache_key_hash(key_hash)
+    return f"{API_KEY_POLICY_HASH_PREFIX}{plain_hash}" if policy_enabled else plain_hash
+
+
+def _cache_key_hash(storage_hash: str) -> str:
+    return (
+        storage_hash[len(API_KEY_POLICY_HASH_PREFIX) :]
+        if storage_hash.startswith(API_KEY_POLICY_HASH_PREFIX)
+        else storage_hash
+    )
+
+
 def _serialize_allowed_models(allowed_models: list[str] | None) -> str | None:
     if allowed_models is None:
         return None
     return json.dumps(allowed_models)
+
+
+def _serialize_allowed_reasoning_efforts(allowed_reasoning_efforts: list[str] | None) -> str | None:
+    if allowed_reasoning_efforts is None:
+        return None
+    return json.dumps(allowed_reasoning_efforts)
 
 
 def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
@@ -1298,6 +1380,18 @@ def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
         return None
     models = [value.strip() for value in parsed if isinstance(value, str) and value.strip()]
     return models
+
+
+def _deserialize_allowed_reasoning_efforts(payload: str | None) -> list[str] | None:
+    if payload is None:
+        return None
+    try:
+        parsed = json.loads(payload)
+        if not isinstance(parsed, list):
+            return []
+        return _normalize_allowed_reasoning_efforts(parsed)
+    except (ApiKeyValidationError, TypeError, json.JSONDecodeError):
+        return []
 
 
 def _normalize_allowed_models(allowed_models: list[str] | None) -> list[str] | None:
@@ -1343,7 +1437,9 @@ def _normalize_model_slug(value: str | None) -> str | None:
     return normalized
 
 
-_SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+_REASONING_EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+_SUPPORTED_REASONING_EFFORTS = frozenset({"none", *_REASONING_EFFORT_ORDER})
+_SUPPORTED_SELECTABLE_REASONING_EFFORTS = frozenset(_REASONING_EFFORT_ORDER)
 _SUPPORTED_SERVICE_TIERS = frozenset({"auto", "default", "priority", "flex"})
 
 
@@ -1374,6 +1470,25 @@ def _normalize_reasoning_effort_lenient(value: str | None) -> str | None:
     if normalized in _SUPPORTED_REASONING_EFFORTS:
         return normalized
     return None
+
+
+def _normalize_allowed_reasoning_efforts(values: list[str] | None) -> list[str] | None:
+    if values is None:
+        return None
+
+    normalized: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            raise ApiKeyValidationError("Allowed reasoning efforts must be strings")
+        effort = value.strip().lower()
+        if effort not in _SUPPORTED_SELECTABLE_REASONING_EFFORTS:
+            options = ", ".join(_REASONING_EFFORT_ORDER)
+            raise ApiKeyValidationError(f"Unsupported allowed reasoning effort '{effort}'. Expected one of: {options}")
+        normalized.add(effort)
+
+    if not normalized:
+        raise ApiKeyValidationError("Allowed reasoning efforts must not be empty")
+    return [effort for effort in _REASONING_EFFORT_ORDER if effort in normalized]
 
 
 def _normalize_service_tier(value: str | None) -> str | None:
@@ -1446,6 +1561,17 @@ def _validate_model_enforcement(*, enforced_model: str | None, allowed_models: l
         )
 
 
+def _validate_reasoning_effort_policy(
+    *,
+    enforced_reasoning_effort: str | None,
+    allowed_reasoning_efforts: list[str] | None,
+) -> None:
+    if enforced_reasoning_effort is not None and allowed_reasoning_efforts is not None:
+        raise ApiKeyValidationError(
+            "enforced_reasoning_effort and allowed_reasoning_efforts cannot be configured together"
+        )
+
+
 def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
     return LimitRuleData(
         id=limit.id,
@@ -1461,6 +1587,14 @@ def _to_limit_rule_data(limit: ApiKeyLimit) -> LimitRuleData:
 def _ensure_valid_api_key_row(row: ApiKey | None) -> ApiKey:
     if row is None or not row.is_active:
         raise ApiKeyInvalidError("Invalid API key")
+    if getattr(row, "allowed_reasoning_efforts", None) is not None:
+        # A policy row must be readable by this build and must retain the
+        # protected hash marker. This also makes malformed rows fail closed
+        # when they were written during a mixed-version deployment.
+        if getattr(row, "api_key_policy_schema_version", None) != _API_KEY_POLICY_SCHEMA_VERSION:
+            raise ApiKeyInvalidError("Invalid API key")
+        if not row.key_hash.startswith(API_KEY_POLICY_HASH_PREFIX):
+            raise ApiKeyInvalidError("Invalid API key")
     return row
 
 
@@ -1637,6 +1771,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         apply_to_codex_model=data.apply_to_codex_model,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
+        allowed_reasoning_efforts=data.allowed_reasoning_efforts,
         enforced_service_tier=data.enforced_service_tier,
         traffic_class=data.traffic_class,
         transport_policy_override=data.transport_policy_override,
@@ -1672,6 +1807,9 @@ def _to_api_key_data(
         apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
+        allowed_reasoning_efforts=_deserialize_allowed_reasoning_efforts(
+            getattr(row, "allowed_reasoning_efforts", None)
+        ),
         enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),
         traffic_class=_normalize_traffic_class_lenient(getattr(row, "traffic_class", TRAFFIC_CLASS_FOREGROUND)),
         transport_policy_override=_normalize_transport_policy_override_lenient(

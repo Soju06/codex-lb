@@ -46,6 +46,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         apply_to_codex_model=row.apply_to_codex_model,
         enforced_model=row.enforced_model,
         enforced_reasoning_effort=row.enforced_reasoning_effort,
+        allowed_reasoning_efforts=row.allowed_reasoning_efforts,
         enforced_service_tier=row.enforced_service_tier,
         traffic_class=row.traffic_class,
         transport_policy_override=row.transport_policy_override,
@@ -118,6 +119,9 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
     return limit_inputs
 
 
+# Policy-aware clients use the versioned write path so an older replica returns
+# 404 instead of silently dropping the new allowlist field.
+@router.post("/v2/", response_model=ApiKeyCreateResponse)
 @router.post("/", response_model=ApiKeyCreateResponse)
 async def create_api_key(
     request: Request,
@@ -135,6 +139,7 @@ async def create_api_key(
                 apply_to_codex_model=payload.apply_to_codex_model,
                 enforced_model=payload.enforced_model,
                 enforced_reasoning_effort=payload.enforced_reasoning_effort,
+                allowed_reasoning_efforts=payload.allowed_reasoning_efforts,
                 enforced_service_tier=payload.enforced_service_tier,
                 traffic_class=payload.traffic_class or "foreground",
                 transport_policy_override=payload.transport_policy_override,
@@ -171,6 +176,7 @@ async def list_api_keys(
     return [_to_response(row) for row in rows]
 
 
+@router.patch("/v2/{key_id}", response_model=ApiKeyResponse)
 @router.patch("/{key_id}", response_model=ApiKeyResponse)
 async def update_api_key(
     request: Request,
@@ -195,6 +201,8 @@ async def update_api_key(
         enforced_model_set="enforced_model" in fields,
         enforced_reasoning_effort=payload.enforced_reasoning_effort,
         enforced_reasoning_effort_set="enforced_reasoning_effort" in fields,
+        allowed_reasoning_efforts=payload.allowed_reasoning_efforts,
+        allowed_reasoning_efforts_set="allowed_reasoning_efforts" in fields,
         enforced_service_tier=payload.enforced_service_tier,
         enforced_service_tier_set="enforced_service_tier" in fields,
         traffic_class=payload.traffic_class,

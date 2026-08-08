@@ -5,7 +5,7 @@ Using CPython 3.13.15
 Creating virtual environment at: .venv
    Building codex-lb @ file:///home/runner/work/codex-lb/codex-lb
       Built codex-lb @ file:///home/runner/work/codex-lb/codex-lb
-Installed 96 packages in 42ms
+Installed 96 packages in 40ms
 > uv run ruff format app/db/models.py app/modules/model_sources/repository.py tests/unit/test_subscription_fallback.py tests/integration/test_subscription_fallback_routes.py
 1 file reformatted, 3 files left unchanged
 > uv run ruff check --fix app/db/models.py app/modules/model_sources/repository.py tests/unit/test_subscription_fallback.py tests/integration/test_subscription_fallback_routes.py
@@ -13,32 +13,35 @@ All checks passed!
 > git diff --check
 > uv run pytest -q tests/unit/test_subscription_fallback.py
 ...........                                                              [100%]
-11 passed in 0.09s
+11 passed in 0.10s
 > uv run pytest -q tests/integration/test_subscription_fallback_routes.py
 ......                                                                   [100%]
-6 passed in 8.02s
+6 passed in 2.47s
 > uv run pytest -q tests/integration/test_model_source_routing.py -k responses
 ..                                                                       [100%]
-2 passed, 31 deselected in 1.13s
+2 passed, 31 deselected in 0.81s
 > make lint
 python scripts/check_proxy_architecture.py
 proxy architecture checks passed
 uv run ruff check .
 All checks passed!
 uv run ruff format --check .
-unformatted: File would be reformatted
-  --> scripts/agent_finalize_openai_fallback.py:14:11
-   |
-13 |     old = 'class ModelSource(Base):\n    __tablename__ = "model_sources"\n\n'
-   -     new = '''class ModelSource(Base):
-14 +     new = """class ModelSource(Base):
-15 |     __tablename__ = "model_sources"
---------------------------------------------------------------------------------
-25 |
-   - '''
-26 + """
-27 |     if text.count(old) != 1:
-   |
+903 files already formatted
+> make typecheck
+uv sync --dev --frozen
+Checked 96 packages in 0.73ms
+uv run ty check
+error[invalid-argument-type]: Method `__getitem__` of type `bound method Top[dict[Unknown, Unknown]].__getitem__(key: Never, /) -> object` cannot be called with key of type `Literal["error"]` on object of type `Top[dict[Unknown, Unknown]]`
+   --> tests/integration/test_subscription_fallback_routes.py:326:13
+    |
+326 |     error = response_payload["error"]
+    |             ^^^^^^^^^^^^^^^^
 
-1 file would be reformatted, 902 files already formatted
-make: *** [Makefile:83: lint] Error 1
+error[invalid-argument-type]: Method `__getitem__` of type `bound method Top[dict[Unknown, Unknown]].__getitem__(key: Never, /) -> object` cannot be called with key of type `Literal["code"]` on object of type `Top[dict[Unknown, Unknown]]`
+   --> tests/integration/test_subscription_fallback_routes.py:328:12
+    |
+328 |     assert error["code"] == "no_accounts"
+    |            ^^^^^
+
+Found 2 diagnostics
+make: *** [Makefile:90: typecheck] Error 1

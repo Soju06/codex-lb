@@ -61,6 +61,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocket,
     UpstreamWebSocketTransportError,
     filter_inbound_websocket_headers,
+    is_account_neutral_websocket_error_code,
 )
 from app.core.errors import (
     OpenAIErrorEnvelope,
@@ -1099,7 +1100,14 @@ async def _process_upstream_websocket_transport_end(
     replay_refusal_reasons: list[str] = []
     replay_request_state = None
     message_error_code = getattr(message, "error_code", None)
-    if message_error_code != "proxy_network_unavailable":
+    # A classified local transport failure says nothing about whether an
+    # already-sent response.create was accepted. Keep it account-neutral and
+    # terminal: replay here could duplicate work, billing, or tool side effects.
+    account_neutral = is_account_neutral_websocket_error_code(message_error_code)
+    if account_neutral:
+        if any(state.last_downstream_sequence_number is not None for state in reader_owned):
+            replay_refusal_reasons.append("sequenced_downstream_frame")
+    else:
         replay_request_state = await _pop_replayable_precreated_websocket_request_state(
             reader_owned,
             pending_lock=anyio.Lock(),
@@ -1131,7 +1139,7 @@ async def _process_upstream_websocket_transport_end(
         client_send_lock=client_send_lock,
         response_create_gate=response_create_gate,
         downstream_activity=downstream_activity,
-        penalize_account=message_error_code != "proxy_network_unavailable",
+        penalize_account=not account_neutral,
         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
     )
     # A terminal receive can race the outer session cleanup, especially when
@@ -2349,7 +2357,7 @@ class _WebSocketMixin:
                                 client_send_lock=client_send_lock,
                                 response_create_gate=response_create_gate,
                                 downstream_activity=downstream_activity,
-                                penalize_account=exc.error_code != "proxy_network_unavailable",
+                                penalize_account=not is_account_neutral_websocket_error_code(exc.error_code),
                             ),
                             name="proxy-websocket-finalization-transport-send-failure",
                         )
@@ -2373,7 +2381,7 @@ class _WebSocketMixin:
                         client_send_lock=client_send_lock,
                         response_create_gate=response_create_gate,
                         downstream_activity=downstream_activity,
-                        penalize_account=exc.error_code != "proxy_network_unavailable",
+                        penalize_account=not is_account_neutral_websocket_error_code(exc.error_code),
                         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
                     if sequenced_downstream_replay_refused:

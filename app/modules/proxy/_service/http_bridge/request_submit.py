@@ -38,7 +38,11 @@ from app.core.clients.proxy import (  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+    UpstreamWebSocketTransportError,
+    is_account_neutral_websocket_error_code,
+)
 from app.core.errors import (
     openai_error,
 )
@@ -248,6 +252,26 @@ async def _send_http_bridge_request_text_with_archive_id(
             raise
     finally:
         reset_request_id(token)
+
+
+async def _settle_claimed_http_bridge_liveness_failure(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    error_message: str,
+) -> None:
+    """Finish the pending-deque settlement claimed beside a failed send."""
+
+    if session.liveness_settlement_owner != "send":
+        raise RuntimeError("HTTP bridge liveness settlement started without the send claim")
+    async with session.lifecycle_lock:
+        await service._fail_http_bridge_reader_and_maybe_retire(
+            session,
+            error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+            error_message=error_message,
+            penalize_account=False,
+            force_retire=True,
+        )
 
 
 def _text_with_account_installation_id(text_data: str, codex_installation_id: str | None) -> str:
@@ -1160,7 +1184,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     upstream_send_started = True
                     try:
                         await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
-                    except BaseException:
+                    except BaseException as exc:
                         request_state.recovery_attempt_dispatched = True
                         # Publish retirement while lifecycle ownership is still
                         # held; a gate waiter must never reuse an ambiguously sent
@@ -1168,6 +1192,15 @@ class _HTTPBridgeRequestSubmitMixin:
                         session.closed = True
                         session.upstream_control.reconnect_requested = True
                         session.upstream_control.retire_after_drain = True
+                        if (
+                            isinstance(exc, UpstreamWebSocketTransportError)
+                            and exc.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                        ):
+                            # Only this narrow claim, not ``closed``, tells the
+                            # reader that the submitter will settle siblings.
+                            # Keep it inside lifecycle_lock with the failing
+                            # send so the reader cannot observe an ownership gap.
+                            session.claim_liveness_settlement()
                         raise
                     request_state.recovery_attempt_dispatched = True
                     session.last_used_at = _service_time().monotonic()
@@ -1248,31 +1281,54 @@ class _HTTPBridgeRequestSubmitMixin:
             # handed to the kernel. Never reconnect-and-resend from this path;
             # only failures proven to precede dispatch may be replayed.
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
-            account_neutral = error_code == "proxy_network_unavailable"
-            await self._cleanup_http_bridge_submit_interruption(
-                session,
-                request_state=request_state,
-                gate_acquired=gate_acquired,
-                request_enqueued=request_enqueued,
-                counted_in_queue=True,
-                admission_waiter_registered=admission_waiter_registered,
-            )
-            await self._fail_pending_websocket_requests(
-                account=session.account,
-                account_id_value=session.account.id,
-                pending_requests=deque([request_state]),
-                pending_lock=anyio.Lock(),
-                error_code=error_code,
-                error_message=str(exc) or "Upstream websocket closed before response.completed",
-                api_key=None,
-                response_create_gate=session.response_create_gate,
-                penalize_account=not account_neutral,
-            )
-            session.closed = True
-            try:
-                await session.upstream.close()
-            except Exception:
-                logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
+            # Liveness expiry and local network loss are transport failures,
+            # not evidence against the selected account. Keep this in sync
+            # with the reader path's shared provenance classification.
+            account_neutral = is_account_neutral_websocket_error_code(error_code)
+            if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
+                # The sender claimed ownership beside the failing send while
+                # holding lifecycle_lock. It therefore owns the entire session
+                # deque, including older in-flight requests; settling only this
+                # request would strand its siblings after the reader yields.
+                # Publish the cleanup task before the first await after the
+                # claim. Shielding it makes cancellation wait for settlement,
+                # so the claim can never outlive its exactly-once owner.
+                settlement_task = asyncio.create_task(
+                    _settle_claimed_http_bridge_liveness_failure(
+                        self,
+                        session,
+                        error_message=str(exc) or "Upstream websocket liveness failed",
+                    ),
+                    name="http-bridge-liveness-send-settlement",
+                )
+                _, settlement_cancellation = await _await_task_deferring_cancellation(settlement_task)
+                if settlement_cancellation is not None:
+                    raise settlement_cancellation
+            else:
+                await self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=gate_acquired,
+                    request_enqueued=request_enqueued,
+                    counted_in_queue=True,
+                    admission_waiter_registered=admission_waiter_registered,
+                )
+                await self._fail_pending_websocket_requests(
+                    account=session.account,
+                    account_id_value=session.account.id,
+                    pending_requests=deque([request_state]),
+                    pending_lock=anyio.Lock(),
+                    error_code=error_code,
+                    error_message=str(exc) or "Upstream websocket closed before response.completed",
+                    api_key=None,
+                    response_create_gate=session.response_create_gate,
+                    penalize_account=not account_neutral,
+                )
+                session.closed = True
+                try:
+                    await session.upstream.close()
+                except Exception:
+                    logger.debug("Failed to close HTTP bridge upstream websocket after send failure", exc_info=True)
             # Always raise 502 so the client can retry with
             # previous_response_id intact.  Returning 400
             # previous_response_not_found causes the client to drop

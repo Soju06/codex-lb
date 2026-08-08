@@ -1838,13 +1838,46 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 detail=retry_circuit_detail or detail,
             )
-        session.closed = True
+
+        async with session.pending_lock:
+            current_response_events_seen = max(
+                (getattr(request_state, "response_event_count", 0) for request_state in session.pending_requests),
+                default=0,
+            )
+            current_response_created = any(
+                request_state.response_id is not None or request_state.latency_response_created_ms is not None
+                for request_state in session.pending_requests
+            )
+            completed_response_id = session.last_completed_response_id
+        # The snapshot above avoids awaiting pending_lock while the global
+        # registry lock is held, preserving bounded cleanup for other sessions.
+        caller_response_events_seen = response_events_seen or 0
+        became_healthy_during_suspend = current_response_events_seen > caller_response_events_seen or (
+            caller_response_events_seen == 0 and (current_response_created or completed_response_id is not None)
+        )
+        should_close = False
         async with self._http_bridge_lock:
+            if session.upstream_close_attempted:
+                session.closed = True
+                if self._http_bridge_sessions.get(session.key) is session:
+                    self._http_bridge_sessions.pop(session.key, None)
+                    self._unregister_http_bridge_turn_states_locked(session)
+                    self._unregister_http_bridge_previous_response_ids_locked(session)
+                return
+            if became_healthy_during_suspend:
+                # The pending snapshot is only advisory; a terminal response
+                # may already have left the deque, and a newer close owner may
+                # have claimed retirement while this task was suspended.
+                if not session.upstream_close_attempted:
+                    session.closed = False
+                    session.upstream_control.reconnect_requested = False
+                    session.upstream_control.retire_after_drain = False
+                return
             if self._http_bridge_sessions.get(session.key) is session:
+                session.closed = True
                 self._http_bridge_sessions.pop(session.key, None)
                 self._unregister_http_bridge_turn_states_locked(session)
                 self._unregister_http_bridge_previous_response_ids_locked(session)
-        async with session.pending_lock:
             should_close = not session.upstream_close_attempted
             if should_close:
                 session.upstream_close_attempted = True

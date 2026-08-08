@@ -121,6 +121,7 @@ def _account_to_summary(
 
     if monthly_usage is not None and usage_core.capacity_for_plan(plan_type, "monthly") is None:
         monthly_usage = None
+    usage_refreshed_at = _latest_usage_recorded_at(primary_usage, secondary_usage, monthly_usage)
     monthly_used_percent = _normalize_used_percent(monthly_usage)
     monthly_remaining_percent = usage_core.remaining_percent_from_used(monthly_used_percent)
     if monthly_usage is not None:
@@ -277,6 +278,7 @@ def _account_to_summary(
         window_minutes_secondary=window_minutes_secondary,
         window_minutes_monthly=window_minutes_monthly,
         last_refresh_at=account.last_refresh,
+        usage_refreshed_at=usage_refreshed_at,
         capacity_credits_primary=capacity_primary,
         remaining_credits_primary=remaining_credits_primary,
         capacity_credits_secondary=capacity_secondary,
@@ -302,6 +304,13 @@ def _normalize_account_routing_policy(value: str | None) -> str:
     if value in _ACCOUNT_ROUTING_POLICIES:
         return value
     return "normal"
+
+
+def _latest_usage_recorded_at(*entries: UsageHistory | None) -> datetime | None:
+    recorded_at = [entry.recorded_at for entry in entries if entry is not None and entry.recorded_at is not None]
+    if not recorded_at:
+        return None
+    return max(recorded_at, key=lambda value: value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value)
 
 
 def _reset_credits_snapshot_for_account(

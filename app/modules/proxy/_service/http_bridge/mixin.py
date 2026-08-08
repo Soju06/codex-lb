@@ -1262,7 +1262,7 @@ class _HTTPBridgeMixin(
                                 model_class=_extract_model_class(request_model) if request_model else None,
                                 owner_check_applied=owner_check_required,
                             )
-                    elif inflight_future is None:
+                    elif session_to_return_after_close is None and inflight_future is None:
                         while (
                             len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self) >= max_sessions
                             and self._http_bridge_sessions

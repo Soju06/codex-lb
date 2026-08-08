@@ -17,6 +17,8 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
     healthStatus: "unknown",
     supportsChatCompletions: true,
     supportsResponses: false,
+    isSubscriptionFallback: false,
+    fallbackModel: null,
     supportsAudioTranscriptions: false,
     timeoutSeconds: null,
     maxConcurrency: null,

@@ -68,6 +68,7 @@ from app.core.clients.usage import (
     ConsumeRateLimitResetCreditResponse as UpstreamConsumeRateLimitResetCreditResponse,
 )
 from app.core.clients.usage import UsageFetchError, consume_rate_limit_reset_credit
+from app.core.clock import REAL_SCHEDULER, Scheduler
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -5626,7 +5627,11 @@ def _retrieve_first_stream_task_exception(task: asyncio.Task[str]) -> None:
         task.exception()
 
 
-def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[str]:
+def _create_first_stream_probe_task(
+    stream: AsyncIterator[str],
+    *,
+    scheduler: Scheduler = REAL_SCHEDULER,
+) -> asyncio.Task[str]:
     """Create the first-stream-item probe task.
 
     ``_probe_stream_startup_error`` / ``_probe_chat_stream_startup_error`` race
@@ -5638,7 +5643,7 @@ def _create_first_stream_probe_task(stream: AsyncIterator[str]) -> asyncio.Task[
     would log it. The done-callback retrieves the result in that abandoned case
     without hiding the error from consumers that do await the task.
     """
-    task = asyncio.create_task(_read_first_stream_item(stream))
+    task = scheduler.create_task(_read_first_stream_item(stream))
     task.add_done_callback(_retrieve_first_stream_task_exception)
     return task
 
@@ -5649,10 +5654,17 @@ async def _wait_for_first_stream_probe(
     timeout_seconds: float,
     capacity_wait_event: asyncio.Event | None,
     capacity_ready_event: asyncio.Event | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> bool:
     try:
-        done, _pending = await asyncio.wait({first_task}, timeout=timeout_seconds)
-        if done:
+        timeout_task = scheduler.create_task(scheduler.sleep(timeout_seconds))
+        try:
+            done, _pending = await asyncio.wait({first_task, timeout_task}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if not timeout_task.done():
+                timeout_task.cancel()
+                await asyncio.gather(timeout_task, return_exceptions=True)
+        if first_task in done:
             if capacity_wait_event is not None and capacity_wait_event.is_set():
                 capacity_wait_event.clear()
             return True
@@ -5677,7 +5689,7 @@ async def _wait_for_first_stream_probe(
                 return True
             if capacity_wait_event.is_set():
                 recovery_ready_task = (
-                    asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+                    scheduler.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
                 )
                 try:
                     recovery_waiters = {first_task}
@@ -5718,8 +5730,10 @@ async def _wait_for_first_stream_probe(
                 )
                 return bool(post_ready_done)
 
-            marker_task = asyncio.create_task(capacity_wait_event.wait())
-            ready_task = asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+            marker_task = scheduler.create_task(capacity_wait_event.wait())
+            ready_task = (
+                scheduler.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
+            )
             try:
                 signal_discovery_remaining = max(
                     0.0,
@@ -5761,15 +5775,17 @@ async def _probe_stream_startup_error(
     timeout_seconds: float | None = None,
     capacity_wait_event: asyncio.Event | None = None,
     capacity_ready_event: asyncio.Event | None = None,
+    scheduler: Scheduler = REAL_SCHEDULER,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
-    first_task = _create_first_stream_probe_task(stream)
+    first_task = _create_first_stream_probe_task(stream, scheduler=scheduler)
     probe_done = await _wait_for_first_stream_probe(
         first_task,
         timeout_seconds=timeout_seconds,
         capacity_wait_event=capacity_wait_event,
         capacity_ready_event=capacity_ready_event,
+        scheduler=scheduler,
     )
     if not probe_done:
         # Probe window elapsed before the first item arrived. Hand the still-

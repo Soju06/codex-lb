@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import Any
 
 import anyio
 
+from app.core.clock import REAL_CLOCK, Clock
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import _HTTPBridgeSession
@@ -48,7 +48,8 @@ class _HTTPBridgeRetryCircuitState:
     half_open_until: float = 0.0
 
 
-def _initialize_http_bridge_retry_circuit(service: Any) -> None:
+def _initialize_http_bridge_retry_circuit(service: Any, *, clock: Clock = REAL_CLOCK) -> None:
+    service._http_bridge_retry_circuit_clock = clock
     service._http_bridge_retry_circuits = {}
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()
@@ -69,7 +70,7 @@ class _HTTPBridgeRetryCircuitMixin:
         if session.key.strength != "hard":
             return True
 
-        now_monotonic = time.monotonic()
+        now_monotonic = self._http_bridge_retry_circuit_clock.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             self._prune_http_bridge_retry_circuit_state(now_monotonic)
             local_state = self._http_bridge_retry_circuits.get(session.key)
@@ -109,7 +110,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     self._http_bridge_retry_circuit_persisted_keys.discard(session.key)
             return True
 
-        now_epoch = time.time()
+        now_epoch = self._http_bridge_retry_circuit_clock.time()
         if now_epoch - persisted.updated_at_epoch > DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS:
             async with self._http_bridge_retry_circuit_lock:
                 stale_local_state = self._http_bridge_retry_circuits.get(session.key)
@@ -176,8 +177,8 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         state: _HTTPBridgeRetryCircuitState,
     ) -> None:
-        now_monotonic = time.monotonic()
-        now_wall = time.time()
+        now_monotonic = self._http_bridge_retry_circuit_clock.monotonic()
+        now_wall = self._http_bridge_retry_circuit_clock.time()
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
         async with self._http_bridge_retry_circuit_lock:
             if self._http_bridge_retry_circuits.get(session.key) is not state:
@@ -265,7 +266,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return True
 
         await self._load_http_bridge_retry_circuit(session)
-        now = time.monotonic()
+        now = self._http_bridge_retry_circuit_clock.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None or state.cooldown_until <= now:
@@ -329,7 +330,7 @@ class _HTTPBridgeRetryCircuitMixin:
             return 0.0
 
         await self._load_http_bridge_retry_circuit(session)
-        now = time.monotonic()
+        now = self._http_bridge_retry_circuit_clock.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None:
@@ -351,7 +352,7 @@ class _HTTPBridgeRetryCircuitMixin:
         base_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS)
         max_backoff = max(base_backoff, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS)
         clean_close_max_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS)
-        now = time.monotonic()
+        now = self._http_bridge_retry_circuit_clock.monotonic()
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.setdefault(
                 session.key,

@@ -42,7 +42,7 @@ class ModelSourcesRepository:
         stmt = (
             select(ModelSource)
             .options(selectinload(ModelSource.models))
-            .join(ModelSourceModel, ModelSourceModel.source_id == ModelSource.id)
+            .join(ModelSourceModel, ModelSourceModel.source_id == model)
             .where(ModelSource.kind == "openai_compatible")
             .where(ModelSource.is_enabled.is_(True))
             .where(ModelSource.supports_chat_completions.is_(True))
@@ -119,7 +119,12 @@ class ModelSourcesRepository:
         stmt = update(ModelSource).where(ModelSource.is_subscription_fallback.is_(True))
         if except_source_id is not None:
             stmt = stmt.where(ModelSource.id != except_source_id)
-        await self._session.execute(stmt.values(is_subscription_fallback=False))
+        # update_source() can have a pending in-memory transition of the new
+        # fallback row to True. Prevent that row from being autoflushed before
+        # this bulk UPDATE clears the previous fallback, otherwise the partial
+        # unique index can reject a valid replacement transaction.
+        with self._session.no_autoflush:
+            await self._session.execute(stmt.values(is_subscription_fallback=False))
         if commit:
             await self._session.commit()
 

@@ -8,13 +8,16 @@ from datetime import datetime, timedelta
 from typing import cast
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.auth import guardian as guardian_module
 from app.core.auth.guardian import AuthGuardianScheduler, build_auth_guardian_scheduler, select_auth_guardian_candidates
 from app.core.auth.refresh import RefreshError
 from app.core.config import settings as settings_module
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, Base
+from app.db.session import close_session
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.repository import AccountsRepository
 
 pytestmark = pytest.mark.unit
 
@@ -280,6 +283,48 @@ async def test_auth_guardian_refresh_once_refreshes_stale_paused_without_changin
 
     assert calls == ["stale-paused"]
     assert paused.status is AccountStatus.PAUSED
+
+
+@pytest.mark.asyncio
+async def test_auth_guardian_refresh_once_survives_candidate_session_close() -> None:
+    now = datetime(2026, 1, 2, 12, 0, 0)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        async with session_factory() as session:
+            session.add(_account("stale-active", status=AccountStatus.ACTIVE, last_refresh=now - timedelta(hours=13)))
+            await session.commit()
+
+        @asynccontextmanager
+        async def repo_factory() -> AsyncIterator[AccountsRepository]:
+            session: AsyncSession = session_factory()
+            try:
+                yield AccountsRepository(session)
+            finally:
+                await close_session(session)
+
+        calls: list[str] = []
+        scheduler = AuthGuardianScheduler(
+            interval_seconds=21600,
+            enabled=True,
+            max_age_seconds=12 * 3600,
+            batch_size=10,
+            concurrency=1,
+            jitter_seconds=0.0,
+            leader_election_factory=lambda: _Leader(),
+            repo_factory=repo_factory,
+            auth_manager_factory=lambda _repo: _AuthManager(calls),
+            sleep=lambda _delay: _noop_sleep(),
+            now=lambda: now,
+        )
+
+        await scheduler._refresh_once()
+
+        assert calls == ["stale-active"]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

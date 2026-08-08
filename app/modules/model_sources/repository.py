@@ -42,7 +42,7 @@ class ModelSourcesRepository:
         stmt = (
             select(ModelSource)
             .options(selectinload(ModelSource.models))
-            .join(ModelSourceModel, ModelSourceModel.source_id == model)
+            .join(ModelSourceModel, ModelSourceModel.source_id == ModelSource.id)
             .where(ModelSource.kind == "openai_compatible")
             .where(ModelSource.is_enabled.is_(True))
             .where(ModelSource.supports_chat_completions.is_(True))

@@ -95,6 +95,7 @@ from app.modules.api_keys.service import (
     ApiKeyInvalidError,
     ApiKeysService,
 )
+from app.modules.model_sources.selection import responses_model_is_source_owned
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -462,7 +463,6 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.model_sources.selection import responses_model_is_source_owned
 from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,

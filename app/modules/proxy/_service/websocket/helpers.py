@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -1583,13 +1583,27 @@ async def _release_websocket_response_create_gate(
         request_state.response_create_admission.release()
         request_state.response_create_admission = None
     if account_response_create_lease is not None and account_response_create_release is not None:
-        await account_response_create_release(account_response_create_lease)
+        await _await_cleanup_deferring_cancellation(account_response_create_release(account_response_create_lease))
     request_state.awaiting_response_created = False
     request_state.response_create_gate = None
     if not request_state.response_create_gate_acquired:
         return
     request_state.response_create_gate_acquired = False
     response_create_gate.release()
+
+
+async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
+    """Finish response-create lease cleanup before propagating cancellation."""
+
+    task = asyncio.ensure_future(awaitable)
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
 
 
 def _pop_terminal_websocket_request_state(

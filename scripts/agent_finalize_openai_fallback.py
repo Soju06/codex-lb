@@ -11,7 +11,7 @@ def patch_model_index() -> None:
     if marker in text:
         return
     old = 'class ModelSource(Base):\n    __tablename__ = "model_sources"\n\n'
-    new = '''class ModelSource(Base):
+    new = """class ModelSource(Base):
     __tablename__ = "model_sources"
     __table_args__ = (
         Index(
@@ -23,7 +23,7 @@ def patch_model_index() -> None:
         ),
     )
 
-'''
+"""
     if text.count(old) != 1:
         raise RuntimeError("ModelSource class anchor changed")
     path.write_text(text.replace(old, new, 1))
@@ -39,10 +39,6 @@ def append_locale_entries(filename: str, entries: dict[str, str]) -> None:
     if not text.endswith("}\n"):
         raise RuntimeError(f"Unexpected locale formatting: {path}")
     prefix = text[:-2].rstrip()
-    if not prefix.endswith("}") and not prefix.endswith('"'):
-        # The locale files are flat JSON objects. This only guards accidental
-        # structural format changes before appending new top-level keys.
-        pass
     additions = ",\n" + ",\n".join(
         f"  {json.dumps(key, ensure_ascii=False)}: {json.dumps(value, ensure_ascii=False)}"
         for key, value in missing.items()

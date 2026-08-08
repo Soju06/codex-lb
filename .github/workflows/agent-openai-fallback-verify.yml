@@ -44,6 +44,7 @@ jobs:
           run uv run python scripts/agent_finalize_openai_fallback.py || status=$?
           if [ "$status" -eq 0 ]; then
             run uv run ruff format \
+              scripts/agent_finalize_openai_fallback.py \
               app/db/models.py \
               app/modules/model_sources/repository.py \
               tests/unit/test_subscription_fallback.py \
@@ -51,6 +52,7 @@ jobs:
           fi
           if [ "$status" -eq 0 ]; then
             run uv run ruff check --fix \
+              scripts/agent_finalize_openai_fallback.py \
               app/db/models.py \
               app/modules/model_sources/repository.py \
               tests/unit/test_subscription_fallback.py \

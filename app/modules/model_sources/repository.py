@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -87,6 +87,41 @@ class ModelSourcesRepository:
             stmt = stmt.where(ModelSource.id.in_(allowed_source_ids))
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def get_subscription_fallback(
+        self,
+        *,
+        allowed_source_ids: set[str] | None = None,
+    ) -> ModelSource | None:
+        if allowed_source_ids is not None and not allowed_source_ids:
+            return None
+        stmt = (
+            select(ModelSource)
+            .options(selectinload(ModelSource.models))
+            .where(ModelSource.kind == "openai_compatible")
+            .where(ModelSource.is_enabled.is_(True))
+            .where(ModelSource.supports_responses.is_(True))
+            .where(ModelSource.is_subscription_fallback.is_(True))
+            .order_by(ModelSource.name, ModelSource.id)
+            .limit(1)
+        )
+        if allowed_source_ids is not None:
+            stmt = stmt.where(ModelSource.id.in_(allowed_source_ids))
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def clear_subscription_fallback(
+        self,
+        *,
+        except_source_id: str | None = None,
+        commit: bool = False,
+    ) -> None:
+        stmt = update(ModelSource).where(ModelSource.is_subscription_fallback.is_(True))
+        if except_source_id is not None:
+            stmt = stmt.where(ModelSource.id != except_source_id)
+        await self._session.execute(stmt.values(is_subscription_fallback=False))
+        if commit:
+            await self._session.commit()
 
     async def find_audio_transcriptions_source_for_model(
         self,

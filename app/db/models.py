@@ -1209,6 +1209,13 @@ class ModelSource(Base):
         server_default=false(),
         nullable=False,
     )
+    is_subscription_fallback: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    fallback_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     supports_audio_transcriptions: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

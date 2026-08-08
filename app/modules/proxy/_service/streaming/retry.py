@@ -76,7 +76,9 @@ from app.modules.proxy.helpers import (
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
+from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
+from app.modules.proxy.subscription_fallback import usage_limit_reservation_transfer_enabled
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _REQUEST_TRANSPORT_WEBSOCKET = "websocket"
@@ -234,6 +236,27 @@ def _payload_size_estimate_bytes(payload: ResponsesRequest) -> int:
 
 
 class _StreamingRetryMixin:
+    def external_fallback_replay_payload(
+        self,
+        payload: ResponsesRequest,
+        headers: Mapping[str, str],
+        *,
+        api_key: ApiKeyData | None,
+    ) -> ResponsesRequest | None:
+        proxy = cast(_StreamingServiceProtocol, self)
+        candidate = payload.model_copy(deep=True)
+        if payload.previous_response_id is not None:
+            candidate = _verified_cross_transport_fresh_replay(proxy, payload=payload, headers=headers, api_key=api_key)
+            if candidate is None:
+                return None
+        try:
+            wire_payload = candidate.to_payload()
+        except Exception:
+            return None
+        if not responses_payload_is_account_neutral_fresh_replay(wire_payload):
+            return None
+        return candidate
+
     async def _stream_with_retry(
         self,
         payload: ResponsesRequest,
@@ -1172,6 +1195,12 @@ class _StreamingRetryMixin:
                         await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         no_accounts_msg = selection.error_message or "Usage limit reached"
                         status_code, error_payload = selection_failure_response(selection)
+                        if propagate_http_errors and usage_limit_reservation_transfer_enabled():
+                            # The route already proved that a replay-safe Model Source fallback is
+                            # available. Transfer the existing API-key reservation to that path
+                            # instead of releasing it in this generator's finally block.
+                            settlement.usage_settlement_transferred = True
+                            raise ProxyResponseError(status_code, error_payload)
                         await proxy._write_request_log(
                             account_id=None,
                             api_key=api_key,

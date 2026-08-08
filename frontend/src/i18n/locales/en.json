@@ -1410,5 +1410,9 @@
   "upstreamProxy.toasts.poolUpdateFailed": "Proxy pool update failed",
   "upstreamProxy.validation.hostRequired": "Host is required",
   "upstreamProxy.validation.nameRequired": "Name is required",
-  "upstreamProxy.validation.portInvalid": "Enter a port between 1 and 65535"
+  "upstreamProxy.validation.portInvalid": "Enter a port between 1 and 65535",
+  "modelSources.fields.subscriptionFallback": "Use as subscription fallback",
+  "modelSources.fields.subscriptionFallbackDescription": "Used only after all eligible ChatGPT accounts report upstream usage exhaustion.",
+  "modelSources.fields.fallbackModelOverride": "Fallback model override (optional)",
+  "modelSources.fields.fallbackModelPlaceholder": "Leave blank to preserve the requested model"
 }

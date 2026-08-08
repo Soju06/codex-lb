@@ -1410,5 +1410,9 @@
   "upstreamProxy.toasts.poolUpdateFailed": "Pool 更新失败",
   "upstreamProxy.validation.hostRequired": "主机不能为空",
   "upstreamProxy.validation.nameRequired": "名称必填",
-  "upstreamProxy.validation.portInvalid": "请输入 1 到 65535 之间的端口"
+  "upstreamProxy.validation.portInvalid": "请输入 1 到 65535 之间的端口",
+  "modelSources.fields.subscriptionFallback": "用作订阅回退",
+  "modelSources.fields.subscriptionFallbackDescription": "仅当所有符合条件的 ChatGPT 账户都达到上游用量限制时使用。",
+  "modelSources.fields.fallbackModelOverride": "回退模型覆盖（可选）",
+  "modelSources.fields.fallbackModelPlaceholder": "留空以保留请求的模型"
 }

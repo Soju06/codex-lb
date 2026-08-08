@@ -707,7 +707,8 @@ def _http_bridge_pending_state_is_stale(
         if request_state.response_create_gate_wait_started_at is not None
         else request_state.started_at
     )
-    if request_state.response_event_count > 0 and request_state.last_upstream_activity_at is not None:
+    has_response_lifecycle_activity = request_state.response_event_count > 0 or request_state.upstream_model_output_seen
+    if has_response_lifecycle_activity and request_state.last_upstream_activity_at is not None:
         wait_started_at = request_state.last_upstream_activity_at
     return max(0.0, now - wait_started_at) >= threshold_seconds
 
@@ -741,7 +742,8 @@ def _http_bridge_eventless_precreated_deadline(
     # response-lifecycle event exists; then use the latest lifecycle activity
     # so deferred reasoning is not retired from the original send time.
     deadline_anchor = sent_at
-    if request_state.response_event_count > 0 and request_state.last_upstream_activity_at is not None:
+    has_response_lifecycle_activity = request_state.response_event_count > 0 or request_state.upstream_model_output_seen
+    if has_response_lifecycle_activity and request_state.last_upstream_activity_at is not None:
         deadline_anchor = request_state.last_upstream_activity_at
     return deadline_anchor + min(
         float(stuck_gate_retire_after_seconds),

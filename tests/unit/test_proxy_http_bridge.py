@@ -251,7 +251,6 @@ def test_http_bridge_eventless_precreated_deadline_requires_narrow_owner_evidenc
 
 def test_http_bridge_eventless_precreated_deadline_survives_reasoning_prelude_without_created() -> None:
     request_state = _make_eventless_http_bridge_owner()
-    request_state.response_event_count = 3
     request_state.last_upstream_activity_at = 150.0
     request_state.upstream_model_output_seen = True
     request_state.deferred_reasoning_downstream_texts.append(
@@ -264,6 +263,42 @@ def test_http_bridge_eventless_precreated_deadline_survives_reasoning_prelude_wi
             stuck_gate_retire_after_seconds=300.0,
         )
         == 150.0 + http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_anchors_deferred_reasoning_prelude_without_created() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_eventless_http_bridge_owner(sent_at=time.monotonic() - 2.0)
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert request_state.response_event_count == 0
+    assert request_state.response_id is None
+    assert request_state.downstream_visible is False
+    assert request_state.upstream_model_output_seen is True
+    assert request_state.last_upstream_activity_at is not None
+    sent_at = request_state.response_create_sent_at
+    assert sent_at is not None
+    assert request_state.last_upstream_activity_at > sent_at
+    assert len(request_state.deferred_reasoning_downstream_texts) == 1
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        == request_state.last_upstream_activity_at
+        + http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
     )
 
 

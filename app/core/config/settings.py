@@ -324,6 +324,8 @@ class Settings(BaseSettings):
     usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
     automations_scheduler_enabled: bool = True
+    telemetry_enabled: bool | None = None
+    telemetry_endpoint: str = "https://telemetry.tokmaxxing.com"
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     # Startup cross-replica encryption-key consistency check against the shared
     # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an

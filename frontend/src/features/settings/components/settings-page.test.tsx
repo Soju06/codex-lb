@@ -19,6 +19,7 @@ const quotaPlannerSectionMock = vi.fn();
 const stickySessionsSectionMock = vi.fn();
 const modelSourcesSettingsMock = vi.fn();
 const dataRetentionSettingsMock = vi.fn();
+const telemetrySettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: () => useSettingsMock(),
@@ -73,6 +74,13 @@ vi.mock("@/features/settings/components/data-retention-settings", () => ({
   DataRetentionSettings: (props: unknown) => {
     dataRetentionSettingsMock(props);
     return <div>Data Retention Settings</div>;
+  },
+}));
+
+vi.mock("@/features/settings/components/telemetry-settings", () => ({
+  TelemetrySettings: (props: unknown) => {
+    telemetrySettingsMock(props);
+    return <div>Telemetry Settings</div>;
   },
 }));
 
@@ -162,6 +170,7 @@ describe("SettingsPage", () => {
     stickySessionsSectionMock.mockReset();
     modelSourcesSettingsMock.mockReset();
     dataRetentionSettingsMock.mockReset();
+    telemetrySettingsMock.mockReset();
   });
 
   async function expandAdvancedSettings() {
@@ -192,6 +201,7 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Appearance Settings")).toBeInTheDocument();
     expect(screen.getByText("Import Settings")).toBeInTheDocument();
     expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    expect(screen.getByText("Telemetry Settings")).toBeInTheDocument();
   });
 
   it("mounts every advanced section after one expand interaction", async () => {
@@ -219,6 +229,7 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
     expect(importSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
     expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    expect(telemetrySettingsMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
 
     await expandAdvancedSettings();
 

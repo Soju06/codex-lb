@@ -81,6 +81,7 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
     RING_HEARTBEAT_INTERVAL_SECONDS,
@@ -276,6 +277,7 @@ async def lifespan(app: FastAPI):
         )
         deleted_bridge_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_owned_sessions_on_startup(
             instance_id=settings.http_responses_session_bridge_instance_id,
+            owner_process_epoch=http_bridge_owner_process_epoch(),
             ownerless_cutoff=ownerless_cutoff,
         )
         if deleted_bridge_rows > 0:

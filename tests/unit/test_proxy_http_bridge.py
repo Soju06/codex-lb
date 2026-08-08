@@ -6,11 +6,12 @@ import inspect
 import json
 import logging
 import pickle
+import subprocess
 import time
 from collections import deque
 from contextlib import nullcontext
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -50,7 +51,7 @@ from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
 )
-from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
@@ -59,6 +60,69 @@ from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission
 
 pytestmark = pytest.mark.unit
+
+
+def _durable_owner_lookup(*, process_epoch: str, lease_expires_at: datetime) -> DurableBridgeLookup:
+    return DurableBridgeLookup(
+        session_id="dead-owner-session",
+        canonical_kind="session_header",
+        canonical_key="dead-owner-key",
+        api_key_scope="anonymous",
+        account_id="acc-bridge",
+        owner_instance_id="bridge-instance",
+        owner_process_epoch=process_epoch,
+        owner_epoch=2,
+        lease_expires_at=lease_expires_at,
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="turn-state",
+        latest_response_id="resp-dead-owner",
+    )
+
+
+def test_http_bridge_dead_owner_epoch_uses_standard_previous_response_not_found_contract() -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    stale = http_bridge_streaming_module._http_bridge_durable_owner_is_dead(
+        _durable_owner_lookup(process_epoch="boot-a", lease_expires_at=now + timedelta(minutes=5)),
+        current_instance="bridge-instance",
+        current_process_epoch="boot-b",
+    )
+    transient = http_bridge_streaming_module._http_bridge_durable_owner_is_dead(
+        _durable_owner_lookup(process_epoch="boot-b", lease_expires_at=now + timedelta(minutes=5)),
+        current_instance="bridge-instance",
+        current_process_epoch="boot-b",
+    )
+
+    assert stale is True
+    assert transient is False
+
+    terminal = cast(
+        dict[str, Any],
+        http_bridge_streaming_module._http_bridge_dead_owner_previous_response_not_found_terminal(
+            previous_response_id="resp-dead-owner",
+            response_id="resp-dead-owner",
+        ),
+    )
+    assert terminal["response"]["error"]["type"] == "invalid_request_error"
+    assert terminal["response"]["error"]["code"] == "previous_response_not_found"
+    assert terminal["response"]["error"]["param"] == "previous_response_id"
+    proxy_error = http_bridge_streaming_module._http_bridge_dead_owner_previous_response_not_found_proxy_error(
+        previous_response_id="resp-dead-owner",
+    )
+    assert proxy_error.status_code == 400
+    assert proxy_error.payload["error"]["type"] == "invalid_request_error"
+    assert proxy_error.payload["error"]["code"] == "previous_response_not_found"
+    assert proxy_error.payload["error"]["param"] == "previous_response_id"
+
+
+def test_http_bridge_rejected_dead_owner_recovery_code_is_not_emitted_from_app() -> None:
+    result = subprocess.run(
+        ["git", "grep", "-n", "bridge_continuity_recovery_required", "--", "app/"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1, result.stdout
 
 
 @pytest.fixture(autouse=True)
@@ -4445,7 +4509,11 @@ async def test_http_bridge_startup_cooldown_releases_api_key_reservation(
     ]
 
     assert len(events) == 1
-    assert '"code":"stream_idle_timeout"' in events[0]
+    # Pre-response-start failures are never stream_idle_timeout: that budget
+    # only starts at response.created.
+    assert '"code":"bridge_eventless_timeout"' in events[0]
+    assert "stream_idle_timeout" not in events[0]
+    assert "Upstream" not in events[0]
     release.assert_awaited_once_with(request_state)
     assert request_state.api_key_reservation is None
 
@@ -4491,7 +4559,8 @@ async def test_http_bridge_post_submit_cooldown_race_detaches_request(
     ]
 
     assert len(events) == 1
-    assert '"code":"stream_idle_timeout"' in events[0]
+    assert '"code":"bridge_eventless_timeout"' in events[0]
+    assert "stream_idle_timeout" not in events[0]
     assert cooldown.await_count == 2
     detach.assert_awaited_once_with(session, request_state=request_state)
 
@@ -19746,6 +19815,166 @@ async def test_stream_via_http_bridge_projects_plaintext_durable_full_resend_whe
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_recovers_dead_owner_with_replayable_full_resend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    settings = _make_app_settings(http_responses_session_bridge_instance_id="bridge-instance")
+    owner_metadata: proxy_service.JsonValue = {"turn_id": "turn-owner"}
+    historical_input: list[proxy_service.JsonValue] = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "old question"}],
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+        {
+            "type": "function_call",
+            "id": "fc_owner",
+            "call_id": "call_old",
+            "name": "lookup",
+            "arguments": "{}",
+            "internal_chat_message_metadata_passthrough": owner_metadata,
+        },
+    ]
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp_completed_anchor",
+            "input": [
+                *historical_input,
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_old",
+                    "output": "old output",
+                    "internal_chat_message_metadata_passthrough": owner_metadata,
+                },
+                {
+                    "type": "message",
+                    "id": "msg_owner",
+                    "role": "assistant",
+                    "status": "completed",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "old answer"}],
+                    "internal_chat_message_metadata_passthrough": owner_metadata,
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "next question"}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": "turn-next"},
+                },
+            ],
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="durable-dead-owner",
+        canonical_kind="session_header",
+        canonical_key="sid-dead-owner",
+        api_key_scope="__anonymous__",
+        account_id="acc-owner",
+        owner_instance_id="bridge-instance",
+        owner_process_epoch="boot-old",
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="sid-dead-owner",
+        latest_response_id="resp_completed_anchor",
+        latest_input_item_count=len(historical_input),
+        latest_input_full_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+        model="gpt-5.4",
+    )
+    captured_request_states: list[proxy_service._WebSocketRequestState] = []
+    captured_text_data: list[str] = []
+    captured_keys: list[proxy_service._HTTPBridgeSessionKey] = []
+    captured_kwargs: list[dict[str, Any]] = []
+
+    async def fake_get_or_create(
+        key: proxy_service._HTTPBridgeSessionKey,
+        **kwargs: Any,
+    ) -> proxy_service._HTTPBridgeSession:
+        captured_keys.append(key)
+        captured_kwargs.append(kwargs)
+        session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        session.account = cast(Any, SimpleNamespace(id="acc-fallback", status=AccountStatus.ACTIVE))
+        session.request_model = payload.model
+        return session
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        **_kwargs: Any,
+    ):
+        captured_request_states.append(request_state)
+        captured_text_data.append(text_data)
+        yield 'data: {"type":"response.created","response":{"id":"resp_recovered"}}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_recovered"}}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(http_bridge_streaming_module, "http_bridge_owner_process_epoch", lambda: "boot-new")
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-dead-owner"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == [
+        'data: {"type":"response.created","response":{"id":"resp_recovered"}}\n\n',
+        'data: {"type":"response.completed","response":{"id":"resp_recovered"}}\n\n',
+    ]
+    assert all("response.failed" not in chunk for chunk in chunks)
+    assert len(captured_keys) == 1
+    assert is_http_bridge_account_neutral_replay(
+        kind=captured_keys[0].affinity_kind,
+        key=captured_keys[0].affinity_key,
+    )
+    assert captured_kwargs[0]["previous_response_id"] is None
+    assert captured_kwargs[0]["durable_lookup"] is None
+    assert captured_request_states[0].previous_response_id is None
+    replay_payload = json.loads(captured_text_data[0])
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"][-1]["content"] == [{"type": "input_text", "text": "next question"}]
+
+
+@pytest.mark.asyncio
 async def test_durable_model_transition_preserves_owner_provenance_when_replacing_retired_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -19813,6 +20042,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
         request_state.awaiting_response_created = False
         request_state.response_create_gate = None
         request_state.response_create_gate_acquired = False
+        assert request_state.durable_owner_dead is False
         raise gate_timeout_error
         yield ""
 
@@ -22143,6 +22373,106 @@ async def test_http_bridge_reader_failure_keeps_waiter_count_when_draining_reque
     assert retired is False
     assert session.queued_request_count == 1
     record_failure.assert_awaited_once_with(session, detail="stream_incomplete")
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_repeated_zero_event_idle_timeouts_poison_anchor_with_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key_value="bridge-anchor-poison",
+        pending_requests=deque([_make_eventless_http_bridge_owner()]),
+        queued_request_count=1,
+    )
+    session.admission_waiter_count = 1
+    session.durable_session_id = "durable-anchor-poison"
+    session.durable_owner_epoch = 3
+    durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+    service._durable_bridge = durable_bridge
+    fail_pending = AsyncMock()
+    retire = AsyncMock()
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+
+    for failure_number in range(1, 8):
+        retired = await service._fail_http_bridge_reader_and_maybe_retire(
+            session,
+            error_code="stream_idle_timeout",
+            error_message="idle timeout",
+        )
+        assert retired is (failure_number == 7)
+
+    durable_bridge.rebind_session_account.assert_awaited_once_with(
+        session_id="durable-anchor-poison",
+        api_key_id=None,
+        instance_id=proxy_service.get_settings().http_responses_session_bridge_instance_id,
+        owner_epoch=3,
+        account_id="acc-bridge",
+        clear_continuity=True,
+    )
+    retire.assert_awaited_once_with(
+        session,
+        detail="repeated_zero_event_idle_timeout",
+        response_events_seen=0,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clear_outcome", [False, RuntimeError("clear failed")])
+async def test_http_bridge_anchor_poisoning_waits_when_durable_clear_fails(
+    clear_outcome: bool | RuntimeError,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key_value="bridge-anchor-poison-clear-fails",
+        pending_requests=deque([_make_eventless_http_bridge_owner()]),
+        queued_request_count=1,
+    )
+    session.admission_waiter_count = 1
+    session.durable_session_id = "durable-anchor-poison-clear-fails"
+    session.durable_owner_epoch = 4
+    rebind = (
+        AsyncMock(side_effect=clear_outcome)
+        if isinstance(clear_outcome, RuntimeError)
+        else AsyncMock(return_value=clear_outcome)
+    )
+    durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+        rebind_session_account=rebind,
+    )
+    service._durable_bridge = durable_bridge
+    fail_pending = AsyncMock()
+    retire = AsyncMock()
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
+
+    with caplog.at_level("WARNING"):
+        for _failure_number in range(1, 8):
+            retired = await service._fail_http_bridge_reader_and_maybe_retire(
+                session,
+                error_code="stream_idle_timeout",
+                error_message="idle timeout",
+            )
+
+    assert retired is False
+    durable_bridge.rebind_session_account.assert_awaited_once_with(
+        session_id="durable-anchor-poison-clear-fails",
+        api_key_id=None,
+        instance_id=proxy_service.get_settings().http_responses_session_bridge_instance_id,
+        owner_epoch=4,
+        account_id="acc-bridge",
+        clear_continuity=True,
+    )
+    retire.assert_not_awaited()
+    assert "poisoned anchor" in caplog.text or "poisoned HTTP bridge continuity" in caplog.text
 
 
 @pytest.mark.asyncio

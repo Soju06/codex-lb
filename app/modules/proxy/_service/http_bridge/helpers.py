@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -39,6 +40,8 @@ from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # 
 from app.core.config.settings import Settings, get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import (
+    HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
+    HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
     openai_error,
@@ -201,6 +204,22 @@ _HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS = 5.0
 # the configured stuck-gate threshold when it is shorter.
 _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS = 60.0
 _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created_timeout"
+# Silence before ``response.created`` is a different failure class than a
+# stream that started and then went quiet. Nothing exists upstream yet, so the
+# request is safe to retry and the upstream is not proven at fault. Keep it out
+# of ``stream_idle_timeout``, whose budget is the post-start
+# ``stream_idle_timeout_seconds``.
+_HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL = HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
+_HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE = (
+    "HTTP responses session bridge saw no response events before its pre-response budget expired; "
+    "no response was created upstream, so the request is safe to retry"
+)
+_HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE = (
+    "HTTP responses session bridge is cooling down after repeated upstream timeouts; retry shortly."
+)
+# Local bridge recovery closes and rebuilds our own upstream session. Reserve
+# upstream-close wording for frames the upstream actually sent.
+_HTTP_BRIDGE_LOCAL_RESET_MESSAGE = HTTP_BRIDGE_LOCAL_RESET_MESSAGE
 T = TypeVar("T")
 
 _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR = "_codex_lb_started_at"
@@ -2567,6 +2586,57 @@ def _http_bridge_request_budget_seconds(settings: object) -> float:
     )
 
 
+def _http_bridge_eventless_budget_seconds(settings: object, *, fallback_seconds: float) -> float:
+    """Named pre-response-start silence budget for the downstream bridge stream.
+
+    Before ``response.created`` the downstream event queue is silent by design,
+    so ``stream_idle_timeout_seconds`` (a *post-start* inter-event budget) does
+    not describe this phase at all. The honest bound is the owner-side stuck
+    gate: once ``http_responses_session_bridge_stuck_gate_retire_after_seconds``
+    retires the pending handoff there is nothing left for the client to wait
+    for. Clamp to the stream-idle and bridge-request budgets so the pre-response
+    watchdog can never outlive the request it guards.
+
+    ``fallback_seconds`` is used when a caller's settings object does not carry
+    ``stream_idle_timeout_seconds`` at all.
+    """
+
+    stuck_gate_seconds = float(
+        getattr(settings, "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
+    )
+    stream_idle_timeout_seconds = float(getattr(settings, "stream_idle_timeout_seconds", fallback_seconds))
+    return max(
+        0.001,
+        min(
+            stuck_gate_seconds,
+            stream_idle_timeout_seconds,
+            _http_bridge_request_budget_seconds(settings),
+        ),
+    )
+
+
+def _http_bridge_eventless_max_keepalive_count(
+    settings: object,
+    *,
+    keepalive_interval_seconds: float,
+    floor_count: int,
+) -> int:
+    """Keepalive ticks the downstream stream waits before ``response.created``.
+
+    Derived from :func:`_http_bridge_eventless_budget_seconds` instead of the
+    implicit ``_STREAM_KEEPALIVE_MAX_COUNT * sse_keepalive_interval_seconds``
+    product, which silently encoded a ~60s pre-response deadline that had no
+    relationship to any configured timeout.
+    """
+
+    interval_seconds = max(0.001, keepalive_interval_seconds)
+    budget_seconds = _http_bridge_eventless_budget_seconds(
+        settings,
+        fallback_seconds=interval_seconds * max(1, floor_count),
+    )
+    return max(max(1, floor_count), math.ceil(budget_seconds / interval_seconds))
+
+
 def _http_bridge_admission_timeout_seconds(
     request_state: _WebSocketRequestState,
     admission_timeout_seconds: float,
@@ -2595,6 +2665,32 @@ def _http_bridge_owner_check_required(
 
 def _http_bridge_key_strength(key: _HTTPBridgeSessionKey) -> str:
     return key.strength or "soft"
+
+
+# Frames the bridge injects into its own downstream streams. They prove the
+# proxy is alive, never that the upstream is.
+_HTTP_BRIDGE_LOCALLY_INJECTED_EVENT_TYPES = frozenset({"codex.keepalive"})
+
+
+def _http_bridge_event_proves_upstream_liveness(event_type: str | None) -> bool:
+    """Return whether an event type is upstream traffic rather than our own."""
+
+    if not event_type:
+        return False
+    return event_type not in _HTTP_BRIDGE_LOCALLY_INJECTED_EVENT_TYPES
+
+
+def _record_http_bridge_unmatched_upstream_liveness(
+    session: "_HTTPBridgeSession",
+    *,
+    event_type: str | None,
+) -> int:
+    """Count an upstream frame that proved liveness but matched no request."""
+
+    if not _http_bridge_event_proves_upstream_liveness(event_type):
+        return session.unmatched_upstream_liveness_count
+    session.unmatched_upstream_liveness_count += 1
+    return session.unmatched_upstream_liveness_count
 
 
 def _log_http_bridge_event(

@@ -7,6 +7,7 @@ from typing import Any
 
 import anyio
 
+from app.core.errors import HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import _HTTPBridgeSession
@@ -24,11 +25,16 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
         "stream_incomplete",
         "clean_close",
         "stream_idle_timeout",
+        # Pre-response-start bridge silence. Deliberately *not* aliased onto
+        # stream_idle_timeout: the whole point is that a circuit opened before
+        # any response existed must be distinguishable from one opened by a
+        # started stream going quiet.
+        HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
     }
 )
 _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES = {
     # These diagnostics describe the same ambiguous idle/incomplete
-    # transport class. Keep the durable contract to the three documented
+    # transport class. Keep the durable contract to the documented
     # failure classes while retaining the more specific event in logs.
     "upstream_keepalive_timeout": "stream_idle_timeout",
     "missing_response_created_timeout": "stream_idle_timeout",
@@ -341,10 +347,10 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         *,
         detail: str,
-    ) -> None:
+    ) -> int | None:
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
-            return
+            return None
 
         await self._load_http_bridge_retry_circuit(session)
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
@@ -385,6 +391,7 @@ class _HTTPBridgeRetryCircuitMixin:
         async with self._http_bridge_retry_circuit_lock:
             if self._http_bridge_retry_circuits.get(session.key) is state:
                 self._http_bridge_retry_circuit_loaded_keys.add(session.key)
+            return state.consecutive_failures
 
     async def _clear_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
         if session.key.strength != "hard":

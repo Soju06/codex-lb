@@ -841,6 +841,10 @@ class _WebSocketRequestState:
     # explicit turn-state header guarantees continuity for stale recovery.
     hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
+    # The durable lookup carried an anchor, but its owner was already stale,
+    # ownerless, or lease-expired when this request arrived.  Such a request
+    # must not be presented to the client as a retryable upstream timeout.
+    durable_owner_dead: bool = False
     # True only when the client's own incoming payload (before this anchor was
     # injected or trimmed) already looked like a full conversation resend
     # (``_http_bridge_payload_looks_like_full_resend``). Deliberately weaker
@@ -1048,6 +1052,11 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+    # Upstream frames that proved transport liveness but matched no pending
+    # request. They are dropped from the downstream queues, so without this
+    # counter a pre-response bridge timeout cannot tell "upstream said nothing"
+    # apart from "upstream spoke and our matching lost the frame".
+    unmatched_upstream_liveness_count: int = 0
 
 
 def _complete_http_bridge_handoff(

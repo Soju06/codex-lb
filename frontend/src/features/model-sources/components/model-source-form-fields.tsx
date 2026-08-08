@@ -43,7 +43,7 @@ export function ModelSourceFormFields({
           name="name"
           render={({ field }) => (
             <FormItem>
-	              <FormLabel>{t("apiKeys.table.name")}</FormLabel>
+              <FormLabel>{t("apiKeys.table.name")}</FormLabel>
               <FormControl>
                 <Input {...field} autoComplete="off" />
               </FormControl>
@@ -57,7 +57,7 @@ export function ModelSourceFormFields({
           name="baseUrl"
           render={({ field }) => (
             <FormItem>
-	              <FormLabel>{t("modelSources.fields.baseUrl")}</FormLabel>
+              <FormLabel>{t("modelSources.fields.baseUrl")}</FormLabel>
               <FormControl>
                 <Input {...field} placeholder="https://api.example.com/v1" autoComplete="off" />
               </FormControl>
@@ -86,7 +86,7 @@ export function ModelSourceFormFields({
         name="models"
         render={({ field }) => (
           <FormItem>
-	            <FormLabel>{t("apiKeys.table.models")}</FormLabel>
+            <FormLabel>{t("apiKeys.table.models")}</FormLabel>
             <FormControl>
               <Input {...field} placeholder="deepseek-v4-flash, local-coder" autoComplete="off" />
             </FormControl>
@@ -97,7 +97,7 @@ export function ModelSourceFormFields({
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
-	          <label className="text-sm font-medium">{t("modelSources.fields.contextWindow")}</label>
+          <label className="text-sm font-medium">{t("modelSources.fields.contextWindow")}</label>
           <Input
             value={draft.contextWindow}
             onChange={(event) => updateDraft({ contextWindow: event.target.value })}
@@ -106,7 +106,7 @@ export function ModelSourceFormFields({
           />
         </div>
         <div className="space-y-1">
-	          <label className="text-sm font-medium">{t("modelSources.fields.maxOutputTokens")}</label>
+          <label className="text-sm font-medium">{t("modelSources.fields.maxOutputTokens")}</label>
           <Input
             value={draft.maxOutputTokens}
             onChange={(event) => updateDraft({ maxOutputTokens: event.target.value })}
@@ -117,13 +117,13 @@ export function ModelSourceFormFields({
       </div>
 
       <div className="space-y-2">
-	        <div className="text-sm font-medium">{t("modelSources.fields.pricing")}</div>
-	        <p className="text-xs text-muted-foreground">
-	          {t("modelSources.fields.pricingDescription")}
-	        </p>
+        <div className="text-sm font-medium">{t("modelSources.fields.pricing")}</div>
+        <p className="text-xs text-muted-foreground">
+          {t("modelSources.fields.pricingDescription")}
+        </p>
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="space-y-1">
-	            <label className="text-xs text-muted-foreground">{t("common.units.input")}</label>
+            <label className="text-xs text-muted-foreground">{t("common.units.input")}</label>
             <Input
               value={draft.inputPer1M}
               onChange={(event) => updateDraft({ inputPer1M: event.target.value })}
@@ -132,7 +132,7 @@ export function ModelSourceFormFields({
             />
           </div>
           <div className="space-y-1">
-	            <label className="text-xs text-muted-foreground">{t("common.units.cached")}</label>
+            <label className="text-xs text-muted-foreground">{t("common.units.cached")}</label>
             <Input
               value={draft.cachedInputPer1M}
               onChange={(event) => updateDraft({ cachedInputPer1M: event.target.value })}
@@ -141,7 +141,7 @@ export function ModelSourceFormFields({
             />
           </div>
           <div className="space-y-1">
-	            <label className="text-xs text-muted-foreground">{t("common.units.output")}</label>
+            <label className="text-xs text-muted-foreground">{t("common.units.output")}</label>
             <Input
               value={draft.outputPer1M}
               onChange={(event) => updateDraft({ outputPer1M: event.target.value })}
@@ -153,13 +153,13 @@ export function ModelSourceFormFields({
       </div>
 
       <div className="space-y-2">
-	        <div className="text-sm font-medium">{t("modelSources.fields.audioPricing")}</div>
-	        <p className="text-xs text-muted-foreground">
-	          {t("modelSources.fields.audioPricingDescription")}
-	        </p>
+        <div className="text-sm font-medium">{t("modelSources.fields.audioPricing")}</div>
+        <p className="text-xs text-muted-foreground">
+          {t("modelSources.fields.audioPricingDescription")}
+        </p>
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="space-y-1">
-	            <label className="text-xs text-muted-foreground">{t("modelSources.fields.perMinute")}</label>
+            <label className="text-xs text-muted-foreground">{t("modelSources.fields.perMinute")}</label>
             <Input
               value={draft.audioPerMinute}
               onChange={(event) => updateDraft({ audioPerMinute: event.target.value })}
@@ -181,18 +181,20 @@ export function ModelSourceFormFields({
               })
             }
           />
-          Use as subscription fallback
+          {t("modelSources.fields.subscriptionFallback")}
         </label>
         <p className="text-xs text-muted-foreground">
-          Used only after all eligible ChatGPT accounts report upstream usage exhaustion.
+          {t("modelSources.fields.subscriptionFallbackDescription")}
         </p>
         {draft.isSubscriptionFallback ? (
           <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Fallback model override (optional)</label>
+            <label className="text-xs text-muted-foreground">
+              {t("modelSources.fields.fallbackModelOverride")}
+            </label>
             <Input
               value={draft.fallbackModel}
               onChange={(event) => updateDraft({ fallbackModel: event.target.value })}
-              placeholder="Leave blank to preserve the requested model"
+              placeholder={t("modelSources.fields.fallbackModelPlaceholder")}
               autoComplete="off"
             />
           </div>
@@ -200,13 +202,13 @@ export function ModelSourceFormFields({
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2">
-	        {CAPABILITY_TOGGLES.map(([key, labelKey]) => (
+        {CAPABILITY_TOGGLES.map(([key, labelKey]) => (
           <label key={key} className="flex items-center gap-2 rounded-md border p-2 text-sm">
             <Checkbox
               checked={draft[key]}
               onCheckedChange={(checked) => updateDraft({ [key]: checked === true })}
             />
-	            {t(labelKey)}
+            {t(labelKey)}
           </label>
         ))}
       </div>

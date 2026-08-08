@@ -66,7 +66,7 @@ describe("ModelSource subscription fallback controls", () => {
     );
   });
 
-  it("submits fallback disablement and clears the model override", async () => {
+  it("submits fallback disablement while preserving the saved override", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 

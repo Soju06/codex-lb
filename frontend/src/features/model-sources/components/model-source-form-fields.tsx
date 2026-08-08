@@ -170,6 +170,35 @@ export function ModelSourceFormFields({
         </div>
       </div>
 
+      <div className="space-y-2 rounded-md border p-3">
+        <label className="flex items-center gap-2 text-sm font-medium">
+          <Checkbox
+            checked={draft.isSubscriptionFallback}
+            onCheckedChange={(checked) =>
+              updateDraft({
+                isSubscriptionFallback: checked === true,
+                supportsResponses: checked === true ? true : draft.supportsResponses,
+              })
+            }
+          />
+          Use as subscription fallback
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Used only after all eligible ChatGPT accounts report upstream usage exhaustion.
+        </p>
+        {draft.isSubscriptionFallback ? (
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">Fallback model override (optional)</label>
+            <Input
+              value={draft.fallbackModel}
+              onChange={(event) => updateDraft({ fallbackModel: event.target.value })}
+              placeholder="Leave blank to preserve the requested model"
+              autoComplete="off"
+            />
+          </div>
+        ) : null}
+      </div>
+
       <div className="grid gap-2 sm:grid-cols-2">
 	        {CAPABILITY_TOGGLES.map(([key, labelKey]) => (
           <label key={key} className="flex items-center gap-2 rounded-md border p-2 text-sm">

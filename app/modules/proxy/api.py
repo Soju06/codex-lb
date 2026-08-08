@@ -267,6 +267,7 @@ from app.modules.proxy.schemas import (
     WarmupSubmittedAccount,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
+from app.modules.proxy.subscription_fallback import usage_limit_reservation_transfer
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -4182,6 +4183,52 @@ async def _select_responses_model_source(
         return (source, candidate) if source is not None else None
 
 
+@dataclass(frozen=True)
+class _PreparedSubscriptionFallback:
+    source: ModelSource
+    payload: ResponsesRequest
+
+
+def _source_has_fallback_model(source: ModelSource, model: str, *, require_streaming: bool) -> bool:
+    return any(
+        item.model == model and item.is_enabled and (not require_streaming or item.supports_streaming)
+        for item in source.models
+    )
+
+
+async def _prepare_subscription_fallback(
+    context: ProxyContext,
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    api_key: ApiKeyData | None,
+    *,
+    require_streaming: bool,
+) -> _PreparedSubscriptionFallback | None:
+    try:
+        replay_payload = context.service.external_fallback_replay_payload(payload, headers, api_key=api_key)
+    except AttributeError:
+        return None
+    if replay_payload is None:
+        return None
+    allowed_source_ids = _allowed_source_ids_for_api_key(api_key)
+    async with get_background_session() as session:
+        source = await ModelSourcesRepository(session).get_subscription_fallback(allowed_source_ids=allowed_source_ids)
+        if source is None:
+            return None
+        effective_model = source.fallback_model or replay_payload.model
+        if not _source_has_fallback_model(source, effective_model, require_streaming=require_streaming):
+            return None
+        prepared_payload = replay_payload.model_copy(update={"model": effective_model}, deep=True)
+        detach_session_objects(session)
+    return _PreparedSubscriptionFallback(source=source, payload=prepared_payload)
+
+
+def _is_usage_limit_proxy_error(exc: ProxyResponseError | OpenAIErrorEnvelopeModel) -> bool:
+    envelope = _parse_error_envelope(exc.payload) if isinstance(exc, ProxyResponseError) else exc
+    error = envelope.error
+    return error is not None and (error.code == USAGE_LIMIT_REACHED or error.type == USAGE_LIMIT_REACHED)
+
+
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
@@ -4347,12 +4394,18 @@ async def _source_responses_response(
     source: ModelSource,
     api_key: ApiKeyData | None,
     rate_limit_headers: Mapping[str, str],
+    reservation_override: ApiKeyUsageReservationData | None = None,
+    reuse_reservation: bool = False,
 ) -> Response:
-    reservation = await _enforce_request_limits(
-        api_key,
-        request_model=payload.model,
-        request_service_tier=payload.service_tier,
-        request_usage_budget=estimate_api_key_request_usage(payload),
+    reservation = (
+        reservation_override
+        if reuse_reservation
+        else await _enforce_request_limits(
+            api_key,
+            request_model=payload.model,
+            request_service_tier=payload.service_tier,
+            request_usage_budget=estimate_api_key_request_usage(payload),
+        )
     )
     source_payload = payload.model_dump_for_forwarding()
     strip_replayed_tool_call_namespaces_from_payload(source_payload)
@@ -5175,6 +5228,9 @@ async def _stream_responses(
                 await _release_reservation(reservation)
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = _CapacityStartupReadyEvent()
+    fallback = await _prepare_subscription_fallback(
+        context, payload, effective_headers, api_key, require_streaming=True
+    )
     payload.stream = True
 
     def build_response_stream() -> AsyncIterator[str]:
@@ -5265,19 +5321,39 @@ async def _stream_responses(
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
-        stream, startup_error = await _probe_stream_startup_error(
-            stream,
-            convert_event_errors=bridge_active and enforce_openai_sdk_contract,
-            timeout_seconds=(
-                _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
-            ),
-            capacity_wait_event=capacity_wait_event,
-            capacity_ready_event=capacity_ready_event,
-        )
+        with usage_limit_reservation_transfer(fallback is not None):
+            stream, startup_error = await _probe_stream_startup_error(
+                stream,
+                convert_event_errors=bridge_active and enforce_openai_sdk_contract,
+                timeout_seconds=(
+                    _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
+                    if prefer_http_bridge
+                    else _STREAM_STARTUP_ERROR_PROBE_SECONDS
+                ),
+                capacity_wait_event=capacity_wait_event,
+                capacity_ready_event=capacity_ready_event,
+            )
     finally:
         _reset_propagated_capacity_startup_ready(capacity_ready_token)
         _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
+        if fallback is not None and _is_usage_limit_proxy_error(startup_error):
+            logger.info(
+                "subscription_fallback_dispatch source_id=%s requested_model=%s fallback_model=%s",
+                fallback.source.id,
+                payload.model,
+                fallback.payload.model,
+            )
+            fallback.payload.stream = True
+            return await _source_responses_response(
+                request,
+                fallback.payload,
+                source=fallback.source,
+                api_key=api_key,
+                rate_limit_headers={**turn_state_headers, **rate_limit_headers},
+                reservation_override=reservation,
+                reuse_reservation=True,
+            )
         startup_error_code = (
             _startup_error_details(startup_error)[0] if isinstance(startup_error, ProxyResponseError) else None
         )
@@ -5405,6 +5481,7 @@ async def _collect_responses(
         if downstream_turn_state is not None
         else {}
     )
+    fallback = await _prepare_subscription_fallback(context, payload, request.headers, api_key, require_streaming=False)
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -5433,11 +5510,29 @@ async def _collect_responses(
         )
     captured_turn_state_headers: dict[str, str] = {}
     try:
-        response_payload = await _collect_responses_payload(
-            stream,
-            captured_turn_state_headers=captured_turn_state_headers,
-        )
+        with usage_limit_reservation_transfer(fallback is not None):
+            response_payload = await _collect_responses_payload(
+                stream,
+                captured_turn_state_headers=captured_turn_state_headers,
+            )
     except ProxyResponseError as exc:
+        if fallback is not None and _is_usage_limit_proxy_error(exc):
+            logger.info(
+                "subscription_fallback_dispatch source_id=%s requested_model=%s fallback_model=%s",
+                fallback.source.id,
+                payload.model,
+                fallback.payload.model,
+            )
+            fallback.payload.stream = False
+            return await _source_responses_response(
+                request,
+                fallback.payload,
+                source=fallback.source,
+                api_key=api_key,
+                rate_limit_headers={**turn_state_headers, **rate_limit_headers},
+                reservation_override=reservation,
+                reuse_reservation=True,
+            )
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
         status_code, error = _mask_previous_response_not_found_error(

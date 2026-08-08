@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
 
 def _entry(
     *,
-    account_id: str = "acc1",
+    account_id: str | None = "acc1",
     used_percent: float = 42.5,
     reset_at: int | None = 1_700_000_000,
     window_minutes: int | None = 60,
@@ -55,3 +55,8 @@ def test_returns_distinct_rows_per_entry() -> None:
     rows = [usage_history_to_window_row(e) for e in (a, b)]
     assert [r.account_id for r in rows] == ["acc-a", "acc-b"]
     assert [r.used_percent for r in rows] == [pytest.approx(10.0), pytest.approx(20.0)]
+
+
+def test_rejects_detached_security_lineage_row() -> None:
+    with pytest.raises(ValueError, match="Detached security-lineage"):
+        usage_history_to_window_row(_entry(account_id=None))

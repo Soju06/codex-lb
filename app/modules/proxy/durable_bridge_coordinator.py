@@ -44,6 +44,7 @@ class DurableBridgeLookup:
     latest_input_full_fingerprint: str | None = None
     model: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
+    requires_security_work_authorized: bool = False
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -622,4 +623,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
         latest_pending_tool_calls=snapshot.latest_pending_tool_calls,
+        requires_security_work_authorized=snapshot.requires_security_work_authorized,
     )

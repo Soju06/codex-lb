@@ -1,0 +1,5 @@
+- [x] Harden pooled session rollback/close against repeated cancellation delivery.
+- [x] Complete source-chat stream close, reservation release, and request-log persistence on disconnect.
+- [x] Release non-stream source-chat reservations on cancellation and unexpected upstream failures.
+- [x] Preserve terminal Responses settlement after downstream disconnect.
+- [x] Run regression and named proxy/integration suites.

@@ -1801,6 +1801,17 @@ class _StreamingRetryMixin:
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             ):
                                 yield line
+                        except asyncio.CancelledError:
+                            # A terminal frame may already have been yielded when
+                            # downstream cancellation is delivered on the next
+                            # generator resume. Finalize that successful usage and
+                            # health result before propagating cancellation so the
+                            # reservation is not released as abandoned.
+                            if settlement.status == "success" and not settled:
+                                settled = await _settle_stream_usage_before_pending_penalty(settlement)
+                                if settled and settlement.record_success:
+                                    await proxy._load_balancer.record_success(account)
+                            raise
                         except (_TransientStreamError, ProxyResponseError) as tex:
                             if account.id == account_model_replacement_account_id:
                                 # Account/model routing gets exactly one selected

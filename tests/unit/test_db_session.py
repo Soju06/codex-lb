@@ -376,6 +376,54 @@ async def test_close_session_rolls_back_open_transaction_before_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_close_session_outlives_caller_cancellation() -> None:
+    rollback_started = asyncio.Event()
+    rollback_release = asyncio.Event()
+    close_started = asyncio.Event()
+    close_release = asyncio.Event()
+    cleanup_done = asyncio.Event()
+    calls: list[str] = []
+
+    class FakeSession:
+        def in_transaction(self) -> bool:
+            return True
+
+        async def rollback(self) -> None:
+            calls.append("rollback-start")
+            rollback_started.set()
+            await rollback_release.wait()
+            calls.append("rollback-end")
+
+        async def close(self) -> None:
+            calls.append("close-start")
+            close_started.set()
+            await close_release.wait()
+            calls.append("close-end")
+
+    async def run_cleanup() -> None:
+        try:
+            await session_module.close_session(cast(session_module.AsyncSession, FakeSession()))
+        finally:
+            cleanup_done.set()
+
+    async with asyncio.TaskGroup() as group:
+        task = group.create_task(run_cleanup())
+        await rollback_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert calls == ["rollback-start"]
+        assert not cleanup_done.is_set()
+        rollback_release.set()
+        await close_started.wait()
+        close_release.set()
+
+    assert calls == ["rollback-start", "rollback-end", "close-start", "close-end"]
+    assert cleanup_done.is_set()
+
+
+@pytest.mark.asyncio
 async def test_detach_session_objects_keeps_loaded_fields_available_after_rollback() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

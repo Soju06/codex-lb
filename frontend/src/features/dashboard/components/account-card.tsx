@@ -4,6 +4,11 @@ import { useTranslation } from "react-i18next";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
+import {
+  accountSubscriptionCredits,
+  formatCreditValue,
+  formatPurchasedCredits,
+} from "@/features/dashboard/account-credit-display";
 import { cn } from "@/lib/utils";
 import type { AccountSummary } from "@/features/dashboard/schemas";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
@@ -89,16 +94,8 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
     account.windowMinutesMonthly != null &&
     account.windowMinutesPrimary == null &&
     account.windowMinutesSecondary == null;
-  const displayCredits = account.creditsBalance ?? (
-    monthlyOnly
-      ? account.remainingCreditsMonthly
-      : weeklyOnly
-        ? account.remainingCreditsSecondary
-        : (account.remainingCreditsSecondary ?? account.remainingCreditsPrimary)
-  );
-  const creditsLabel = account.creditsUnlimited ? t("common.states.unlimited") : (
-    displayCredits === null || displayCredits === undefined ? "-" : displayCredits.toFixed(2)
-  );
+  const subscriptionCreditsLabel = formatCreditValue(accountSubscriptionCredits(account));
+  const purchasedCreditsLabel = formatPurchasedCredits(account, t("common.states.unlimited"));
 
   const primaryReset = formatQuotaResetLabel(account.resetAtPrimary ?? null);
   const secondaryReset = formatQuotaResetLabel(account.resetAtSecondary ?? null);
@@ -198,11 +195,19 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
         </Button>
       </div>
 
-      <div className="mt-3 text-xs text-muted-foreground">
-        {t("components.donut.credits")}:{" "}
-        <span className="font-medium tabular-nums text-foreground">
-          {creditsLabel}
-        </span>
+      <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
+        <p>
+          {t("dashboard.accounts.subscriptionCredits")}:{" "}
+          <span className="font-medium tabular-nums text-foreground">
+            {subscriptionCreditsLabel}
+          </span>
+        </p>
+        <p>
+          {t("dashboard.accounts.purchasedCredits")}:{" "}
+          <span className="font-medium tabular-nums text-foreground">
+            {purchasedCreditsLabel}
+          </span>
+        </p>
       </div>
 
       {/* Actions */}

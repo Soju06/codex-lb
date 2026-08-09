@@ -312,7 +312,7 @@ export function AccountList({
       className="overflow-x-auto rounded-lg border bg-card"
     >
       <div
-        className="min-w-[54rem] divide-y overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="min-w-[76rem] divide-y overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         style={{ maxHeight: `${ACCOUNT_LIST_VISIBLE_ROWS * ACCOUNT_LIST_ROW_HEIGHT_REM}rem` }}
       >
         <div

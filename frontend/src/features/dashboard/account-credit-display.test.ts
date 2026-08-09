@@ -54,6 +54,19 @@ describe("account credit display", () => {
     expect(accountSubscriptionCredits(account)).toBe(100);
   });
 
+  it("falls back to primary credits for legacy accounts without window metadata", () => {
+    const account = createAccountSummary({
+      windowMinutesPrimary: null,
+      windowMinutesSecondary: null,
+      windowMinutesMonthly: null,
+      remainingCreditsPrimary: 100,
+      remainingCreditsSecondary: null,
+      remainingCreditsMonthly: null,
+    });
+
+    expect(accountSubscriptionCredits(account)).toBe(100);
+  });
+
   it("formats unlimited only for purchased credits", () => {
     const account = createAccountSummary({ creditsUnlimited: true, creditsBalance: null });
 

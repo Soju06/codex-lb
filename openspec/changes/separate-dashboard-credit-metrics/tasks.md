@@ -4,6 +4,7 @@
 - [x] 1.2 Render and sort the two metrics independently in card and list views.
 - [x] 1.3 Add localized labels for each metric.
 - [x] 1.4 Migrate the persisted legacy `credits` sort key to purchased credits.
+- [x] 1.5 Keep the compact list minimum width aligned with its eight column tracks.
 
 ## 2. Validation
 

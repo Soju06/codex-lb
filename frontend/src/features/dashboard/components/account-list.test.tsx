@@ -47,6 +47,7 @@ describe("AccountList", () => {
     expect(screen.getByText("5065.20")).toBeInTheDocument();
     expect(screen.getByText("42.50")).toBeInTheDocument();
     expect(screen.getByText("On")).toBeInTheDocument();
+    expect(screen.getByTestId("dashboard-account-list").firstElementChild).toHaveClass("min-w-[76rem]");
   });
 
   it("renders primary idle warm-up attempts as 5h", () => {

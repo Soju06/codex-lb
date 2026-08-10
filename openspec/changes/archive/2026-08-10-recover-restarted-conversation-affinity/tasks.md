@@ -13,7 +13,7 @@
 - [x] 2.2 Add atomic unavailable-owner tombstoning guarded by mapping owner and account status.
 - [x] 2.3 Thread the capability through HTTP and WebSocket selection and rerun normal selection after successful retirement.
 - [x] 2.4 Restrict retirement mutation to the authenticated effective account scope and preserve generated turn-state cleanup across account changes.
-- [x] 2.5 Prevent bridge reuse/forwarding and stale account snapshots from bypassing or undoing successful restart retirement.
+- [x] 2.5 Prevent bridge reuse/forwarding, leaked one-shot restart authority, and stale account snapshots from bypassing or undoing guarded restart retirement.
 - [x] 2.6 Persist source-qualified session-header abandonment while retaining hard explicit turn-state ownership.
 - [x] 2.7 Separate authenticated sticky-mutation authority from model and service-tier replacement eligibility.
 - [x] 2.8 Encode source-qualified retirement so legacy readers retain hard ownership, and preserve the retired owner as exclusion evidence on every typed read.

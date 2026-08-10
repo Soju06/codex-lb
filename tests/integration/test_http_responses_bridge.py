@@ -643,6 +643,15 @@ class _CompleteThenReasoningAbruptCloseUpstreamWebSocket(_ReasoningThenAbruptClo
         await super().send_text(text)
 
 
+class _CompleteThenPrecreatedCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        if not self.sent_text:
+            await super().send_text(text)
+            return
+        self.sent_text.append(text)
+        await self._messages.put(_FakeUpstreamMessage("close", close_code=1011))
+
+
 class _ErrorOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -6121,6 +6130,227 @@ async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_u
     assert rows[raw_session].continuity_abandoned_at is not None
     assert rows[selection_key].account_id == replacement.id
     assert rows[selection_key].continuity_abandoned_at is None
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_goal_restart_keeps_authority_for_same_request_reconnect(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_reconnect_restart_owner",
+        "backend-bridge-reconnect-restart-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_reconnect_restart_replacement",
+        "backend-bridge-reconnect-restart-replacement@example.com",
+    )
+    owner = await _get_account(owner_id)
+    replacement = await _get_account(replacement_id)
+    owner_chatgpt_account_id = cast(str, owner.chatgpt_account_id)
+    replacement_chatgpt_account_id = cast(str, replacement.chatgpt_account_id)
+    raw_session = "backend-bridge-reconnect-restart-session"
+    selection_key = _codex_session_selection_key(raw_session)
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner.id,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        )
+
+    class _OwnerBecomesUnavailableBeforeResponse(_FakeBridgeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            async with SessionLocal() as session:
+                await session.execute(
+                    update(Account).where(Account.id == owner.id).values(status=AccountStatus.QUOTA_EXCEEDED)
+                )
+                await session.commit()
+            await self._messages.put(_FakeUpstreamMessage("close", close_code=1000))
+
+    owner_upstream = _OwnerBecomesUnavailableBeforeResponse("resp_bridge_reconnect_restart_owner")
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_reconnect_restart_replacement")
+    connected_account_ids: list[str] = []
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connected_account_ids.append(account_id_header)
+        if account_id_header == owner_chatgpt_account_id:
+            return owner_upstream
+        assert account_id_header == replacement_chatgpt_account_id
+        return replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    restart_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        headers={"session_id": raw_session},
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Continue the existing task.",
+            "input": [
+                {
+                    "role": "developer",
+                    "content": (
+                        '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                    ),
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert restart_events[-1]["response"]["id"] == "resp_bridge_reconnect_restart_replacement_1"
+    assert connected_account_ids == [owner_chatgpt_account_id, replacement_chatgpt_account_id]
+    assert len(owner_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 1
+    async with SessionLocal() as session:
+        rows = {
+            row.key: row
+            for row in (
+                await session.execute(
+                    select(StickySession).where(
+                        StickySession.key.in_((raw_session, selection_key)),
+                        StickySession.kind == proxy_module.StickySessionKind.CODEX_SESSION,
+                    )
+                )
+            ).scalars()
+        }
+    assert rows[raw_session].account_id == owner.id
+    assert rows[raw_session].continuity_abandoned_at is not None
+    assert rows[selection_key].account_id == replacement.id
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_goal_restart_authority_does_not_leak_to_reused_bridge(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_one_shot_restart_owner",
+        "backend-bridge-one-shot-restart-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_one_shot_restart_replacement",
+        "backend-bridge-one-shot-restart-replacement@example.com",
+    )
+    owner = await _get_account(owner_id)
+    replacement = await _get_account(replacement_id)
+    owner_chatgpt_account_id = cast(str, owner.chatgpt_account_id)
+    replacement_chatgpt_account_id = cast(str, replacement.chatgpt_account_id)
+    raw_session = "backend-bridge-one-shot-restart-session"
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner.id,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        )
+
+    owner_upstream = _CompleteThenPrecreatedCloseUpstreamWebSocket("resp_bridge_one_shot_owner")
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_one_shot_replacement")
+    connected_account_ids: list[str] = []
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connected_account_ids.append(account_id_header)
+        if account_id_header == owner_chatgpt_account_id:
+            return owner_upstream
+        assert account_id_header == replacement_chatgpt_account_id
+        return replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    headers = {"session_id": raw_session}
+    restart_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        headers=headers,
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Continue the existing task.",
+            "input": [
+                {
+                    "role": "developer",
+                    "content": (
+                        '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                    ),
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            ],
+            "stream": True,
+        },
+    )
+    assert restart_events[-1]["response"]["id"] == "resp_bridge_one_shot_owner_1"
+
+    service = get_proxy_service_for_app(app_instance)
+    bridge_key = proxy_module._HTTPBridgeSessionKey("session_header", raw_session, None)
+    async with service._http_bridge_lock:
+        bridge = service._http_bridge_sessions[bridge_key]
+    assert bridge.affinity.abandon_unavailable_legacy_owner is False
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner.id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.commit()
+
+    ordinary_response = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "ordinary follow-up without restart authority",
+                "stream": True,
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert ordinary_response.status_code == 502
+    assert ordinary_response.json()["error"]["code"] == "upstream_unavailable"
+    assert connected_account_ids == [owner_chatgpt_account_id]
+    assert len(owner_upstream.sent_text) == 2
+    assert replacement_upstream.sent_text == []
+    async with SessionLocal() as session:
+        raw_mapping = await StickySessionsRepository(session).get_account_id_and_abandonment(
+            raw_session,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        )
+    assert raw_mapping.account_id == owner.id
+    assert raw_mapping.continuity_abandoned is False
 
 
 @pytest.mark.asyncio

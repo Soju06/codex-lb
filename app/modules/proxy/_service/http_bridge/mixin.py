@@ -228,6 +228,15 @@ _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
 
 
+def _persistent_http_bridge_affinity(affinity: _AffinityPolicy) -> _AffinityPolicy:
+    if not affinity.abandon_unavailable_legacy_owner:
+        return affinity
+    # Restart authority is proof attached to one canonical request body, not a
+    # property of the process session. A bridge outlives that request, so never
+    # let later ordinary requests inherit permission to retire hard ownership.
+    return replace(affinity, abandon_unavailable_legacy_owner=False)
+
+
 class _HTTPBridgeMixin(
     _HTTPBridgeStreamingMixin,
     _HTTPBridgeSessionRegistryMixin,
@@ -1977,7 +1986,7 @@ class _HTTPBridgeMixin(
         session = _HTTPBridgeSession(
             key=key,
             headers=connect_headers,
-            affinity=affinity,
+            affinity=_persistent_http_bridge_affinity(affinity),
             api_key=api_key,
             request_model=request_model,
             request_service_tier=request_service_tier,
@@ -2015,6 +2024,11 @@ class _HTTPBridgeMixin(
         selection_affinity: _AffinityPolicy | None = None,
     ) -> None:
         request_state.response_create_sent_at = None
+        if selection_affinity is None and request_state.affinity_policy.abandon_unavailable_legacy_owner:
+            # The stored session policy deliberately drops this one-shot bit.
+            # A reconnect owned by the authorizing request must still carry its
+            # proof into guarded selection, without granting it to later turns.
+            selection_affinity = request_state.affinity_policy
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
@@ -2409,7 +2423,7 @@ class _HTTPBridgeMixin(
                 session.last_completed_input_count = 0
                 session.last_completed_input_prefix_fingerprint = None
                 session.last_pending_tool_calls.clear()
-                session.affinity = selection_affinity or session.affinity
+                session.affinity = _persistent_http_bridge_affinity(selection_affinity or session.affinity)
                 session.codex_session = session.key.affinity_kind == "thread_header"
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None

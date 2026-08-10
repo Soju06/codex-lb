@@ -438,6 +438,13 @@ class _HTTPBridgeMixin(
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
             key, incoming_turn_state, previous_response_id, forwarded_request, forwarded_original_request_unanchored
         )
+        # Model-transition isolation intentionally drops the durable lookup as a
+        # routing input below. Preserve generation provenance first: the same
+        # replica id can still name an older socket/process whose late release
+        # must be fenced by a newly advanced owner epoch.
+        same_replica_durable_predecessor = bool(
+            durable_lookup and durable_lookup.owner_instance_id == settings.http_responses_session_bridge_instance_id
+        )
         model_transition_rebind = bool(
             durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, request_model)
         )
@@ -1281,9 +1288,15 @@ class _HTTPBridgeMixin(
                                 owner_check_applied=owner_check_required,
                             )
                     elif inflight_future is None:
-                        while (
-                            _http_bridge_capacity_generation_count(self) >= max_sessions and self._http_bridge_sessions
-                        ):
+                        # Detached generations remain globally capacity-owned
+                        # until close finalization. This request may discount
+                        # only the idle generations it has committed to close
+                        # synchronously below, before its inflight reservation
+                        # can create a replacement socket.
+                        def capacity_after_planned_closes() -> int:
+                            return _http_bridge_capacity_generation_count(self) - len(sessions_to_close_before_create)
+
+                        while capacity_after_planned_closes() >= max_sessions and self._http_bridge_sessions:
                             evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
                             for candidate_key, candidate_session in self._http_bridge_sessions.items():
                                 if candidate_key == model_transition_parent_key:
@@ -1318,7 +1331,7 @@ class _HTTPBridgeMixin(
                             detached = self._detach_http_bridge_session_locked(lru_key, expected_session=lru_session)
                             if detached is not None:
                                 sessions_to_close_before_create.append(detached)
-                        if _http_bridge_capacity_generation_count(self) >= max_sessions:
+                        if capacity_after_planned_closes() >= max_sessions:
                             if _http_bridge_inflight_creation_count(self):
                                 capacity_wait_future = next(
                                     future
@@ -1544,18 +1557,13 @@ class _HTTPBridgeMixin(
                             create_kwargs.pop(optional_kwarg, None)
                 created_session = await create_session(key, **create_kwargs)
                 await _raise_if_http_bridge_creation_superseded(self, key, inflight_future=inflight_future)
-                current_instance = settings.http_responses_session_bridge_instance_id
-                # Replica ids route traffic, not socket generations. Advance a
-                # same-replica replacement so predecessor or prior-process
-                # releases cannot close it.
-                same_replica_owner = bool(durable_lookup and durable_lookup.owner_instance_id == current_instance)
                 await self._claim_durable_http_bridge_session(
                     created_session,
                     allow_takeover=_http_bridge_claim_allows_takeover(
                         durable_lookup,
                         force=force_durable_takeover,
                     ),
-                    force_owner_epoch_advance=(force_durable_takeover or same_replica_owner),
+                    force_owner_epoch_advance=(force_durable_takeover or same_replica_durable_predecessor),
                     # restart_takeover means recovering a row whose previous
                     # owner is genuinely gone. Every claim now advances the
                     # epoch, so epoch > 1 alone would also count ordinary
@@ -1623,30 +1631,6 @@ class _HTTPBridgeMixin(
                     else None,
                 )
             return created_session
-
-    async def close_all_http_bridge_sessions(self) -> None:
-        async with self._http_bridge_lock:
-            sessions_to_close, inflight_futures = self._take_all_http_bridge_sessions_locked()
-        shutdown_error = ProxyResponseError(
-            503,
-            openai_error(
-                "upstream_unavailable",
-                "HTTP responses session bridge is shutting down",
-                error_type="server_error",
-            ),
-        )
-        for inflight_future in inflight_futures:
-            if inflight_future.done():
-                continue
-            inflight_future.set_exception(shutdown_error)
-            inflight_future.exception()
-        for session in sessions_to_close:
-            await self._close_http_bridge_session(session)
-        await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
-        event_batcher = getattr(self, "_http_bridge_operation_event_batcher", None)
-        close_batcher = getattr(event_batcher, "close", None)
-        if callable(close_batcher):
-            await close_batcher()
 
     async def mark_http_bridge_draining(self) -> None:
         try:

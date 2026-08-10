@@ -9,6 +9,7 @@
 - [x] 1.7 Add regressions for reserved predecessor submission, bounded detached generations, and shutdown cleanup.
 - [x] 1.8 Add regressions for detached alias fencing, common close finalization, drained reservation cleanup, and account invalidation.
 - [x] 1.9 Add regressions for cancellation-safe detached closure and same-replica durable-generation fencing.
+- [x] 1.10 Add regressions for idle detached capacity, admission-closed account invalidation, cancellation-safe global shutdown, and same-replica model-transition fencing.
 
 ## 2. Implementation
 
@@ -23,6 +24,7 @@
 - [x] 2.9 Preserve request-owned admission across replacement and track detached live generations through closure.
 - [x] 2.10 Fence detached continuity publication and finalize every detached generation through reservation, account, direct-close, and shutdown paths.
 - [x] 2.11 Defer direct-close cancellation through resource finalization and advance same-replica replacement owner epochs.
+- [x] 2.12 Keep every detached generation capacity-owned, make resource close single-flight, preserve model-transition epoch provenance, and schedule all shutdown closes before cancellation propagation.
 
 ## 3. Validation and Documentation
 

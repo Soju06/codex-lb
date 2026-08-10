@@ -7,7 +7,7 @@ Define sticky-session operation contracts so durable sessions, dashboard affinit
 ### Requirement: Sticky sessions are explicitly typed
 The system SHALL persist each sticky-session mapping with an explicit kind so durable Codex backend affinity, durable dashboard sticky-thread routing, and bounded prompt-cache affinity can be managed independently. Budget-pressure reallocation MUST apply only to mappings whose kind/source is soft. A raw or legacy `codex_session` mapping MUST remain owner-bound because it may represent explicit turn-state continuity; budget pressure MUST NOT delete or rebind it.
 
-An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. Classification MUST use the canonical upstream request form so accepted compatibility controls and transport-envelope fields do not make equivalent requests disagree. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's account-assignment and security-policy scope computed before model and service-tier eligibility; local capacity, model eligibility, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT determine mutation authority. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account. Because a raw key's persisted source is ambiguous, goal-restart abandonment MUST apply only to `session_header` interpretation and MUST retain the stored account as hard ownership for an explicit `turn_state` lookup using the same text. During a rolling deployment or rollback, replicas that do not understand source-qualified abandonment MUST continue treating that retained account as hard ownership. A selector that observes source-qualified abandonment initially or after losing the retirement compare-and-set MUST exclude the retained retired owner until replacement affinity is persisted, even if its account inputs predate retirement. Restart authority MUST remain scoped to the classified request and MUST NOT persist on a reusable bridge for later requests. A live or durable HTTP bridge for the same process session MUST NOT bypass this guarded selection through local reuse, owner forwarding, or preferred-owner promotion. Canonical replacement MUST preserve an already reserved predecessor request's authority to submit on its detached draining generation after queue publication clears the mutable reservation marker. A detached predecessor MAY finish its admitted response but MUST NOT publish new turn-state or previous-response aliases under the replacement generation's canonical key. Every detached live generation MUST remain owned by the bridge lifecycle, MUST count against the configured session cap until its close task completes, and MUST be closed during service shutdown, account invalidation, or drained reservation cleanup. All close paths MUST release detached-generation ownership only after resource closure finishes, even when the close caller is cancelled. A new local bridge generation that replaces durable ownership under the same replica identity MUST advance the durable owner epoch before serving requests so a predecessor's late release cannot close the replacement lease.
+An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. Classification MUST use the canonical upstream request form so accepted compatibility controls and transport-envelope fields do not make equivalent requests disagree. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's account-assignment and security-policy scope computed before model and service-tier eligibility; local capacity, model eligibility, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT determine mutation authority. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account. Because a raw key's persisted source is ambiguous, goal-restart abandonment MUST apply only to `session_header` interpretation and MUST retain the stored account as hard ownership for an explicit `turn_state` lookup using the same text. During a rolling deployment or rollback, replicas that do not understand source-qualified abandonment MUST continue treating that retained account as hard ownership. A selector that observes source-qualified abandonment initially or after losing the retirement compare-and-set MUST exclude the retained retired owner until replacement affinity is persisted, even if its account inputs predate retirement. Restart authority MUST remain scoped to the classified request and MUST NOT persist on a reusable bridge for later requests. A live or durable HTTP bridge for the same process session MUST NOT bypass this guarded selection through local reuse, owner forwarding, or preferred-owner promotion. Canonical replacement MUST preserve an already reserved predecessor request's authority to submit on its detached draining generation after queue publication clears the mutable reservation marker. A detached predecessor MAY finish its admitted response but MUST NOT publish new turn-state or previous-response aliases under the replacement generation's canonical key. Every detached generation, including an idle generation already marked closed for admission, MUST remain owned by the bridge lifecycle, MUST count against the configured session cap until resource closure completes, and MUST be closed during service shutdown, account invalidation, or drained reservation cleanup. The admission-only closed state MUST NOT be treated as proof that the socket and leases have a close owner. Resource teardown MUST be single-flight, and all close paths MUST release detached-generation ownership only after resource closure finishes, even when a close caller is cancelled. Shutdown MUST schedule and await every snapshotted generation before propagating cancellation. A new local bridge generation that replaces durable ownership under the same replica identity MUST advance the durable owner epoch before serving requests so a predecessor's late release cannot close the replacement lease, including when model-transition isolation discards the durable lookup as a routing input.
 
 #### Scenario: Soft sticky reallocation uses split primary and secondary pressure thresholds
 - **WHEN** a request resolves an existing prompt-cache, sticky-thread, or other explicitly soft mapping
@@ -117,12 +117,27 @@ An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_sess
 - **THEN** the service refuses another generation with its bounded local-capacity error
 - **AND** detached sockets, readers, durable leases, and account leases are not omitted from capacity accounting
 
+#### Scenario: Idle detached predecessor remains capacity owned while closing
+
+- **GIVEN** a verified restart replaces an idle canonical bridge and its resource close is still running
+- **WHEN** another restart would exceed the configured session cap
+- **THEN** the admission-closed predecessor still counts as a detached generation
+- **AND** the service either closes an evictable canonical generation before replacement creation or refuses the new generation
+
 #### Scenario: Shutdown closes detached bridge generations
 
 - **GIVEN** canonical replacement detached an older generation whose request is still draining
 - **WHEN** the service closes all HTTP bridge sessions
 - **THEN** it closes both canonical and detached generations
 - **AND** no detached socket, reader, durable lease, or account lease escapes shutdown ownership
+
+#### Scenario: Shutdown cancellation does not orphan later generations
+
+- **GIVEN** shutdown snapshots multiple canonical or detached bridge generations
+- **AND** one generation has a slow resource close
+- **WHEN** the shutdown caller is cancelled
+- **THEN** every snapshotted generation receives a close owner before cancellation is propagated
+- **AND** shutdown awaits all of those closes through resource finalization
 
 #### Scenario: Detached predecessor cannot publish replacement continuity
 
@@ -143,6 +158,20 @@ An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_sess
 - **WHEN** the account is deactivated, requires reauthentication, or changes proxy binding
 - **THEN** the service closes every generation authenticated to that account
 - **AND** no detached socket remains routed through the invalid account binding
+
+#### Scenario: Admission-closed detached generation is still invalidated
+
+- **GIVEN** a detached generation is marked closed for admission but has no resource-close owner
+- **WHEN** its account is invalidated
+- **THEN** the service schedules resource teardown for that generation
+- **AND** an already owned or successfully finalized close is not scheduled twice
+
+#### Scenario: Same-replica model replacement advances the durable epoch
+
+- **GIVEN** a durable bridge row names the current replica and an older model
+- **WHEN** model-transition isolation creates a replacement generation and stops using that row for routing
+- **THEN** the replacement claim still advances the durable owner epoch
+- **AND** the predecessor's late release cannot close the replacement lease
 
 #### Scenario: Stale selection snapshot cannot repin a retired owner
 

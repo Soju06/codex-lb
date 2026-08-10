@@ -16,6 +16,7 @@ from app.core.metrics.prometheus import (
 from app.db.models import StickySessionKind
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_allow_durable_takeover,
+    _await_task_deferring_cancellation,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_live_previous_response_alias_owner,
     _http_bridge_live_turn_state_alias_owner,
@@ -89,6 +90,41 @@ class _HTTPBridgeSessionRegistryMixin:
             return 0
         self._schedule_http_bridge_session_closes(pruned_sessions, reason="idle_sweep")
         return len(pruned_sessions)
+
+    async def close_all_http_bridge_sessions(self: _HTTPBridgeServiceProtocol) -> None:
+        async with self._http_bridge_lock:
+            sessions_to_close, inflight_futures = self._take_all_http_bridge_sessions_locked()
+        shutdown_error = ProxyResponseError(
+            503,
+            openai_error(
+                "upstream_unavailable",
+                "HTTP responses session bridge is shutting down",
+                error_type="server_error",
+            ),
+        )
+
+        async def finish_shutdown() -> None:
+            for inflight_future in inflight_futures:
+                if inflight_future.done():
+                    continue
+                inflight_future.set_exception(shutdown_error)
+                inflight_future.exception()
+            # The registry snapshot is no longer discoverable after the lock is
+            # released. Start every close concurrently, then await every result,
+            # so cancellation cannot strand the tail of a sequential close loop.
+            close_results = await asyncio.gather(
+                *(self._close_http_bridge_session(session) for session in sessions_to_close),
+                return_exceptions=True,
+            )
+            await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
+            for result in close_results:
+                if isinstance(result, BaseException):
+                    raise result
+
+        shutdown_task = asyncio.create_task(finish_shutdown(), name="http-bridge-shutdown-close-all")
+        _, cancellation = await _await_task_deferring_cancellation(shutdown_task)
+        if cancellation is not None:
+            raise cancellation
 
     async def _register_http_bridge_turn_state(
         self: _HTTPBridgeServiceProtocol,
@@ -390,11 +426,11 @@ class _HTTPBridgeSessionRegistryMixin:
         self._http_bridge_sessions.pop(key, None)
         if mark_closed:
             session.closed = True
-        else:
-            # Canonical replacement may detach a generation while its admitted
-            # request drains. Keep owning it until close so caps and shutdown do
-            # not lose the generation's socket, reader, durable lease, or account lease.
-            self._http_bridge_detached_sessions[id(session)] = session
+        # Detachment removes only canonical routing. Even an idle generation
+        # marked closed may retain a slow-closing socket, reader, durable lease,
+        # or account lease, so lifecycle/capacity ownership lasts through the
+        # common resource-close finalizer for every detached generation.
+        self._http_bridge_detached_sessions[id(session)] = session
         self._unregister_http_bridge_turn_states_locked(session)
         self._unregister_http_bridge_previous_response_ids_locked(session)
         return session

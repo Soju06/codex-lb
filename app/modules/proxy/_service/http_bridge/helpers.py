@@ -955,15 +955,32 @@ async def _close_http_bridge_session(
     # leases are actually finalized; only then may detached-capacity tracking
     # disappear. Otherwise cancellation can turn a live predecessor into an
     # unowned generation that neither shutdown nor capacity accounting sees.
-    close_task = asyncio.create_task(
-        _close_http_bridge_session_resources(
-            service,
-            session,
-            turn_state_lock_held=turn_state_lock_held,
-            release_durable_session=release_durable_session,
-        ),
-        name=f"http-bridge-resource-close-{_hash_identifier(session.key.affinity_key)}",
-    )
+    def resource_close_task() -> asyncio.Task[None]:
+        existing = session.resource_close_task
+        if existing is not None and (
+            not existing.done() or (not existing.cancelled() and existing.exception() is None)
+        ):
+            return existing
+        created = asyncio.create_task(
+            _close_http_bridge_session_resources(
+                service,
+                session,
+                turn_state_lock_held=turn_state_lock_held,
+                release_durable_session=release_durable_session,
+            ),
+            name=f"http-bridge-resource-close-{_hash_identifier(session.key.affinity_key)}",
+        )
+        session.resource_close_task = created
+        return created
+
+    # Close callers can race (reader retirement, account invalidation, and
+    # shutdown). Install one resource owner under the registry lock so leases
+    # and pending settlement are finalized exactly once.
+    if turn_state_lock_held:
+        close_task = resource_close_task()
+    else:
+        async with service._http_bridge_lock:
+            close_task = resource_close_task()
     _, cancellation = await _await_task_deferring_cancellation(close_task)
     # Detached generations remain capacity owners until resource closure ends.
     # Finalize that ownership here so direct error-recovery closes and bounded

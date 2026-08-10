@@ -1109,6 +1109,10 @@ class _HTTPBridgeSession:
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False
+    # ``closed`` is only an admission fence. Resource teardown is single-flight
+    # through this task so invalidation and shutdown can distinguish a rejected
+    # session from one whose socket and leases actually have a close owner.
+    resource_close_task: asyncio.Task[None] | None = None
     # ``closed`` rejects new admissions but is written by many unrelated
     # retirement paths; it never proves that a sender owns pending settlement.
     # Only the submitter may claim this, while holding ``lifecycle_lock``, when

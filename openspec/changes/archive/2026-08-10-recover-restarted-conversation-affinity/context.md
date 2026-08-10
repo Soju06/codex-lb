@@ -12,9 +12,9 @@ Sticky rows are global, but an API key may authorize only a subset of accounts. 
 
 Goal-restart retirement occurs only inside account selection. A live or durable HTTP bridge for the same process session is not additional ownership evidence after the client proves a self-contained resend, so bridge reuse, preferred-owner promotion, and remote forwarding must not consume the request before selection. A successful guarded retirement is also authoritative over any account objects loaded before that transaction; the retired owner remains excluded for the rest of the selection attempt even if that snapshot still reports it active. A selector that loses the retirement compare-and-set to another selector's scoped marker carries the marker's retained owner into the same exclusion path.
 
-Canonical replacement changes which generation accepts new work; it does not revoke a predecessor request that already reserved admission or release ownership of that predecessor's resources. The request's reservation proof is captured before asynchronous preparation, while detached live generations remain in lifecycle accounting until their close tasks complete.
+Canonical replacement changes which generation accepts new work; it does not revoke a predecessor request that already reserved admission or release ownership of that predecessor's resources. The request's reservation proof is captured before asynchronous preparation, while every detached generation remains in lifecycle accounting until resource closure completes. `closed` is an admission fence, not a resource-finalization signal: even an idle predecessor can retain its socket and leases while a slow close runs.
 
-Direct close cancellation is deferred until common resource finalization completes. Durable replica ownership is also generation-fenced: when a new local socket replaces a durable row that still names the same configured replica, its claim advances the owner epoch before serving work. For example, if generation A clean-closes while generation B reconnects, A's delayed epoch-1 release cannot close B's epoch-2 lease.
+Resource close is single-flight across reader retirement, account invalidation, and shutdown. Direct close cancellation is deferred until common resource finalization completes, and shutdown starts all snapshotted closes before it can propagate cancellation. Durable replica ownership is also generation-fenced: when a new local socket replaces a durable row that still names the same configured replica, its claim advances the owner epoch before serving work, including across model-transition routing isolation. For example, if generation A clean-closes while generation B reconnects on another model, A's delayed epoch-1 release cannot close B's epoch-2 lease.
 
 ## Failure Modes
 
@@ -27,8 +27,9 @@ Direct close cancellation is deferred until common resource finalization complet
 - A live HTTP bridge can retain a detached ACTIVE account object after its persisted owner becomes unavailable. A verified restart bypasses and retires that bridge instead of trusting the stale object.
 - A pre-retirement selection snapshot can still contain the old owner. Successful retirement, or an authoritative reread after losing the retirement compare-and-set, filters that owner before replacement selection so namespaced affinity cannot be recreated on it.
 - An older replica does not understand source scope. The scoped marker therefore leaves the historical timestamp tombstone empty so that replica keeps the retained hard owner instead of globally abandoning it.
-- If repeated restarts detach visible generations faster than they drain, those generations continue to consume the configured bridge-session capacity; shutdown closes them alongside the current canonical generation.
-- If a close caller is cancelled or an old generation releases late, lifecycle tracking and the durable owner epoch keep its resources and lease effects fenced until finalization completes.
+- If repeated restarts detach visible or idle generations faster than their resource closes finish, those generations continue to consume the configured bridge-session capacity; shutdown closes them alongside the current canonical generation.
+- If a generation is already admission-closed but has no resource-close owner, account invalidation still schedules teardown instead of trusting the admission flag.
+- If a close or shutdown caller is cancelled, or an old generation releases late after a model transition, single-flight lifecycle tracking and the durable owner epoch keep resources and lease effects fenced until finalization completes.
 
 ## Example
 

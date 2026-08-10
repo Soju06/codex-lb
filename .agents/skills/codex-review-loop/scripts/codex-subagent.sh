@@ -33,11 +33,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Reviews commonly outlive the invoking terminal or exceed its output cap.
-# Keep the rollout persistent so its final response can be recovered with
-# `codex resume` after either failure; `--ephemeral` would discard that escape
-# hatch as soon as this process exits.
-CODEX_ARGS+=("--full-auto")
+# Reviews commonly outlive the invoking terminal or exceed its output cap, so
+# do not add `--ephemeral`: the persistent rollout is the recovery path after
+# either failure. Also do not restore the historical `--full-auto` argument;
+# Codex CLI 0.147.0 removed it from `exec review`, which already uses the
+# configured non-interactive approval and sandbox policy.
 
 # --- Model overrides ---
 if [[ -n "${CODEX_REVIEW_MODEL:-}" ]]; then

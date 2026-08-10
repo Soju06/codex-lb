@@ -62,7 +62,9 @@ Launch the adversarial review as a background process.
 3. The script parses Codex output and returns the final review text. Review
    rollouts intentionally remain persistent so `codex resume` can recover a
    completed response when the invoking terminal disconnects or truncates its
-   output. Do not add `--ephemeral` to the wrapper.
+   output. Do not add `--ephemeral` to the wrapper. The wrapper also relies on
+   the configured non-interactive approval/sandbox policy because Codex CLI
+   0.147.0 removed the historical `--full-auto` argument from `exec review`.
 
 ### Error handling
 

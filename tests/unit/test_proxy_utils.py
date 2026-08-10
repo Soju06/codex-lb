@@ -42690,6 +42690,75 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
 
 
 @pytest.mark.asyncio
+async def test_submit_http_bridge_preflight_failure_keeps_operation_pre_dispatch(monkeypatch):
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    service._durable_bridge = None
+    proxy_service._initialize_http_bridge_retry_circuit(service)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-preflight",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5"}',
+        operation_id="operation-preflight",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-submit-preflight", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="sid-submit-preflight"),
+        request_model="gpt-5.5",
+        account=_make_account("acc_submit_preflight"),
+        upstream=cast(
+            proxy_service.UpstreamWebSocket,
+            SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()),
+        ),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+    )
+    send_frame = AsyncMock(
+        side_effect=proxy_module.ProxyResponseError(
+            400,
+            {"error": {"code": "payload_too_large", "message": "response.create is too large"}},
+        )
+    )
+    cleanup_dispatched: list[bool] = []
+
+    async def cleanup(*_args: object, **_kwargs: object) -> None:
+        cleanup_dispatched.append(request_state.operation_dispatched)
+
+    monkeypatch.setattr(proxy_http_bridge_request_submit, "_send_http_bridge_request_text_with_archive_id", send_frame)
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(return_value=request_state.request_text))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_cleanup_http_bridge_submit_interruption", cleanup)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", AsyncMock())
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=1,
+        )
+
+    assert exc_info.value.status_code == 400
+    send_frame.assert_awaited_once()
+    assert cleanup_dispatched == [False]
+    assert request_state.recovery_attempt_dispatched is False
+    assert request_state.operation_dispatched is False
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_checks_queue_before_inlining(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
     service._durable_bridge = None

@@ -1564,12 +1564,27 @@ class _HTTPBridgeRequestSubmitMixin:
                         session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
                         admission_waiter_registered = False
                     request_enqueued = True
-                    upstream_send_started = True
+
+                    def mark_upstream_send_started() -> None:
+                        nonlocal upstream_send_started
+                        # The helper invokes this only after the final frame
+                        # size preflight. A payload_too_large rejection must
+                        # therefore remain proven pre-dispatch so cleanup can
+                        # roll back a newly-created operation.
+                        upstream_send_started = True
+
                     try:
-                        await _send_http_bridge_request_text_with_archive_id(session, request_state, text_data)
+                        await _send_http_bridge_request_text_with_archive_id(
+                            session,
+                            request_state,
+                            text_data,
+                            on_send_started=mark_upstream_send_started,
+                        )
                     except BaseException as exc:
-                        request_state.recovery_attempt_dispatched = True
-                        request_state.operation_dispatched = request_state.operation_id is not None
+                        request_state.recovery_attempt_dispatched = upstream_send_started
+                        request_state.operation_dispatched = (
+                            request_state.operation_id is not None and upstream_send_started
+                        )
                         # Publish retirement while lifecycle ownership is still
                         # held; a gate waiter must never reuse an ambiguously sent
                         # response.create socket between unlock and cleanup.

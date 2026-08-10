@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import errno
 import gc
 import hashlib
@@ -8,7 +10,9 @@ import json
 import logging
 import socket
 import ssl
+import struct
 import time
+import zlib
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -3587,6 +3591,233 @@ async def test_stream_http_bridge_or_retry_bypasses_bridge_for_input_image(monke
 
     assert disabled_bridge_output == ["data: retry\n\n"]
     assert calls == [("retry", payload, None, 180.0, "http")]
+
+
+def _make_test_png(width: int, height: int) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", binascii.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    scanline = b"\x00" + b"\x00\x00\x00" * width
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(scanline * height))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_responses_request_has_only_valid_inline_images_accepts_real_inline_images() -> None:
+    png = _make_test_png(64, 64)
+    png_url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "image_url": png_url},
+                    ],
+                }
+            ],
+        }
+    )
+    assert proxy_service._responses_request_has_only_valid_inline_images(payload) is True
+
+    tool_output = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [{"type": "input_image", "image_url": png_url}],
+                }
+            ],
+        }
+    )
+    assert proxy_service._responses_request_has_only_valid_inline_images(tool_output) is True
+
+    text_only = ResponsesRequest.model_validate({"model": "gpt-5.5", "instructions": "hi", "input": "hello"})
+    assert proxy_service._responses_request_has_only_valid_inline_images(text_only) is False
+
+
+def test_responses_request_has_only_valid_inline_images_rejects_unsafe_images() -> None:
+    tiny_png = _make_test_png(1, 1)
+    tiny_png = _make_test_png(1, 1)
+    tiny_url = "data:image/png;base64," + base64.b64encode(tiny_png).decode("ascii")
+
+    def make_payload(image_url: str) -> ResponsesRequest:
+        return ResponsesRequest.model_validate(
+            {
+                "model": "gpt-5.5",
+                "instructions": "hi",
+                "input": [{"type": "input_image", "image_url": image_url}],
+            }
+        )
+
+    assert proxy_service._responses_request_has_only_valid_inline_images(make_payload(tiny_url)) is False
+    assert (
+        proxy_service._responses_request_has_only_valid_inline_images(make_payload("data:image/png;base64,%%%"))
+        is False
+    )
+    assert (
+        proxy_service._responses_request_has_only_valid_inline_images(
+            make_payload("data:image/png;base64," + base64.b64encode(b"not an image").decode("ascii"))
+        )
+        is False
+    )
+    assert (
+        proxy_service._responses_request_has_only_valid_inline_images(make_payload("https://example.com/image.png"))
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_uses_bridge_for_valid_inline_image(monkeypatch):
+    png_url = "data:image/png;base64," + base64.b64encode(_make_test_png(64, 64)).decode("ascii")
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    settings.http_responses_stream_request_budget_seconds = 180.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    png_url = "data:image/png;base64," + base64.b64encode(_make_test_png(64, 64)).decode("ascii")
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "image_url": png_url},
+                    ],
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+
+    calls: list[tuple[str, object, str | None]] = []
+
+    async def fake_stream_with_retry(payload, headers, *, rewritten_file_account_id=None, **kwargs):
+        del payload, headers
+        calls.append(("retry", rewritten_file_account_id, kwargs.get("upstream_stream_transport_override")))
+        yield "data: retry\n\n"
+
+    async def fake_stream_via_http_bridge(payload, headers, **kwargs):
+        del payload, headers, kwargs
+        calls.append(("bridge", None, None))
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: bridge\n\n"]
+    assert calls == [("bridge", None, None)]
+
+
+@pytest.mark.asyncio
+async def test_stream_http_bridge_or_retry_bypasses_bridge_for_tiny_inline_image(monkeypatch):
+    png_url = "data:image/png;base64," + base64.b64encode(_make_test_png(1, 1)).decode("ascii")
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    settings.http_responses_stream_request_budget_seconds = 180.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=30.0,
+            codex_idle_ttl_seconds=30.0,
+            max_sessions=8,
+            queue_limit=16,
+            prompt_cache_idle_ttl_seconds=30.0,
+            gateway_safe_mode=False,
+        ),
+    )
+    png_url = "data:image/png;base64," + base64.b64encode(_make_test_png(1, 1)).decode("ascii")
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hi",
+            "input": [{"type": "input_image", "image_url": png_url}],
+        }
+    )
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+
+    calls: list[tuple[str, object, str | None]] = []
+
+    async def fake_stream_with_retry(payload, headers, *, rewritten_file_account_id=None, **kwargs):
+        del payload, headers
+        calls.append(("retry", rewritten_file_account_id, kwargs.get("upstream_stream_transport_override")))
+        yield "data: retry\n\n"
+
+    async def fake_stream_via_http_bridge(payload, headers, **kwargs):
+        del payload, headers, kwargs
+        calls.append(("bridge", None, None))
+        yield "data: bridge\n\n"
+
+    monkeypatch.setattr(service, "_stream_with_retry", fake_stream_with_retry)
+    monkeypatch.setattr(service, "_stream_via_http_bridge", fake_stream_via_http_bridge)
+
+    output = [
+        line
+        async for line in service._stream_http_bridge_or_retry(
+            payload=payload,
+            headers={},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+        )
+    ]
+
+    assert output == ["data: retry\n\n"]
+    assert calls == [("retry", None, "http")]
 
 
 @pytest.mark.asyncio

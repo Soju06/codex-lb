@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import dataclasses
 import json
 import logging
@@ -233,6 +235,134 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
+_INLINE_IMAGE_MIN_DIMENSION = 64
+_INLINE_IMAGE_MAX_PIXELS = 100_000_000
+_JPEG_START_OF_FRAME_MARKERS = frozenset(
+    {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+)
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    offset = 2
+    while offset + 4 <= len(data):
+        if data[offset] != 0xFF:
+            offset += 1
+            continue
+        while offset < len(data) and data[offset] == 0xFF:
+            offset += 1
+        if offset >= len(data):
+            return None
+        marker = data[offset]
+        offset += 1
+        if marker in {0x01, 0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+            continue
+        if offset + 2 > len(data):
+            return None
+        segment_length = int.from_bytes(data[offset : offset + 2], "big")
+        if segment_length < 2 or offset + segment_length > len(data):
+            return None
+        if marker in _JPEG_START_OF_FRAME_MARKERS:
+            if segment_length < 7:
+                return None
+            height = int.from_bytes(data[offset + 3 : offset + 5], "big")
+            width = int.from_bytes(data[offset + 5 : offset + 7], "big")
+            return width, height
+        offset += segment_length
+    return None
+
+
+def _webp_dimensions(data: bytes) -> tuple[int, int] | None:
+    if len(data) < 20 or not data.startswith(b"RIFF") or data[8:12] != b"WEBP":
+        return None
+    offset = 12
+    while offset + 8 <= len(data):
+        chunk_type = data[offset : offset + 4]
+        chunk_size = int.from_bytes(data[offset + 4 : offset + 8], "little")
+        payload_offset = offset + 8
+        payload_end = payload_offset + chunk_size
+        if payload_end > len(data):
+            return None
+        if chunk_type == b"VP8X" and chunk_size >= 10:
+            width = 1 + int.from_bytes(data[payload_offset + 4 : payload_offset + 7], "little")
+            height = 1 + int.from_bytes(data[payload_offset + 7 : payload_offset + 10], "little")
+            return width, height
+        if chunk_type == b"VP8 " and chunk_size >= 10 and (
+            data[payload_offset + 3 : payload_offset + 6] == b"\x9d\x01\x2a"
+        ):
+            width = int.from_bytes(data[payload_offset + 6 : payload_offset + 8], "little") & 0x3FFF
+            height = int.from_bytes(data[payload_offset + 8 : payload_offset + 10], "little") & 0x3FFF
+            return width, height
+        if chunk_type == b"VP8L" and chunk_size >= 5 and data[payload_offset] == 0x2F:
+            size_bits = int.from_bytes(data[payload_offset + 1 : payload_offset + 5], "little")
+            width = 1 + (size_bits & 0x3FFF)
+            height = 1 + ((size_bits >> 14) & 0x3FFF)
+            return width, height
+        offset = payload_end + (chunk_size & 1)
+    return None
+
+
+def _inline_image_dimensions(media_type: str, data: bytes) -> tuple[int, int] | None:
+    if media_type == "image/png":
+        if len(data) < 24 or not data.startswith(b"\x89PNG\r\n\x1a\n") or data[12:16] != b"IHDR":
+            return None
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if media_type == "image/gif":
+        if len(data) < 10 or data[:6] not in (b"GIF87a", b"GIF89a"):
+            return None
+        return int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little")
+    if media_type == "image/jpeg":
+        return _jpeg_dimensions(data)
+    if media_type == "image/webp":
+        return _webp_dimensions(data)
+    return None
+
+
+def _inline_image_bytes_are_ws_safe(media_type: str, data: bytes) -> bool:
+    dimensions = _inline_image_dimensions(media_type, data)
+    if dimensions is None:
+        return False
+    width, height = dimensions
+    return (
+        width >= _INLINE_IMAGE_MIN_DIMENSION
+        and height >= _INLINE_IMAGE_MIN_DIMENSION
+        and width * height <= _INLINE_IMAGE_MAX_PIXELS
+    )
+
+
+def _responses_request_has_only_valid_inline_images(payload: ResponsesRequest) -> bool:
+    """Return whether every input image is a safe, recognized inline data URL for the WebSocket bridge."""
+    found_image = False
+
+    def visit(value: JsonValue) -> bool:
+        nonlocal found_image
+        if isinstance(value, dict):
+            if value.get("type") == "input_image":
+                found_image = True
+                image_url = value.get("image_url")
+                if not isinstance(image_url, str):
+                    return False
+                header, separator, encoded = image_url.partition(",")
+                if not separator or not encoded:
+                    return False
+                normalized_header = header.lower()
+                if not normalized_header.startswith("data:image/") or not normalized_header.endswith(";base64"):
+                    return False
+                media_type = normalized_header.removeprefix("data:").removesuffix(";base64")
+                try:
+                    data = base64.b64decode(encoded, validate=True)
+                except (binascii.Error, ValueError):
+                    return False
+                return _inline_image_bytes_are_ws_safe(media_type, data)
+            return all(visit(child) for child in value.values())
+        if isinstance(value, list):
+            return all(visit(item) for item in value)
+        return True
+
+    input_value = payload.input
+    return isinstance(input_value, list) and visit(input_value) and found_image
+
 
 
 def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
@@ -889,7 +1019,8 @@ class _HTTPBridgeStreamingMixin:
             ("local file pin", local_file_owner_account_id),
         )
         ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
-        if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
+        payload_fits_websocket = payload_size_estimate_bytes <= ws_payload_budget_bytes
+        if runtime_config.enabled and not payload_fits_websocket:
             logger.info(
                 "stream_responses bypassing http bridge for large payload size=%s budget=%s request_id=%s",
                 payload_size_estimate_bytes,
@@ -899,12 +1030,21 @@ class _HTTPBridgeStreamingMixin:
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
         image_request = _responses_request_contains_input_image(payload)
         image_generation_request = _responses_request_uses_image_generation(payload)
-        force_upstream_stream_transport = "http" if image_request else None
-        if runtime_config.enabled and (image_request or image_generation_request):
+        image_websocket_eligible = (
+            image_request and payload_fits_websocket and _responses_request_has_only_valid_inline_images(payload)
+        )
+        force_upstream_stream_transport = "http" if image_request and not image_websocket_eligible else None
+        if runtime_config.enabled and image_websocket_eligible:
+            logger.info(
+                "stream_responses allowing validated inline image through http bridge request_id=%s",
+                request_id,
+            )
+        if runtime_config.enabled and ((image_request and not image_websocket_eligible) or image_generation_request):
             logger.info(
                 "stream_responses bypassing http bridge for image-capable request input_image=%s "
-                "image_generation=%s request_id=%s",
+                "image_websocket_eligible=%s image_generation=%s request_id=%s",
                 image_request,
+                image_websocket_eligible,
                 image_generation_request,
                 request_id,
             )

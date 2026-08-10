@@ -327,6 +327,9 @@ from app.modules.proxy._service.http_bridge.retry_circuit import (
     _HTTPBridgeRetryCircuitMixin,
     _initialize_http_bridge_retry_circuit,
 )
+from app.modules.proxy._service.http_bridge.streaming import (
+    _responses_request_has_only_valid_inline_images as _responses_request_has_only_valid_inline_images,
+)
 from app.modules.proxy._service.observability import _hash_identifier as _hash_identifier
 from app.modules.proxy._service.observability import _hash_identifier_or_none as _hash_identifier_or_none
 from app.modules.proxy._service.observability import _interesting_header_keys as _interesting_header_keys

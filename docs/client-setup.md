@@ -194,6 +194,65 @@ codex-lb codex-sessions retag --from openai --to codex-lb --yes
 |:---:|:---:|
 | ![retag dry run in WSL](screenshots/codex-session-retag-wsl-dry-run.png) | ![retag apply in WSL](screenshots/codex-session-retag-wsl-apply.png) |
 
+### Automatic Shell Integration & Bi-directional Auto-Toggling (zsh / bash)
+
+If you frequently toggle between direct OpenAI and `codex-lb` (for instance, running `uvx codex-lb` on demand), manually updating `~/.codex/config.toml` and re-tagging session files each time can cause missing chat history in Codex CLI and the Desktop App.
+
+You can add this wrapper function to your shell profile (`~/.zshrc` or `~/.bashrc`) to automatically toggle `~/.codex/config.toml` and re-tag sessions in `state_5.sqlite` and `.jsonl` files whenever `uvx codex-lb` starts and stops:
+
+```zsh
+# Switch Codex provider and retag sessions automatically
+_switch_codex_provider() {
+  local target="$1"
+  local from
+  if [[ "$target" == "codex-lb" ]]; then
+    from="openai"
+  else
+    from="codex-lb"
+  fi
+  local config_file="$HOME/.codex/config.toml"
+  local db_file="$HOME/.codex/state_5.sqlite"
+
+  if [[ -f "$config_file" ]]; then
+    sed -i '' "s/^#* *model_provider = .*/model_provider = \"$target\"/" "$config_file"
+  fi
+
+  if [[ -f "$db_file" ]]; then
+    sqlite3 "$db_file" "UPDATE threads SET model_provider = '$target' WHERE model_provider = '$from';" 2>/dev/null
+  fi
+
+  if [[ -d "$HOME/.codex/sessions" ]]; then
+    find "$HOME/.codex/sessions" -type f -name '*.jsonl' -exec sed -i '' "s/\"model_provider\":\"$from\"/\"model_provider\":\"$target\"/g" {} + 2>/dev/null
+  fi
+}
+
+# Auto-toggle Codex GUI config & retag sessions when running Codex-LB via uvx
+uvx() {
+  if [[ "$*" == *"codex-lb"* ]]; then
+    echo "⚡ Activating Codex-LB and retagging sessions to 'codex-lb'..."
+    _switch_codex_provider "codex-lb"
+
+    local _cleaned=0
+    _do_cleanup() {
+      if [[ $_cleaned -eq 0 ]]; then
+        _cleaned=1
+        echo "\n🔄 Restoring config and retagging sessions to 'openai'..."
+        _switch_codex_provider "openai"
+      fi
+    }
+
+    trap '_do_cleanup' EXIT INT TERM
+
+    command uvx "$@"
+
+    _do_cleanup
+    trap - EXIT INT TERM
+  else
+    command uvx "$@"
+  fi
+}
+```
+
 ## OpenCode
 
 !!! important

@@ -7,7 +7,9 @@ import { renderWithProviders } from "@/test/utils";
 
 import { ModelSourceEditDialog } from "./model-source-edit-dialog";
 
-function reasoningSource(): ModelSource {
+function reasoningSource(
+  reasoningLevels: unknown[] = ["minimal", "low", "medium", "high", "xhigh"],
+): ModelSource {
   return {
     id: "src_reasoning",
     name: "reasoning-source",
@@ -39,7 +41,7 @@ function reasoningSource(): ModelSource {
         audioPerMinute: null,
         rawMetadataJson: JSON.stringify({
           supports_reasoning: true,
-          supported_reasoning_levels: ["minimal", "low", "medium", "high", "xhigh"],
+          supported_reasoning_levels: reasoningLevels,
           default_reasoning_level: "high",
         }),
         isEnabled: true,
@@ -69,14 +71,36 @@ describe("ModelSource reasoning controls", () => {
     expect(screen.getByRole("checkbox", { name: "minimal" })).toBeChecked();
     expect(screen.getByRole("checkbox", { name: "xhigh" })).toBeChecked();
 
+    await user.click(screen.getByRole("checkbox", { name: "xhigh" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
 
-    const rawMetadata = JSON.parse(onSubmit.mock.calls[0][1].models[0].rawMetadataJson);
+    const rawMetadata = JSON.parse(
+      onSubmit.mock.calls[0][1].models[0].rawMetadataJson,
+    );
     expect(rawMetadata).toMatchObject({
       supports_reasoning: true,
-      supported_reasoning_levels: ["minimal", "low", "medium", "high", "xhigh"],
+      supported_reasoning_levels: ["minimal", "low", "medium", "high"],
       default_reasoning_level: "high",
     });
+  });
+
+  it("prefills descriptive reasoning-level objects", () => {
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={reasoningSource([
+          { effort: "minimal", description: "Smallest budget" },
+          { effort: "xhigh", description: "Largest budget" },
+        ])}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("checkbox", { name: "minimal" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "xhigh" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "low" })).not.toBeChecked();
   });
 });

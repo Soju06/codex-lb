@@ -177,20 +177,37 @@ function parseReasoningMetadata(rawMetadataJson: string | null | undefined): {
   reasoningEfforts: string[];
   defaultReasoningEffort: string;
 } {
-  const fallback = { supportsReasoning: false, reasoningEfforts: [], defaultReasoningEffort: "" };
+  const fallback = {
+    supportsReasoning: false,
+    reasoningEfforts: [],
+    defaultReasoningEffort: "",
+  };
   if (!rawMetadataJson) return fallback;
   try {
     const parsed: unknown = JSON.parse(rawMetadataJson);
     if (typeof parsed !== "object" || parsed === null) return fallback;
     const metadata = parsed as Record<string, unknown>;
     const configuredEfforts = Array.isArray(metadata.supported_reasoning_levels)
-      ? metadata.supported_reasoning_levels.filter(
-          (value): value is string => typeof value === "string" && value !== "none",
-        )
+      ? metadata.supported_reasoning_levels
+          .flatMap((value): string[] => {
+            if (typeof value === "string") return [value];
+            if (
+              typeof value !== "object" ||
+              value === null ||
+              Array.isArray(value)
+            )
+              return [];
+            const effort = (value as Record<string, unknown>).effort;
+            return typeof effort === "string" ? [effort] : [];
+          })
+          .map((effort) => effort.trim().toLowerCase())
+          .filter((effort) => effort && effort !== "none")
       : [];
     const supportsReasoning = metadata.supports_reasoning === true;
     const reasoningEfforts =
-      supportsReasoning && configuredEfforts.length === 0 ? ["low", "medium", "high"] : configuredEfforts;
+      supportsReasoning && configuredEfforts.length === 0
+        ? ["low", "medium", "high"]
+        : configuredEfforts;
     return {
       supportsReasoning,
       reasoningEfforts,
@@ -232,10 +249,16 @@ export function modelIdsToInput(source: ModelSource): string {
   return source.models.map((model) => model.model).join(", ");
 }
 
-export function rawMetadataByModel(source: ModelSource): Record<string, string | null> {
-  return Object.fromEntries(source.models.map((model) => [model.model, model.rawMetadataJson]));
+export function rawMetadataByModel(
+  source: ModelSource,
+): Record<string, string | null> {
+  return Object.fromEntries(
+    source.models.map((model) => [model.model, model.rawMetadataJson]),
+  );
 }
 
 export function enabledByModel(source: ModelSource): Record<string, boolean> {
-  return Object.fromEntries(source.models.map((model) => [model.model, model.isEnabled]));
+  return Object.fromEntries(
+    source.models.map((model) => [model.model, model.isEnabled]),
+  );
 }

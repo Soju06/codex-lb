@@ -24,6 +24,8 @@ Each account SHALL support an optional maximum standard-quota used percentage gr
 
 For an account with an enabled maximum usage policy, the selector MUST evaluate current standard primary and long-window quota observations after normalizing weekly-only and monthly-only account shapes. When historical monthly and normalized weekly-only shapes coexist, observations from fetches separated by more than the shared sibling-fetch margin MUST be ordered by `recorded_at`; observations within the margin MUST use quota metadata and reset-deadline precedence, with the weekly-primary shape winning an otherwise exact tie. If any current standard window reports used percentage greater than or equal to the configured maximum, the account MUST be excluded after upstream status, quota, and cooldown checks but before error-backoff classification, sticky affinity, single-account routing, manual routing policy, additional-quota routing, health-tier selection, backoff fallback, fair-share capacity accounting, or any routing strategy is applied. Standard usage limits MUST NOT be bypassed by an additional-quota request that ignores standard upstream exhaustion. Reaching a local account policy MUST NOT mutate the account's persisted upstream status.
 
+Each newly admitted logical HTTP bridge turn MUST re-evaluate its continuity-pinned account through the same standard usage-limit policy, including when a reused bridge retains its stream lease and when an idle bridge would otherwise reacquire that lease. A policy denial MUST occur before the new turn is queued or sent, MUST use the `account_usage_limit_reached` response contract, and MUST retire the bridge after already-admitted turns drain without rebinding or disrupting their ownership and settlement. If the pinned account no longer exists or becomes administratively unavailable, admission MUST fail closed with the established bridge continuity-lost response and retire the bridge without creating a new runtime lease for that owner.
+
 #### Scenario: Equality reaches the limit
 
 - **GIVEN** account A has an enabled maximum usage of 10 percent
@@ -51,6 +53,15 @@ For an account with an enabled maximum usage policy, the selector MUST evaluate 
 - **GIVEN** an account was excluded because a standard window reached its maximum usage
 - **WHEN** a current post-reset usage observation reports every available standard window below the maximum
 - **THEN** the account becomes eligible without changing or removing the policy
+
+#### Scenario: Reused bridge owner reaches its local limit
+
+- **GIVEN** an HTTP bridge is continuity-pinned to an account from an earlier admitted turn
+- **AND** the account's enabled policy becomes `reached` or `data_unavailable`
+- **WHEN** a new logical turn reuses the bridge with either a retained or released stream lease
+- **THEN** the new turn fails with `account_usage_limit_reached` before upstream dispatch
+- **AND** already-admitted work remains pinned and settles normally
+- **AND** the bridge retires after that work drains
 
 #### Scenario: Fresh weekly shape supersedes elapsed monthly telemetry
 
@@ -125,3 +136,37 @@ Account summaries SHALL expose the configured percentage, enabled flag, and eval
 - **WHEN** the operator views or edits the policy
 - **THEN** the dashboard shows the same configured numeric value
 - **AND** saving an edit does not first quantize the persisted value to 0 or 100
+
+### Requirement: Synthetic quota warmups respect account usage limits
+
+Quota warmup planning MUST exclude an already-evaluated account state whose enabled usage-limit state is `reached` or `data_unavailable`. After atomically claiming a planned decision and acquiring any API-key reservation, execution MUST freshly load the account and its current standard primary, secondary, and monthly observations, MUST require the fresh account status to remain `active`, and MUST apply the canonical standard usage-limit evaluator and shape rules immediately before sending the synthetic probe. A missing fresh account MUST skip with reason `account_not_found`; any fresh non-active account MUST skip with reason `account_status_<status>`; and either account denial MUST release any reservation, transition the claimed decision from `executing` to `skipped`, and MUST NOT send the probe. If the authoritative usage-limit evaluation is `reached` or `data_unavailable`, execution MUST perform the same cleanup with reason `account_usage_limit_reached`. Disabled and `available` policies MUST preserve normal short-window planning and execution behavior.
+
+#### Scenario: Limit reached after warmup planning
+
+- **GIVEN** a synthetic warmup was planned while the account policy was available
+- **AND** a newer standard observation reaches the enabled maximum before execution
+- **WHEN** the execution gate re-evaluates the account
+- **THEN** the warmup is skipped
+- **AND** no synthetic upstream request is sent
+
+#### Scenario: Account pauses after warmup planning
+
+- **GIVEN** a synthetic warmup was planned while the account was active
+- **AND** the account becomes paused after the decision claim or API-key reservation
+- **WHEN** the final execution authorization reloads the account
+- **THEN** the warmup is skipped with reason `account_status_paused`
+- **AND** any API-key reservation is released
+- **AND** no synthetic upstream request is sent
+
+#### Scenario: Missing current data blocks warmup
+
+- **GIVEN** an account has an enabled maximum usage policy
+- **AND** its current standard usage data is unavailable
+- **WHEN** warmup planning or execution evaluates the account
+- **THEN** no synthetic warmup is planned or sent
+
+#### Scenario: Available and disabled policies preserve warmup behavior
+
+- **GIVEN** an otherwise eligible short-window account has an `available` or disabled usage-limit policy
+- **WHEN** warmup planning and execution evaluate the account
+- **THEN** the usage-limit gate does not prevent its normal warmup action

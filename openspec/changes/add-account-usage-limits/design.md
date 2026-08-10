@@ -38,6 +38,10 @@ Selection inputs retain cloned standard primary, secondary, and monthly rows sep
 
 Fair-share admission derives capacity and lease/key counters from the same usage-policy-eligible candidate set used for routing. Locally blocked accounts contribute neither capacity nor in-flight counters; an entirely locally blocked pool bypasses fair-share admission and reaches the canonical policy error.
 
+Reused HTTP bridges are continuity owners, not fresh selection opportunities. Turn admission therefore extracts the pinned account and standard rows from one canonical global selection snapshot and calls the evaluator directly before accepting a retained lease or reacquiring a released one. Cached probes share that immutable snapshot and its account-id index without cloning fleet-sized lists or maps. The read-only probe neither builds runtime states nor creates per-owner cache entries. It never asks the selector for an alternate owner. A denial marks the session to retire after drain so already-admitted turns keep their ownership and settlement paths; a missing or administratively unavailable owner uses the established continuity-lost response instead of a local usage-limit error.
+
+Quota warmup planning consumes the usage-limit state already evaluated on `AccountState`. Because a planned action can outlive that snapshot, execution freshly reads the account plus its standard primary, secondary, and monthly rows after the decision claim and optional API-key reservation, then requires the account to remain active and runs the same evaluator immediately before the probe send. A denial releases the reservation and changes the claimed decision from `executing` to `skipped`. Disabled and available policies remain neutral.
+
 ### D5: Dashboard writes invalidate selection state across replicas
 
 `PUT /api/accounts/{account_id}/usage-limit` accepts the enabled flag and nullable percentage, returns the persisted pair, invalidates the local selection-input cache, and emits the existing account-selection invalidation signal for peers. Account summaries expose the fields and evaluated state. The Accounts page provides percentage editing, enable/disable, and remove actions with wording that makes `10%` mean “10% maximum used / 90% reserved.” The dashboard initializes the editable value from the persisted number without decimal-place quantization, so every API-valid percentage remains valid and unchanged until the operator edits it.
@@ -58,3 +62,5 @@ A forward Alembic revision based on the current upstream migration head adds bot
 - Accounts API/service/mapper tests for set, disable-retain, remove, validation, response state, and cache invalidation.
 - Migration upgrade/downgrade/upgrade coverage.
 - Dashboard schema, request hook, control interaction, and reached-state presentation tests.
+- Reused HTTP bridge admission tests for retained and released leases, including public policy errors and drain-safe retirement.
+- Quota planner and execution-gate tests for reached, unavailable, available, and disabled usage-limit states.

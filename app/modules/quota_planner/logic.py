@@ -8,7 +8,12 @@ from datetime import time as dt_time
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.core.balancer import AccountState, RoutingCost, RoutingCostsByAccount
+from app.core.balancer import (
+    AccountState,
+    RoutingCost,
+    RoutingCostsByAccount,
+    account_usage_limit_blocks_selection,
+)
 from app.db.models import AccountStatus
 
 FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60
@@ -564,6 +569,8 @@ def _is_cold_window(state: AccountState, current_ts: float) -> bool:
 
 def _is_warmup_candidate(state: AccountState, current_ts: float) -> bool:
     if state.status != AccountStatus.ACTIVE:
+        return False
+    if account_usage_limit_blocks_selection(state):
         return False
     if _plannable_window_seconds(state) is None:
         return False

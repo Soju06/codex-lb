@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.core.balancer import AccountState
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.quota_planner.logic import (
@@ -237,6 +238,60 @@ def test_plan_shadow_actions_skips_weekly_only_accounts() -> None:
 
     assert actions
     assert {action.account_id for action in actions} == {"cold-5h"}
+
+
+@pytest.mark.parametrize(
+    "usage_limit_state",
+    [AccountUsageLimitState.REACHED, AccountUsageLimitState.DATA_UNAVAILABLE],
+)
+def test_plan_shadow_actions_skips_accounts_blocked_by_usage_limit(
+    usage_limit_state: AccountUsageLimitState,
+) -> None:
+    settings = PlannerSettings(
+        mode="shadow",
+        timezone="UTC",
+        working_days=(0,),
+        working_hours_start="09:00",
+        working_hours_end="18:00",
+        prewarm_enabled=True,
+        prewarm_lead_minutes=300,
+        max_warmups_per_day=2,
+        min_expected_gain=1.0,
+    )
+    now = datetime(2026, 5, 18, 5, 0, tzinfo=timezone.utc)
+    peak_at = datetime(2026, 5, 18, 13, 0, tzinfo=timezone.utc)
+    states = [
+        AccountState(
+            "policy-blocked",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            primary_window_minutes=300,
+            usage_limit_state=usage_limit_state,
+        ),
+        AccountState(
+            "policy-available",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            primary_window_minutes=300,
+            usage_limit_state=AccountUsageLimitState.AVAILABLE,
+        ),
+        AccountState(
+            "policy-disabled",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            primary_window_minutes=300,
+            usage_limit_state=AccountUsageLimitState.DISABLED,
+        ),
+    ]
+
+    actions = plan_shadow_actions(
+        settings=settings,
+        states=states,
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
+
+    assert {action.account_id for action in actions} == {"policy-available", "policy-disabled"}
 
 
 def test_plan_shadow_actions_uses_observed_window_duration() -> None:

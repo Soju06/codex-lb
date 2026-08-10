@@ -2330,6 +2330,50 @@ async def test_load_balancer_propagates_usage_limit_error_code() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_balancer_checks_pinned_policies_from_one_read_only_global_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.modules.proxy import load_balancer as load_balancer_module
+    from app.modules.proxy.account_cache import AccountSelectionCache
+
+    now = datetime.now(timezone.utc)
+    limited = _make_test_account(account_id="pinned-limited")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    disabled = _make_test_account(account_id="pinned-disabled")
+    unavailable = _make_test_account(account_id="pinned-paused")
+    unavailable.status = AccountStatus.PAUSED
+    usage = _make_test_usage(
+        account_id=limited.id,
+        window="primary",
+        used_percent=10.0,
+        reset_at=int((now + timedelta(hours=1)).timestamp()),
+        recorded_at=now.replace(tzinfo=None),
+    )
+    repos = _usage_limit_test_repositories([limited, disabled, unavailable], {limited.id: usage})
+    balancer = load_balancer_module.LoadBalancer(repo_factory=lambda: repos)
+    balancer._selection_inputs_cache = AccountSelectionCache(ttl_seconds=60)
+
+    limited_state = await balancer.check_account_usage_limit(limited.id)
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_clone_selection_inputs",
+        MagicMock(side_effect=AssertionError("policy probes must not clone the fleet snapshot")),
+    )
+    disabled_state = await balancer.check_account_usage_limit(disabled.id)
+    unavailable_state = await balancer.check_account_usage_limit(unavailable.id)
+    missing_state = await balancer.check_account_usage_limit("deleted-owner")
+
+    assert limited_state is AccountUsageLimitState.REACHED
+    assert disabled_state is AccountUsageLimitState.DISABLED
+    assert unavailable_state is None
+    assert missing_state is None
+    repos.accounts.list_accounts.assert_awaited_once()
+    assert repos.usage.latest_by_account.await_count == 3
+    assert balancer._runtime == {}
+
+
+@pytest.mark.asyncio
 async def test_load_balancer_preserves_usage_limit_error_with_paused_peer() -> None:
     from app.modules.proxy.load_balancer import LoadBalancer
 

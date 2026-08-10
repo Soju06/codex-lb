@@ -9,3 +9,4 @@
 - [x] 7. Document configuring and interpreting per-account usage limits in the routing guide.
 - [x] 8. Run focused backend/frontend tests, migration checks, lint/type checks, and the repository verification suite available in the checkout.
 - [x] 9. Address current-head review regressions for precision, error precedence, fair-share eligibility, opportunistic admission errors, and normalized telemetry freshness.
+- [x] 10. Revalidate continuity-pinned HTTP bridge turns and quota-planner synthetic warmups against the canonical account usage-limit policy.

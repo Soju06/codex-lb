@@ -58,7 +58,7 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
-from app.core.usage.account_limits import evaluate_standard_usage_limit
+from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -246,6 +246,20 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
+    _runtime_account_by_id: dict[str, Account] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def runtime_account(self, account_id: str) -> Account | None:
+        account_by_id = self._runtime_account_by_id
+        if account_by_id is None:
+            source_accounts = self.accounts if self.runtime_accounts is None else self.runtime_accounts
+            account_by_id = {account.id: account for account in source_accounts}
+            object.__setattr__(self, "_runtime_account_by_id", account_by_id)
+        return account_by_id.get(account_id)
 
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]:
@@ -355,6 +369,28 @@ class LoadBalancer:
             if runtime is None:
                 return 0, 0, 0.0
             return runtime.inflight_response_creates, runtime.inflight_streams, runtime.leased_tokens
+
+    async def check_account_usage_limit(self, account_id: str) -> AccountUsageLimitState | None:
+        """Re-evaluate one continuity owner from the canonical global snapshot.
+
+        ``None`` means the persisted owner no longer exists. This probe is
+        intentionally read-only: bridge admission must not create runtime
+        state for an owner it is only validating.
+        """
+        selection_inputs = await self._load_selection_inputs(model=None, clone_cached=False)
+        account = selection_inputs.runtime_account(account_id)
+        if account is None or account.status in {
+            AccountStatus.REAUTH_REQUIRED,
+            AccountStatus.DEACTIVATED,
+            AccountStatus.PAUSED,
+        }:
+            return None
+        return _evaluate_account_usage_limit(
+            account,
+            primary=selection_inputs.standard_latest_primary.get(account_id),
+            secondary=selection_inputs.standard_latest_secondary.get(account_id),
+            monthly=selection_inputs.standard_latest_monthly.get(account_id),
+        )
 
     def _acquire_account_lease_locked(
         self,
@@ -1123,6 +1159,7 @@ class LoadBalancer:
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        clone_cached: bool = True,
     ) -> _SelectionInputs:
         mapped_limit_name = _gated_limit_name_for_model(model)
         effective_limit_name = additional_limit_name or mapped_limit_name
@@ -1143,7 +1180,7 @@ class LoadBalancer:
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
-            return _clone_selection_inputs(cached)
+            return _clone_selection_inputs(cached) if clone_cached else cached
 
         load_generation = self._selection_inputs_cache.generation
 
@@ -2154,26 +2191,11 @@ def _build_states(
             secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
-        state.usage_limit_state = evaluate_standard_usage_limit(
-            enabled=bool(account.usage_limit_enabled),
-            limit_percent=account.usage_limit_percent,
-            plan_type=account.plan_type,
-            primary=(
-                usage_history_to_window_row(entry)
-                if (entry := effective_standard_primary.get(account.id)) is not None
-                else None
-            ),
-            secondary=(
-                usage_history_to_window_row(entry)
-                if (entry := effective_standard_secondary.get(account.id)) is not None
-                else None
-            ),
-            monthly=(
-                usage_history_to_window_row(entry)
-                if (entry := effective_standard_monthly.get(account.id)) is not None
-                else None
-            ),
-            refresh_interval_seconds=_usage_refresh_interval_seconds(),
+        state.usage_limit_state = _evaluate_account_usage_limit(
+            account,
+            primary=effective_standard_primary.get(account.id),
+            secondary=effective_standard_secondary.get(account.id),
+            monthly=effective_standard_monthly.get(account.id),
         )
         state.usage_limit_percent = account.usage_limit_percent
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
@@ -2182,6 +2204,24 @@ def _build_states(
         states.append(state)
         account_map[account.id] = account
     return states, account_map
+
+
+def _evaluate_account_usage_limit(
+    account: Account,
+    *,
+    primary: UsageHistory | None,
+    secondary: UsageHistory | None,
+    monthly: UsageHistory | None,
+) -> AccountUsageLimitState:
+    return evaluate_standard_usage_limit(
+        enabled=bool(account.usage_limit_enabled),
+        limit_percent=account.usage_limit_percent,
+        plan_type=account.plan_type,
+        primary=usage_history_to_window_row(primary) if primary is not None else None,
+        secondary=usage_history_to_window_row(secondary) if secondary is not None else None,
+        monthly=usage_history_to_window_row(monthly) if monthly is not None else None,
+        refresh_interval_seconds=_usage_refresh_interval_seconds(),
+    )
 
 
 def _account_lease_stale_ttl_seconds(kind: AccountLeaseKind, settings: object) -> float:

@@ -89,7 +89,7 @@ export function AccountUsageLimitControl({
           ? t("accounts.usageLimit.description")
           : t("accounts.usageLimit.summary", {
               maximum: formatPercent(configuredPercent),
-              reserved: formatPercent(100 - configuredPercent),
+              reserved: formatReservedPercent(configuredPercent),
             })}
       </p>
 
@@ -141,7 +141,7 @@ export function AccountUsageLimitControl({
         <p className="text-xs text-muted-foreground">
           {t("accounts.usageLimit.summary", {
             maximum: formatPercent(parsedDraft),
-            reserved: formatPercent(100 - parsedDraft),
+            reserved: formatReservedPercent(parsedDraft),
           })}
         </p>
       ) : null}
@@ -189,5 +189,20 @@ function UsageLimitStateBadge({ state }: { state: AccountUsageLimitState }) {
 }
 
 function formatPercent(value: number): string {
-  return String(Number(Math.max(0, value).toFixed(2)));
+  return String(value);
+}
+
+function formatReservedPercent(maximumUsedPercent: number): string {
+  const decimalPlaces = decimalPlacesIn(maximumUsedPercent);
+  const roundedComplement = (100 - maximumUsedPercent).toFixed(
+    Math.min(decimalPlaces, 20),
+  );
+  return String(Number(roundedComplement));
+}
+
+function decimalPlacesIn(value: number): number {
+  const [coefficient, exponentText] = String(value).toLowerCase().split("e");
+  const fractionLength = coefficient.split(".")[1]?.length ?? 0;
+  const exponent = exponentText === undefined ? 0 : Number(exponentText);
+  return Math.max(0, fractionLength - exponent);
 }

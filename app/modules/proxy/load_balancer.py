@@ -126,6 +126,7 @@ from app.modules.proxy.fair_share import (
     evaluate_stream_fair_share,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
+from app.modules.proxy.selection_errors import OPPORTUNISTIC_BURN_WINDOW_CLOSED
 from app.modules.quota_planner.logic import PlannerSettings
 from app.modules.usage.additional_quota_keys import (
     canonicalize_additional_quota_key,
@@ -159,7 +160,6 @@ _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus", "edu"})
 _ROUTING_POLICY_NORMAL = "normal"
 _ACCOUNT_ROUTING_POLICIES = frozenset({_ROUTING_POLICY_NORMAL, ROUTING_POLICY_BURN_FIRST, ROUTING_POLICY_PRESERVE})
 _ADDITIONAL_QUOTA_ROUTING_POLICIES = _ACCOUNT_ROUTING_POLICIES | frozenset({"inherit"})
-OPPORTUNISTIC_BURN_WINDOW_CLOSED = "opportunistic_burn_window_closed"
 CONTINUITY_OWNER_UNAVAILABLE = "continuity_owner_unavailable"
 CONTINUITY_OWNER_POLICY_CONFLICT = "continuity_owner_policy_conflict"
 _AMBIGUOUS_CONVERSATION_OWNER_CODE = "conversation_owner_unavailable"

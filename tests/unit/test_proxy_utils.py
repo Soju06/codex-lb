@@ -3496,11 +3496,53 @@ async def test_opportunistic_admission_uses_api_key_enforced_model():
 
 
 @pytest.mark.asyncio
-async def test_opportunistic_admission_preserves_usage_limit_denial():
+async def test_opportunistic_admission_preserves_local_account_usage_limit_denial():
     api_key = ApiKeyData(
         id="key_opportunistic_usage_limit",
         name="opportunistic usage limit",
         key_prefix="sk-opportunistic",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    selection = AccountSelection(
+        account=None,
+        error_message="Account usage limit reached; reserved quota is unavailable",
+        error_code="account_usage_limit_reached",
+    )
+    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
+    context = SimpleNamespace(service=service)
+    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
+
+    response = await proxy_api._opportunistic_admission_denial(
+        request,
+        cast(proxy_api.ProxyContext, context),
+        api_key,
+        model="gpt-5.1",
+    )
+
+    assert response is not None
+    assert response.status_code == 503
+    body = json.loads(bytes(response.body))
+    assert body["error"]["code"] == "account_usage_limit_reached"
+    assert body["error"]["type"] == "server_error"
+    assert body["error"]["message"] == "Account usage limit reached; reserved quota is unavailable"
+    assert "resets_at" not in body["error"]
+    assert "Retry-After" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_opportunistic_admission_preserves_upstream_usage_limit_denial():
+    api_key = ApiKeyData(
+        id="key_opportunistic_upstream_usage_limit",
+        name="opportunistic upstream usage limit",
+        key_prefix="«redacted:sk-…»",
         allowed_models=None,
         enforced_model=None,
         enforced_reasoning_effort=None,
@@ -3531,10 +3573,12 @@ async def test_opportunistic_admission_preserves_usage_limit_denial():
     assert response is not None
     assert response.status_code == 429
     body = json.loads(bytes(response.body))
-    assert body["error"]["code"] == "usage_limit_reached"
-    assert body["error"]["type"] == "usage_limit_reached"
-    assert body["error"]["message"] == "Rate limit exceeded. Try again in 1h"
-    assert body["error"]["resets_at"] == 1_700_003_600
+    assert body["error"] == {
+        "code": "usage_limit_reached",
+        "message": "Rate limit exceeded. Try again in 1h",
+        "resets_at": 1_700_003_600,
+        "type": "usage_limit_reached",
+    }
     assert "Retry-After" not in response.headers
 
 

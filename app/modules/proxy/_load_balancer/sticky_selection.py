@@ -486,9 +486,9 @@ async def run_sticky_selection_path(
                     error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                     error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
                 )
-            # Fair share is measured against the full candidate pool, before
-            # hard-sticky narrows selection to the owner account.
-            fair_share_candidate_ids = [state.account_id for state in states]
+            # Fair share is measured against the routable usage-policy pool,
+            # before hard-sticky narrows selection to the owner account.
+            fair_share_candidate_ids = [state.account_id for state in _usage_limit_eligible_states(states)]
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
@@ -1579,7 +1579,7 @@ def _filter_states_for_usage_limit_and_account_caps(
 ) -> tuple[list[AccountState], bool]:
     state_list = list(states)
     usage_limit_blocked = [state for state in state_list if account_usage_limit_blocks_selection(state)]
-    usage_limit_eligible = [state for state in state_list if not account_usage_limit_blocks_selection(state)]
+    usage_limit_eligible = _usage_limit_eligible_states(state_list)
     if not usage_limit_eligible:
         # Preserve blocked states so the canonical selector returns the stable
         # local-policy error instead of misclassifying the pool as cap-bound.
@@ -1595,6 +1595,10 @@ def _filter_states_for_usage_limit_and_account_caps(
     # The canonical selector excludes policy-blocked states before selection,
     # but retaining them preserves terminal error precedence on fallback paths.
     return [*filtered, *usage_limit_blocked], False
+
+
+def _usage_limit_eligible_states(states: Iterable[AccountState]) -> list[AccountState]:
+    return [state for state in states if not account_usage_limit_blocks_selection(state)]
 
 
 def _probing_result_requires_recovery_reservation(

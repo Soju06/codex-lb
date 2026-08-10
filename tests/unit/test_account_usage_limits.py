@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.core.usage import SIBLING_FETCH_MARGIN_SECONDS
 from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
 from app.core.usage.types import UsageWindowRow
 
@@ -130,4 +131,86 @@ def test_stale_relevant_window_fails_closed_even_when_another_window_is_fresh() 
             ),
         )
         is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
+
+
+def test_fresh_weekly_primary_supersedes_old_monthly_shape() -> None:
+    assert (
+        _evaluate(
+            plan_type="free",
+            primary=_row(5.0, window_minutes=10080),
+            monthly=_row(
+                100.0,
+                recorded_at=NOW - timedelta(minutes=10),
+                reset_delta=timedelta(seconds=-1),
+                window_minutes=43200,
+            ),
+        )
+        is AccountUsageLimitState.AVAILABLE
+    )
+
+
+def test_newer_monthly_shape_supersedes_weekly_primary() -> None:
+    assert (
+        _evaluate(
+            plan_type="free",
+            primary=_row(
+                5.0,
+                recorded_at=NOW - timedelta(seconds=10),
+                window_minutes=10080,
+            ),
+            monthly=_row(10.0, window_minutes=43200),
+        )
+        is AccountUsageLimitState.REACHED
+    )
+
+
+def test_newest_normalized_shape_still_fails_closed_when_stale() -> None:
+    assert (
+        _evaluate(
+            plan_type="free",
+            primary=_row(
+                5.0,
+                recorded_at=NOW - timedelta(seconds=181),
+                window_minutes=10080,
+            ),
+            monthly=_row(
+                5.0,
+                recorded_at=NOW - timedelta(minutes=10),
+                window_minutes=43200,
+            ),
+        )
+        is AccountUsageLimitState.DATA_UNAVAILABLE
+    )
+
+
+def test_monthly_and_weekly_shapes_at_sibling_boundary_use_reset_tiebreak() -> None:
+    assert (
+        _evaluate(
+            plan_type="free",
+            primary=_row(
+                5.0,
+                recorded_at=NOW,
+                reset_delta=timedelta(hours=1),
+                window_minutes=10080,
+            ),
+            monthly=_row(
+                10.0,
+                recorded_at=NOW - timedelta(seconds=SIBLING_FETCH_MARGIN_SECONDS),
+                reset_delta=timedelta(hours=2),
+                window_minutes=43200,
+            ),
+        )
+        is AccountUsageLimitState.REACHED
+    )
+
+
+def test_monthly_and_weekly_exact_tie_uses_stable_weekly_primary_default() -> None:
+    assert (
+        _evaluate(
+            plan_type="free",
+            primary=_row(5.0, window_minutes=10080),
+            monthly=_row(10.0, window_minutes=43200),
+        )
+        is AccountUsageLimitState.AVAILABLE
     )

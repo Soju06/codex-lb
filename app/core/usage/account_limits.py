@@ -80,10 +80,17 @@ def _relevant_standard_rows(
     secondary: UsageWindowRow | None,
     monthly: UsageWindowRow | None,
 ) -> tuple[UsageWindowRow, ...]:
+    effective_primary, effective_secondary = _effective_primary_and_long_window(primary, secondary)
     if monthly is not None and usage_core.capacity_for_plan(plan_type, "monthly") is not None:
+        if (
+            effective_primary is None
+            and effective_secondary is not None
+            and usage_core.is_weekly_window_minutes(effective_secondary.window_minutes)
+            and usage_core.should_use_weekly_primary(effective_secondary, monthly)
+        ):
+            return (effective_secondary,)
         return (monthly,)
 
-    effective_primary, effective_secondary = _effective_primary_and_long_window(primary, secondary)
     return tuple(row for row in (effective_primary, effective_secondary) if row is not None)
 
 

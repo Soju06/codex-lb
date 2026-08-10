@@ -17,6 +17,7 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.proxy.account_cache import AccountSelectionCache
 from app.modules.proxy.load_balancer import AccountConcurrencyCaps, AccountSelection, LoadBalancer
 from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
@@ -272,6 +273,217 @@ async def test_public_selection_surfaces_fair_share_denial_shape(
     assert selection.error_code == "api_key_stream_fair_share"
     assert selection.error_message is not None
     assert "fair share" in selection.error_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
+async def test_public_fair_share_denies_against_usage_eligible_capacity(
+    selection_cache: AccountSelectionCache,
+    sticky: bool,
+) -> None:
+    eligible = _account(f"contract-fair-share-eligible-{sticky}")
+    limited = _account(f"contract-fair-share-limited-{sticky}")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    balancer, _, _, _ = _balancer(
+        [eligible, limited],
+        selection_cache,
+        primary={
+            eligible.id: _usage_row(20, eligible.id, window="primary", used_percent=5.0),
+            limited.id: _usage_row(21, limited.id, window="primary", used_percent=10.0),
+        },
+    )
+    balancer._runtime[eligible.id] = load_balancer_module.RuntimeState(
+        inflight_streams=3,
+        stream_key_inflight={"requester": 2, "other": 1},
+    )
+
+    selection = await balancer.select_account(
+        "contract-fair-share-sticky" if sticky else None,
+        sticky_kind=StickySessionKind.PROMPT_CACHE if sticky else None,
+        sticky_max_age_seconds=600 if sticky else None,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=3, stream_limit=3),
+        api_key_id="requester",
+        api_key_stream_fair_share_threshold_pct=100,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "api_key_stream_fair_share"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
+async def test_public_fair_share_ignores_usage_limited_counters_when_admitting(
+    selection_cache: AccountSelectionCache,
+    sticky: bool,
+) -> None:
+    eligible = _account(f"contract-fair-share-admit-eligible-{sticky}")
+    limited = _account(f"contract-fair-share-admit-limited-{sticky}")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    balancer, _, _, _ = _balancer(
+        [eligible, limited],
+        selection_cache,
+        primary={
+            eligible.id: _usage_row(30, eligible.id, window="primary", used_percent=5.0),
+            limited.id: _usage_row(31, limited.id, window="primary", used_percent=10.0),
+        },
+    )
+    balancer._runtime[limited.id] = load_balancer_module.RuntimeState(
+        inflight_streams=6,
+        stream_key_inflight={"requester": 3, "other": 3},
+    )
+
+    selection = await balancer.select_account(
+        "contract-fair-share-admit-sticky" if sticky else None,
+        sticky_kind=StickySessionKind.PROMPT_CACHE if sticky else None,
+        sticky_max_age_seconds=600 if sticky else None,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=3, stream_limit=3),
+        api_key_id="requester",
+        api_key_stream_fair_share_threshold_pct=100,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == eligible.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
+async def test_public_fair_share_all_usage_limited_keeps_policy_error(
+    selection_cache: AccountSelectionCache,
+    sticky: bool,
+) -> None:
+    limited = _account(f"contract-fair-share-all-limited-{sticky}")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    balancer, _, _, _ = _balancer(
+        [limited],
+        selection_cache,
+        primary={limited.id: _usage_row(40, limited.id, window="primary", used_percent=10.0)},
+    )
+    balancer._runtime[limited.id] = load_balancer_module.RuntimeState(
+        inflight_streams=3,
+        stream_key_inflight={"requester": 2, "other": 1},
+    )
+
+    selection = await balancer.select_account(
+        "contract-all-limited-sticky" if sticky else None,
+        sticky_kind=StickySessionKind.PROMPT_CACHE if sticky else None,
+        sticky_max_age_seconds=600 if sticky else None,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=3, stream_limit=3),
+        api_key_id="requester",
+        api_key_stream_fair_share_threshold_pct=100,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "account_usage_limit_reached"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_block", ["usage_limit", "paused"])
+async def test_public_backoff_fallback_cannot_reintroduce_usage_limited_accounts(
+    selection_cache: AccountSelectionCache,
+    other_block: str,
+) -> None:
+    limited = _account(f"contract-backoff-limited-{other_block}")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    other = _account(f"contract-backoff-other-{other_block}")
+    primary = {
+        limited.id: _usage_row(41, limited.id, window="primary", used_percent=10.0),
+    }
+    if other_block == "usage_limit":
+        other.usage_limit_enabled = True
+        other.usage_limit_percent = 10.0
+        primary[other.id] = _usage_row(42, other.id, window="primary", used_percent=10.0)
+    else:
+        other.status = AccountStatus.PAUSED
+
+    balancer, _, _, _ = _balancer([limited, other], selection_cache, primary=primary)
+    now = datetime.now(UTC).timestamp()
+    balancer._runtime[limited.id] = load_balancer_module.RuntimeState(error_count=3, last_error_at=now)
+    if other_block == "usage_limit":
+        balancer._runtime[other.id] = load_balancer_module.RuntimeState(error_count=3, last_error_at=now)
+
+    selection = await balancer.select_account(routing_strategy="usage_weighted")
+
+    assert selection.account is None
+    assert selection.error_code == "account_usage_limit_reached"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
+@pytest.mark.parametrize(
+    "upstream_status",
+    [AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED],
+    ids=["rate-limited", "quota-exceeded"],
+)
+async def test_public_exhaustion_envelope_wins_when_account_also_reaches_local_cap(
+    selection_cache: AccountSelectionCache,
+    sticky: bool,
+    upstream_status: AccountStatus,
+) -> None:
+    exhausted = _account(f"contract-upstream-and-local-{upstream_status}-{sticky}")
+    exhausted.status = upstream_status
+    exhausted.usage_limit_enabled = True
+    exhausted.usage_limit_percent = 100.0
+    usage = _usage_row(50, exhausted.id, window="primary", used_percent=100.0)
+    exhausted.reset_at = usage.reset_at
+    balancer, _, _, _ = _balancer(
+        [exhausted],
+        selection_cache,
+        primary={exhausted.id: usage},
+    )
+
+    selection = await balancer.select_account(
+        "contract-upstream-local-sticky" if sticky else None,
+        sticky_kind=StickySessionKind.PROMPT_CACHE if sticky else None,
+        sticky_max_age_seconds=600 if sticky else None,
+        routing_strategy="usage_weighted",
+    )
+    status_code, payload = selection_failure_response(selection)
+
+    assert selection.error_code == "usage_limit_reached"
+    assert selection.resets_at == usage.reset_at
+    assert status_code == 429
+    assert payload["error"] == {
+        "message": selection.error_message,
+        "type": "usage_limit_reached",
+        "code": "usage_limit_reached",
+        "resets_at": usage.reset_at,
+    }
+
+
+@pytest.mark.asyncio
+async def test_public_opportunistic_selection_preserves_local_usage_limit_code(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    limited = _account("contract-opportunistic-local-limit")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    balancer, _, _, _ = _balancer(
+        [limited],
+        selection_cache,
+        primary={limited.id: _usage_row(60, limited.id, window="primary", used_percent=10.0)},
+    )
+
+    selection = await balancer.check_opportunistic_admission(
+        model=None,
+        account_ids=None,
+        prefer_earlier_reset_accounts=False,
+        routing_strategy="usage_weighted",
+        budget_threshold_pct=95.0,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == "account_usage_limit_reached"
 
 
 @pytest.mark.asyncio

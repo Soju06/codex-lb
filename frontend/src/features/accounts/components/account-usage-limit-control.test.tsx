@@ -98,4 +98,45 @@ describe("AccountUsageLimitControl", () => {
     expect(screen.getByText("Reached · routing blocked")).toBeInTheDocument();
     expect(screen.getByText(/in-flight requests may briefly exceed/i)).toBeInTheDocument();
   });
+
+  it.each([
+    { configured: 1e-7, edited: "0.0000002", saved: 2e-7 },
+    { configured: 0.001, edited: "0.002", saved: 0.002 },
+    { configured: 99.999, edited: "99.998", saved: 99.998 },
+  ])(
+    "preserves and saves the configured precision for $configured percent",
+    async ({ configured, edited, saved }) => {
+      const user = userEvent.setup();
+      const onChange = vi.fn();
+      const account = createAccountSummary({
+        usageLimitEnabled: true,
+        usageLimitPercent: configured,
+        usageLimitState: "available",
+      });
+
+      render(
+        <AccountUsageLimitControl
+          account={account}
+          busy={false}
+          readOnly={false}
+          onChange={onChange}
+        />,
+      );
+
+      const input = screen.getByRole("spinbutton", {
+        name: "Maximum used percent",
+      });
+      expect(input).toHaveValue(configured);
+      expect(screen.getByText(new RegExp(`${configured}% maximum used`))).toBeInTheDocument();
+
+      await user.clear(input);
+      await user.type(input, edited);
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      expect(onChange).toHaveBeenCalledWith(account.accountId, {
+        enabled: true,
+        percent: saved,
+      });
+    },
+  );
 });

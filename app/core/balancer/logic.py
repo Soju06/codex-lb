@@ -541,8 +541,8 @@ def select_account(
     in_error_backoff: list[AccountState] = []
     all_states = list(states)
     usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else all_states
-    usage_limit_blocked = [state for state in all_states if account_usage_limit_blocks_selection(state)]
-    selectable_states = [state for state in all_states if not account_usage_limit_blocks_selection(state)]
+    usage_limit_blocked: list[AccountState] = []
+    selectable_states = all_states
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
 
     for state in selectable_states:
@@ -577,6 +577,9 @@ def select_account(
             state.last_error_at = None
             state.error_count = 0
         if state.cooldown_until and current < state.cooldown_until:
+            continue
+        if account_usage_limit_blocks_selection(state):
+            usage_limit_blocked.append(state)
             continue
         if state.error_count >= ERROR_BACKOFF_THRESHOLD:
             backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))

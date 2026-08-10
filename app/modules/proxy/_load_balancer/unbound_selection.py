@@ -25,6 +25,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _filter_states_for_usage_limit_and_account_caps,
     _probing_result_requires_recovery_reservation,
     _select_account_preferring_budget_safe,
+    _usage_limit_eligible_states,
 )
 from app.modules.proxy._load_balancer.types import (
     MAX_SELECTION_ATTEMPTS,
@@ -163,7 +164,7 @@ async def run_unbound_selection_path(
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
-                candidate_account_ids=[state.account_id for state in states],
+                candidate_account_ids=[state.account_id for state in _usage_limit_eligible_states(states)],
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
                 threshold_pct=fair_share_threshold_pct,

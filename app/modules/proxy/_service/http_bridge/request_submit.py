@@ -762,6 +762,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_scope_id: str,
         recovery_turn_state: str | None = None,
     ) -> None:
+        recovery_attempt_consumed = False
         # Eventless upstream timeouts retire the current socket.  A client
         # reconnect can otherwise create a fresh socket for the same hard key
         # and submit the identical request repeatedly while the retry circuit
@@ -850,14 +851,24 @@ class _HTTPBridgeRequestSubmitMixin:
                         ),
                     )
                 if getattr(attempt.state, "value", attempt.state) != "unknown":
-                    raise ProxyResponseError(
-                        502,
-                        openai_error(
-                            "bridge_continuity_persistence_failed",
-                            "The recovery checkpoint was already consumed; retry the request.",
-                        ),
-                    )
-                if getattr(attempt, "request_id", request_state.request_id) != request_state.request_id:
+                    if getattr(attempt.state, "value", attempt.state) != "replayed":
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "The recovery checkpoint was already consumed; retry the request.",
+                            ),
+                        )
+                    # A REPLAYED checkpoint may belong to a completed
+                    # operation whose finalized transcript is safe to replay.
+                    # Defer rejection until the operation ledger lookup below
+                    # can decide that terminal-spool case; nonterminal rows
+                    # remain fail-closed after that lookup.
+                    recovery_attempt_consumed = True
+                if (
+                    not recovery_attempt_consumed
+                    and getattr(attempt, "request_id", request_state.request_id) != request_state.request_id
+                ):
                     raise ProxyResponseError(
                         502,
                         openai_error(
@@ -903,7 +914,11 @@ class _HTTPBridgeRequestSubmitMixin:
         if (
             operation_ledger_enabled
             and callable(record_operation)
-            and (request_state.previous_response_id is not None or request_state.operation_rebind_required)
+            and (
+                request_state.previous_response_id is not None
+                or request_state.operation_rebind_required
+                or recovery_attempt_consumed
+            )
             and (request_state.operation_id is None or request_state.operation_rebind_required)
             and session.durable_session_id is not None
             and session.durable_owner_epoch is not None
@@ -1040,6 +1055,14 @@ class _HTTPBridgeRequestSubmitMixin:
                         "HTTP responses session ownership changed; retry the request.",
                     ),
                 )
+            if recovery_attempt_consumed and operation.created:
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "bridge_continuity_persistence_failed",
+                        "The recovery checkpoint was already consumed; retry the request.",
+                    ),
+                )
             if not operation.created:
                 if operation.state in {"completed", "incomplete"} and getattr(operation, "event_spool_complete", False):
                     get_operation_events = getattr(self._durable_bridge, "get_operation_events", None)
@@ -1057,6 +1080,14 @@ class _HTTPBridgeRequestSubmitMixin:
                             await request_state.event_queue.put(replay_event)
                         await request_state.event_queue.put(None)
                         return
+                if recovery_attempt_consumed:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "The recovery checkpoint was already consumed; retry the request.",
+                        ),
+                    )
                 recovery_mode = getattr(
                     _service_get_settings(),
                     "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
@@ -2036,6 +2067,31 @@ class _HTTPBridgeRequestSubmitMixin:
             if admission_waiter_registered:
                 session.admission_waiter_count = max(0, session.admission_waiter_count - 1)
             retire_closed_session = session.closed and session.admission_waiter_count == 0
+        if (
+            request_state.recovery_attempt_fingerprint is not None
+            and not request_state.recovery_attempt_claimed
+            and not request_state.recovery_attempt_dispatched
+            and session.durable_session_id is not None
+            and session.durable_owner_epoch is not None
+        ):
+            rollback_recovery_attempt = getattr(self._durable_bridge, "rollback_recovery_attempt_before_dispatch", None)
+            if callable(rollback_recovery_attempt):
+                try:
+                    await _call_with_supported_optional_kwargs(
+                        rollback_recovery_attempt,
+                        optional_kwargs={},
+                        session_id=session.durable_session_id,
+                        api_key_id=session.key.api_key_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=session.durable_owner_epoch,
+                        request_fingerprint=request_state.recovery_attempt_fingerprint,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to roll back pre-dispatch HTTP bridge recovery checkpoint request_id=%s",
+                        request_state.request_id,
+                        exc_info=True,
+                    )
         if (
             request_state.operation_recovery_claimed
             and request_state.operation_registered

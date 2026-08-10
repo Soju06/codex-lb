@@ -492,6 +492,24 @@ class DurableBridgeSessionCoordinator:
                 request_fingerprint=request_fingerprint,
             )
 
+    async def rollback_recovery_attempt_before_dispatch(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+    ) -> bool:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).rollback_recovery_attempt_before_dispatch(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                request_fingerprint=request_fingerprint,
+            )
+
     async def record_operation(
         self,
         *,

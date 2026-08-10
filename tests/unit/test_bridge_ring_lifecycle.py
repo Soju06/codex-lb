@@ -567,6 +567,19 @@ async def test_recovery_attempt_pre_dispatch_claim_can_be_rolled_back(
         )
         assert restored is not None
         assert restored.state.value == "unknown"
+        assert await repository.rollback_recovery_attempt_before_dispatch(
+            session_id=claim.id,
+            instance_id="inst-recovery-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint="fingerprint-recovery-rollback",
+        )
+        assert (
+            await repository.lookup_recovery_attempt(
+                session_id=claim.id,
+                request_fingerprint="fingerprint-recovery-rollback",
+            )
+            is None
+        )
     finally:
         await session.close()
 

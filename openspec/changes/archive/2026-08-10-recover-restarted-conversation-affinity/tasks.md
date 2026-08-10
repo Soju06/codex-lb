@@ -7,6 +7,7 @@
 - [x] 1.5 Add regressions proving a colliding explicit turn state retains its owner and model eligibility does not narrow mutation authority.
 - [x] 1.6 Add regressions proving old-reader fail-closed behavior and CAS-loser exclusion of a concurrently retired owner.
 - [x] 1.7 Add regressions for reserved predecessor submission, bounded detached generations, and shutdown cleanup.
+- [x] 1.8 Add regressions for detached alias fencing, common close finalization, drained reservation cleanup, and account invalidation.
 
 ## 2. Implementation
 
@@ -19,6 +20,7 @@
 - [x] 2.7 Separate authenticated sticky-mutation authority from model and service-tier replacement eligibility.
 - [x] 2.8 Encode source-qualified retirement so legacy readers retain hard ownership, and preserve the retired owner as exclusion evidence on every typed read.
 - [x] 2.9 Preserve request-owned admission across replacement and track detached live generations through closure.
+- [x] 2.10 Fence detached continuity publication and finalize every detached generation through reservation, account, direct-close, and shutdown paths.
 
 ## 3. Validation and Documentation
 

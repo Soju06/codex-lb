@@ -135,7 +135,13 @@ class _HTTPBridgeSessionRegistryMixin:
         defer_durable_publication = False
         deferred_live_alias_owner: _HTTPBridgeSession | None = None
         async with self._http_bridge_lock:
-            if session.closed:
+            if session.closed or (
+                session.upstream_control.retire_after_drain
+                and self._http_bridge_sessions.get(session.key) is not session
+            ):
+                # A detached predecessor may finish its admitted response, but
+                # publishing continuity aliases under its reused key would make
+                # them resolve to the replacement generation (and account).
                 return False, None
             account_neutral_recovery = is_http_bridge_account_neutral_replay(
                 kind=session.key.affinity_kind,

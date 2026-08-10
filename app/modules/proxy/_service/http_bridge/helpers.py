@@ -870,7 +870,7 @@ async def _settle_failed_http_bridge_creation(
         return superseded
 
 
-async def _close_http_bridge_session(
+async def _close_http_bridge_session_resources(
     service: Any,
     session: "_HTTPBridgeSession",
     *,
@@ -943,6 +943,33 @@ async def _close_http_bridge_session(
     )
 
 
+async def _close_http_bridge_session(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    turn_state_lock_held: bool = False,
+    release_durable_session: bool = True,
+) -> None:
+    try:
+        await _close_http_bridge_session_resources(
+            service,
+            session,
+            turn_state_lock_held=turn_state_lock_held,
+            release_durable_session=release_durable_session,
+        )
+    finally:
+        # Detached generations remain capacity owners until resource closure
+        # ends. Finalize that ownership here so direct error-recovery closes and
+        # bounded background closes cannot drift into different lifecycles.
+        if turn_state_lock_held:
+            if service._http_bridge_detached_sessions.get(id(session)) is session:
+                service._http_bridge_detached_sessions.pop(id(session), None)
+        else:
+            async with service._http_bridge_lock:
+                if service._http_bridge_detached_sessions.get(id(session)) is session:
+                    service._http_bridge_detached_sessions.pop(id(session), None)
+
+
 async def _close_http_bridge_session_bounded(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -952,20 +979,8 @@ async def _close_http_bridge_session_bounded(
     if session.upstream_reader is asyncio.current_task():
         session.upstream_reader = None
 
-    async def close_and_forget_detached_generation() -> None:
-        try:
-            await service._close_http_bridge_session(session)
-        finally:
-            # The bounded waiter may time out or be cancelled while this task
-            # continues. Release cap ownership only after the close task ends,
-            # and serialize that mutation with canonical registry replacement.
-            async with service._http_bridge_lock:
-                detached_sessions = service._http_bridge_detached_sessions
-                if detached_sessions.get(id(session)) is session:
-                    detached_sessions.pop(id(session), None)
-
     close_task = asyncio.create_task(
-        close_and_forget_detached_generation(),
+        service._close_http_bridge_session(session),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
     )
 
@@ -2018,8 +2033,14 @@ async def _release_http_bridge_unanchored_handoffs_for_request(
     """Fail-safe cleanup for reservations published before request submission."""
 
     async with service._http_bridge_lock:
-        for session in service._http_bridge_sessions.values():
+        for session in (*service._http_bridge_sessions.values(), *service._http_bridge_detached_sessions.values()):
             _release_http_bridge_unanchored_handoff(session, request_scope_id=request_scope_id)
+        # Nested stream finalizers can clear their marker before this fail-safe
+        # sweep runs. Reconsider every detached generation so marker ordering
+        # cannot leave a fully drained predecessor owning a socket and cap slot.
+        detached_sessions = tuple(service._http_bridge_detached_sessions.values())
+    for session in detached_sessions:
+        await service._retire_http_bridge_after_drain_if_ready(session)
 
 
 def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_state: bool) -> int:

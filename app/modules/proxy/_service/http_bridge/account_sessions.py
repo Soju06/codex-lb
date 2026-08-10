@@ -24,6 +24,22 @@ class _HTTPBridgeAccountSessionsMixin:
                     model_class=_extract_model_class(session.request_model) if session.request_model else None,
                 )
                 sessions_to_close.append(detached)
+            # Detached predecessors still own authenticated sockets and account
+            # leases. Account invalidation must fence them even though a newer
+            # generation occupies (or has vacated) their canonical key.
+            for session in tuple(self._http_bridge_detached_sessions.values()):
+                if session.account.id != account_id or session.closed:
+                    continue
+                session.closed = True
+                _log_http_bridge_event(
+                    "evict_account_binding_changed",
+                    session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    cache_key_family=session.key.affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+                sessions_to_close.append(session)
 
         for session in sessions_to_close:
             await self._close_http_bridge_session_bounded(session, reason="account_binding_changed")

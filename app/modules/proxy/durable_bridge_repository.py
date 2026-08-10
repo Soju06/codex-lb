@@ -1717,6 +1717,8 @@ class DurableBridgeRepository:
                 operation.event_bytes = int(operation.event_bytes or 0) + event_size
             else:
                 operation.event_spool_complete = False
+                await self._session.commit()
+                return False
             operation.state = state
             if response_id is not None:
                 operation.response_id = response_id

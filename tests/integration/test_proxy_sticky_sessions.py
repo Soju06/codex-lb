@@ -17,7 +17,8 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyData, ApiKeysService
 from app.modules.proxy._service.realtime_live import (
     _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
     realtime_call_affinity_key,
@@ -93,6 +94,7 @@ def _install_proxy_settings_cache(
     openai_cache_affinity_max_age_seconds: int = 300,
     sticky_reallocation_budget_threshold_pct: float = 95.0,
     openai_prompt_cache_key_derivation_enabled: bool = True,
+    proxy_request_budget_seconds: float = 75.0,
 ) -> None:
     settings = SimpleNamespace(
         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
@@ -101,13 +103,14 @@ def _install_proxy_settings_cache(
         sticky_reallocation_budget_threshold_pct=sticky_reallocation_budget_threshold_pct,
         openai_prompt_cache_key_derivation_enabled=openai_prompt_cache_key_derivation_enabled,
         routing_strategy="usage_weighted",
-        proxy_request_budget_seconds=75.0,
+        proxy_request_budget_seconds=proxy_request_budget_seconds,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
         trace_channels=frozenset(),
         http_responses_session_bridge_enabled=False,
+        http_responses_session_bridge_instance_id="sticky-session-test",
         http_responses_session_bridge_idle_ttl_seconds=120.0,
         http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
         http_responses_session_bridge_max_sessions=128,
@@ -473,6 +476,117 @@ async def test_codex_goal_restart_cas_miss_reloads_concurrently_rebound_raw_owne
         )
     assert raw_row is not None
     assert raw_row.account_id == rebound_owner_id
+    assert raw_row.continuity_abandoned_at is None
+
+
+@pytest.mark.asyncio
+async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
+    async_client,
+    monkeypatch,
+):
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings_response.status_code == 200
+    owner_id = await _import_account(
+        async_client,
+        "acc_goal_restart_out_of_scope_owner",
+        "goal-restart-out-of-scope-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_goal_restart_scoped_replacement",
+        "goal-restart-scoped-replacement@example.com",
+    )
+    raw_session = "goal-restart-scoped-session"
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=replacement_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+        await session.execute(update(Account).where(Account.id == owner_id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.commit()
+    async with SessionLocal() as session:
+        created_key = await ApiKeysService(ApiKeysRepository(session)).create_key(
+            ApiKeyCreateData(
+                name="goal restart scoped replacement",
+                allowed_models=None,
+                assigned_account_ids=[replacement_id],
+            )
+        )
+
+    _install_proxy_settings_cache(
+        monkeypatch,
+        sticky_threads_enabled=False,
+        proxy_request_budget_seconds=0.05,
+    )
+
+    async def fail_stream(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("an out-of-scope owner must fail closed before upstream dispatch")
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers={
+            "Authorization": f"Bearer {created_key.key}",
+            "session_id": raw_session,
+        },
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Continue the existing task.",
+            "input": [
+                {
+                    "role": "developer",
+                    "content": (
+                        '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                    ),
+                },
+                {"role": "user", "content": "continue"},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    failed_event = next(event for event in events if event.get("type") == "response.failed")
+    assert failed_event["response"]["error"]["code"] == "hard_affinity_saturated"
+    async with SessionLocal() as session:
+        raw_row = await session.scalar(
+            select(StickySession).where(
+                StickySession.key == raw_session,
+                StickySession.kind == StickySessionKind.CODEX_SESSION,
+            )
+        )
+    assert raw_row is not None
+    assert raw_row.account_id == owner_id
     assert raw_row.continuity_abandoned_at is None
 
 

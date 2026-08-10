@@ -7,7 +7,7 @@ Define sticky-session operation contracts so durable sessions, dashboard affinit
 ### Requirement: Sticky sessions are explicitly typed
 The system SHALL persist each sticky-session mapping with an explicit kind so durable Codex backend affinity, durable dashboard sticky-thread routing, and bounded prompt-cache affinity can be managed independently. Budget-pressure reallocation MUST apply only to mappings whose kind/source is soft. A raw or legacy `codex_session` mapping MUST remain owner-bound because it may represent explicit turn-state continuity; budget pressure MUST NOT delete or rebind it.
 
-An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED`; local capacity, retry exclusions, runtime health, and budget pressure MUST NOT authorize abandonment. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account.
+An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's effective account-policy scope; local capacity, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT authorize abandonment. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account.
 
 #### Scenario: Soft sticky reallocation uses split primary and secondary pressure thresholds
 - **WHEN** a request resolves an existing prompt-cache, sticky-thread, or other explicitly soft mapping
@@ -76,6 +76,14 @@ An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_sess
 - **WHEN** another operation rebinds that mapping or restores the owner before the retirement write executes
 - **THEN** the compare-and-set retirement does not tombstone the newer state
 - **AND** selection preserves fail-closed ownership semantics
+
+#### Scenario: Scoped API key cannot retire another pool's owner
+
+- **GIVEN** a raw legacy `codex_session` mapping points to unavailable account A
+- **AND** the authenticated API key's effective account-policy scope contains account B but not account A
+- **WHEN** the key sends a marked account-neutral goal-continuation restart for that session
+- **THEN** the request fails closed before upstream dispatch
+- **AND** the raw mapping to account A is neither tombstoned nor rebound
 
 ### Requirement: Dashboard exposes sticky-session administration
 The system SHALL provide dashboard APIs for listing sticky-session mappings, deleting one mapping, and purging stale mappings.
@@ -267,7 +275,7 @@ A nonblank `conversation` without a dedicated resolved owner MUST proceed only w
 #### Scenario: Retired WebSocket turn state does not cross accounts
 
 - **GIVEN** a closed upstream WebSocket on account A supplied an account-scoped turn-state token
-- **AND** a later movable bare-session frame selects account B
+- **AND** a later movable bare-session frame or marked self-contained goal restart selects account B
 - **WHEN** the proxy opens the replacement WebSocket
 - **THEN** it removes account A's stale turn-state token before connect
 - **AND** account B never receives that token

@@ -1344,7 +1344,14 @@ class _WebSocketMixin:
         account_lease: AccountLease | None = None
         upstream_requires_security_work_authorized: bool | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
-        client_turn_state_header: str | None = _sticky_key_from_turn_state_header(filtered_headers)
+        # The API inserts its generated downstream turn state into ``headers``
+        # before entering this service. Preserve a turn-state header as
+        # client-owned only when no synthesized value accompanied it; otherwise
+        # account-switch cleanup must remain able to remove the old account's
+        # generated token from ``filtered_headers``.
+        client_turn_state_header: str | None = (
+            _sticky_key_from_turn_state_header(filtered_headers) if synthesized_turn_state is None else None
+        )
         upstream_account_id: str | None = None
         downstream_activity = _DownstreamWebSocketActivity()
         replay_request_state: _WebSocketRequestState | None = None
@@ -1939,6 +1946,10 @@ class _WebSocketMixin:
                     await retire_current_upstream()
                     upstream_turn_state = None
                     if client_turn_state_header is None:
+                        # Provenance was captured before this switch: absence
+                        # here means the API synthesized the forwarded token.
+                        # Such account-local state must die with its upstream;
+                        # an actual client anchor remains fail-closed instead.
                         filtered_headers = {
                             key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
                         }

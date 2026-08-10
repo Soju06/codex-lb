@@ -4062,6 +4062,7 @@ def test_backend_responses_websocket_goal_restart_retires_reused_socket_and_keep
     assert len(selections) == 2
     assert selections[0]["abandon_unavailable_legacy_owner"] is False
     assert selections[1]["abandon_unavailable_legacy_owner"] is True
+    assert "x-codex-turn-state" not in cast(dict[str, str], selections[1]["headers"])
     assert owner_upstream.closed is True
     assert len(owner_upstream.sent_text) == 1
     assert len(replacement_upstream.sent_text) == 1

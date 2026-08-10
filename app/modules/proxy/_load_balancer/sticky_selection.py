@@ -469,6 +469,14 @@ async def run_sticky_selection_path(
                     traffic_class=traffic_class,
                 )
             probe_reservation: ProbeReservation | None = None
+        # Raw sticky rows are global, while account-assigned API keys and
+        # other authenticated policies narrow a request's mutation authority.
+        # Keep this check on the pre-health continuity pool: quota exhaustion
+        # may authorize retirement, but being outside policy scope never does.
+        legacy_owner_in_effective_policy_scope = isinstance(sticky_existing_account_id, str) and any(
+            account.id == sticky_existing_account_id
+            for account in selection_inputs.effective_continuity_owner_candidates
+        )
         if (
             abandon_unavailable_legacy_owner
             and hard_sticky
@@ -476,6 +484,7 @@ async def run_sticky_selection_path(
             and sticky_source == "session_header"
             and legacy_sticky_key is not None
             and isinstance(sticky_existing_account_id, str)
+            and legacy_owner_in_effective_policy_scope
         ):
             async with owner._repo_factory() as repos:
                 owner_retired = await repos.sticky_sessions.tombstone_if_owner_unavailable(

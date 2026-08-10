@@ -361,6 +361,8 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
         await QuotaPlannerRepository(session).upsert_settings(_AUTO_WARMUP_SETTINGS)
         service = QuotaWarmupService(session)
         released_reservations: list[str] = []
+        release_started = asyncio.Event()
+        allow_release = asyncio.Event()
 
         async def reach_limit() -> None:
             async with SessionLocal() as race_session:
@@ -386,6 +388,9 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
                     return SimpleNamespace(reservation_id="reservation-final-authorization")
 
                 async def release_usage_reservation(self, reservation_id: str) -> None:
+                    if race_point == "authorization_cancelled":
+                        release_started.set()
+                        await allow_release.wait()
                     released_reservations.append(reservation_id)
 
             monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
@@ -419,13 +424,21 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
         monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fail_send)
 
         if race_point == "authorization_cancelled":
-            with pytest.raises(asyncio.CancelledError):
-                await service.warm_now(
+            warmup = asyncio.create_task(
+                service.warm_now(
                     account_id=account_id,
                     model="gpt-5.4-mini",
                     api_key_id="api-key-race",
                     force_probe=True,
                 )
+            )
+            await release_started.wait()
+            warmup.cancel()
+            await asyncio.sleep(0)
+            warmup.cancel()
+            allow_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await warmup
             stored = await session.scalar(
                 select(QuotaPlannerDecision).where(QuotaPlannerDecision.account_id == account_id)
             )

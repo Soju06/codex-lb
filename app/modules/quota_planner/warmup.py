@@ -439,11 +439,17 @@ class QuotaWarmupService:
                 reservation_id=reservation_id,
             )
         )
-        try:
-            return await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await cleanup
-            raise
+        cancellation: asyncio.CancelledError | None = None
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+        result = cleanup.result()
+        if cancellation is not None:
+            raise cancellation
+        return result
 
     async def cancel_decision(self, decision_id: str) -> WarmupExecutionResult | None:
         row = await self._planner.get_decision(decision_id)

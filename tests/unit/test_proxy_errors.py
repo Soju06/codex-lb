@@ -9,10 +9,39 @@ from starlette.requests import Request
 
 from app.core.clients.proxy import ProxyResponseError, _error_event_from_response, _error_payload_from_response
 from app.core.exceptions import ProxyRateLimitError
+from app.core.openai.requests import ResponsesRequest
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
 
 pytestmark = pytest.mark.unit
+
+
+def test_http_bridge_recovery_eligibility_accepts_turn_state_anchor_without_previous_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy_api.proxy_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_operation_ledger_enabled=True),
+    )
+    payload = ResponsesRequest(model="gpt-5.6", instructions="", input="retry")
+
+    assert (
+        proxy_api._http_bridge_recovery_request_eligible(
+            payload,
+            bridge_active=True,
+            headers={"x-codex-turn-state": "turn-1"},
+        )
+        is True
+    )
+    assert (
+        proxy_api._http_bridge_recovery_request_eligible(
+            payload,
+            bridge_active=True,
+            headers={},
+        )
+        is False
+    )
 
 
 def test_logged_error_json_response_preserves_upstream_diagnostic_markers():

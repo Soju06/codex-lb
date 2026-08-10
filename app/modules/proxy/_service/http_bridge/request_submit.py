@@ -255,6 +255,38 @@ def _http_bridge_server_anchored_replay_enabled(request_state: _WebSocketRequest
     )
 
 
+def _http_bridge_operation_fence_for_hard_continuity_enabled(request_state: _WebSocketRequestState) -> bool:
+    """Return whether a hard turn-state request may use the durable replay fence."""
+    if not request_state.hard_continuity_anchor:
+        return False
+    return getattr(
+        _service_get_settings(),
+        "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+        "fail_closed",
+    ) in {"server_anchored_replay_once", "server_indefinite_recovery"}
+
+
+def _http_bridge_operation_fingerprint(
+    *,
+    session_id: str,
+    api_key_scope: str,
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> str:
+    fingerprint_text = _text_without_account_installation_id(text_data)
+    if request_state.previous_response_id is None and _http_bridge_operation_fence_for_hard_continuity_enabled(
+        request_state
+    ):
+        # Hard turn-state requests do not carry previous_response_id. Scope
+        # their operation identity to the durable session so identical prompts
+        # in two conversations cannot collide in the global fingerprint fence.
+        fingerprint_text = f"session:{session_id}\n{fingerprint_text}"
+    return durable_bridge_operation_fingerprint(
+        api_key_scope=api_key_scope,
+        request_text=fingerprint_text,
+    )
+
+
 def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     payload = openai_error(
         "previous_response_not_found",
@@ -752,6 +784,51 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_scope_id=request_scope_id,
             )
 
+    async def _http_bridge_operation_fenced_continuity_replay_allowed(
+        self: Any,
+        session: "_HTTPBridgeSession",
+        *,
+        request_state: _WebSocketRequestState,
+        text_data: str,
+    ) -> bool:
+        """Allow a cooldown bypass only for an already-fenced hard turn."""
+        if (
+            not _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+            or request_state.previous_response_id is not None
+            or session.durable_session_id is None
+            or session.durable_owner_epoch is None
+        ):
+            return False
+        get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)
+        if not callable(get_operation_by_fingerprint):
+            return False
+        api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
+        request_fingerprint = _http_bridge_operation_fingerprint(
+            session_id=session.durable_session_id,
+            api_key_scope=api_key_scope,
+            request_state=request_state,
+            text_data=text_data,
+        )
+        try:
+            operation = await _call_with_supported_optional_kwargs(
+                get_operation_by_fingerprint,
+                optional_kwargs={"api_key_scope": api_key_scope},
+                request_fingerprint=request_fingerprint,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to inspect hard-continuity operation fence before retry request_id=%s",
+                request_state.request_id,
+                exc_info=True,
+            )
+            return False
+        if operation is None or operation.session_id != session.durable_session_id:
+            return False
+        operation_state = getattr(operation.state, "value", operation.state)
+        return operation_state == "unknown" or (
+            operation_state in {"completed", "incomplete"} and bool(getattr(operation, "event_spool_complete", False))
+        )
+
     async def _submit_http_bridge_request_with_handoff(
         self: Any,
         session: "_HTTPBridgeSession",
@@ -763,6 +840,17 @@ class _HTTPBridgeRequestSubmitMixin:
         recovery_turn_state: str | None = None,
     ) -> None:
         recovery_attempt_consumed = False
+        allow_operation_fenced_continuity_replay = False
+        if _http_bridge_operation_fence_for_hard_continuity_enabled(request_state):
+            retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+            if retry_cooldown_seconds > 0:
+                allow_operation_fenced_continuity_replay = (
+                    await self._http_bridge_operation_fenced_continuity_replay_allowed(
+                        session,
+                        request_state=request_state,
+                        text_data=text_data,
+                    )
+                )
         # Eventless upstream timeouts retire the current socket.  A client
         # reconnect can otherwise create a fresh socket for the same hard key
         # and submit the identical request repeatedly while the retry circuit
@@ -782,6 +870,7 @@ class _HTTPBridgeRequestSubmitMixin:
         if not await self._http_bridge_precreated_retry_allowed(
             session,
             allow_proof_gated_continuity_replay=allow_proof_gated_continuity_replay or allow_server_anchored_replay,
+            allow_operation_fenced_continuity_replay=allow_operation_fenced_continuity_replay,
         ):
             retry_after_seconds = max(
                 1,
@@ -910,12 +999,14 @@ class _HTTPBridgeRequestSubmitMixin:
         operation_ledger_enabled = bool(
             getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
         )
+        operation_ledger_for_hard_continuity = _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
         record_operation = getattr(self._durable_bridge, "record_operation", None)
         if (
             operation_ledger_enabled
             and callable(record_operation)
             and (
                 request_state.previous_response_id is not None
+                or operation_ledger_for_hard_continuity
                 or request_state.operation_rebind_required
                 or recovery_attempt_consumed
             )
@@ -924,14 +1015,15 @@ class _HTTPBridgeRequestSubmitMixin:
             and session.durable_owner_epoch is not None
         ):
             text_data = _text_without_operation_id(text_data)
-            fingerprint_text_data = _text_without_account_installation_id(text_data)
             api_key_scope = durable_bridge_api_key_scope(session.key.api_key_id)
             operation_fingerprint = (
                 request_state.operation_fingerprint
                 if request_state.operation_rebind_required and request_state.operation_fingerprint is not None
-                else durable_bridge_operation_fingerprint(
+                else _http_bridge_operation_fingerprint(
+                    session_id=session.durable_session_id,
                     api_key_scope=api_key_scope,
-                    request_text=fingerprint_text_data,
+                    request_state=request_state,
+                    text_data=text_data,
                 )
             )
             operation_id = (

@@ -227,6 +227,110 @@ def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_ancho
     assert http_bridge_request_submit_module._http_bridge_client_full_history_recovery_enabled(request_state) is False
 
 
+def test_hard_continuity_operation_fence_requires_server_recovery_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(http_responses_session_bridge_ambiguous_continuation_recovery_mode="fail_closed"),
+    )
+    assert (
+        http_bridge_request_submit_module._http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+        is False
+    )
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+        ),
+    )
+    assert (
+        http_bridge_request_submit_module._http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+        is True
+    )
+    first_fingerprint = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="durable-a",
+        api_key_scope="key-scope",
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"same"}',
+    )
+    second_fingerprint = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="durable-b",
+        api_key_scope="key-scope",
+        request_state=request_state,
+        text_data='{"type":"response.create","input":"same"}',
+    )
+    assert first_fingerprint != second_fingerprint
+    request_state.hard_continuity_anchor = False
+    assert (
+        http_bridge_request_submit_module._http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_hard_continuity_operation_replay_requires_matching_unknown_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-fence")
+    session.durable_session_id = "durable-hard-fence"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-fence-replay",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+        ),
+    )
+    operation = SimpleNamespace(
+        session_id="durable-hard-fence",
+        state="unknown",
+        event_spool_complete=False,
+    )
+    service._durable_bridge = SimpleNamespace(get_operation_by_fingerprint=AsyncMock(return_value=operation))
+
+    assert (
+        await service._http_bridge_operation_fenced_continuity_replay_allowed(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create","input":"retry"}',
+        )
+        is True
+    )
+
+    operation.session_id = "different-session"
+    assert (
+        await service._http_bridge_operation_fenced_continuity_replay_allowed(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create","input":"retry"}',
+        )
+        is False
+    )
+
+
 def _make_app_settings(*, bridge_enabled: bool = True, **overrides: Any) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled, **overrides)
 

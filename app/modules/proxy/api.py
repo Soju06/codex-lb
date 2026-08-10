@@ -4968,8 +4968,12 @@ async def _stream_responses(
         else {}
     )
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
-    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(payload, bridge_active=bridge_active)
     effective_headers = forwarded_headers or request.headers
+    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
+        payload,
+        bridge_active=bridge_active,
+        headers=effective_headers,
+    )
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
     downstream_turn_state = (
         forwarded_downstream_turn_state
@@ -5260,7 +5264,11 @@ async def _collect_responses(
 
     rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
-    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(payload, bridge_active=bridge_active)
+    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
+        payload,
+        bridge_active=bridge_active,
+        headers=request.headers,
+    )
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
@@ -8089,8 +8097,14 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
     )
 
 
-def _http_bridge_recovery_request_eligible(payload: ResponsesRequest, *, bridge_active: bool) -> bool:
-    if not bridge_active or payload.previous_response_id is None:
+def _http_bridge_recovery_request_eligible(
+    payload: ResponsesRequest,
+    *,
+    bridge_active: bool,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
+    turn_state_anchor = proxy_affinity_module._sticky_key_from_turn_state_header(headers or {})
+    if not bridge_active or (payload.previous_response_id is None and turn_state_anchor is None):
         return False
     settings = proxy_service_module.get_settings()
     if not getattr(settings, "http_responses_session_bridge_operation_ledger_enabled", True):

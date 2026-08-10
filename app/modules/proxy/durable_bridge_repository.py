@@ -1945,12 +1945,18 @@ class DurableBridgeRepository:
                         .values(last_seen_at=now, lease_expires_at=now)
                     )
                 if retained_recovery_ids:
+                    if owner_process_epoch is None:
+                        retained_owner_filter = HttpBridgeSessionRecord.owner_instance_id == instance_id
+                    else:
+                        retained_owner_filter = and_(
+                            HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                            HttpBridgeSessionRecord.owner_process_epoch == owner_process_epoch,
+                        )
                     await self._session.execute(
                         update(HttpBridgeSessionRecord)
                         .where(
                             HttpBridgeSessionRecord.id.in_(retained_recovery_ids),
-                            HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                            HttpBridgeSessionRecord.owner_process_epoch == owner_process_epoch,
+                            retained_owner_filter,
                         )
                         .values(
                             owner_instance_id=None,

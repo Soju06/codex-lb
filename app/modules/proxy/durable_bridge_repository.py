@@ -1103,7 +1103,12 @@ class DurableBridgeRepository:
                     handoff_allowed = previous_session is None or not (
                         previous_session.owner_instance_id is not None
                         and previous_session.lease_expires_at is not None
-                        and previous_session.lease_expires_at > now
+                        # PostgreSQL returns timestamptz values with an
+                        # attached UTC offset, while ``utcnow`` is a
+                        # naive UTC value used by the durable layer.
+                        # Normalize before comparing so cross-session
+                        # recovery remains database-backend agnostic.
+                        and to_utc_naive(previous_session.lease_expires_at) > now
                     )
                     if handoff_allowed:
                         # Transfer only nonterminal operations to the currently

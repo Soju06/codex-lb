@@ -208,6 +208,7 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     sticky_seed_kind: StickySessionKind | None
     sticky_seed_account_id: str | None
     spill_bare_session_on_account_cap: bool
+    abandon_unavailable_legacy_owner: bool
     require_unambiguous_account: bool
     sticky_max_age_seconds: int | None
     prefer_earlier_reset_accounts: bool
@@ -273,6 +274,7 @@ async def run_sticky_selection_path(
     sticky_seed_kind = request.sticky_seed_kind
     sticky_seed_account_id = request.sticky_seed_account_id
     spill_bare_session_on_account_cap = request.spill_bare_session_on_account_cap
+    abandon_unavailable_legacy_owner = request.abandon_unavailable_legacy_owner
     require_unambiguous_account = request.require_unambiguous_account
     sticky_max_age_seconds = request.sticky_max_age_seconds
     prefer_earlier_reset_accounts = request.prefer_earlier_reset_accounts
@@ -467,6 +469,52 @@ async def run_sticky_selection_path(
                     traffic_class=traffic_class,
                 )
             probe_reservation: ProbeReservation | None = None
+        if (
+            abandon_unavailable_legacy_owner
+            and hard_sticky
+            and sticky_existing_is_legacy
+            and sticky_source == "session_header"
+            and legacy_sticky_key is not None
+            and isinstance(sticky_existing_account_id, str)
+        ):
+            async with owner._repo_factory() as repos:
+                owner_retired = await repos.sticky_sessions.tombstone_if_owner_unavailable(
+                    legacy_sticky_key,
+                    kind=StickySessionKind.CODEX_SESSION,
+                    expected_account_id=sticky_existing_account_id,
+                )
+                authoritative_legacy_owner = None
+                if not owner_retired:
+                    authoritative_legacy_owner = await repos.sticky_sessions.get_account_id_and_abandonment(
+                        legacy_sticky_key,
+                        kind=StickySessionKind.CODEX_SESSION,
+                    )
+            # One guarded write is authoritative for this selection. Repeating
+            # it in capacity-wait retries would add write pressure and could
+            # reinterpret a later status transition as restart authorization.
+            abandon_unavailable_legacy_owner = False
+            if owner_retired:
+                # The raw compatibility row is now a tombstone. Drop only the
+                # selection loop's cached legacy owner and run the normal path
+                # again so namespaced affinity, leases, and admission checks
+                # are established through the existing selection path.
+                logger.info(
+                    "Legacy Codex session owner retired for self-contained goal restart account_id=%s",
+                    "<redacted>" if redact_sensitive_details else sticky_existing_account_id,
+                )
+                legacy_existing_account_id = None
+                continue
+            # A failed compare-and-set means the cached owner is no longer
+            # authoritative: it may have recovered, another request may have
+            # rebound the raw row, or another worker may already have
+            # tombstoned it. Re-read under a fresh transaction and restart the
+            # loop so each outcome is handled by normal selection. Retaining
+            # the stale owner here would defeat the CAS and can fail a restart
+            # even though a concurrent operation already established a valid
+            # replacement.
+            assert authoritative_legacy_owner is not None
+            legacy_existing_account_id = authoritative_legacy_owner.account_id
+            continue
         sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
         if fair_share_denial is not None:
             # Denial parks in the transport capacity-wait loop like a cap

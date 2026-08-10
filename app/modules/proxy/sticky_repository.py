@@ -239,6 +239,58 @@ class StickySessionsRepository:
             await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def tombstone_if_owner_unavailable(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        expected_account_id: str,
+    ) -> bool:
+        """Retire an unchanged owner only while its persisted status is unavailable."""
+
+        if not key or not expected_account_id:
+            return False
+        unavailable_statuses = (
+            AccountStatus.PAUSED,
+            AccountStatus.RATE_LIMITED,
+            AccountStatus.QUOTA_EXCEEDED,
+        )
+        # PostgreSQL evaluates the status subquery from the UPDATE statement's
+        # snapshot. Without first locking the Account row, a concurrent status
+        # recovery can commit while that statement waits for the StickySession
+        # row and the stale snapshot can still authorize a tombstone. Locking
+        # the status owner makes recovery and retirement serialize; the sticky
+        # owner predicate below independently keeps concurrent rebinds safe.
+        owner_status_lock = select(Account.status).where(Account.id == expected_account_id).with_for_update()
+        # Retain account status inside the UPDATE as a second, database-level
+        # invariant. The lock is the concurrency guarantee; this predicate
+        # prevents future refactors from turning a prior status observation
+        # into unconditional retirement.
+        unavailable_owner = select(Account.id).where(
+            Account.id == expected_account_id,
+            Account.status.in_(unavailable_statuses),
+        )
+        statement = (
+            update(StickySession)
+            .where(
+                StickySession.key == key,
+                StickySession.kind == kind,
+                StickySession.account_id == expected_account_id,
+                StickySession.continuity_abandoned_at.is_(None),
+                StickySession.account_id.in_(unavailable_owner),
+            )
+            .values(continuity_abandoned_at=func.now())
+            .returning(StickySession.key)
+        )
+        async with sqlite_writer_section():
+            owner_status = await self._session.scalar(owner_status_lock)
+            if owner_status not in unavailable_statuses:
+                await self._session.commit()
+                return False
+            result = await self._session.execute(statement)
+            await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
     async def restore_if_current(
         self,
         key: str,

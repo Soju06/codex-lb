@@ -10466,6 +10466,138 @@ def test_sticky_key_for_responses_request_keeps_sticky_threads_durable():
     assert policy.max_age_seconds is None
 
 
+def _goal_restart_payload(**updates: object) -> ResponsesRequest:
+    payload: dict[str, object] = {
+        "model": "gpt-5.1",
+        "instructions": "Continue the existing task.",
+        "input": [
+            {
+                "role": "developer",
+                "content": ('<codex_internal_context source="goal">\nContinue working toward the active thread goal.'),
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+        "stream": True,
+        **updates,
+    }
+    return ResponsesRequest.model_validate(payload)
+
+
+def test_goal_restart_affinity_can_abandon_only_legacy_session_owner():
+    payload = _goal_restart_payload()
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "goal-restart-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+    turn_state_policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={
+            "session_id": "goal-restart-session",
+            "x-codex-turn-state": "explicit-turn-owner",
+        },
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.codex_session_source == "session_header"
+    assert policy.abandon_unavailable_legacy_owner is True
+    assert turn_state_policy.codex_session_source == "turn_state"
+    assert turn_state_policy.abandon_unavailable_legacy_owner is False
+
+
+@pytest.mark.parametrize(
+    ("payload_update", "extra_input"),
+    [
+        ({"previous_response_id": "resp_owner"}, []),
+        ({"conversation": "conv_owner"}, []),
+        ({}, [{"type": "input_file", "file_id": "file_owner"}]),
+        ({}, [{"type": "input_image", "file_id": "file_image_owner"}]),
+        (
+            {},
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_without_matching_input",
+                    "output": "result",
+                }
+            ],
+        ),
+    ],
+)
+def test_goal_restart_affinity_preserves_owner_for_account_dependent_payloads(
+    payload_update: dict[str, object],
+    extra_input: list[JsonValue],
+):
+    payload = _goal_restart_payload(**payload_update)
+    assert isinstance(payload.input, list)
+    cast(list[JsonValue], payload.input).extend(extra_input)
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "goal-restart-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.abandon_unavailable_legacy_owner is False
+
+
+def test_full_resend_without_goal_marker_cannot_abandon_legacy_owner():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Continue the existing task.",
+            "input": [{"role": "user", "content": "continue"}],
+            "stream": True,
+        }
+    )
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "goal-restart-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.abandon_unavailable_legacy_owner is False
+
+
+@pytest.mark.asyncio
+async def test_unavailable_owner_tombstone_locks_account_status_before_retirement() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    fake_session = SimpleNamespace(
+        scalar=AsyncMock(return_value=AccountStatus.ACTIVE),
+        execute=AsyncMock(),
+        commit=AsyncMock(),
+    )
+    repo = StickySessionsRepository(cast(Any, fake_session))
+
+    retired = await repo.tombstone_if_owner_unavailable(
+        "goal-restart-lock",
+        kind=StickySessionKind.CODEX_SESSION,
+        expected_account_id="acc-recovered-before-lock",
+    )
+
+    assert retired is False
+    status_statement = fake_session.scalar.await_args.args[0]
+    compiled = str(status_statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled
+    fake_session.execute.assert_not_awaited()
+    fake_session.commit.assert_awaited_once()
+
+
 def test_sticky_key_for_compact_request_prefers_codex_session_affinity():
     payload = ResponsesCompactRequest.model_validate(
         {
@@ -21105,6 +21237,83 @@ async def test_prepare_websocket_response_create_request_injects_anchor_for_code
     fresh_payload = json.loads(prepared.request_state.fresh_upstream_request_text)
     assert "previous_response_id" not in fresh_payload
     assert fresh_payload["input"] == [*historical_input, new_input]
+
+
+@pytest.mark.asyncio
+async def test_prepare_websocket_goal_restart_keeps_full_resend_without_injected_anchor(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reserve_usage = AsyncMock(return_value=None)
+    api_key = ApiKeyData(
+        id="key_ws_goal_restart",
+        name="ws-goal-restart",
+        key_prefix="sk-ws-goal",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        trace_channels = frozenset()
+        openai_prompt_cache_key_derivation_enabled = True
+
+    historical_input: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "old question"}]},
+    ]
+    retained_output: JsonValue = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "old answer"}],
+    }
+    new_input: JsonValue = {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "continue the goal"}],
+    }
+    continuity_state = proxy_service._WebSocketContinuityState(
+        last_completed_input_count=len(historical_input),
+        last_completed_response_id="resp_old_goal_owner",
+        last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(historical_input),
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    prepared = await service._prepare_websocket_response_create_request(
+        cast(
+            dict[str, JsonValue],
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "instructions": (
+                    '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                ),
+                "input": [*historical_input, retained_output, new_input],
+            },
+        ),
+        headers={"session_id": "goal-restart-direct-websocket"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=300,
+        api_key=api_key,
+        continuity_state=continuity_state,
+    )
+
+    upstream_payload = json.loads(prepared.text_data)
+    assert "previous_response_id" not in upstream_payload
+    assert upstream_payload["input"] == [*historical_input, retained_output, new_input]
+    assert prepared.request_state.previous_response_id is None
+    assert prepared.request_state.proxy_injected_previous_response_id is False
+    assert prepared.request_state.fresh_upstream_request_is_retry_safe is True
+    assert prepared.affinity_policy.codex_session_source == "session_header"
+    assert prepared.affinity_policy.abandon_unavailable_legacy_owner is True
 
 
 @pytest.mark.asyncio

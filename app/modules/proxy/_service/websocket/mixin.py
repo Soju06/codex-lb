@@ -433,6 +433,7 @@ from app.modules.proxy.affinity import (
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
+    _request_allows_unavailable_legacy_owner_abandonment,
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,  # noqa: F401
     _sticky_key_from_turn_state_header,
@@ -535,23 +536,24 @@ async def _reject_websocket_owner_switch_blocked(
     api_key: ApiKeyData | None,
     response_create_gate: asyncio.Semaphore,
     downstream_activity: _DownstreamWebSocketActivity,
-) -> None:
-    error_message = (
+    error_code: str = "previous_response_owner_unavailable",
+    error_message: str = (
         "Previous response owner differs while another response is still streaming; retry after the terminal frame."
-    )
+    ),
+) -> None:
     await proxy._release_websocket_request_state_reservation(request_state)
     await proxy._write_websocket_connect_failure(
         account_id=account.id,
         api_key=api_key,
         request_state=request_state,
-        error_code="previous_response_owner_unavailable",
+        error_code=error_code,
         error_message=error_message,
     )
     await proxy._emit_websocket_terminal_error(
         websocket,
         client_send_lock=client_send_lock,
         request_state=request_state,
-        error_code="previous_response_owner_unavailable",
+        error_code=error_code,
         error_message=error_message,
         downstream_activity=downstream_activity,
     )
@@ -1902,6 +1904,49 @@ class _WebSocketMixin:
                     request_state is not None
                     and upstream is not None
                     and account is not None
+                    and request_state.affinity_policy.abandon_unavailable_legacy_owner
+                ):
+                    # Reusing the existing socket would bypass sticky
+                    # selection, so the unavailable raw owner would never be
+                    # compared, tombstoned, or replaced. A restart is movable
+                    # only before dispatch and cannot retire a socket that
+                    # still owns another response.
+                    async with pending_lock:
+                        restart_switch_blocked = _websocket_owner_switch_has_other_pending_requests(
+                            request_state,
+                            pending_requests,
+                        )
+                    if restart_switch_blocked:
+                        await _reject_websocket_owner_switch_blocked(
+                            proxy,
+                            websocket,
+                            client_send_lock=client_send_lock,
+                            request_state=request_state,
+                            account=account,
+                            api_key=api_key,
+                            response_create_gate=response_create_gate,
+                            downstream_activity=downstream_activity,
+                            error_code="stream_incomplete",
+                            error_message=(
+                                "Goal restart cannot switch accounts while another response is still streaming; "
+                                "retry after the terminal frame."
+                            ),
+                        )
+                        request_state = None
+                        text_data = None
+                        payload = None
+                        continue
+                    await retire_current_upstream()
+                    upstream_turn_state = None
+                    if client_turn_state_header is None:
+                        filtered_headers = {
+                            key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
+                        }
+
+                if (
+                    request_state is not None
+                    and upstream is not None
+                    and account is not None
                     and request_state.require_security_work_authorized
                 ):
                     capability_account_reusable = False
@@ -2837,11 +2882,21 @@ class _WebSocketMixin:
         original_full_resend_payload: ResponsesRequest | None = None
         original_input_item_count: int | None = None
         original_input_fingerprint: str | None = None
-        session_anchor = _websocket_continuity_anchor_for_payload(
-            continuity_state,
-            responses_payload=responses_payload,
-            codex_session_affinity=codex_session_affinity,
-        )
+        # Classify restart authority from the complete normalized client body,
+        # before ordinary direct-WebSocket continuity injects a
+        # ``previous_response_id`` and trims historical input. That injected
+        # anchor is account-owned and would both erase the restart capability
+        # and make the payload unsafe for the replacement account. A proven
+        # goal restart must retain the complete resend through selection.
+        goal_restart_full_resend = _request_allows_unavailable_legacy_owner_abandonment(responses_payload)
+        restart_affinity_payload = responses_payload
+        session_anchor = None
+        if not goal_restart_full_resend:
+            session_anchor = _websocket_continuity_anchor_for_payload(
+                continuity_state,
+                responses_payload=responses_payload,
+                codex_session_affinity=codex_session_affinity,
+            )
         if session_anchor is not None:
             original_input_items = cast(list[JsonValue], responses_payload.input)
             original_input_item_count = len(original_input_items)
@@ -3005,7 +3060,10 @@ class _WebSocketMixin:
                     request_state.input_item_count,
                 )
         affinity_policy = _sticky_key_for_responses_request(
-            responses_payload,
+            # Only the proven restart uses the pre-injection body. Ordinary
+            # full resends must be classified after anchor injection so they
+            # cannot accidentally gain soft-session mobility.
+            restart_affinity_payload if goal_restart_full_resend else responses_payload,
             headers,
             codex_session_affinity=codex_session_affinity,
             openai_cache_affinity=openai_cache_affinity,
@@ -3410,6 +3468,7 @@ class _WebSocketMixin:
                     sticky_seed_key=request_state.affinity_policy.seed_selection_key,
                     sticky_seed_kind=request_state.affinity_policy.seed_selection_kind,
                     spill_bare_session_on_account_cap=request_state.affinity_policy.spill_on_account_cap,
+                    abandon_unavailable_legacy_owner=(request_state.affinity_policy.abandon_unavailable_legacy_owner),
                     require_unambiguous_account=request_state.affinity_policy.require_unambiguous_account,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,

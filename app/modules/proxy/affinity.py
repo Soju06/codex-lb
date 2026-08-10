@@ -17,9 +17,15 @@ from typing import Literal, TypedDict, cast
 from uuid import uuid4
 
 from app.core.config.settings import get_settings
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, extract_input_file_ids
+from app.core.openai.requests import (
+    ResponsesCompactRequest,
+    ResponsesRequest,
+    extract_input_file_ids,
+    responses_request_contains_goal_continuation_context,
+)
 from app.db.models import StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 
 # This typed provenance is a routing capability: callers must never recover it
 # from key text, because a client-controlled turn state can mimic any prefix.
@@ -40,6 +46,7 @@ class _AffinitySelectionKwargs(TypedDict):
     sticky_seed_key: str | None
     sticky_seed_kind: StickySessionKind | None
     spill_bare_session_on_account_cap: bool
+    abandon_unavailable_legacy_owner: bool
     require_unambiguous_account: bool
     sticky_max_age_seconds: int | None
 
@@ -52,6 +59,9 @@ class _AffinityPolicy:
     # Source capability only. Shared selection still revokes spillover for a
     # required owner or any stage that may carry account-local state.
     spill_on_account_cap: bool = False
+    # An explicit, self-contained Codex goal restart may retire only a raw
+    # compatibility owner whose durable account status is unavailable.
+    abandon_unavailable_legacy_owner: bool = False
     max_age_seconds: int | None = None
     codex_session_source: _CodexSessionSource | None = None
     # A thread row is soft locality, but old replicas may have persisted the
@@ -102,6 +112,7 @@ class _AffinityPolicy:
             "sticky_seed_key": self.seed_selection_key,
             "sticky_seed_kind": self.seed_selection_kind,
             "spill_bare_session_on_account_cap": self.spill_on_account_cap,
+            "abandon_unavailable_legacy_owner": self.abandon_unavailable_legacy_owner,
             "require_unambiguous_account": self.require_unambiguous_account,
             "sticky_max_age_seconds": self.max_age_seconds,
         }
@@ -450,6 +461,24 @@ def _request_allows_bare_session_cap_spillover(
     )
 
 
+def _request_allows_unavailable_legacy_owner_abandonment(payload: ResponsesRequest) -> bool:
+    # Intent and safety are separate proofs. The internal goal marker says the
+    # client deliberately restarted, while the replay classifier proves that
+    # this particular body carries no account-scoped state. Never collapse this
+    # into a marker-only or missing-previous-response shortcut.
+    if not responses_request_contains_goal_continuation_context(payload):
+        return False
+    replay_payload = payload.model_dump(mode="json", exclude_none=True)
+    # Direct WebSocket frames carry ``type=response.create`` as a transport
+    # envelope field. It is not part of the HTTP Responses body or replay
+    # semantics, and leaving it in the strict body classifier would make every
+    # otherwise valid WebSocket restart fail closed. Remove only the exact
+    # response-create discriminator; unknown envelope values remain rejected.
+    if replay_payload.get("type") == "response.create":
+        replay_payload.pop("type")
+    return responses_payload_is_account_neutral_fresh_replay(replay_payload)
+
+
 def _affinity_with_payload_continuity(
     policy: _AffinityPolicy,
     payload: ResponsesRequest | ResponsesCompactRequest,
@@ -704,4 +733,12 @@ def _sticky_key_for_responses_request(
         )
     else:
         policy = _AffinityPolicy()
+    if (
+        # Only typed process-session provenance can represent the legacy row
+        # this escape hatch targets. An explicit turn-state header stays hard
+        # even when a client includes the same goal marker.
+        policy.codex_session_source == "session_header"
+        and _request_allows_unavailable_legacy_owner_abandonment(payload)
+    ):
+        policy = replace(policy, abandon_unavailable_legacy_owner=True)
     return _affinity_with_payload_continuity(policy, payload)

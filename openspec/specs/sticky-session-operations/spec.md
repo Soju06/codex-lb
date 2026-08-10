@@ -7,6 +7,8 @@ Define sticky-session operation contracts so durable sessions, dashboard affinit
 ### Requirement: Sticky sessions are explicitly typed
 The system SHALL persist each sticky-session mapping with an explicit kind so durable Codex backend affinity, durable dashboard sticky-thread routing, and bounded prompt-cache affinity can be managed independently. Budget-pressure reallocation MUST apply only to mappings whose kind/source is soft. A raw or legacy `codex_session` mapping MUST remain owner-bound because it may represent explicit turn-state continuity; budget pressure MUST NOT delete or rebind it.
 
+An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED`; local capacity, retry exclusions, runtime health, and budget pressure MUST NOT authorize abandonment. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account.
+
 #### Scenario: Soft sticky reallocation uses split primary and secondary pressure thresholds
 - **WHEN** a request resolves an existing prompt-cache, sticky-thread, or other explicitly soft mapping
 - **AND** the pinned account is otherwise eligible to serve traffic
@@ -40,9 +42,40 @@ The system SHALL persist each sticky-session mapping with an explicit kind so du
 - **GIVEN** a raw `codex_session` mapping points to account A
 - **AND** account A is temporarily quota-exceeded or otherwise unusable
 - **AND** account B is healthy
-- **WHEN** hard-owner selection fails
+- **WHEN** an ordinary request or an unsafe restart-shaped request requires the mapping
 - **THEN** the request fails closed instead of selecting account B
 - **AND** the raw mapping is neither deleted nor rebound
+
+#### Scenario: Self-contained goal restart abandons unavailable legacy owner
+
+- **GIVEN** a process-session identifier has a raw legacy `codex_session` mapping to account A
+- **AND** account A is paused, rate-limited, or quota-exceeded
+- **AND** account B is eligible
+- **WHEN** Codex sends the recognized goal-continuation marker with an account-neutral self-contained full resend and no other continuity dependency
+- **THEN** the proxy tombstones the still-current raw mapping to account A
+- **AND** it routes the restarted turn to account B
+- **AND** subsequent session or response continuity remains on account B
+
+#### Scenario: Goal marker does not override account-scoped continuity
+
+- **GIVEN** a marked goal-continuation request carries a nonblank `previous_response_id`, nonblank `conversation`, account-scoped file or image reference, or unresolved tool output
+- **WHEN** its hard owner is unavailable
+- **THEN** the request fails closed
+- **AND** the hard mapping is not abandoned
+
+#### Scenario: Healthy owner is not abandoned
+
+- **GIVEN** a marked account-neutral goal-continuation restart has a raw legacy owner that is still active
+- **WHEN** the owner is locally capped, excluded, budget-pressured, or transiently unhealthy
+- **THEN** the mapping remains owner-bound
+- **AND** the restart does not retire it as unavailable
+
+#### Scenario: Concurrent owner change wins retirement race
+
+- **GIVEN** restart selection observed a raw legacy mapping to unavailable account A
+- **WHEN** another operation rebinds that mapping or restores the owner before the retirement write executes
+- **THEN** the compare-and-set retirement does not tombstone the newer state
+- **AND** selection preserves fail-closed ownership semantics
 
 ### Requirement: Dashboard exposes sticky-session administration
 The system SHALL provide dashboard APIs for listing sticky-session mappings, deleting one mapping, and purging stale mappings.

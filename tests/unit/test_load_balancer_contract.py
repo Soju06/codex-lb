@@ -402,6 +402,65 @@ async def test_public_fair_share_all_usage_limited_keeps_policy_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
+@pytest.mark.parametrize(
+    ("candidate_status", "candidate_in_backoff", "expected_error_code"),
+    [
+        (AccountStatus.ACTIVE, False, "account_stream_cap"),
+        (AccountStatus.PAUSED, False, "account_usage_limit_reached"),
+        (AccountStatus.ACTIVE, True, "account_usage_limit_reached"),
+    ],
+    ids=["routable-capped", "paused-capped", "backoff-capped"],
+)
+async def test_public_account_caps_consider_only_routable_usage_eligible_peers(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+    sticky: bool,
+    candidate_status: AccountStatus,
+    candidate_in_backoff: bool,
+    expected_error_code: str,
+) -> None:
+    candidate = _account(f"contract-cap-candidate-{sticky}-{candidate_status.value}")
+    limited = _account(f"contract-cap-limited-{sticky}-{candidate_status.value}")
+    limited.usage_limit_enabled = True
+    limited.usage_limit_percent = 10.0
+    balancer, _, _, _ = _balancer(
+        [candidate, limited],
+        selection_cache,
+        primary={
+            candidate.id: _usage_row(43, candidate.id, window="primary", used_percent=5.0),
+            limited.id: _usage_row(44, limited.id, window="primary", used_percent=10.0),
+        },
+    )
+    selection_inputs = await balancer._load_selection_inputs(model=None)
+    cached_candidate = next(account for account in selection_inputs.accounts if account.id == candidate.id)
+    cached_candidate.status = candidate_status
+    monkeypatch.setattr(balancer, "_load_selection_inputs", AsyncMock(return_value=selection_inputs))
+    balancer._runtime[candidate.id] = load_balancer_module.RuntimeState(
+        inflight_streams=1,
+        error_count=3 if candidate_in_backoff else 0,
+        last_error_at=datetime.now(UTC).timestamp() if candidate_in_backoff else None,
+    )
+
+    selection = await balancer.select_account(
+        "contract-cap-sticky" if sticky else None,
+        sticky_kind=StickySessionKind.PROMPT_CACHE if sticky else None,
+        sticky_max_age_seconds=600 if sticky else None,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=_CONCURRENCY_CAPS,
+    )
+
+    assert selection.account is None
+    assert selection.error_code == expected_error_code
+    assert cached_candidate.status is candidate_status
+    assert (
+        next(account for account in selection_inputs.accounts if account.id == limited.id).status
+        is AccountStatus.ACTIVE
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("other_block", ["usage_limit", "paused"])
 async def test_public_backoff_fallback_cannot_reintroduce_usage_limited_accounts(
     selection_cache: AccountSelectionCache,

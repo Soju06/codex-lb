@@ -65,6 +65,7 @@ def evaluate_standard_usage_limit(
             or recorded_at < freshness_cutoff
             or used_percent is None
             or not math.isfinite(used_percent)
+            or usage_core.is_no_data_placeholder(row)
         ):
             return AccountUsageLimitState.DATA_UNAVAILABLE
 

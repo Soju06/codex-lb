@@ -489,7 +489,7 @@ async def run_sticky_selection_path(
             # Fair share is measured against the routable pool,
             # before hard-sticky narrows selection to the owner account.
             fair_share_candidate_ids = [
-                state.account_id for state in _fair_share_eligible_states(states, traffic_class=traffic_class)
+                state.account_id for state in _routing_eligible_states(states, traffic_class=traffic_class)
             ]
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
@@ -1586,8 +1586,14 @@ def _filter_states_for_usage_limit_and_account_caps(
         # Preserve blocked states so the canonical selector returns the stable
         # local-policy error instead of misclassifying the pool as cap-bound.
         return state_list, False
-    filtered = _filter_states_for_account_caps(
+    routing_eligible = _routing_eligible_states(
         usage_limit_eligible,
+        traffic_class=TRAFFIC_CLASS_FOREGROUND,
+    )
+    if not routing_eligible:
+        return usage_limit_blocked or state_list, False
+    filtered = _filter_states_for_account_caps(
+        routing_eligible,
         lease_kind=lease_kind,
         caps=caps,
         stream_reserve_slots=stream_reserve_slots,
@@ -1603,7 +1609,7 @@ def _usage_limit_eligible_states(states: Iterable[AccountState]) -> list[Account
     return [state for state in states if not account_usage_limit_blocks_selection(state)]
 
 
-def _fair_share_eligible_states(
+def _routing_eligible_states(
     states: Iterable[AccountState],
     *,
     traffic_class: TrafficClass,

@@ -16,13 +16,13 @@ def _row(
     *,
     account_id: str = "acc_1",
     recorded_at: datetime = NOW,
-    reset_delta: timedelta = timedelta(hours=1),
-    window_minutes: int = 300,
+    reset_delta: timedelta | None = timedelta(hours=1),
+    window_minutes: int | None = 300,
 ) -> UsageWindowRow:
     return UsageWindowRow(
         account_id=account_id,
         used_percent=used_percent,
-        reset_at=int((NOW + reset_delta).timestamp()),
+        reset_at=int((NOW + reset_delta).timestamp()) if reset_delta is not None else None,
         window_minutes=window_minutes,
         recorded_at=recorded_at,
     )
@@ -53,9 +53,19 @@ def test_disabled_limit_does_not_require_usage_data() -> None:
     assert _evaluate(enabled=False, limit_percent=10.0) is AccountUsageLimitState.DISABLED
 
 
-@pytest.mark.parametrize("used_percent", [9.99, 0.0])
-def test_current_usage_below_limit_is_available(used_percent: float) -> None:
-    assert _evaluate(primary=_row(used_percent)) is AccountUsageLimitState.AVAILABLE
+def test_current_usage_below_limit_is_available() -> None:
+    assert _evaluate(primary=_row(9.99)) is AccountUsageLimitState.AVAILABLE
+
+
+def test_fresh_zero_percent_usage_with_quota_metadata_is_available() -> None:
+    assert _evaluate(primary=_row(0.0)) is AccountUsageLimitState.AVAILABLE
+
+
+@pytest.mark.parametrize("window_minutes", [0, None], ids=["zero-window", "missing-window"])
+def test_fresh_no_data_placeholder_is_unavailable(window_minutes: int | None) -> None:
+    placeholder = _row(0.0, reset_delta=None, window_minutes=window_minutes)
+
+    assert _evaluate(primary=placeholder) is AccountUsageLimitState.DATA_UNAVAILABLE
 
 
 @pytest.mark.parametrize("used_percent", [10.0, 10.01, 100.0])

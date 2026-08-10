@@ -21,10 +21,10 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _account_cap_error_code,
     _account_cap_error_message,
     _clone_account,
-    _fair_share_eligible_states,
     _filter_recovery_probe_candidates,
     _filter_states_for_usage_limit_and_account_caps,
     _probing_result_requires_recovery_reservation,
+    _routing_eligible_states,
     _select_account_preferring_budget_safe,
 )
 from app.modules.proxy._load_balancer.types import (
@@ -165,7 +165,7 @@ async def run_unbound_selection_path(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
                 candidate_account_ids=[
-                    state.account_id for state in _fair_share_eligible_states(states, traffic_class=traffic_class)
+                    state.account_id for state in _routing_eligible_states(states, traffic_class=traffic_class)
                 ],
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,

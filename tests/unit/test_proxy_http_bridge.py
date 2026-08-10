@@ -172,6 +172,47 @@ def test_http_bridge_operation_metadata_is_stable_and_non_destructive() -> None:
     assert json.loads(normalized) == {"type": "response.create"}
 
 
+def test_http_bridge_inserts_previous_response_id_for_hard_turn_advance() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-turn-next",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+    )
+    completed_operation = SimpleNamespace(
+        state="completed",
+        event_spool_complete=True,
+        response_id="resp-prior-turn",
+    )
+
+    response_id = http_bridge_request_submit_module._http_bridge_terminal_hard_turn_response_id(
+        request_state,
+        completed_operation,
+    )
+    assert response_id == "resp-prior-turn"
+    assert (
+        json.loads(
+            http_bridge_request_submit_module._text_with_previous_response_id(
+                '{"type":"response.create","input":"same"}',
+                response_id,
+            )
+        )["previous_response_id"]
+        == "resp-prior-turn"
+    )
+
+    request_state.replay_count = 1
+    assert (
+        http_bridge_request_submit_module._http_bridge_terminal_hard_turn_response_id(
+            request_state,
+            completed_operation,
+        )
+        is None
+    )
+
+
 def test_http_bridge_operation_fingerprint_strips_account_installation_metadata() -> None:
     request = (
         '{"type":"response.create","previous_response_id":"resp_parent",'

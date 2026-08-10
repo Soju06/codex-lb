@@ -287,6 +287,37 @@ def _http_bridge_operation_fingerprint(
     )
 
 
+def _http_bridge_terminal_hard_turn_response_id(
+    request_state: _WebSocketRequestState,
+    operation: Any,
+) -> str | None:
+    """Return a completed hard-turn anchor when this is a new client turn.
+
+    Hard turn-state requests can omit ``previous_response_id``. Their durable
+    operation fingerprint is therefore otherwise identical for repeated
+    prompts. A terminal, fully spooled operation represents the prior turn,
+    not an in-flight retry, so the next request must advance from its response
+    rather than replaying that transcript. Recovery/rebind states retain the
+    operation identity and are intentionally excluded here.
+    """
+    if (
+        request_state.previous_response_id is not None
+        or not request_state.hard_continuity_anchor
+        or request_state.operation_id is not None
+        or request_state.operation_rebind_required
+        or request_state.replay_count != 0
+    ):
+        return None
+    operation_state = getattr(operation, "state", None)
+    operation_state = getattr(operation_state, "value", operation_state)
+    if operation_state not in {"completed", "incomplete"}:
+        return None
+    if not getattr(operation, "event_spool_complete", False):
+        return None
+    response_id = getattr(operation, "response_id", None)
+    return response_id if isinstance(response_id, str) and response_id else None
+
+
 def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     payload = openai_error(
         "previous_response_not_found",
@@ -443,7 +474,7 @@ def _text_with_previous_response_id(text_data: str, response_id: str | None) -> 
         payload = json.loads(text_data)
     except (TypeError, json.JSONDecodeError):
         return text_data
-    if not isinstance(payload, dict) or not isinstance(payload.get("previous_response_id"), str):
+    if not isinstance(payload, dict) or not response_id:
         return text_data
     payload["previous_response_id"] = response_id
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
@@ -1054,6 +1085,33 @@ class _HTTPBridgeRequestSubmitMixin:
                 get_operation = getattr(self._durable_bridge, "get_operation", None)
                 if existing_operation is None and callable(get_operation):
                     existing_operation = await get_operation(operation_id=operation_id)
+                terminal_hard_turn_response_id = _http_bridge_terminal_hard_turn_response_id(
+                    request_state,
+                    existing_operation,
+                )
+                if terminal_hard_turn_response_id is not None:
+                    # A completed operation with the same body is the prior
+                    # hard turn, not a replay request: the client omitted an
+                    # upstream anchor, so advance this legitimate new turn
+                    # from the completed response instead of replaying the
+                    # old transcript. Unknown/in-flight operations stay
+                    # fenced and continue through the recovery path below.
+                    text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
+                    request_state.previous_response_id = terminal_hard_turn_response_id
+                    request_state.proxy_injected_previous_response_id = True
+                    request_state.hard_continuity_anchor = True
+                    operation_parent_response_id = terminal_hard_turn_response_id
+                    operation_fingerprint = durable_bridge_operation_fingerprint(
+                        api_key_scope=api_key_scope,
+                        request_text=_text_without_account_installation_id(text_data),
+                    )
+                    operation_id = durable_bridge_operation_id(
+                        session.durable_session_id,
+                        operation_fingerprint,
+                    )
+                    operation_tagged_text = _text_with_operation_id(text_data, operation_id)
+                    _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
+                    existing_operation = None
                 # If another worker durably observed the previous turn's
                 # completion, advance a new continuation to that response
                 # anchor instead of replaying the timed-out turn.

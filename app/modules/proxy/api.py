@@ -6397,6 +6397,24 @@ async def _stream_response_error_events(
                         ),
                     )
                     break
+                except Exception:
+                    # Recovery admission can also fail before a replacement
+                    # stream is created (for example, a transient database
+                    # failure while reserving usage). Do not let that
+                    # unexpected exception truncate an already-started SSE
+                    # response; the outer cleanup still settles the original
+                    # reservation and emits one terminal response.failed event.
+                    logger.warning("HTTP bridge recovery admission failed", exc_info=True)
+                    exc = ProxyResponseError(
+                        503,
+                        openai_error(
+                            "bridge_recovery_admission_failed",
+                            "Recovery admission failed; retry shortly.",
+                            error_type="server_error",
+                        ),
+                        retry_after_seconds=5,
+                    )
+                    break
         if owns_reservation:
             try:
                 await _release_reservation(reservation)

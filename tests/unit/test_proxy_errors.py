@@ -153,6 +153,44 @@ async def test_indefinite_recovery_converts_retry_reservation_failure_to_sse(mon
 
 
 @pytest.mark.asyncio
+async def test_indefinite_recovery_converts_unexpected_admission_failure_to_sse(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        proxy_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery"
+        ),
+    )
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay: _completed_asyncio_sleep())
+
+    async def stream():
+        if False:
+            yield ""
+        raise ProxyResponseError(
+            502,
+            {"error": {"code": "stream_incomplete", "message": "closed", "type": "server_error"}},
+        )
+
+    async def recovery_stream():
+        raise RuntimeError("durable admission database unavailable")
+        yield ""
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+            recovery_stream_factory=lambda: recovery_stream(),
+        )
+    ]
+
+    assert any("bridge_recovery_admission_failed" in event and "response.failed" in event for event in events)
+
+
+@pytest.mark.asyncio
 async def test_indefinite_recovery_stops_after_retry_output_then_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ):

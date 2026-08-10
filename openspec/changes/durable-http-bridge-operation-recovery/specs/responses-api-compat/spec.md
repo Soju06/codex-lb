@@ -237,6 +237,13 @@ event instead of aborting the already-started stream.
 - **WHEN** a recovery retry cannot reacquire its usage reservation
 - **THEN** the client receives `response.failed` and the prior reservation is settled
 
+#### Scenario: Unexpected admission failure produces terminal SSE
+
+- **WHEN** recovery admission raises an unexpected infrastructure error before
+  a replacement stream starts
+- **THEN** the client receives `response.failed` and the prior reservation is
+  settled instead of receiving a truncated stream
+
 ### Requirement: Partial disconnect acknowledgement
 
 When a bridge disconnects after an operation has emitted any response event but

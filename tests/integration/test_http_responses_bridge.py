@@ -7137,7 +7137,10 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         "model": "gpt-5.1",
         "instructions": "Return exactly OK.",
         "input": "hello",
-        "prompt_cache_key": "http-bridge-reconnect-thread-1",
+        # Scope the soft-affinity key to this test's account so a parallel or
+        # ordered integration run cannot inherit another instance's durable
+        # owner and turn the reconnect assertion into a 409 race.
+        "prompt_cache_key": f"http-bridge-reconnect-thread-{account_id}",
     }
     first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
     second = await asyncio.wait_for(

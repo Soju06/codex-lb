@@ -312,7 +312,7 @@ def _http_bridge_terminal_hard_turn_response_id(
         return None
     operation_state = getattr(operation, "state", None)
     operation_state = getattr(operation_state, "value", operation_state)
-    if operation_state not in {"completed", "incomplete"}:
+    if operation_state != "completed":
         return None
     if not getattr(operation, "event_spool_complete", False):
         return None
@@ -1163,6 +1163,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         if completed_response_id and completed_response_id != request_state.previous_response_id:
                             text_data = _text_with_previous_response_id(text_data, completed_response_id)
                             request_state.previous_response_id = completed_response_id
+                            operation_parent_response_id = completed_response_id
                             request_state.hard_continuity_anchor = True
                             operation_fingerprint = durable_bridge_operation_fingerprint(
                                 api_key_scope=api_key_scope,

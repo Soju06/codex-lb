@@ -226,6 +226,17 @@ def test_http_bridge_inserts_previous_response_id_for_hard_turn_advance() -> Non
         )
         == "resp-second-turn"
     )
+    assert (
+        http_bridge_request_submit_module._http_bridge_terminal_hard_turn_response_id(
+            replace(request_state, previous_response_id=None),
+            SimpleNamespace(
+                state="incomplete",
+                event_spool_complete=True,
+                response_id="resp-incomplete-turn",
+            ),
+        )
+        is None
+    )
 
 
 def test_http_bridge_operation_fingerprint_strips_account_installation_metadata() -> None:

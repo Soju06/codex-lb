@@ -7,7 +7,7 @@
 
 - [x] 2.1 Import `getDateDisplayFormat` into `formatters.ts`
 - [x] 2.2 Add ISO date/time helper functions (`formatISODate`, `formatISOTime`)
-- [x] 2.3 Add ISO 8601 branch in `formatTimeLong`: when active, return `{ time: "YYYY-MM-DD", date: "HH:MM:SS" }`
+- [x] 2.3 Add ISO 8601 branch in `formatTimeLong`: when active, return semantic `{ time: "HH:MM:SS", date: "YYYY-MM-DD" }` fields
 
 ## 3. Appearance settings UI
 
@@ -31,3 +31,9 @@
 - [x] 6.1 Add `useDateDisplayFormatStore` initialization in `appearance-settings.test.tsx`
 - [x] 6.2 Add test for date format toggle (select Default then ISO 8601, verify aria-pressed and store state)
 - [x] 6.3 Verify all existing formatter tests and appearance settings tests pass
+
+## 7. Review regressions
+
+- [x] 7.1 Keep `formatTimeLong` field meanings stable and render ISO date-first ordering at display surfaces
+- [x] 7.2 Subscribe rendered date surfaces to date-format preference changes so mounted values update immediately
+- [x] 7.3 Add formatter and conversation-table regressions for semantic fields, ISO ordering, and live updates

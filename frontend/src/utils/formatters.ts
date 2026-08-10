@@ -1,6 +1,6 @@
 import { RESET_ERROR_LABEL } from "@/utils/constants";
 import { getTimeFormatPreference, type TimeFormatPreference } from "@/hooks/use-time-format";
-import { getDateDisplayFormat } from "@/hooks/use-date-format";
+import { getDateDisplayFormat, type DateDisplayFormat } from "@/hooks/use-date-format";
 import i18n from "@/i18n";
 
 function t(key: string, options?: Record<string, unknown>): string {
@@ -83,6 +83,11 @@ function createChartDateTimeFormatter(locale: string, preference: TimeFormatPref
 export type FormattedDateTime = {
   time: string;
   date: string;
+};
+
+export type FormattedDateTimeLines = {
+  primary: string;
+  secondary: string;
 };
 
 function getTimeFormatter(): Intl.DateTimeFormat {
@@ -256,15 +261,18 @@ export function formatModelLabel(
   return suffix ? `${base} (${suffix})` : base;
 }
 
-export function formatTimeLong(iso: string | null | undefined): FormattedDateTime {
+export function formatTimeLong(
+  iso: string | null | undefined,
+  displayFormat: DateDisplayFormat = getDateDisplayFormat(),
+): FormattedDateTime {
   const date = parseDate(iso);
   if (!date) {
     return { time: "--", date: "--" };
   }
-  if (getDateDisplayFormat() === "iso8601") {
+  if (displayFormat === "iso8601") {
     return {
-      time: formatISODate(date),
-      date: formatISOTime(date),
+      time: formatISOTime(date),
+      date: formatISODate(date),
     };
   }
   return {
@@ -309,9 +317,22 @@ export function formatConversationDuration(
   });
 }
 
-export function formatDateTimeInline(iso: string | null | undefined): string {
-  const formatted = formatTimeLong(iso);
-  return formatted.time === "--" ? "--" : `${formatted.time} ${formatted.date}`;
+export function formatDateTimeInline(
+  iso: string | null | undefined,
+  displayFormat: DateDisplayFormat = getDateDisplayFormat(),
+): string {
+  const formatted = formatDateTimeLines(iso, displayFormat);
+  return formatted.primary === "--" ? "--" : `${formatted.primary} ${formatted.secondary}`;
+}
+
+export function formatDateTimeLines(
+  iso: string | null | undefined,
+  displayFormat: DateDisplayFormat = getDateDisplayFormat(),
+): FormattedDateTimeLines {
+  const formatted = formatTimeLong(iso, displayFormat);
+  return displayFormat === "iso8601"
+    ? { primary: formatted.date, secondary: formatted.time }
+    : { primary: formatted.time, secondary: formatted.date };
 }
 
 function formatISODate(date: Date): string {

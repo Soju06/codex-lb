@@ -4,7 +4,7 @@
 
 Define the user-facing date display format preference and its effects on date/time rendering throughout the dashboard.
 
-## Requirements
+## ADDED Requirements
 
 ### Requirement: Date format preference is stored in localStorage
 
@@ -29,15 +29,16 @@ The system SHALL persist a date display format preference in localStorage under 
 
 ### Requirement: ISO 8601 format spec for date/time rendering
 
-When the date display format is `"iso8601"`, the `formatTimeLong` function SHALL return `{ time: "YYYY-MM-DD", date: "HH:MM:SS" }` where:
-- `time` is the date portion in ISO 8601 format (4-digit year, 2-digit month, 2-digit day, hyphen-separated)
-- `date` is the time portion in 24-hour format (2-digit hour, 2-digit minute, 2-digit second, colon-separated)
+When the date display format is `"iso8601"`, the `formatTimeLong` function SHALL return `{ time: "HH:MM:SS", date: "YYYY-MM-DD" }` where:
+- `time` is always the clock-time portion in 24-hour format (2-digit hour, 2-digit minute, 2-digit second, colon-separated)
+- `date` is always the calendar-date portion in ISO 8601 format (4-digit year, 2-digit month, 2-digit day, hyphen-separated)
+The semantic meaning of these fields SHALL remain stable across date display formats. Rendered date/time surfaces that display ISO values SHALL order the `date` value before the `time` value.
 
 #### Scenario: ISO 8601 rendering of a UTC timestamp
 
 - **GIVEN** the date display format is `"iso8601"`
 - **WHEN** formatting a timestamp corresponding to August 9, 2026 at 14:30:45 local time
-- **THEN** `formatTimeLong` SHALL return `{ time: "2026-08-09", date: "14:30:45" }`
+- **THEN** `formatTimeLong` SHALL return `{ time: "14:30:45", date: "2026-08-09" }`
 
 #### Scenario: Default rendering unchanged
 

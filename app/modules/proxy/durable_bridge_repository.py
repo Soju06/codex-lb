@@ -1306,6 +1306,7 @@ class DurableBridgeRepository:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        restore_recovery_dispatch_claim: bool = False,
     ) -> bool:
         """Fence an ambiguously dispatched SUBMITTED operation as UNKNOWN.
 
@@ -1337,6 +1338,18 @@ class DurableBridgeRepository:
                 return False
             if operation.state == "submitted":
                 operation.state = "unknown"
+                if restore_recovery_dispatch_claim and operation.recovery_dispatch_count > 0:
+                    operation.recovery_dispatch_count -= 1
+                operation.updated_at = utcnow()
+            elif (
+                restore_recovery_dispatch_claim
+                and operation.state == "unknown"
+                and operation.recovery_dispatch_count > 0
+            ):
+                # A concurrent cleanup may have fenced the row first. The
+                # caller still owns a proven pre-dispatch recovery claim, so
+                # refund exactly that claim while retaining UNKNOWN.
+                operation.recovery_dispatch_count -= 1
                 operation.updated_at = utcnow()
             await self._session.commit()
         return True

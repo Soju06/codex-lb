@@ -658,6 +658,7 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        restore_recovery_dispatch_claim: bool = False,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_operation_unknown(
@@ -665,6 +666,7 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                restore_recovery_dispatch_claim=restore_recovery_dispatch_claim,
             )
 
     async def rollback_operation_before_dispatch(

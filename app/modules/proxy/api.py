@@ -5147,14 +5147,40 @@ async def _stream_responses(
         _reset_propagated_capacity_startup_ready(capacity_ready_token)
         _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
-        if owns_reservation:
-            await _release_reservation(reservation)
-        return _stream_startup_error_response(
-            request,
-            startup_error,
-            headers=rate_limit_headers,
-            allow_client_full_history_once=bridge_recovery_eligible,
+        startup_error_code = (
+            _startup_error_details(startup_error)[0] if isinstance(startup_error, ProxyResponseError) else None
         )
+        startup_recovery_allowed = (
+            isinstance(startup_error, ProxyResponseError)
+            and bridge_recovery_eligible
+            and get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
+            == "server_indefinite_recovery"
+            and getattr(startup_error, "http_bridge_durable_recovery_eligible", False)
+            and startup_error_code
+            in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+        )
+        if startup_recovery_allowed:
+            assert isinstance(startup_error, ProxyResponseError)
+
+            # A durable bridge can fail before the startup probe observes the
+            # first response.created event. Feed that error through the same
+            # server-owned recovery loop used for failures after the probe;
+            # returning JSON here would hand a recoverable disconnect back to
+            # the client before recovery is even installed.
+            async def _raise_startup_error() -> AsyncIterator[str]:
+                raise startup_error
+                yield ""  # pragma: no cover
+
+            stream = _raise_startup_error()
+        else:
+            if owns_reservation:
+                await _release_reservation(reservation)
+            return _stream_startup_error_response(
+                request,
+                startup_error,
+                headers=rate_limit_headers,
+                allow_client_full_history_once=bridge_recovery_eligible,
+            )
     # Server-indefinite recovery is only safe for an explicitly anchored
     # continuation. Fresh first-turn requests have no durable parent
     # operation to fence, so do not install the recovery loop for them.

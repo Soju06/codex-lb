@@ -2020,7 +2020,9 @@ class _HTTPBridgeRequestSubmitMixin:
             restored = False
             if callable(mark_operation_unknown):
                 try:
-                    restored = await mark_operation_unknown(
+                    restored = await _call_with_supported_optional_kwargs(
+                        mark_operation_unknown,
+                        optional_kwargs={"restore_recovery_dispatch_claim": True},
                         operation_id=request_state.operation_id,
                         session_id=session.durable_session_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,

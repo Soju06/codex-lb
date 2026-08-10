@@ -831,6 +831,68 @@ async def test_one_shot_recovery_budget_survives_unknown_reset(
 
 
 @pytest.mark.asyncio
+async def test_pre_dispatch_recovery_claim_restores_one_shot_budget(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-refund",
+            session_key_value="sid-operation-refund",
+        )
+        fingerprint = durable_bridge_hash("continuation-refund")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+            max_recovery_dispatches=1,
+        )
+
+        # A cancellation before send_text() is proven pre-dispatch and must
+        # refund the claim so the next reconnect can make the one safe retry.
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+            restore_recovery_dispatch_claim=True,
+        )
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+            max_recovery_dispatches=1,
+        )
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.recovery_dispatch_count == 1
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_pre_dispatch_operation_rollback_removes_only_empty_new_row(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

@@ -1728,7 +1728,9 @@ class _HTTPBridgeRequestSubmitMixin:
                     if not marked_unknown:
                         request_state.operation_registered = False
                         error_code = "bridge_continuity_persistence_failed"
-                        failure_error_message = "Ambiguous response operation could not be persisted; retry the request."
+                        failure_error_message = (
+                            "Ambiguous response operation could not be persisted; retry the request."
+                        )
                         _record_continuity_fail_closed(
                             surface="http_bridge",
                             reason="ambiguous_operation_unknown_persistence_failed",

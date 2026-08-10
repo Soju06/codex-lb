@@ -2816,6 +2816,19 @@ class _HTTPBridgeStreamingMixin:
             durable_recovery_fresh_replay = False
             retry_request_state: _WebSocketRequestState | None = None
 
+            async def release_recovery_origin_lease() -> None:
+                if durable_recovery_attempt_session_id is None or durable_recovery_attempt_owner_epoch is None:
+                    return
+                try:
+                    await self._durable_bridge.release_live_session(
+                        session_id=durable_recovery_attempt_session_id,
+                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                        owner_epoch=durable_recovery_attempt_owner_epoch,
+                        draining=False,
+                    )
+                except Exception:
+                    logger.warning("Failed to release HTTP bridge recovery origin lease", exc_info=True)
+
             async def rollback_pre_dispatch_recovery_claim() -> None:
                 if not (
                     durable_recovery_fresh_replay
@@ -2826,13 +2839,15 @@ class _HTTPBridgeStreamingMixin:
                 ):
                     return
                 try:
-                    await self._durable_bridge.rollback_recovery_attempt_replayed(
+                    rolled_back = await self._durable_bridge.rollback_recovery_attempt_replayed(
                         session_id=durable_recovery_attempt_session_id,
                         api_key_id=bridge_session_key.api_key_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
                         owner_epoch=durable_recovery_attempt_owner_epoch,
                         request_fingerprint=durable_recovery_attempt_fingerprint,
                     )
+                    if rolled_back:
+                        await release_recovery_origin_lease()
                 except Exception:
                     logger.warning("Failed to roll back pre-dispatch HTTP bridge recovery claim", exc_info=True)
 
@@ -3125,10 +3140,11 @@ class _HTTPBridgeStreamingMixin:
                         session,
                         error_code="stream_incomplete",
                         error_message="Upstream websocket closed before response.completed",
-                        # The retry is moving to a new account-neutral durable
-                        # session. Release the origin lease so record_operation
-                        # can atomically hand off the nonterminal operation.
-                        preserve_durable_lease=False,
+                        # Keep the origin lease fenced while the replacement
+                        # session is admitted and the one-shot journal is
+                        # either rolled back or settled. Releasing it here
+                        # would make both transitions fail their owner fence.
+                        preserve_durable_lease=True,
                     )
                     switch_to_account_neutral_replay()
                     request_state.recovery_attempt_fingerprint = durable_recovery_attempt_fingerprint
@@ -3256,68 +3272,72 @@ class _HTTPBridgeStreamingMixin:
                 retry_preferred_account_id = request_state.preferred_account_id
                 allow_previous_response_recovery_rebind = True
 
-            while True:
-                try:
-                    session = await self._get_or_create_http_bridge_session(
-                        bridge_session_key,
-                        headers=dict(session_creation_headers),
-                        affinity=affinity,
-                        api_key=api_key,
-                        request_model=retry_payload.model,
-                        request_service_tier=request_state.requested_service_tier,
-                        idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+            try:
+                while True:
+                    try:
+                        session = await self._get_or_create_http_bridge_session(
+                            bridge_session_key,
+                            headers=dict(session_creation_headers),
                             affinity=affinity,
-                            idle_ttl_seconds=idle_ttl_seconds,
-                            codex_idle_ttl_seconds=codex_idle_ttl_seconds,
-                            prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
-                        ),
-                        max_sessions=max_sessions,
-                        previous_response_id=retry_previous_response_id,
-                        gateway_safe_mode=runtime_config.gateway_safe_mode,
-                        allow_forward_to_owner=False,
-                        forwarded_request=False,
-                        allow_previous_response_recovery_rebind=allow_previous_response_recovery_rebind,
-                        session_header_fallback_key=session_header_fallback_key,
-                        durable_lookup=durable_lookup,
-                        request_stage=retry_request_stage,
-                        preferred_account_id=retry_preferred_account_id,
-                        preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
-                        fallback_on_preferred_account_unavailable=not (
-                            file_required_preferred_account and retry_preferred_account_id is not None
-                        ),
-                        request_usage_budget=estimate_api_key_request_usage(retry_payload),
-                        request_deadline=request_deadline,
-                        exclude_account_ids=request_state.excluded_account_ids or None,
-                        deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
-                        defer_account_health_writes=request_state.api_key_reservation is not None,
-                    )
-                except ProxyResponseError as capacity_exc:
-                    wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
-                    if wait_plan is None:
-                        raise
-                    bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
-                    logger.info(
-                        "Waiting for an account to recover before retrying HTTP bridge local recovery session "
-                        "request_id=%s model=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f path=%s error=%s",
-                        request_id,
-                        retry_payload.model,
-                        bounded_wait_seconds,
-                        account_capacity_wait_seconds,
-                        recovery_path,
-                        message,
-                    )
-                    async for line in _iter_account_capacity_wait_sse(
-                        request_id=request_id,
-                        reason=message,
-                        sleep_seconds=bounded_wait_seconds,
-                        emit_keepalives=not propagate_http_errors,
-                        request_state=request_state,
-                    ):
-                        yield line
-                    if _service_time().monotonic() >= request_deadline:
-                        raise
-                    continue
-                break
+                            api_key=api_key,
+                            request_model=retry_payload.model,
+                            request_service_tier=request_state.requested_service_tier,
+                            idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
+                                affinity=affinity,
+                                idle_ttl_seconds=idle_ttl_seconds,
+                                codex_idle_ttl_seconds=codex_idle_ttl_seconds,
+                                prompt_cache_idle_ttl_seconds=prompt_cache_idle_ttl_seconds,
+                            ),
+                            max_sessions=max_sessions,
+                            previous_response_id=retry_previous_response_id,
+                            gateway_safe_mode=runtime_config.gateway_safe_mode,
+                            allow_forward_to_owner=False,
+                            forwarded_request=False,
+                            allow_previous_response_recovery_rebind=allow_previous_response_recovery_rebind,
+                            session_header_fallback_key=session_header_fallback_key,
+                            durable_lookup=durable_lookup,
+                            request_stage=retry_request_stage,
+                            preferred_account_id=retry_preferred_account_id,
+                            preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
+                            fallback_on_preferred_account_unavailable=not (
+                                file_required_preferred_account and retry_preferred_account_id is not None
+                            ),
+                            request_usage_budget=estimate_api_key_request_usage(retry_payload),
+                            request_deadline=request_deadline,
+                            exclude_account_ids=request_state.excluded_account_ids or None,
+                            deferred_account_backoff_lifecycle=request_state.deferred_account_backoff_lifecycle,
+                            defer_account_health_writes=request_state.api_key_reservation is not None,
+                        )
+                    except ProxyResponseError as capacity_exc:
+                        wait_plan = _http_bridge_capacity_wait_plan(capacity_exc, request_deadline=request_deadline)
+                        if wait_plan is None:
+                            raise
+                        bounded_wait_seconds, account_capacity_wait_seconds, message = wait_plan
+                        logger.info(
+                            "Waiting for an account to recover before retrying HTTP bridge local recovery session "
+                            "request_id=%s model=%s sleep_seconds=%.1f recovery_hint_seconds=%.1f path=%s error=%s",
+                            request_id,
+                            retry_payload.model,
+                            bounded_wait_seconds,
+                            account_capacity_wait_seconds,
+                            recovery_path,
+                            message,
+                        )
+                        async for line in _iter_account_capacity_wait_sse(
+                            request_id=request_id,
+                            reason=message,
+                            sleep_seconds=bounded_wait_seconds,
+                            emit_keepalives=not propagate_http_errors,
+                            request_state=request_state,
+                        ):
+                            yield line
+                        if _service_time().monotonic() >= request_deadline:
+                            raise
+                        continue
+                    break
+            except BaseException:
+                await rollback_pre_dispatch_recovery_claim()
+                raise
             _record_bridge_reattach(path=recovery_path, outcome="success")
 
             local_recovery_scope_id = ensure_request_scope_id() if original_request_unanchored else None

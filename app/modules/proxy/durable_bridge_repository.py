@@ -1056,6 +1056,9 @@ class DurableBridgeRepository:
         parent_response_id: str | None,
         api_key_scope: str | None = None,
         request_text: str | None = None,
+        recovery_attempt_session_id: str | None = None,
+        recovery_attempt_owner_epoch: int | None = None,
+        recovery_attempt_fingerprint: str | None = None,
     ) -> DurableBridgeOperationSnapshot | None:
         """Create a fenced operation identity, or return the existing one."""
         async with sqlite_writer_section():
@@ -1101,15 +1104,47 @@ class DurableBridgeRepository:
                         .with_for_update()
                     )
                     now = utcnow()
-                    handoff_allowed = previous_session is None or not (
-                        previous_session.owner_instance_id is not None
-                        and previous_session.lease_expires_at is not None
-                        # PostgreSQL returns timestamptz values with an
-                        # attached UTC offset, while ``utcnow`` is a
-                        # naive UTC value used by the durable layer.
-                        # Normalize before comparing so cross-session
-                        # recovery remains database-backend agnostic.
-                        and to_utc_naive(previous_session.lease_expires_at) > now
+                    recovery_handoff_allowed = False
+                    if (
+                        previous_session is not None
+                        and recovery_attempt_session_id == operation.session_id
+                        and recovery_attempt_owner_epoch is not None
+                        and recovery_attempt_fingerprint is not None
+                        and previous_session.owner_instance_id == instance_id
+                        and previous_session.owner_epoch == recovery_attempt_owner_epoch
+                    ):
+                        # A fresh account-neutral replay has already fenced
+                        # the one-shot journal on the origin session. That
+                        # journal owner must remain fenced until settlement,
+                        # but the operation itself must move to the
+                        # replacement owner so its transcript and outcome
+                        # writes are accepted there. This is the only
+                        # cross-session handoff allowed while the origin
+                        # lease is still active.
+                        recovery_attempt = await self._session.scalar(
+                            select(HttpBridgeRecoveryAttemptRecord)
+                            .where(
+                                HttpBridgeRecoveryAttemptRecord.session_id == recovery_attempt_session_id,
+                                HttpBridgeRecoveryAttemptRecord.request_fingerprint == recovery_attempt_fingerprint,
+                                HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.REPLAYED,
+                                HttpBridgeRecoveryAttemptRecord.response_id.is_(None),
+                            )
+                            .with_for_update()
+                        )
+                        recovery_handoff_allowed = recovery_attempt is not None
+                    handoff_allowed = (
+                        recovery_handoff_allowed
+                        or previous_session is None
+                        or not (
+                            previous_session.owner_instance_id is not None
+                            and previous_session.lease_expires_at is not None
+                            # PostgreSQL returns timestamptz values with an
+                            # attached UTC offset, while ``utcnow`` is a
+                            # naive UTC value used by the durable layer.
+                            # Normalize before comparing so cross-session
+                            # recovery remains database-backend agnostic.
+                            and to_utc_naive(previous_session.lease_expires_at) > now
+                        )
                     )
                     if handoff_allowed:
                         # Transfer only nonterminal operations to the currently

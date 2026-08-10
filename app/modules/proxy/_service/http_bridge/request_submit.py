@@ -987,7 +987,19 @@ class _HTTPBridgeRequestSubmitMixin:
                                 session.durable_session_id,
                                 operation_fingerprint,
                             )
-                operation = await record_operation(
+                operation = await _call_with_supported_optional_kwargs(
+                    record_operation,
+                    optional_kwargs={
+                        "recovery_attempt_session_id": request_state.recovery_attempt_session_id
+                        if request_state.recovery_attempt_claimed
+                        else None,
+                        "recovery_attempt_owner_epoch": request_state.recovery_attempt_owner_epoch
+                        if request_state.recovery_attempt_claimed
+                        else None,
+                        "recovery_attempt_fingerprint": request_state.recovery_attempt_fingerprint
+                        if request_state.recovery_attempt_claimed
+                        else None,
+                    },
                     operation_id=operation_id,
                     session_id=session.durable_session_id,
                     instance_id=_service_get_settings().http_responses_session_bridge_instance_id,

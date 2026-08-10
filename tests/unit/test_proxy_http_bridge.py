@@ -18127,6 +18127,63 @@ async def test_submit_http_bridge_request_starts_api_key_reservation_heartbeat(
 
 
 @pytest.mark.asyncio
+async def test_submit_http_bridge_request_restores_recovery_claim_when_stream_lease_reacquire_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = _make_bridge_session(key_value="recovery-lease-reacquire")
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-recovery-lease-reacquire",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"retry"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_recovery_claimed = True
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None)),
+    )
+    cleanup = AsyncMock()
+    monkeypatch.setattr(service, "_cleanup_http_bridge_submit_interruption", cleanup)
+    lease_failure = proxy_service.ProxyResponseError(
+        429,
+        openai_error("account_stream_cap", "stream capacity exhausted"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_ensure_http_bridge_session_stream_lease_locked",
+        AsyncMock(side_effect=lease_failure),
+    )
+
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert exc_info.value is lease_failure
+    cleanup.assert_awaited_once()
+    assert cleanup.await_args is not None
+    assert cleanup.await_args.kwargs["admission_waiter_registered"] is False
+    assert cleanup.await_args.kwargs["request_enqueued"] is False
+    send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_http_bridge_submit_interruption_releases_gate_state_when_gate_already_acquired() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     admission = cast(Any, SimpleNamespace(release=Mock()))

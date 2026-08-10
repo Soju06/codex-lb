@@ -1302,14 +1302,34 @@ class _HTTPBridgeRequestSubmitMixin:
         gate_acquired = False
         request_enqueued = False
         admission_waiter_registered = False
-        async with session.pending_lock:
-            await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
-            # Register the submit as an admission waiter atomically with the
-            # reacquire so a previous turn's finalizer unwinding concurrently
-            # cannot see an apparently idle session and release this lease
-            # before the turn is counted into the session queue.
-            session.admission_waiter_count += 1
-            admission_waiter_registered = True
+        try:
+            async with session.pending_lock:
+                await self._ensure_http_bridge_session_stream_lease_locked(session, request_state=request_state)
+                # Register the submit as an admission waiter atomically with the
+                # reacquire so a previous turn's finalizer unwinding concurrently
+                # cannot see an apparently idle session and release this lease
+                # before the turn is counted into the session queue.
+                session.admission_waiter_count += 1
+                admission_waiter_registered = True
+        except BaseException:
+            # Recovery claims are made before admission. If reacquiring an
+            # idle session's stream lease fails, no upstream frame can have
+            # been sent; restore that claim before propagating the admission
+            # error so a later reconnect is not fenced as already dispatched.
+            if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
+                session.unanchored_reservation_id = None
+            cleanup_task = asyncio.create_task(
+                self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=False,
+                    request_enqueued=False,
+                    counted_in_queue=False,
+                    admission_waiter_registered=admission_waiter_registered,
+                )
+            )
+            await _await_task_deferring_cancellation(cleanup_task)
+            raise
         try:
             await self._maybe_prewarm_http_bridge_session(
                 session,

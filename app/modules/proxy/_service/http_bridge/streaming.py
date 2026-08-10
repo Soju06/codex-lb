@@ -85,6 +85,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_budget_seconds,
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
+    _http_bridge_requires_cluster_registration,
     _http_bridge_runtime_config,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
@@ -2039,6 +2040,16 @@ class _HTTPBridgeStreamingMixin:
                     gateway_safe_mode=runtime_config.gateway_safe_mode,
                     allow_forward_to_owner=(
                         not fresh_replay_excluded_account_ids and not force_local_recovery_creation
+                    ),
+                    # A single-instance restart can leave an anchored durable
+                    # row owned by the previous process epoch. Once the old
+                    # owner is proven dead, let the initial continuation
+                    # rebind locally; clustered deployments still route or
+                    # fail closed through the normal owner path.
+                    allow_previous_response_recovery_rebind=(
+                        request_state.previous_response_id is not None
+                        and dead_owner_anchor
+                        and not _http_bridge_requires_cluster_registration(settings)
                     ),
                     forwarded_request=forwarded_request,
                     forwarded_original_request_unanchored=original_request_unanchored,

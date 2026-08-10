@@ -180,6 +180,7 @@ class DurableBridgeOperationSnapshot:
     parent_response_id: str | None
     state: str
     response_id: str | None
+    recovery_dispatch_count: int = 0
     request_text: str | None = None
     event_spool_complete: bool = True
     created: bool = False
@@ -1251,6 +1252,7 @@ class DurableBridgeRepository:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        max_recovery_dispatches: int | None = None,
     ) -> bool:
         """Atomically claim an UNKNOWN operation for one recovery attempt.
 
@@ -1282,11 +1284,15 @@ class DurableBridgeRepository:
             if owner_exists is None or operation is None:
                 await self._session.rollback()
                 return False
+            if max_recovery_dispatches is not None and operation.recovery_dispatch_count >= max_recovery_dispatches:
+                await self._session.rollback()
+                return False
             await self._session.execute(
                 delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id == operation_id)
             )
             operation.state = "submitted"
             operation.response_id = None
+            operation.recovery_dispatch_count += 1
             operation.event_bytes = 0
             operation.event_spool_complete = False
             operation.updated_at = utcnow()
@@ -2758,6 +2764,7 @@ def _to_operation_snapshot(
         parent_response_id=row.parent_response_id,
         state=row.state,
         response_id=row.response_id,
+        recovery_dispatch_count=row.recovery_dispatch_count,
         request_text=row.request_text,
         event_spool_complete=bool(row.event_spool_complete),
         created=created,

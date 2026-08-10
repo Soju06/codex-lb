@@ -1080,7 +1080,9 @@ class _HTTPBridgeRequestSubmitMixin:
                                 "HTTP response recovery could not claim the previous operation; retry the request.",
                             ),
                         )
-                    claimed = await claim_unknown_operation(
+                    claimed = await _call_with_supported_optional_kwargs(
+                        claim_unknown_operation,
+                        optional_kwargs={"max_recovery_dispatches": 1} if one_shot_recovery else {},
                         operation_id=operation.operation_id,
                         session_id=session.durable_session_id,
                         instance_id=_service_get_settings().http_responses_session_bridge_instance_id,

@@ -277,11 +277,22 @@ async def test_public_selection_surfaces_fair_share_denial_shape(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
-async def test_public_fair_share_denies_against_usage_eligible_capacity(
+@pytest.mark.parametrize(
+    ("candidate_status", "expected_error_code"),
+    [
+        (AccountStatus.ACTIVE, "api_key_stream_fair_share"),
+        (AccountStatus.PAUSED, "account_usage_limit_reached"),
+    ],
+    ids=["routable", "paused"],
+)
+async def test_public_fair_share_uses_only_routable_usage_eligible_capacity(
     selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
     sticky: bool,
+    candidate_status: AccountStatus,
+    expected_error_code: str,
 ) -> None:
-    eligible = _account(f"contract-fair-share-eligible-{sticky}")
+    eligible = _account(f"contract-fair-share-eligible-{sticky}-{candidate_status.value}")
     limited = _account(f"contract-fair-share-limited-{sticky}")
     limited.usage_limit_enabled = True
     limited.usage_limit_percent = 10.0
@@ -293,6 +304,10 @@ async def test_public_fair_share_denies_against_usage_eligible_capacity(
             limited.id: _usage_row(21, limited.id, window="primary", used_percent=10.0),
         },
     )
+    selection_inputs = await balancer._load_selection_inputs(model=None)
+    # Inject PAUSED after fresh-load prefiltering to exercise selection-path eligibility.
+    next(account for account in selection_inputs.accounts if account.id == eligible.id).status = candidate_status
+    monkeypatch.setattr(balancer, "_load_selection_inputs", AsyncMock(return_value=selection_inputs))
     balancer._runtime[eligible.id] = load_balancer_module.RuntimeState(
         inflight_streams=3,
         stream_key_inflight={"requester": 2, "other": 1},
@@ -304,13 +319,13 @@ async def test_public_fair_share_denies_against_usage_eligible_capacity(
         sticky_max_age_seconds=600 if sticky else None,
         routing_strategy="usage_weighted",
         lease_kind="stream",
-        concurrency_caps=AccountConcurrencyCaps(response_create_limit=3, stream_limit=3),
+        concurrency_caps=AccountConcurrencyCaps(response_create_limit=4, stream_limit=4),
         api_key_id="requester",
-        api_key_stream_fair_share_threshold_pct=100,
+        api_key_stream_fair_share_threshold_pct=50,
     )
 
     assert selection.account is None
-    assert selection.error_code == "api_key_stream_fair_share"
+    assert selection.error_code == expected_error_code
 
 
 @pytest.mark.asyncio

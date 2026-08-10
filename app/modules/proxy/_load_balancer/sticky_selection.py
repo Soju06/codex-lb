@@ -486,9 +486,11 @@ async def run_sticky_selection_path(
                     error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                     error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
                 )
-            # Fair share is measured against the routable usage-policy pool,
+            # Fair share is measured against the routable pool,
             # before hard-sticky narrows selection to the owner account.
-            fair_share_candidate_ids = [state.account_id for state in _usage_limit_eligible_states(states)]
+            fair_share_candidate_ids = [
+                state.account_id for state in _fair_share_eligible_states(states, traffic_class=traffic_class)
+            ]
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
@@ -1599,6 +1601,26 @@ def _filter_states_for_usage_limit_and_account_caps(
 
 def _usage_limit_eligible_states(states: Iterable[AccountState]) -> list[AccountState]:
     return [state for state in states if not account_usage_limit_blocks_selection(state)]
+
+
+def _fair_share_eligible_states(
+    states: Iterable[AccountState],
+    *,
+    traffic_class: TrafficClass,
+) -> list[AccountState]:
+    current = time.time()
+    return [
+        state
+        for state in states
+        if select_account(
+            [replace(state)],
+            now=current,
+            allow_backoff_fallback=False,
+            traffic_class=traffic_class,
+            allow_usage_exhaustion_error=False,
+        ).account
+        is not None
+    ]
 
 
 def _probing_result_requires_recovery_reservation(

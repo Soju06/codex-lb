@@ -28,7 +28,7 @@ from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
 )
-from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
@@ -2223,6 +2223,24 @@ async def test_durable_bridge_lookup_active_lease_survives_request_lookup(
     assert lookup is not None
     assert lookup.owner_instance_id == "instance-a"
     assert lookup.latest_response_id == "resp_1"
+    assert lookup.lease_is_active(now=utcnow()) is True
+
+
+def test_durable_bridge_lookup_lease_accepts_offset_aware_timestamp() -> None:
+    lookup = DurableBridgeLookup(
+        session_id="session-aware-lease",
+        canonical_kind="session_header",
+        canonical_key="sid-aware-lease",
+        api_key_scope="anonymous",
+        account_id="acc-1",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id=None,
+    )
+
     assert lookup.lease_is_active(now=utcnow()) is True
 
 

@@ -33,7 +33,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CODEX_ARGS+=("--full-auto" "--ephemeral")
+# Reviews commonly outlive the invoking terminal or exceed its output cap.
+# Keep the rollout persistent so its final response can be recovered with
+# `codex resume` after either failure; `--ephemeral` would discard that escape
+# hatch as soon as this process exits.
+CODEX_ARGS+=("--full-auto")
 
 # --- Model overrides ---
 if [[ -n "${CODEX_REVIEW_MODEL:-}" ]]; then

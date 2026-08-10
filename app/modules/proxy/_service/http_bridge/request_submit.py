@@ -290,6 +290,8 @@ def _http_bridge_operation_fingerprint(
 def _http_bridge_terminal_hard_turn_response_id(
     request_state: _WebSocketRequestState,
     operation: Any,
+    *,
+    allow_anchored_continuation: bool = False,
 ) -> str | None:
     """Return a completed hard-turn anchor when this is a new client turn.
 
@@ -301,7 +303,7 @@ def _http_bridge_terminal_hard_turn_response_id(
     operation identity and are intentionally excluded here.
     """
     if (
-        request_state.previous_response_id is not None
+        (request_state.previous_response_id is not None and not allow_anchored_continuation)
         or not request_state.hard_continuity_anchor
         or request_state.operation_id is not None
         or request_state.operation_rebind_required
@@ -1085,17 +1087,27 @@ class _HTTPBridgeRequestSubmitMixin:
                 get_operation = getattr(self._durable_bridge, "get_operation", None)
                 if existing_operation is None and callable(get_operation):
                     existing_operation = await get_operation(operation_id=operation_id)
-                terminal_hard_turn_response_id = _http_bridge_terminal_hard_turn_response_id(
-                    request_state,
-                    existing_operation,
-                )
-                if terminal_hard_turn_response_id is not None:
+                hard_turn_chain_advanced = False
+                seen_hard_turn_response_ids: set[str] = set()
+                while True:
+                    terminal_hard_turn_response_id = _http_bridge_terminal_hard_turn_response_id(
+                        request_state,
+                        existing_operation,
+                        allow_anchored_continuation=hard_turn_chain_advanced,
+                    )
+                    if (
+                        terminal_hard_turn_response_id is None
+                        or terminal_hard_turn_response_id in seen_hard_turn_response_ids
+                    ):
+                        break
                     # A completed operation with the same body is the prior
-                    # hard turn, not a replay request: the client omitted an
-                    # upstream anchor, so advance this legitimate new turn
-                    # from the completed response instead of replaying the
-                    # old transcript. Unknown/in-flight operations stay
-                    # fenced and continue through the recovery path below.
+                    # hard turn, not a replay request: advance from its
+                    # response instead of replaying the old transcript. Keep
+                    # walking the chain because repeated identical turns can
+                    # have several terminal operations with successive
+                    # response anchors.
+                    seen_hard_turn_response_ids.add(terminal_hard_turn_response_id)
+                    hard_turn_chain_advanced = True
                     text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
                     request_state.previous_response_id = terminal_hard_turn_response_id
                     request_state.proxy_injected_previous_response_id = True
@@ -1112,6 +1124,14 @@ class _HTTPBridgeRequestSubmitMixin:
                     operation_tagged_text = _text_with_operation_id(text_data, operation_id)
                     _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
                     existing_operation = None
+                    if callable(get_operation_by_fingerprint):
+                        existing_operation = await _call_with_supported_optional_kwargs(
+                            get_operation_by_fingerprint,
+                            optional_kwargs={"api_key_scope": api_key_scope},
+                            request_fingerprint=operation_fingerprint,
+                        )
+                    if existing_operation is None and callable(get_operation):
+                        existing_operation = await get_operation(operation_id=operation_id)
                 # If another worker durably observed the previous turn's
                 # completion, advance a new continuation to that response
                 # anchor instead of replaying the timed-out turn.

@@ -1003,6 +1003,49 @@ async def test_startup_retains_completed_operation_session(
 
 
 @pytest.mark.asyncio
+async def test_startup_retains_completed_operation_session_across_process_epoch(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-epoch-retain", session_key_value="sid-epoch-retain")
+        fingerprint = durable_bridge_hash("epoch-retain")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-epoch-retain",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-epoch-retain",
+            owner_epoch=claim.owner_epoch,
+            state="completed",
+            response_id="resp-completed",
+        )
+        assert (
+            await repository.purge_owned_sessions_on_startup(
+                instance_id="inst-epoch-retain",
+                owner_process_epoch="new-process",
+            )
+            == 0
+        )
+        owner = await repository.get_session_by_id(claim.id)
+        assert owner is not None
+        assert owner.owner_instance_id is None
+        assert owner.owner_process_epoch == "test-process"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_ring_purge_removes_dead_members_and_keeps_recent(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

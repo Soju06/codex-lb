@@ -39,3 +39,6 @@
 - [x] 7.3 Add formatter and conversation-table regressions for semantic fields, ISO ordering, and live updates
 - [x] 7.4 Route filename-missing archive record summaries through the subscribed shared formatter and cover live ISO updates
 - [x] 7.5 Route reset-credit expiry timestamps through the subscribed shared formatter and cover live Default updates in both account surfaces
+- [x] 7.6 Route daily report table dates through the subscribed preference and cover live Default/ISO updates
+- [x] 7.7 Clarify that the preference applies only to read-only presentation text and excludes interactive controls and verbatim API/data representations
+- [x] 7.8 Route the quota planner decision Peak label through the subscribed preference and cover live Default/ISO updates

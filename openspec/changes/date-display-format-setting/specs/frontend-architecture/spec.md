@@ -2,13 +2,13 @@
 
 ### Requirement: Appearance settings include date format toggle
 
-The Appearance settings section SHALL include a "Date format" toggle row with two options: "Default" and "ISO 8601". The toggle SHALL be placed between the Time format and Account rows settings. Selecting an option SHALL immediately apply the new format across the dashboard.
+The Appearance settings section SHALL include a "Date format" toggle row with two options: "Default" and "ISO 8601". The toggle SHALL be placed between the Time format and Account rows settings. Selecting an option SHALL immediately apply the new format to applicable read-only date/time presentation text across the dashboard.
 
 #### Scenario: Default date format is selected initially
 
 - **WHEN** a user opens the Appearance settings section with no prior date format preference
 - **THEN** the "Default" option SHALL be selected (aria-pressed true)
-- **AND** dates SHALL render using locale-dependent formatting
+- **AND** applicable read-only date/time presentation text SHALL render using locale-dependent formatting
 
 #### Scenario: Switching to ISO 8601
 

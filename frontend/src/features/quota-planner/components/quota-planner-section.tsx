@@ -451,7 +451,10 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
               ) : (
                 <div className="divide-y">
                   {decisions.slice(0, 8).map((decision) => {
-                    const targetPeak = detailValue(decision.details, "target_peak_at");
+                    const targetPeakAt = decision.details?.target_peak_at;
+                    const targetPeak = typeof targetPeakAt === "string" && targetPeakAt
+                      ? formatInlineTime(targetPeakAt, dateDisplayFormat)
+                      : null;
                     const warmupCycle = detailValue(decision.details, "warmup_cycle");
                     const expectedGain = detailValue(decision.details, "expected_gain");
                     const expectedCost = detailValue(decision.details, "expected_cost");

@@ -1,14 +1,10 @@
 # date-display-format Specification
 
-## Purpose
-
-Define the user-facing date display format preference and its effects on date/time rendering throughout the dashboard.
-
 ## ADDED Requirements
 
 ### Requirement: Date format preference is stored in localStorage
 
-The system SHALL persist a date display format preference in localStorage under the key `codex-lb-date-display-format`. The valid values SHALL be `"default"` and `"iso8601"`. The default value SHALL be `"default"`.
+The system SHALL persist a date display format preference in localStorage under the key `codex-lb-date-display-format`. The valid values SHALL be `"default"` and `"iso8601"`. The default value SHALL be `"default"`. The preference SHALL apply only to read-only date/time presentation text.
 
 #### Scenario: No stored preference
 
@@ -19,17 +15,52 @@ The system SHALL persist a date display format preference in localStorage under 
 
 - **WHEN** the user selects "ISO 8601" as the date format
 - **THEN** the system SHALL persist `"iso8601"` to localStorage under `codex-lb-date-display-format`
-- **AND** all applicable date display surfaces SHALL use ISO 8601 formatting
+- **AND** all applicable read-only date/time presentation text SHALL use ISO 8601 formatting
 
 #### Scenario: User switches back to Default
 
 - **WHEN** the user selects "Default" as the date format
 - **THEN** the system SHALL persist `"default"` to localStorage
-- **AND** all applicable date display surfaces SHALL revert to locale-dependent formatting
+- **AND** all applicable read-only date/time presentation text SHALL revert to locale-dependent formatting
+
+#### Scenario: Interactive date and time controls retain their own format
+
+- **GIVEN** a date or time is shown within an interactive control used to enter, edit, select, or filter a value
+- **WHEN** the user switches between "Default" and "ISO 8601"
+- **THEN** inputs, calendars, date pickers, selectors, and equivalent interactive controls SHALL retain the format provided by their component or browser
+- **AND** the preference SHALL NOT change the control's value representation or interaction behavior
+
+#### Scenario: Verbatim API and data representations remain unchanged
+
+- **GIVEN** a date or timestamp appears inside a verbatim API or data representation
+- **WHEN** the user switches between "Default" and "ISO 8601"
+- **THEN** raw JSON, request and response payloads, metadata, copied values, filenames, downloads, and exports SHALL preserve their source representation
+- **AND** the preference SHALL NOT rewrite those values
+
+#### Scenario: Read-only presentation text follows the selected format
+
+- **GIVEN** a date or timestamp is presented as non-interactive text in a table cell, detail field, status, or informational label
+- **WHEN** the user switches between "Default" and "ISO 8601"
+- **THEN** the rendered text SHALL update immediately to the selected format
+
+#### Scenario: Daily report table follows the selected format
+
+- **GIVEN** the daily report breakdown table is mounted
+- **WHEN** the user switches between "Default" and "ISO 8601"
+- **THEN** the table's Day column SHALL update immediately
+- **AND** Default SHALL use locale-dependent formatting
+- **AND** ISO 8601 SHALL use `YYYY-MM-DD` formatting
+
+#### Scenario: Quota planner decision peak follows the selected format
+
+- **GIVEN** a quota planner decision presents `target_peak_at` as a read-only Peak label
+- **WHEN** the user switches between "Default" and "ISO 8601"
+- **THEN** the Peak label SHALL update immediately to the selected format
+- **AND** the underlying decision details value SHALL remain unchanged
 
 ### Requirement: ISO 8601 format spec for date/time rendering
 
-When the date display format is `"iso8601"`, the `formatTimeLong` function SHALL return `{ time: "HH:MM:SS", date: "YYYY-MM-DD" }` where:
+When the date display format is `"iso8601"`, the `formatTimeLong` function SHALL return `{ time: "HH:MM:SS", date: "YYYY-MM-DD" }` for read-only presentation text where:
 - `time` is always the clock-time portion in 24-hour format (2-digit hour, 2-digit minute, 2-digit second, colon-separated)
 - `date` is always the calendar-date portion in ISO 8601 format (4-digit year, 2-digit month, 2-digit day, hyphen-separated)
 The semantic meaning of these fields SHALL remain stable across date display formats. Rendered date/time surfaces that display ISO values SHALL order the `date` value before the `time` value.

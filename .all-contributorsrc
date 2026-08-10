@@ -1203,6 +1203,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "iqbalmaulana03",
+      "name": "Ahmad Maulana Iqbal",
+      "avatar_url": "https://avatars.githubusercontent.com/u/78488507?v=4",
+      "profile": "https://github.com/iqbalmaulana03",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

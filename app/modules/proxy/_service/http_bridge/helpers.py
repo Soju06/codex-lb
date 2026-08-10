@@ -950,24 +950,33 @@ async def _close_http_bridge_session(
     turn_state_lock_held: bool = False,
     release_durable_session: bool = True,
 ) -> None:
-    try:
-        await _close_http_bridge_session_resources(
+    # Direct close callers can be cancelled just like the bounded background
+    # wrapper. Keep the resource owner alive until its reader, socket, and
+    # leases are actually finalized; only then may detached-capacity tracking
+    # disappear. Otherwise cancellation can turn a live predecessor into an
+    # unowned generation that neither shutdown nor capacity accounting sees.
+    close_task = asyncio.create_task(
+        _close_http_bridge_session_resources(
             service,
             session,
             turn_state_lock_held=turn_state_lock_held,
             release_durable_session=release_durable_session,
-        )
-    finally:
-        # Detached generations remain capacity owners until resource closure
-        # ends. Finalize that ownership here so direct error-recovery closes and
-        # bounded background closes cannot drift into different lifecycles.
-        if turn_state_lock_held:
+        ),
+        name=f"http-bridge-resource-close-{_hash_identifier(session.key.affinity_key)}",
+    )
+    _, cancellation = await _await_task_deferring_cancellation(close_task)
+    # Detached generations remain capacity owners until resource closure ends.
+    # Finalize that ownership here so direct error-recovery closes and bounded
+    # background closes cannot drift into different lifecycles.
+    if turn_state_lock_held:
+        if service._http_bridge_detached_sessions.get(id(session)) is session:
+            service._http_bridge_detached_sessions.pop(id(session), None)
+    else:
+        async with service._http_bridge_lock:
             if service._http_bridge_detached_sessions.get(id(session)) is session:
                 service._http_bridge_detached_sessions.pop(id(session), None)
-        else:
-            async with service._http_bridge_lock:
-                if service._http_bridge_detached_sessions.get(id(session)) is session:
-                    service._http_bridge_detached_sessions.pop(id(session), None)
+    if cancellation is not None:
+        raise cancellation
 
 
 async def _close_http_bridge_session_bounded(

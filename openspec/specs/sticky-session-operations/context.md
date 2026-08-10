@@ -16,6 +16,7 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - Restart mutation authority is the authenticated account-assignment and security-policy scope before model and service-tier eligibility. Model filtering constrains only replacement selection.
 - Goal-restart retirement is an account-selection capability. An existing HTTP bridge cannot consume the request first through local reuse, durable-owner promotion, or forwarding. The retired owner is excluded from stale account snapshots for the remainder of the request, including when another selector wrote the scoped marker and this selector discovers it after losing the compare-and-set.
 - Canonical bridge replacement preserves request-owned pre-submit admission on the detached predecessor, but that predecessor cannot publish new continuity aliases under the replacement's key. Detached live generations remain lifecycle-owned, capacity-counted, drain-visible, and closeable on drained reservation release, account invalidation, or shutdown; common close finalization retains ownership until resource closure ends.
+- Close finalization defers caller cancellation until owned resources are released. Durable claims are fenced per websocket generation as well as per replica, so a replacement for a row still owned by the same configured replica advances the owner epoch before serving work.
 - Durable file pins, responses, conversations, live/durable bridges, replay, and reattach sources are independent hard evidence; conflicting evidence fails closed instead of using source precedence. Opaque file IDs with no live durable pin remain unpinned for compatibility with uploads that occurred outside the current process.
 - Dashboard prompt-cache TTL is persisted in settings so operators can adjust it without restart.
 - Background cleanup removes stale prompt-cache rows proactively, while manual delete and purge endpoints provide operator override.
@@ -43,6 +44,7 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - A rolling older replica ignores the scope column. The scoped marker therefore leaves the historical timestamp tombstone empty, causing the older reader to keep the retained hard owner instead of treating the row as globally ownerless.
 - Repeated restart replacement cannot hide predecessor generations from the session cap or shutdown merely because a newer generation now occupies the canonical key.
 - A nested stream finalizer may clear a detached reservation before outer request cleanup runs, so final cleanup sweeps every detached generation for newly drainable ownership instead of relying on the mutable marker transition alone.
+- A predecessor close may release after its same-replica replacement is created; generation-specific owner epochs prevent that stale release from closing the replacement lease.
 
 ## Example
 

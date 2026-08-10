@@ -14,6 +14,8 @@ Goal-restart retirement occurs only inside account selection. A live or durable 
 
 Canonical replacement changes which generation accepts new work; it does not revoke a predecessor request that already reserved admission or release ownership of that predecessor's resources. The request's reservation proof is captured before asynchronous preparation, while detached live generations remain in lifecycle accounting until their close tasks complete.
 
+Direct close cancellation is deferred until common resource finalization completes. Durable replica ownership is also generation-fenced: when a new local socket replaces a durable row that still names the same configured replica, its claim advances the owner epoch before serving work. For example, if generation A clean-closes while generation B reconnects, A's delayed epoch-1 release cannot close B's epoch-2 lease.
+
 ## Failure Modes
 
 - A normal same-session request still returns the existing hard-affinity error while its owner is unavailable.
@@ -26,6 +28,7 @@ Canonical replacement changes which generation accepts new work; it does not rev
 - A pre-retirement selection snapshot can still contain the old owner. Successful retirement, or an authoritative reread after losing the retirement compare-and-set, filters that owner before replacement selection so namespaced affinity cannot be recreated on it.
 - An older replica does not understand source scope. The scoped marker therefore leaves the historical timestamp tombstone empty so that replica keeps the retained hard owner instead of globally abandoning it.
 - If repeated restarts detach visible generations faster than they drain, those generations continue to consume the configured bridge-session capacity; shutdown closes them alongside the current canonical generation.
+- If a close caller is cancelled or an old generation releases late, lifecycle tracking and the durable owner epoch keep its resources and lease effects fenced until finalization completes.
 
 ## Example
 

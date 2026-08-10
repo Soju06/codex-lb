@@ -7694,6 +7694,7 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_classifies_responses_lite_developer_interleaved_full_resend(
     async_client,
+    app_instance,
     monkeypatch,
     developer_message_extra,
     fresh_developer_message,
@@ -7711,6 +7712,24 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
     replay_upstream = _FakeBridgeUpstreamWebSocket("resp_preserve_replay")
     upstreams = [first_upstream, replay_upstream]
     connect_headers: list[dict[str, str]] = []
+    service = get_proxy_service_for_app(app_instance)
+    predecessor_release_started = asyncio.Event()
+    allow_predecessor_release = asyncio.Event()
+    replacement_claimed = asyncio.Event()
+    original_release_live_session = service._durable_bridge.release_live_session
+    original_claim_live_session = service._durable_bridge.claim_live_session
+
+    async def delay_predecessor_release(**kwargs):
+        if kwargs["owner_epoch"] == 1 and not predecessor_release_started.is_set():
+            predecessor_release_started.set()
+            await allow_predecessor_release.wait()
+        return await original_release_live_session(**kwargs)
+
+    async def observe_replacement_claim(**kwargs):
+        lookup = await original_claim_live_session(**kwargs)
+        if lookup.owner_epoch > 1:
+            replacement_claimed.set()
+        return lookup
 
     async def fake_select_account_with_budget(self, deadline, **kwargs):
         del self, deadline, kwargs
@@ -7735,6 +7754,8 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(service._durable_bridge, "release_live_session", delay_predecessor_release)
+    monkeypatch.setattr(service._durable_bridge, "claim_live_session", observe_replacement_claim)
 
     session_headers = {"x-codex-session-id": "fresh-reattach-full-resend"}
     historical_input = [
@@ -7783,6 +7804,7 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
     assert first.status_code == 200, first.text
+    await asyncio.wait_for(predecessor_release_started.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
     full_resend = [
         *historical_input,
@@ -7799,7 +7821,7 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
             "output": "/workspace",
         },
     ]
-    second = await asyncio.wait_for(
+    second_task = asyncio.create_task(
         async_client.post(
             "/v1/responses",
             json={
@@ -7808,9 +7830,20 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
                 "input": full_resend,
             },
             headers=session_headers,
-        ),
-        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+        )
     )
+    try:
+        await asyncio.wait_for(replacement_claimed.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    except BaseException:
+        allow_predecessor_release.set()
+        second_task.cancel()
+        try:
+            await second_task
+        except asyncio.CancelledError:
+            pass
+        raise
+    allow_predecessor_release.set()
+    second = await asyncio.wait_for(second_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
     assert second.status_code == 200, second.text
     assert second.json()["id"] == "resp_preserve_replay_1"

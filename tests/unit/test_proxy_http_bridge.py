@@ -11781,6 +11781,9 @@ async def test_close_http_bridge_session_releases_lease_before_pending_cleanup_w
     lock_holder = asyncio.create_task(hold_pending_lock())
     await asyncio.wait_for(lock_acquired.wait(), timeout=1.0)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    upstream_close = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(close=upstream_close))
+    service._http_bridge_detached_sessions[id(session)] = session
 
     close_task = asyncio.create_task(service._close_http_bridge_session(session))
     try:
@@ -11788,8 +11791,14 @@ async def test_close_http_bridge_session_releases_lease_before_pending_cleanup_w
         assert session.account_lease is None
         assert not close_task.done()
         close_task.cancel()
+        await asyncio.sleep(0)
+        assert not close_task.done()
+        assert service._http_bridge_detached_sessions[id(session)] is session
+        release_lock.set()
         with pytest.raises(asyncio.CancelledError):
-            await close_task
+            await asyncio.wait_for(close_task, timeout=1.0)
+        upstream_close.assert_awaited_once()
+        assert service._http_bridge_detached_sessions == {}
     finally:
         release_lock.set()
         await asyncio.wait_for(lock_holder, timeout=1.0)

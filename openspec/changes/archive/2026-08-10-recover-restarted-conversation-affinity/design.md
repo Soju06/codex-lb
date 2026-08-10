@@ -48,6 +48,8 @@ Detachment does not end lifecycle ownership. A predecessor request that reserved
 
 The predecessor may drain its admitted response but cannot publish newly learned aliases under a key now owned by the replacement. Detached ownership is removed only by common close finalization so direct terminal-error paths and bounded background closes share the same capacity lifecycle. Request-final cleanup rechecks detached generations after reservations are released, and account-level invalidation closes both canonical and detached sockets.
 
+Close finalization shields its resource task from caller cancellation and re-raises cancellation only after releasing the reader, socket, durable lease, and account lease. A newly created local generation also advances the durable owner epoch whenever the existing durable row still names the same replica identity. Replica identity is a routing destination, not a websocket-generation fence; without the epoch advance, a delayed release from the predecessor (or a prior process using the same configured identity) could close the replacement's lease.
+
 ## Risks / Trade-offs
 
 - [A forged marker requests owner abandonment] → The complete payload must still be account-neutral and self-contained, retirement occurs only while the persisted owner is unavailable, and source-qualified abandonment cannot erase a colliding explicit turn-state owner.

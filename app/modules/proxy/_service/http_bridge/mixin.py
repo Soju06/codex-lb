@@ -1544,13 +1544,18 @@ class _HTTPBridgeMixin(
                             create_kwargs.pop(optional_kwarg, None)
                 created_session = await create_session(key, **create_kwargs)
                 await _raise_if_http_bridge_creation_superseded(self, key, inflight_future=inflight_future)
+                current_instance = settings.http_responses_session_bridge_instance_id
+                # Replica ids route traffic, not socket generations. Advance a
+                # same-replica replacement so predecessor or prior-process
+                # releases cannot close it.
+                same_replica_owner = bool(durable_lookup and durable_lookup.owner_instance_id == current_instance)
                 await self._claim_durable_http_bridge_session(
                     created_session,
                     allow_takeover=_http_bridge_claim_allows_takeover(
                         durable_lookup,
                         force=force_durable_takeover,
                     ),
-                    force_owner_epoch_advance=force_durable_takeover,
+                    force_owner_epoch_advance=(force_durable_takeover or same_replica_owner),
                     # restart_takeover means recovering a row whose previous
                     # owner is genuinely gone. Every claim now advances the
                     # epoch, so epoch > 1 alone would also count ordinary

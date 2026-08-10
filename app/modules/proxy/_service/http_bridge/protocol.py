@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any, Protocol
 
@@ -21,6 +22,7 @@ class _HTTPBridgeServiceProtocol(Protocol):
     _durable_bridge_coordinator: Any
     _http_bridge_owner_client: Any
     _http_bridge_sessions: Any
+    _http_bridge_detached_sessions: Any
     _http_bridge_inflight_sessions: Any
     _http_bridge_turn_state_index: Any
     _http_bridge_previous_response_index: Any
@@ -64,6 +66,9 @@ class _HTTPBridgeServiceProtocol(Protocol):
         expected_session: _HTTPBridgeSession | None = None,
         mark_closed: bool = True,
     ) -> _HTTPBridgeSession | None: ...
+    def _take_all_http_bridge_sessions_locked(
+        self,
+    ) -> tuple[list[_HTTPBridgeSession], list[asyncio.Future[_HTTPBridgeSession]]]: ...
     def _unregister_http_bridge_turn_states_locked(self, session: _HTTPBridgeSession) -> None: ...
     def _unregister_http_bridge_previous_response_ids_locked(self, session: _HTTPBridgeSession) -> None: ...
     async def _register_http_bridge_turn_state_impl(

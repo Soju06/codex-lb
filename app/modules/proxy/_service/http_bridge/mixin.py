@@ -81,6 +81,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
     _http_bridge_claim_allows_takeover,
+    _http_bridge_capacity_generation_count,
     _http_bridge_compatible,
     _http_bridge_continuity_lost_error_envelope,
     _http_bridge_endpoint_matches_current_instance,
@@ -103,6 +104,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_session_account_active,
     _http_bridge_session_allows_api_key,
+    _http_bridge_session_generation_count,
     _http_bridge_session_has_admission_waiter,
     _http_bridge_session_matches_preferred_account,
     _http_bridge_session_retiring_with_visible_requests,
@@ -1280,8 +1282,7 @@ class _HTTPBridgeMixin(
                             )
                     elif inflight_future is None:
                         while (
-                            len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self) >= max_sessions
-                            and self._http_bridge_sessions
+                            _http_bridge_capacity_generation_count(self) >= max_sessions and self._http_bridge_sessions
                         ):
                             evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
                             for candidate_key, candidate_session in self._http_bridge_sessions.items():
@@ -1317,7 +1318,7 @@ class _HTTPBridgeMixin(
                             detached = self._detach_http_bridge_session_locked(lru_key, expected_session=lru_session)
                             if detached is not None:
                                 sessions_to_close_before_create.append(detached)
-                        if len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self) >= max_sessions:
+                        if _http_bridge_capacity_generation_count(self) >= max_sessions:
                             if _http_bridge_inflight_creation_count(self):
                                 capacity_wait_future = next(
                                     future
@@ -1330,9 +1331,7 @@ class _HTTPBridgeMixin(
                                     key,
                                     account_id=None,
                                     model=request_model,
-                                    pending_count=(
-                                        len(self._http_bridge_sessions) + _http_bridge_inflight_creation_count(self)
-                                    ),
+                                    pending_count=_http_bridge_capacity_generation_count(self),
                                     cache_key_family=key.affinity_kind,
                                     model_class=_extract_model_class(request_model) if request_model else None,
                                 )
@@ -1389,7 +1388,7 @@ class _HTTPBridgeMixin(
                         timeout_seconds=wait_timeout_seconds,
                         key=stale_key or key,
                         request_model=request_model,
-                        pending_count=len(self._http_bridge_sessions),
+                        pending_count=_http_bridge_session_generation_count(self),
                         inflight_count=len(self._http_bridge_inflight_sessions),
                     )
                     raise timeout_error from exc
@@ -1420,7 +1419,7 @@ class _HTTPBridgeMixin(
                         timeout_seconds=wait_timeout_seconds,
                         key=key,
                         request_model=request_model,
-                        pending_count=len(self._http_bridge_sessions),
+                        pending_count=_http_bridge_session_generation_count(self),
                         inflight_count=len(self._http_bridge_inflight_sessions),
                     )
                     raise timeout_error from exc
@@ -1622,11 +1621,7 @@ class _HTTPBridgeMixin(
 
     async def close_all_http_bridge_sessions(self) -> None:
         async with self._http_bridge_lock:
-            sessions_to_close = list(self._http_bridge_sessions.values())
-            inflight_futures = list(self._http_bridge_inflight_sessions.values())
-            self._http_bridge_sessions.clear()
-            self._http_bridge_inflight_sessions.clear()
-            self._http_bridge_previous_response_index.clear()
+            sessions_to_close, inflight_futures = self._take_all_http_bridge_sessions_locked()
         shutdown_error = ProxyResponseError(
             503,
             openai_error(

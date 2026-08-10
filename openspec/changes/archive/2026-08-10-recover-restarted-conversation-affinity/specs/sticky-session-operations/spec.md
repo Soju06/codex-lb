@@ -3,7 +3,7 @@
 ### Requirement: Sticky sessions are explicitly typed
 The system SHALL persist each sticky-session mapping with an explicit kind so durable Codex backend affinity, durable dashboard sticky-thread routing, and bounded prompt-cache affinity can be managed independently. Budget-pressure reallocation MUST apply only to mappings whose kind/source is soft. A raw or legacy `codex_session` mapping MUST remain owner-bound because it may represent explicit turn-state continuity; budget pressure MUST NOT delete or rebind it.
 
-An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. Classification MUST use the canonical upstream request form so accepted compatibility controls and transport-envelope fields do not make equivalent requests disagree. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's account-assignment and security-policy scope computed before model and service-tier eligibility; local capacity, model eligibility, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT determine mutation authority. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account. Because a raw key's persisted source is ambiguous, goal-restart abandonment MUST apply only to `session_header` interpretation and MUST retain the stored account as hard ownership for an explicit `turn_state` lookup using the same text. During a rolling deployment or rollback, replicas that do not understand source-qualified abandonment MUST continue treating that retained account as hard ownership. A selector that observes source-qualified abandonment initially or after losing the retirement compare-and-set MUST exclude the retained retired owner until replacement affinity is persisted, even if its account inputs predate retirement. Restart authority MUST remain scoped to the classified request and MUST NOT persist on a reusable bridge for later requests. A live or durable HTTP bridge for the same process session MUST NOT bypass this guarded selection through local reuse, owner forwarding, or preferred-owner promotion.
+An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. Classification MUST use the canonical upstream request form so accepted compatibility controls and transport-envelope fields do not make equivalent requests disagree. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's account-assignment and security-policy scope computed before model and service-tier eligibility; local capacity, model eligibility, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT determine mutation authority. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account. Because a raw key's persisted source is ambiguous, goal-restart abandonment MUST apply only to `session_header` interpretation and MUST retain the stored account as hard ownership for an explicit `turn_state` lookup using the same text. During a rolling deployment or rollback, replicas that do not understand source-qualified abandonment MUST continue treating that retained account as hard ownership. A selector that observes source-qualified abandonment initially or after losing the retirement compare-and-set MUST exclude the retained retired owner until replacement affinity is persisted, even if its account inputs predate retirement. Restart authority MUST remain scoped to the classified request and MUST NOT persist on a reusable bridge for later requests. A live or durable HTTP bridge for the same process session MUST NOT bypass this guarded selection through local reuse, owner forwarding, or preferred-owner promotion. Canonical replacement MUST preserve an already reserved predecessor request's authority to submit on its detached draining generation after queue publication clears the mutable reservation marker. Every detached live generation MUST remain owned by the bridge lifecycle, MUST count against the configured session cap until its close task completes, and MUST be closed during service shutdown.
 
 #### Scenario: Soft sticky reallocation uses split primary and secondary pressure thresholds
 - **WHEN** a request resolves an existing prompt-cache, sticky-thread, or other explicitly soft mapping
@@ -97,6 +97,28 @@ An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_sess
 - **WHEN** a later ordinary request reuses that bridge and account A has become unavailable
 - **THEN** the ordinary request fails closed instead of inheriting the earlier restart's retirement authority
 - **AND** the raw mapping to account A is neither tombstoned nor rebound
+
+#### Scenario: Reserved predecessor submits after canonical replacement
+
+- **GIVEN** an unanchored request has reserved the canonical session-header bridge before submit
+- **AND** a verified goal restart replaces that canonical bridge while the reserved request is preparing its payload
+- **WHEN** the reserved request publishes queued activity and clears its mutable reservation marker
+- **THEN** the request submits exactly once on its detached predecessor generation
+- **AND** canonical replacement does not reject that request as unregistered or replaced
+
+#### Scenario: Detached restart generations remain capacity bounded
+
+- **GIVEN** repeated verified restarts replace canonical bridges that still own visible or reserved requests
+- **WHEN** the number of canonical, detached-live, and in-flight generations reaches the configured session cap
+- **THEN** the service refuses another generation with its bounded local-capacity error
+- **AND** detached sockets, readers, durable leases, and account leases are not omitted from capacity accounting
+
+#### Scenario: Shutdown closes detached bridge generations
+
+- **GIVEN** canonical replacement detached an older generation whose request is still draining
+- **WHEN** the service closes all HTTP bridge sessions
+- **THEN** it closes both canonical and detached generations
+- **AND** no detached socket, reader, durable lease, or account lease escapes shutdown ownership
 
 #### Scenario: Stale selection snapshot cannot repin a retired owner
 

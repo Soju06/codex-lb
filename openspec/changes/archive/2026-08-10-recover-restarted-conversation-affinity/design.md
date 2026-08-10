@@ -44,6 +44,8 @@ The normal loop may still hold account objects loaded before retirement. Success
 
 HTTP bridge reuse normally returns before account selection, and durable bridge metadata can promote the prior account to a required preferred owner or forward the request to another replica. For a verified self-contained goal restart, these paths would prevent the guarded raw-owner retirement from running. The bridge path therefore ignores that prior bridge ownership for this request, detaches any matching local bridge, and creates a replacement only after ordinary selection has evaluated the retirement capability. A bridge with visible work is detached without interrupting that work; an idle bridge is closed normally.
 
+Detachment does not end lifecycle ownership. A predecessor request that reserved its lane before replacement keeps request-scoped submit authority after queue publication clears the mutable reservation field. Detached live generations remain tracked separately from the canonical key, count against capacity until close finishes, participate in drain status, and are included in shutdown cleanup. Treating the canonical map as the complete live-generation registry was rejected because repeated restarts could otherwise hide unbounded sockets, readers, durable leases, and account leases.
+
 ## Risks / Trade-offs
 
 - [A forged marker requests owner abandonment] → The complete payload must still be account-neutral and self-contained, retirement occurs only while the persisted owner is unavailable, and source-qualified abandonment cannot erase a colliding explicit turn-state owner.

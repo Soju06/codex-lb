@@ -1339,6 +1339,69 @@ async def test_submit_http_bridge_request_prewarm_failure_retires_owned_handoff(
 
 
 @pytest.mark.asyncio
+async def test_submit_http_bridge_request_keeps_reserved_detached_lane_after_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-detached-submit", None)
+    predecessor = _make_bridge_session(key=key, key_value=key.affinity_key)
+    replacement = _make_bridge_session(key=key, key_value=key.affinity_key)
+    send_text = AsyncMock()
+    predecessor.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    predecessor.unanchored_reservation_id = "scope-detached-submit"
+    service._http_bridge_sessions[key] = predecessor
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-detached-submit",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"continue"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    async def replace_during_prewarm(*_args: object, **_kwargs: object) -> None:
+        predecessor.upstream_control.reconnect_requested = True
+        predecessor.upstream_control.retire_after_drain = True
+        async with service._http_bridge_lock:
+            assert (
+                service._detach_http_bridge_session_locked(
+                    key,
+                    expected_session=predecessor,
+                    mark_closed=False,
+                )
+                is predecessor
+            )
+            service._http_bridge_sessions[key] = replacement
+
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", replace_during_prewarm)
+    request_scope_token = set_request_scope_id("scope-detached-submit")
+    try:
+        await service._submit_http_bridge_request(
+            predecessor,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+    finally:
+        reset_request_scope_id(request_scope_token)
+
+    send_text.assert_awaited_once_with(request_state.request_text)
+    assert predecessor.unanchored_reservation_id is None
+    assert service._http_bridge_sessions[key] is replacement
+    assert service._http_bridge_detached_sessions[id(predecessor)] is predecessor
+
+    assert await service._detach_http_bridge_request(predecessor, request_state=request_state) is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("submit_succeeds", [True, False])
 async def test_http_bridge_submit_transfers_settlement_ownership_only_after_success(
     monkeypatch: pytest.MonkeyPatch,
@@ -16876,6 +16939,72 @@ async def test_get_or_create_goal_restart_forces_canonical_durable_takeover(
 
 
 @pytest.mark.asyncio
+async def test_goal_restart_replacement_generations_remain_bounded_by_session_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-restart-cap", None)
+    predecessor = _make_bridge_session(key=key, key_value=key.affinity_key, queued_request_count=1)
+    replacement = _make_bridge_session(key=key, key_value=key.affinity_key)
+    service._http_bridge_sessions[key] = predecessor
+    create_session = AsyncMock(return_value=replacement)
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+    affinity = proxy_service._AffinityPolicy(
+        key=key.affinity_key,
+        kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        abandon_unavailable_legacy_owner=True,
+    )
+
+    first_scope_token = set_request_scope_id("scope-restart-cap-1")
+    try:
+        resolved = await service._get_or_create_http_bridge_session(
+            key,
+            headers={"x-codex-session-id": key.affinity_key},
+            affinity=affinity,
+            api_key=None,
+            request_model="gpt-5.6-sol",
+            idle_ttl_seconds=120.0,
+            max_sessions=2,
+        )
+    finally:
+        reset_request_scope_id(first_scope_token)
+
+    assert resolved is replacement
+    assert service._http_bridge_detached_sessions[id(predecessor)] is predecessor
+
+    second_scope_token = set_request_scope_id("scope-restart-cap-2")
+    try:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await service._get_or_create_http_bridge_session(
+                key,
+                headers={"x-codex-session-id": key.affinity_key},
+                affinity=affinity,
+                api_key=None,
+                request_model="gpt-5.6-sol",
+                idle_ttl_seconds=120.0,
+                max_sessions=2,
+            )
+    finally:
+        reset_request_scope_id(second_scope_token)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
+    assert create_session.await_count == 1
+    assert set(service._http_bridge_detached_sessions) == {id(predecessor), id(replacement)}
+
+    await service.close_all_http_bridge_sessions()
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_allows_local_rebind_for_previous_response_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -17759,6 +17888,46 @@ async def test_close_all_http_bridge_sessions_fails_inflight_waiters() -> None:
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_close_all_http_bridge_sessions_closes_detached_generations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-shutdown-detached", None)
+    predecessor = _make_bridge_session(key=key, key_value=key.affinity_key, queued_request_count=1)
+    replacement = _make_bridge_session(key=key, key_value=key.affinity_key)
+    predecessor_close = AsyncMock()
+    replacement_close = AsyncMock()
+    predecessor.upstream = cast(UpstreamWebSocket, SimpleNamespace(close=predecessor_close))
+    replacement.upstream = cast(UpstreamWebSocket, SimpleNamespace(close=replacement_close))
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+    service._http_bridge_sessions[key] = predecessor
+    async with service._http_bridge_lock:
+        assert (
+            service._detach_http_bridge_session_locked(
+                key,
+                expected_session=predecessor,
+                mark_closed=False,
+            )
+            is predecessor
+        )
+        service._http_bridge_sessions[key] = replacement
+
+    snapshot = service.http_bridge_activity_snapshot_nowait()
+    assert snapshot["http_bridge_live_sessions"] == 2
+    assert snapshot["http_bridge_pending_or_queued_requests"] == 1
+    assert snapshot["http_bridge_restart_blocking"] is True
+
+    await service.close_all_http_bridge_sessions()
+
+    predecessor_close.assert_awaited_once()
+    replacement_close.assert_awaited_once()
+    assert predecessor.closed is True
+    assert replacement.closed is True
+    assert service._http_bridge_sessions == {}
+    assert service._http_bridge_detached_sessions == {}
 
 
 @pytest.mark.asyncio
@@ -25630,6 +25799,7 @@ async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() ->
             text_data=request_state.request_text or "",
             queue_limit=8,
             request_scope_id="scope-submit-cooldown",
+            owned_unanchored_handoff=False,
         )
 
     assert exc_info.value.status_code == 503

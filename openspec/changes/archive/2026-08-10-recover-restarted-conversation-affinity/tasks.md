@@ -6,6 +6,7 @@
 - [x] 1.4 Add regressions for canonical compatibility classification, stale post-retirement selection inputs, and live HTTP bridge bypass.
 - [x] 1.5 Add regressions proving a colliding explicit turn state retains its owner and model eligibility does not narrow mutation authority.
 - [x] 1.6 Add regressions proving old-reader fail-closed behavior and CAS-loser exclusion of a concurrently retired owner.
+- [x] 1.7 Add regressions for reserved predecessor submission, bounded detached generations, and shutdown cleanup.
 
 ## 2. Implementation
 
@@ -17,6 +18,7 @@
 - [x] 2.6 Persist source-qualified session-header abandonment while retaining hard explicit turn-state ownership.
 - [x] 2.7 Separate authenticated sticky-mutation authority from model and service-tier replacement eligibility.
 - [x] 2.8 Encode source-qualified retirement so legacy readers retain hard ownership, and preserve the retired owner as exclusion evidence on every typed read.
+- [x] 2.9 Preserve request-owned admission across replacement and track detached live generations through closure.
 
 ## 3. Validation and Documentation
 

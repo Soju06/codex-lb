@@ -425,13 +425,26 @@ def _http_bridge_inflight_creation_count(service: Any) -> int:
     )
 
 
+def _http_bridge_session_generation_count(service: Any) -> int:
+    return len(service._http_bridge_sessions) + len(service._http_bridge_detached_sessions)
+
+
+def _http_bridge_capacity_generation_count(service: Any) -> int:
+    return _http_bridge_session_generation_count(service) + _http_bridge_inflight_creation_count(service)
+
+
 def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
     inflight_cleanup = _cleanup_http_bridge_inflight_sessions_nowait(service)
     live_sessions = 0
     pending_or_queued_requests = 0
     pending_unknown_sessions = 0
 
-    for session in list(service._http_bridge_sessions.values()):
+    # A canonical key names only the newest generation. Detached predecessors
+    # remain live work and must still block restart until their requests settle.
+    for session in [
+        *service._http_bridge_sessions.values(),
+        *service._http_bridge_detached_sessions.values(),
+    ]:
         if session.closed and not _http_bridge_session_has_admission_waiter(session):
             continue
         if not session.closed:
@@ -938,8 +951,21 @@ async def _close_http_bridge_session_bounded(
 ) -> None:
     if session.upstream_reader is asyncio.current_task():
         session.upstream_reader = None
+
+    async def close_and_forget_detached_generation() -> None:
+        try:
+            await service._close_http_bridge_session(session)
+        finally:
+            # The bounded waiter may time out or be cancelled while this task
+            # continues. Release cap ownership only after the close task ends,
+            # and serialize that mutation with canonical registry replacement.
+            async with service._http_bridge_lock:
+                detached_sessions = service._http_bridge_detached_sessions
+                if detached_sessions.get(id(session)) is session:
+                    detached_sessions.pop(id(session), None)
+
     close_task = asyncio.create_task(
-        service._close_http_bridge_session(session),
+        close_and_forget_detached_generation(),
         name=f"http-bridge-close-{_hash_identifier(session.key.affinity_key)}",
     )
 

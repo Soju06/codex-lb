@@ -811,6 +811,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 text_data=text_data,
                 queue_limit=queue_limit,
                 request_scope_id=request_scope_id,
+                owned_unanchored_handoff=owned_unanchored_handoff,
                 recovery_turn_state=recovery_turn_state,
             )
         finally:
@@ -883,6 +884,7 @@ class _HTTPBridgeRequestSubmitMixin:
         text_data: str,
         queue_limit: int,
         request_scope_id: str,
+        owned_unanchored_handoff: bool,
         recovery_turn_state: str | None = None,
     ) -> None:
         recovery_attempt_consumed = False
@@ -1423,7 +1425,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     error_type="server_error",
                 ),
             )
-        if session.upstream_control.retire_after_drain and session.unanchored_reservation_id != request_scope_id:
+        if session.upstream_control.retire_after_drain and not owned_unanchored_handoff:
             await _cleanup_unsubmitted_recovery_claim()
             if not session.upstream_close_attempted:
                 await self._retire_http_bridge_after_drain_if_ready(session)
@@ -1634,6 +1636,12 @@ class _HTTPBridgeRequestSubmitMixin:
                     current_session = http_bridge_sessions.get(session.key)
                 session_unregistered = current_session is None and _http_bridge_key_strength(session.key) == "hard"
                 session_replaced = current_session is not None and current_session is not session
+                # Queue publication clears the mutable reservation marker. The
+                # proof captured before the first await still authorizes exactly
+                # that request to submit on its detached, draining generation.
+                detached_handoff_can_submit = (
+                    owned_unanchored_handoff and session.upstream_control.retire_after_drain and not session.closed
+                )
                 if session.closed and current_session is session and not session.upstream_control.retire_after_drain:
                     recovered = await self._retry_http_bridge_request_on_fresh_upstream(
                         session,
@@ -1644,7 +1652,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                     if recovered:
                         session.closed = False
-                if session.closed or session_unregistered or session_replaced:
+                if session.closed or ((session_unregistered or session_replaced) and not detached_handoff_can_submit):
                     _log_http_bridge_event(
                         "submit_on_closed",
                         session.key,

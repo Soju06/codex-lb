@@ -12,6 +12,8 @@ Sticky rows are global, but an API key may authorize only a subset of accounts. 
 
 Goal-restart retirement occurs only inside account selection. A live or durable HTTP bridge for the same process session is not additional ownership evidence after the client proves a self-contained resend, so bridge reuse, preferred-owner promotion, and remote forwarding must not consume the request before selection. A successful guarded retirement is also authoritative over any account objects loaded before that transaction; the retired owner remains excluded for the rest of the selection attempt even if that snapshot still reports it active. A selector that loses the retirement compare-and-set to another selector's scoped marker carries the marker's retained owner into the same exclusion path.
 
+Canonical replacement changes which generation accepts new work; it does not revoke a predecessor request that already reserved admission or release ownership of that predecessor's resources. The request's reservation proof is captured before asynchronous preparation, while detached live generations remain in lifecycle accounting until their close tasks complete.
+
 ## Failure Modes
 
 - A normal same-session request still returns the existing hard-affinity error while its owner is unavailable.
@@ -23,6 +25,7 @@ Goal-restart retirement occurs only inside account selection. A live or durable 
 - A live HTTP bridge can retain a detached ACTIVE account object after its persisted owner becomes unavailable. A verified restart bypasses and retires that bridge instead of trusting the stale object.
 - A pre-retirement selection snapshot can still contain the old owner. Successful retirement, or an authoritative reread after losing the retirement compare-and-set, filters that owner before replacement selection so namespaced affinity cannot be recreated on it.
 - An older replica does not understand source scope. The scoped marker therefore leaves the historical timestamp tombstone empty so that replica keeps the retained hard owner instead of globally abandoning it.
+- If repeated restarts detach visible generations faster than they drain, those generations continue to consume the configured bridge-session capacity; shutdown closes them alongside the current canonical generation.
 
 ## Example
 

@@ -384,9 +384,25 @@ class _HTTPBridgeSessionRegistryMixin:
         self._http_bridge_sessions.pop(key, None)
         if mark_closed:
             session.closed = True
+        else:
+            # Canonical replacement may detach a generation while its admitted
+            # request drains. Keep owning it until close so caps and shutdown do
+            # not lose the generation's socket, reader, durable lease, or account lease.
+            self._http_bridge_detached_sessions[id(session)] = session
         self._unregister_http_bridge_turn_states_locked(session)
         self._unregister_http_bridge_previous_response_ids_locked(session)
         return session
+
+    def _take_all_http_bridge_sessions_locked(
+        self: _HTTPBridgeServiceProtocol,
+    ) -> tuple[list[_HTTPBridgeSession], list[asyncio.Future[_HTTPBridgeSession]]]:
+        sessions = [*self._http_bridge_sessions.values(), *self._http_bridge_detached_sessions.values()]
+        inflight_futures = list(self._http_bridge_inflight_sessions.values())
+        self._http_bridge_sessions.clear()
+        self._http_bridge_detached_sessions.clear()
+        self._http_bridge_inflight_sessions.clear()
+        self._http_bridge_previous_response_index.clear()
+        return sessions, inflight_futures
 
     def _unregister_http_bridge_turn_states_locked(
         self: _HTTPBridgeServiceProtocol,

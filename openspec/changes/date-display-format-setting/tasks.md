@@ -38,3 +38,4 @@
 - [x] 7.2 Subscribe rendered date surfaces to date-format preference changes so mounted values update immediately
 - [x] 7.3 Add formatter and conversation-table regressions for semantic fields, ISO ordering, and live updates
 - [x] 7.4 Route filename-missing archive record summaries through the subscribed shared formatter and cover live ISO updates
+- [x] 7.5 Route reset-credit expiry timestamps through the subscribed shared formatter and cover live Default updates in both account surfaces

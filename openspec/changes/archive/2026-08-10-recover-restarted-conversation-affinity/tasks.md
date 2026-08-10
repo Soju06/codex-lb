@@ -3,6 +3,7 @@
 - [x] 1.1 Add a routed `/backend-api/codex/responses` regression proving a marked self-contained restart escapes an unavailable legacy owner and subsequent continuity stays on the replacement.
 - [x] 1.2 Add negative coverage for ordinary requests, account-dependent payloads, healthy owners, and compare-and-set races.
 - [x] 1.3 Add routed regressions for scoped-owner retirement and synthesized WebSocket turn-state cleanup.
+- [x] 1.4 Add regressions for canonical compatibility classification and stale post-retirement selection inputs.
 
 ## 2. Implementation
 
@@ -10,6 +11,7 @@
 - [x] 2.2 Add atomic unavailable-owner tombstoning guarded by mapping owner and account status.
 - [x] 2.3 Thread the capability through HTTP and WebSocket selection and rerun normal selection after successful retirement.
 - [x] 2.4 Restrict retirement mutation to the authenticated effective account scope and preserve generated turn-state cleanup across account changes.
+- [x] 2.5 Prevent stale account snapshots from undoing successful restart retirement.
 
 ## 3. Validation and Documentation
 

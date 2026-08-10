@@ -468,12 +468,13 @@ def _request_allows_unavailable_legacy_owner_abandonment(payload: ResponsesReque
     # into a marker-only or missing-previous-response shortcut.
     if not responses_request_contains_goal_continuation_context(payload):
         return False
-    replay_payload = payload.model_dump(mode="json", exclude_none=True)
-    # Direct WebSocket frames carry ``type=response.create`` as a transport
-    # envelope field. It is not part of the HTTP Responses body or replay
-    # semantics, and leaving it in the strict body classifier would make every
-    # otherwise valid WebSocket restart fail closed. Remove only the exact
-    # response-create discriminator; unknown envelope values remain rejected.
+    # Classify the same canonical body that subscription egress would send.
+    # Raw model dumps retain accepted compatibility-only controls, which are
+    # not account state and must not make equivalent request forms disagree.
+    replay_payload = dict(payload.to_replay_safety_payload())
+    # ``type=response.create`` belongs to the direct-WebSocket envelope, not
+    # the HTTP Responses body. Remove only that exact discriminator after
+    # canonicalization; unknown envelope values remain fail-closed below.
     if replay_payload.get("type") == "response.create":
         replay_payload.pop("type")
     return responses_payload_is_account_neutral_fresh_replay(replay_payload)

@@ -322,6 +322,7 @@ async def run_sticky_selection_path(
 
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
     sticky_continuity_abandoned = False
+    retired_legacy_owner_account_ids: set[str] = set()
     attempt = 0
     suppress_recovery_probe_candidates = False
     while True:
@@ -357,6 +358,17 @@ async def run_sticky_selection_path(
                 required_account_id=required_account_id,
                 redact_sensitive_details=redact_sensitive_details,
             )
+            if retired_legacy_owner_account_ids:
+                # Retirement is authoritative even when this selector loaded a
+                # pre-retirement account snapshot (or another replica still has
+                # one cached). Never let that stale snapshot immediately repin
+                # the account this request just proved durably unavailable.
+                states = [state for state in states if state.account_id not in retired_legacy_owner_account_ids]
+                account_map = {
+                    account_id: account
+                    for account_id, account in account_map.items()
+                    if account_id not in retired_legacy_owner_account_ids
+                }
             effective_routing_costs = (
                 routing_costs_by_account_id
                 if routing_costs_by_account_id is not None
@@ -511,6 +523,7 @@ async def run_sticky_selection_path(
                     "Legacy Codex session owner retired for self-contained goal restart account_id=%s",
                     "<redacted>" if redact_sensitive_details else sticky_existing_account_id,
                 )
+                retired_legacy_owner_account_ids.add(sticky_existing_account_id)
                 legacy_existing_account_id = None
                 continue
             # A failed compare-and-set means the cached owner is no longer

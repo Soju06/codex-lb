@@ -3,7 +3,7 @@
 ### Requirement: Sticky sessions are explicitly typed
 The system SHALL persist each sticky-session mapping with an explicit kind so durable Codex backend affinity, durable dashboard sticky-thread routing, and bounded prompt-cache affinity can be managed independently. Budget-pressure reallocation MUST apply only to mappings whose kind/source is soft. A raw or legacy `codex_session` mapping MUST remain owner-bound because it may represent explicit turn-state continuity; budget pressure MUST NOT delete or rebind it.
 
-An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's effective account-policy scope; local capacity, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT authorize abandonment. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account.
+An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. Classification MUST use the canonical upstream request form so accepted compatibility controls and transport-envelope fields do not make equivalent requests disagree. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's effective account-policy scope; local capacity, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT authorize abandonment. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account. The successful retirement MUST exclude the retired owner from the remainder of that request even if selection loaded a pre-retirement account snapshot.
 
 #### Scenario: Soft sticky reallocation uses split primary and secondary pressure thresholds
 - **WHEN** a request resolves an existing prompt-cache, sticky-thread, or other explicitly soft mapping
@@ -51,6 +51,20 @@ An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_sess
 - **THEN** the proxy tombstones the still-current raw mapping to account A
 - **AND** it routes the restarted turn to account B
 - **AND** subsequent session or response continuity remains on account B
+
+#### Scenario: Equivalent request forms receive the same restart classification
+
+- **GIVEN** two marked self-contained goal restarts differ only by accepted compatibility controls or a transport-only response-create envelope
+- **WHEN** the proxy classifies their account-neutral replay safety
+- **THEN** it evaluates the same canonical upstream request fields for both forms
+- **AND** neither form remains pinned merely because its accepted input representation differs
+
+#### Scenario: Stale selection snapshot cannot repin a retired owner
+
+- **GIVEN** restart selection loaded account A as active before guarded retirement observes its unavailable persisted status
+- **WHEN** guarded retirement tombstones account A's still-current raw legacy mapping
+- **THEN** the remainder of that selection excludes account A from the stale snapshot
+- **AND** the namespaced process-session mapping is not established on account A
 
 #### Scenario: Goal marker does not override account-scoped continuity
 

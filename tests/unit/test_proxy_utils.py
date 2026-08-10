@@ -10512,6 +10512,26 @@ def test_goal_restart_affinity_can_abandon_only_legacy_session_owner():
     assert turn_state_policy.abandon_unavailable_legacy_owner is False
 
 
+def test_goal_restart_affinity_normalizes_accepted_compatibility_controls_before_replay_classification():
+    payload = _goal_restart_payload(
+        max_output_tokens=512,
+        promptCacheKey="goal-restart-cache",
+        promptCacheRetention="12h",
+    )
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"session_id": "goal-restart-session"},
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.codex_session_source == "session_header"
+    assert policy.abandon_unavailable_legacy_owner is True
+
+
 @pytest.mark.parametrize(
     ("payload_update", "extra_input"),
     [

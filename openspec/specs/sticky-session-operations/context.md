@@ -12,7 +12,8 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - Bare process-session headers use a header-inaccessible, source-separated storage key and are soft only for self-contained pre-visible work.
 - Account-cap spillover is request-local: it selects an alternate without deleting or rebinding the process-session row.
 - Raw and legacy Codex rows remain hard during rolling upgrades because they may represent explicit turn-state ownership.
-- A raw legacy Codex owner can be abandoned only for an explicit goal-continuation restart whose complete payload passes the account-neutral fresh-replay proof, and only while that owner has a persisted unavailable status. The compare-and-set tombstone preserves a concurrent rebind or owner recovery.
+- A raw legacy Codex owner can be abandoned only for an explicit goal-continuation restart whose canonical upstream payload passes the account-neutral fresh-replay proof, and only while that owner has a persisted unavailable status. Canonicalization keeps accepted compatibility fields and transport envelopes from changing classification. The compare-and-set tombstone preserves a concurrent rebind or owner recovery.
+- The retired owner is excluded from stale account snapshots for the remainder of the request.
 - Durable file pins, responses, conversations, live/durable bridges, replay, and reattach sources are independent hard evidence; conflicting evidence fails closed instead of using source precedence. Opaque file IDs with no live durable pin remain unpinned for compatibility with uploads that occurred outside the current process.
 - Dashboard prompt-cache TTL is persisted in settings so operators can adjust it without restart.
 - Background cleanup removes stale prompt-cache rows proactively, while manual delete and purge endpoints provide operator override.
@@ -34,6 +35,7 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - A turn-state token learned from a retired WebSocket is discarded before a movable bare-session request connects to another account.
 - An ordinary same-session request, or a goal-marked request that still carries previous-response, conversation, account-scoped file/image, or unresolved tool state, remains fail-closed on an unavailable raw owner.
 - Local caps, retry exclusions, transient runtime health, and budget pressure never authorize legacy hard-owner abandonment.
+- Selection inputs can predate the guarded retirement transaction. Once retirement succeeds, the old owner is filtered from those inputs so the request cannot immediately recreate namespaced affinity on it.
 
 ## Example
 

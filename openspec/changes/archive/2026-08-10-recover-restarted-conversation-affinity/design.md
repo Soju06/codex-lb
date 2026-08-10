@@ -22,9 +22,9 @@ Current replicas distinguish newly namespaced soft process-session affinity from
 
 ### Derive a typed restart capability during affinity classification
 
-The Responses request classifier will expose whether any input item carries the already-recognized `<codex_internal_context source="goal">` prefix. `_sticky_key_for_responses_request` will grant an `abandon_unavailable_legacy_owner` capability only when that marker is present and the complete serialized request passes `responses_payload_is_account_neutral_fresh_replay`.
+The Responses request classifier will expose whether any input item carries the already-recognized `<codex_internal_context source="goal">` prefix. `_sticky_key_for_responses_request` will grant an `abandon_unavailable_legacy_owner` capability only when that marker is present and the canonical upstream request body passes `responses_payload_is_account_neutral_fresh_replay`.
 
-This reuses the proof applied to cross-account replay instead of maintaining a second list of unsafe fields. Inferring restart from a missing `previous_response_id` alone was rejected because ordinary first turns and lossy incremental requests have that shape. Introducing a new client header was rejected because the deployed Codex client already supplies a stable payload marker.
+This reuses the proof applied to cross-account replay instead of maintaining a second list of unsafe fields. Canonical request serialization is required because raw model dumps retain accepted compatibility controls and the direct-WebSocket response-create discriminator even though neither is upstream account state. Inferring restart from a missing `previous_response_id` alone was rejected because ordinary first turns and lossy incremental requests have that shape. Introducing a new client header was rejected because the deployed Codex client already supplies a stable payload marker.
 
 ### Limit retirement to legacy process-session ownership and durable statuses
 
@@ -36,12 +36,15 @@ The repository will atomically set `continuity_abandoned_at` only when the key, 
 
 Deleting the row outright was rejected because tombstones distinguish deliberate continuity abandonment from an unknown owner. Blindly updating after an earlier status read was rejected because a concurrent rebind or account recovery could otherwise be lost.
 
+The normal loop may still hold account objects loaded before retirement. The successful tombstone therefore records the retired account for the lifetime of the selection call and filters it from later iterations. Re-reading every account after the write was rejected because the request needs only one authoritative exclusion and the broader refresh would add unrelated database work.
+
 ## Risks / Trade-offs
 
 - [A forged marker requests owner abandonment] → The complete payload must still be account-neutral and self-contained, the caller controls only its own session key, and retirement occurs only while the persisted owner is unavailable.
 - [A concurrent request changes ownership or restores the account] → One compare-and-set statement verifies both mapping owner and account status at write time; a miss preserves fail-closed behavior.
 - [A restart includes unresolved tool output or account-scoped content] → The existing fresh-replay classifier denies the capability, leaving the hard row untouched.
 - [Transport wiring drifts] → Carry one typed affinity-policy flag through the shared selection boundary and explicitly forward it from the direct WebSocket call site that expands policy fields.
+- [A stale account snapshot restores the old owner] → Successful retirement excludes the old owner from all later iterations of the current selection call.
 
 ## Migration Plan
 

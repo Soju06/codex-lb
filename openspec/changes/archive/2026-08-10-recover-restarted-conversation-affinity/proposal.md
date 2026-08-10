@@ -6,6 +6,8 @@ Codex conversation restart can resend a self-contained thread under the same pro
 
 - Recognize the existing Codex goal-continuation context as an explicit restart signal.
 - Permit a restart-shaped, self-contained request to retire its unavailable legacy hard owner and select another account.
+- Classify accepted compatibility and transport request forms through the same canonical replay-safety body.
+- Ensure stale account snapshots cannot undo guarded owner retirement.
 - Keep ordinary incremental, conversation-bound, file-pinned, and unresolved tool-state requests fail-closed on their required owner.
 - Make retirement compare-and-set so a concurrent owner change cannot be deleted.
 - Cover the public Codex Responses route and subsequent continuity on the replacement owner.

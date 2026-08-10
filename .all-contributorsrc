@@ -1203,6 +1203,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "Borealin",
+      "name": "Borealin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/41241077?v=4",
+      "profile": "https://github.com/Borealin",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

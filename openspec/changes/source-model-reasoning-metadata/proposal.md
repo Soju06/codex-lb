@@ -25,6 +25,29 @@ declared rather than inferred.
 - Accept both effort slugs (`["low", "high"]`) and objects
   (`[{"effort": "low", "description": "..."}]`), ignoring malformed entries.
 - Keep the existing no-reasoning behavior for models that do not opt in.
+- Skip the `minimal` normalization workaround for models a populated registry
+  snapshot does not list, so a declared effort reaches the source unchanged.
+
+## Relationship to `supports_reasoning`
+
+`raw_metadata_json` now carries two independent reasoning keys, and operators
+need to know both:
+
+- `supported_reasoning_levels` / `default_reasoning_level` drive **catalog
+  advertising**. Codex clients read them from the Codex model catalog to
+  populate the reasoning-effort picker.
+- `supports_reasoning` gates `sanitize_source_chat_payload`, which strips
+  `reasoning`, `reasoning_effort` and the related toggles on the **Chat
+  Completions** path only. The Responses path forwards them regardless.
+
+Declaring levels without also setting `supports_reasoning` therefore advertises
+efforts that Codex (Responses) honors while chat-completions callers silently
+lose them. This change documents the split rather than coupling the two keys,
+because the chat-path sanitizer protects backends that reject unknown fields and
+inferring that opt-in from an advertising declaration would remove that
+protection silently. The dashboard side of this — a single `Reasoning` toggle
+that only affects the chat path, and no UI for the levels at all — is tracked
+separately in #1672.
 
 ## Capabilities
 

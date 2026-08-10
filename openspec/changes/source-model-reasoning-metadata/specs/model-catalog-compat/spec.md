@@ -48,3 +48,34 @@ and no summary support.
 - **WHEN** a client fetches the Codex model catalog
 - **THEN** the entry advertises no reasoning efforts, no default effort, and no
   reasoning-summary support
+
+### Requirement: Declared efforts survive the unsupported-effort normalization
+
+The `minimal` normalization exists to work around a ChatGPT/Codex backend that
+drops the value, and MUST NOT be applied to models that backend does not serve.
+When a populated model-registry snapshot has no entry for the requested model,
+the requested reasoning effort MUST be forwarded unchanged. When no snapshot is
+available the existing conservative rewrite MUST still apply, because the
+request cannot then be attributed to a model source.
+
+#### Scenario: A source model keeps a declared minimal effort
+
+- **GIVEN** a populated registry snapshot that lists only subscription models
+- **AND** a request for a model absent from that snapshot with
+  `reasoning.effort` of `minimal`
+- **WHEN** the unsupported-effort normalization runs
+- **THEN** the effort remains `minimal`
+
+#### Scenario: Subscription models keep the workaround
+
+- **GIVEN** a populated registry snapshot that lists the requested model
+- **AND** a request with `reasoning.effort` of `minimal`
+- **WHEN** the unsupported-effort normalization runs
+- **THEN** the effort is rewritten to the model's lowest supported effort
+
+#### Scenario: An unavailable snapshot keeps the conservative rewrite
+
+- **GIVEN** no registry snapshot is available
+- **AND** a request with `reasoning.effort` of `minimal`
+- **WHEN** the unsupported-effort normalization runs
+- **THEN** the effort is rewritten to the default fallback

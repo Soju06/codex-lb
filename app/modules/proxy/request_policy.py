@@ -484,9 +484,24 @@ def normalize_unsupported_reasoning_effort(
     if normalized_effort not in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
         return
 
+    active_registry = registry or get_model_registry()
+    if _model_is_outside_subscription_registry(payload.model, registry=active_registry):
+        # This rewrite works around a ChatGPT/Codex backend quirk. A model a
+        # populated registry snapshot does not know is not served by that
+        # backend -- OpenAI-compatible model sources are catalogued separately
+        # -- so rewriting here would silently downgrade an effort the operator
+        # declared for the source. Leave it for the source to accept or reject.
+        logger.info(
+            "reasoning_effort_normalization_skipped request_id=%s model=%s requested_effort=%s",
+            get_request_id(),
+            payload.model,
+            requested_effort,
+        )
+        return
+
     fallback = _resolve_reasoning_effort_fallback(
         payload.model,
-        registry=registry or get_model_registry(),
+        registry=active_registry,
     )
     payload.reasoning.effort = fallback
     logger.info(
@@ -496,6 +511,27 @@ def normalize_unsupported_reasoning_effort(
         requested_effort,
         fallback,
     )
+
+
+def _model_is_outside_subscription_registry(
+    model: str | None,
+    *,
+    registry: ModelRegistry,
+) -> bool:
+    """True when a populated registry snapshot has no entry for ``model``.
+
+    An absent snapshot returns ``False`` on purpose: without registry data we
+    cannot tell a model source from a subscription model, and the conservative
+    rewrite is preferable to risking the upstream hang it guards against.
+    """
+    if not model:
+        return False
+    snapshot = registry.get_snapshot()
+    if snapshot is None:
+        return False
+    if snapshot.models.get(model) is not None:
+        return False
+    return snapshot.models.get(model.strip().lower()) is None
 
 
 def _resolve_reasoning_effort_fallback(

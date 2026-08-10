@@ -2059,6 +2059,56 @@ def test_normalize_unsupported_reasoning_effort_rewrites_minimal_to_low(caplog):
     assert any("reasoning_effort_normalized" in record.message for record in caplog.records)
 
 
+def test_normalize_unsupported_reasoning_effort_keeps_effort_for_model_outside_registry(caplog):
+    """Model sources are not served by the ChatGPT/Codex backend.
+
+    The ``minimal`` rewrite works around a backend quirk that only applies to
+    subscription models. A populated snapshot that does not list the model
+    means the request will be routed to an OpenAI-compatible model source, so
+    the operator-declared effort must survive untouched.
+    """
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "qwen3.8-max",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="minimal")
+    # Snapshot is populated, but only with an unrelated subscription model.
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.request_policy"):
+        proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "minimal"
+    assert any("reasoning_effort_normalization_skipped" in record.message for record in caplog.records)
+    assert not any("reasoning_effort_normalized" in record.message for record in caplog.records)
+
+
+def test_normalize_unsupported_reasoning_effort_still_rewrites_known_subscription_model():
+    """The workaround must stay in place for models the registry does know."""
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="minimal")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "low"
+
+
 def test_normalize_unsupported_reasoning_effort_falls_back_to_low_without_registry():
     from app.core.openai.model_registry import ModelRegistry
     from app.core.openai.requests import ResponsesReasoning

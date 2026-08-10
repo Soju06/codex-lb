@@ -2831,7 +2831,7 @@ class _HTTPBridgeStreamingMixin:
 
             async def rollback_pre_dispatch_recovery_claim() -> None:
                 if not (
-                    durable_recovery_fresh_replay
+                    (durable_recovery_fresh_replay or durable_recovery_attempt_claimed)
                     and (retry_request_state is None or not retry_request_state.recovery_attempt_dispatched)
                     and durable_recovery_attempt_fingerprint is not None
                     and durable_recovery_attempt_session_id is not None

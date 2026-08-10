@@ -6032,7 +6032,17 @@ async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_u
             kind=proxy_module.StickySessionKind.CODEX_SESSION,
         )
 
-    owner_upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_goal_owner")
+    owner_send_started = asyncio.Event()
+    owner_send_release = asyncio.Event()
+
+    class _BlockingOwnerUpstream(_FakeBridgeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            if not self.sent_text:
+                owner_send_started.set()
+                await owner_send_release.wait()
+            await super().send_text(text)
+
+    owner_upstream = _BlockingOwnerUpstream("resp_bridge_goal_owner")
     replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_goal_replacement")
     connected_account_ids: list[str] = []
 
@@ -6059,18 +6069,20 @@ async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_u
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     headers = {"session_id": raw_session}
-    first_events = await _collect_sse_events(
-        async_client,
-        "/backend-api/codex/responses",
-        headers=headers,
-        json_body={
-            "model": "gpt-5.1",
-            "instructions": "Return exactly OK.",
-            "input": "prime the live bridge",
-            "stream": True,
-        },
+    first_response_task = asyncio.create_task(
+        _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            headers=headers,
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "prime the live bridge",
+                "stream": True,
+            },
+        )
     )
-    assert first_events[-1]["response"]["id"] == "resp_bridge_goal_owner_1"
+    await _wait_for_event(owner_send_started)
 
     service = get_proxy_service_for_app(app_instance)
     bridge_key = proxy_module._HTTPBridgeSessionKey("session_header", raw_session, None)
@@ -6084,35 +6096,57 @@ async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_u
         await session.execute(update(Account).where(Account.id == owner.id).values(status=AccountStatus.QUOTA_EXCEEDED))
         await session.commit()
 
-    restart_events = await _collect_sse_events(
-        async_client,
-        "/backend-api/codex/responses",
-        headers=headers,
-        json_body={
-            "model": "gpt-5.1",
-            "instructions": "Continue the existing task.",
-            "input": [
-                {
-                    "role": "developer",
-                    "content": (
-                        '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
-                    ),
-                },
-                {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
-            ],
-            "stream": True,
-        },
-    )
+    try:
+        restart_events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            headers=headers,
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Continue the existing task.",
+                "input": [
+                    {
+                        "role": "developer",
+                        "content": (
+                            '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                        ),
+                    },
+                    {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+                ],
+                "stream": True,
+            },
+        )
+        async with service._http_bridge_lock:
+            replacement_bridge = service._http_bridge_sessions[bridge_key]
+        assert replacement_bridge is not old_bridge
+        assert replacement_bridge.account.id == replacement.id
+        assert replacement_bridge.key == bridge_key
+        assert old_bridge.upstream_control.retire_after_drain is True
+    finally:
+        owner_send_release.set()
+        first_events = await asyncio.wait_for(first_response_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
+    assert first_events[-1]["response"]["id"] == "resp_bridge_goal_owner_1"
     assert restart_events[-1]["response"]["id"] == "resp_bridge_goal_replacement_1"
     assert connected_account_ids == [owner_chatgpt_account_id, replacement_chatgpt_account_id]
     assert len(owner_upstream.sent_text) == 1
     assert len(replacement_upstream.sent_text) == 1
     assert old_bridge.closed is True
-    async with service._http_bridge_lock:
-        replacement_bridge = service._http_bridge_sessions[bridge_key]
-    assert replacement_bridge is not old_bridge
-    assert replacement_bridge.account.id == replacement.id
+
+    follow_up_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        headers=headers,
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue on the replacement bridge",
+            "stream": True,
+        },
+    )
+    assert follow_up_events[-1]["response"]["id"] == "resp_bridge_goal_replacement_2"
+    assert len(owner_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 2
 
     async with SessionLocal() as session:
         rows = {

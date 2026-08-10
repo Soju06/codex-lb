@@ -817,6 +817,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_scope_id=request_scope_id,
             )
+            if session.upstream_control.retire_after_drain and not session.upstream_close_attempted:
+                await self._retire_http_bridge_after_drain_if_ready(session)
 
     async def _http_bridge_operation_fenced_continuity_replay_allowed(
         self: Any,
@@ -1411,7 +1413,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     error_type="server_error",
                 ),
             )
-        if session.upstream_control.retire_after_drain:
+        if session.upstream_control.retire_after_drain and session.unanchored_reservation_id != request_scope_id:
             await _cleanup_unsubmitted_recovery_claim()
             if not session.upstream_close_attempted:
                 await self._retire_http_bridge_after_drain_if_ready(session)
@@ -2682,7 +2684,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
             )
             should_reconnect = (
-                not has_visible_pending and session.queued_request_count == 0 and not session.upstream_close_attempted
+                not has_visible_pending
+                and session.queued_request_count == 0
+                and session.unanchored_reservation_id is None
+                and not session.upstream_close_attempted
             )
             if should_reconnect:
                 session.pending_requests.clear()

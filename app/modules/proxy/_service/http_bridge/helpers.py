@@ -1120,8 +1120,17 @@ def _http_bridge_parallel_fork_key(
     request_scope_id: str,
     allow_model_fork: bool = True,
     same_model_required: bool = False,
+    force_canonical_replacement: bool = False,
 ) -> "_HTTPBridgeSessionKey | None":
     """Give incompatible or concurrent requests an independent websocket lane."""
+
+    if force_canonical_replacement:
+        if session is not None:
+            # A restart must replace the canonical session-header lane. Forking
+            # would leave the old owner reusable after the restart moved affinity.
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+        return None
 
     reason: str | None = None
     if (
@@ -1268,7 +1277,11 @@ async def _refresh_reused_http_bridge_session_with_handoff(
 
 
 def _http_bridge_session_retiring_with_visible_requests(session: "_HTTPBridgeSession") -> bool:
-    return session.upstream_control.retire_after_drain and _http_bridge_session_has_visible_requests(session)
+    # A reserved handoff is not queued yet, but it owns the lane just as a
+    # visible request does and must be allowed to submit before retirement.
+    return session.upstream_control.retire_after_drain and (
+        _http_bridge_session_has_visible_requests(session) or session.unanchored_reservation_id is not None
+    )
 
 
 def _http_bridge_payload_looks_like_full_resend(payload: ResponsesRequest) -> bool:

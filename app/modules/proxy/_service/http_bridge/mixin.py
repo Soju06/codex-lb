@@ -441,10 +441,8 @@ class _HTTPBridgeMixin(
         )
         if model_transition_rebind:
             durable_lookup = None
-        # This capability is consumed only by account selection. Returning an
-        # existing bridge would skip the guarded raw-owner retirement entirely,
-        # so a verified goal restart must take the fresh creation path even when
-        # the in-memory session still presents its former account as ACTIVE.
+        # Account selection consumes this one-shot capability; bridge reuse
+        # would bypass guarded retirement, so restart creation stays canonical.
         force_goal_restart_account_reselection = affinity.abandon_unavailable_legacy_owner
         if await _http_bridge_should_wait_for_registration(self, key, settings):
             skip_registration_gate = False
@@ -713,6 +711,7 @@ class _HTTPBridgeMixin(
                     request_service_tier=request_service_tier,
                     request_scope_id=request_scope_id,
                     allow_model_fork=reusable or model_transition_rebind,
+                    force_canonical_replacement=force_goal_restart_account_reselection,
                 )
                 if fork_key is not None:
                     if existing is not None:
@@ -1439,6 +1438,7 @@ class _HTTPBridgeMixin(
                     request_service_tier=request_service_tier,
                     request_scope_id=request_scope_id,
                     same_model_required=True,
+                    force_canonical_replacement=force_goal_restart_account_reselection,
                 )
                 if fork_key is not None:
                     bind_account_neutral_recovery_owner(session)

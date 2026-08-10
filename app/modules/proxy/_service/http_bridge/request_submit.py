@@ -813,11 +813,19 @@ class _HTTPBridgeRequestSubmitMixin:
                 recovery_turn_state=recovery_turn_state,
             )
         finally:
+            released_unanchored_handoff = session.unanchored_reservation_id == request_scope_id
             _release_http_bridge_unanchored_handoff(
                 session,
                 request_scope_id=request_scope_id,
             )
-            if session.upstream_control.retire_after_drain and not session.upstream_close_attempted:
+            # Only a reserved handoff can make retirement newly ready here. An
+            # ordinary send/reader failure already owns terminal settlement;
+            # closing again would run the pending-failure funnel twice.
+            if (
+                released_unanchored_handoff
+                and session.upstream_control.retire_after_drain
+                and not session.upstream_close_attempted
+            ):
                 await self._retire_http_bridge_after_drain_if_ready(session)
 
     async def _http_bridge_operation_fenced_continuity_replay_allowed(

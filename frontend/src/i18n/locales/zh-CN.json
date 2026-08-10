@@ -1375,5 +1375,8 @@
   "upstreamProxy.toasts.poolUpdateFailed": "Pool 更新失败",
   "upstreamProxy.validation.hostRequired": "主机不能为空",
   "upstreamProxy.validation.nameRequired": "名称必填",
-  "upstreamProxy.validation.portInvalid": "请输入 1 到 65535 之间的端口"
+  "upstreamProxy.validation.portInvalid": "请输入 1 到 65535 之间的端口",
+  "modelSources.fields.reasoningEfforts": "支持的推理级别",
+  "modelSources.fields.reasoningEffortsDescription": "选择此模型支持的推理级别和默认级别。",
+  "modelSources.fields.defaultReasoningEffort": "默认推理级别"
 }

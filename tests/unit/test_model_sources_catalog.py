@@ -87,6 +87,55 @@ def test_source_models_to_upstream_models_preserves_source_identity() -> None:
     assert model.prefer_websockets is False
 
 
+def test_source_models_to_upstream_models_publishes_reasoning_levels() -> None:
+    source = ModelSource(
+        id="src_reasoning",
+        name="Meta",
+        kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+        base_url="https://api.meta.ai/v1",
+        is_enabled=True,
+        supports_responses=True,
+        models=[
+            ModelSourceModel(
+                model="muse-spark-1.2-contributor",
+                raw_metadata_json=json.dumps(
+                    {
+                        "supports_reasoning": True,
+                        "supported_reasoning_levels": ["minimal", "low", "medium", "high", "xhigh", "none"],
+                        "default_reasoning_level": "high",
+                    }
+                ),
+            )
+        ],
+    )
+
+    model = source_models_to_upstream_models([source])[0]
+
+    assert [level.effort for level in model.supported_reasoning_levels] == [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+    ]
+    assert model.default_reasoning_level == "high"
+
+
+def test_source_models_to_upstream_models_ignores_reasoning_levels_when_disabled() -> None:
+    source = _overrides_source(
+        {
+            "supports_reasoning": False,
+            "supported_reasoning_levels": ["low", "high"],
+            "default_reasoning_level": "high",
+        }
+    )
+
+    model = source_models_to_upstream_models([source])[0]
+
+    assert model.supported_reasoning_levels == ()
+    assert model.default_reasoning_level is None
+
+
 def test_source_models_to_upstream_models_defaults_missing_context_window() -> None:
     source = ModelSource(
         id="src_ollama",

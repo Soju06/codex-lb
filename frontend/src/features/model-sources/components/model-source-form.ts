@@ -35,6 +35,8 @@ export type ModelSourceDraft = {
   supportsTools: boolean;
   supportsVision: boolean;
   supportsReasoning: boolean;
+  reasoningEfforts: string[];
+  defaultReasoningEffort: string;
   contextWindow: string;
   maxOutputTokens: string;
   inputPer1M: string;
@@ -51,6 +53,8 @@ export const initialModelSourceDraft: ModelSourceDraft = {
   supportsTools: false,
   supportsVision: false,
   supportsReasoning: false,
+  reasoningEfforts: [],
+  defaultReasoningEffort: "",
   contextWindow: "",
   maxOutputTokens: "",
   inputPer1M: "",
@@ -84,9 +88,21 @@ function parseNonNegativeFloat(value: string): number | undefined {
 // model's raw metadata JSON, which the proxy reads to pass reasoning fields
 // through and to advertise supports_reasoning in /v1/models. Merge it into
 // any raw metadata the model already carries so other keys survive edits.
-export function mergeReasoningFlag(
+export const REASONING_EFFORT_OPTIONS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
+
+export function mergeReasoningMetadata(
   existing: string | null | undefined,
   supportsReasoning: boolean,
+  reasoningEfforts: string[] = [],
+  defaultReasoningEffort = "",
 ): string | null {
   let metadata: Record<string, unknown> = {};
   if (existing) {
@@ -101,8 +117,12 @@ export function mergeReasoningFlag(
   }
   if (supportsReasoning) {
     metadata.supports_reasoning = true;
+    metadata.supported_reasoning_levels = reasoningEfforts;
+    metadata.default_reasoning_level = defaultReasoningEffort;
   } else {
     delete metadata.supports_reasoning;
+    delete metadata.supported_reasoning_levels;
+    delete metadata.default_reasoning_level;
   }
   return Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null;
 }
@@ -135,7 +155,12 @@ export function modelInputsFromForm(
       cachedInputPer1M: cachedInputPer1M ?? null,
       outputPer1M: outputPer1M ?? null,
       audioPerMinute: audioPerMinute ?? null,
-      rawMetadataJson: mergeReasoningFlag(existingRawMetadata[model], draft.supportsReasoning),
+      rawMetadataJson: mergeReasoningMetadata(
+        existingRawMetadata[model],
+        draft.supportsReasoning,
+        draft.reasoningEfforts,
+        draft.defaultReasoningEffort,
+      ),
       isEnabled: existingEnabledByModel[model] ?? true,
     }));
 }
@@ -147,22 +172,43 @@ function numberToInput(value: number | null | undefined): string {
 // Derive the shared draft from an existing source. The create UI applies one
 // set of per-model settings to every model, so editing mirrors that by reading
 // the first model's values as the representative settings.
-function rawMetadataHasReasoning(rawMetadataJson: string | null | undefined): boolean {
-  if (!rawMetadataJson) return false;
+function parseReasoningMetadata(rawMetadataJson: string | null | undefined): {
+  supportsReasoning: boolean;
+  reasoningEfforts: string[];
+  defaultReasoningEffort: string;
+} {
+  const fallback = { supportsReasoning: false, reasoningEfforts: [], defaultReasoningEffort: "" };
+  if (!rawMetadataJson) return fallback;
   try {
     const parsed: unknown = JSON.parse(rawMetadataJson);
-    return (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      (parsed as Record<string, unknown>).supports_reasoning === true
-    );
+    if (typeof parsed !== "object" || parsed === null) return fallback;
+    const metadata = parsed as Record<string, unknown>;
+    const configuredEfforts = Array.isArray(metadata.supported_reasoning_levels)
+      ? metadata.supported_reasoning_levels.filter(
+          (value): value is string => typeof value === "string" && value !== "none",
+        )
+      : [];
+    const supportsReasoning = metadata.supports_reasoning === true;
+    const reasoningEfforts =
+      supportsReasoning && configuredEfforts.length === 0 ? ["low", "medium", "high"] : configuredEfforts;
+    return {
+      supportsReasoning,
+      reasoningEfforts,
+      defaultReasoningEffort:
+        typeof metadata.default_reasoning_level === "string"
+          ? metadata.default_reasoning_level
+          : supportsReasoning
+            ? "medium"
+            : "",
+    };
   } catch {
-    return false;
+    return fallback;
   }
 }
 
 export function draftFromSource(source: ModelSource): ModelSourceDraft {
   const firstModel = source.models[0];
+  const reasoningMetadata = parseReasoningMetadata(firstModel?.rawMetadataJson);
   return {
     supportsChatCompletions: source.supportsChatCompletions,
     supportsResponses: source.supportsResponses,
@@ -170,7 +216,9 @@ export function draftFromSource(source: ModelSource): ModelSourceDraft {
     supportsStreaming: firstModel?.supportsStreaming ?? true,
     supportsTools: firstModel?.supportsTools ?? false,
     supportsVision: firstModel?.supportsVision ?? false,
-    supportsReasoning: rawMetadataHasReasoning(firstModel?.rawMetadataJson),
+    supportsReasoning: reasoningMetadata.supportsReasoning,
+    reasoningEfforts: reasoningMetadata.reasoningEfforts,
+    defaultReasoningEffort: reasoningMetadata.defaultReasoningEffort,
     contextWindow: numberToInput(firstModel?.contextWindow),
     maxOutputTokens: numberToInput(firstModel?.maxOutputTokens),
     inputPer1M: numberToInput(firstModel?.inputPer1M),

@@ -4,6 +4,7 @@ import json
 
 from app.core.openai.model_registry import (
     MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+    ReasoningLevel,
     UpstreamModel,
 )
 from app.core.types import JsonValue
@@ -56,6 +57,13 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     # source identifiers must not leak to proxy clients.
     raw["model_provider"] = "codex-lb"
 
+    reasoning_levels = _source_reasoning_levels(raw)
+    default_reasoning_level = raw.get("default_reasoning_level")
+    if not isinstance(default_reasoning_level, str) or default_reasoning_level not in {
+        level.effort for level in reasoning_levels
+    }:
+        default_reasoning_level = reasoning_levels[0].effort if reasoning_levels else None
+
     input_modalities = ("text", "image") if source_model.supports_vision else ("text",)
     display_name = source_model.display_name or source_model.model
     return UpstreamModel(
@@ -64,8 +72,8 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
         description=display_name,
         context_window=context_window,
         input_modalities=input_modalities,
-        supported_reasoning_levels=(),
-        default_reasoning_level=None,
+        supported_reasoning_levels=reasoning_levels,
+        default_reasoning_level=default_reasoning_level,
         supports_reasoning_summaries=False,
         support_verbosity=False,
         default_verbosity=None,
@@ -79,6 +87,36 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
         source_id=source.id,
         raw=raw,
     )
+
+
+def _source_reasoning_levels(raw: dict[str, JsonValue]) -> tuple[ReasoningLevel, ...]:
+    if raw.get("supports_reasoning") is not True:
+        return ()
+    configured = raw.get("supported_reasoning_levels")
+    if not is_json_list(configured):
+        return ()
+
+    levels: list[ReasoningLevel] = []
+    seen: set[str] = set()
+    for item in configured:
+        effort: str | None = None
+        description: str | None = None
+        if isinstance(item, str):
+            effort = item.strip().lower()
+        elif is_json_mapping(item):
+            raw_effort = item.get("effort")
+            raw_description = item.get("description")
+            if isinstance(raw_effort, str):
+                effort = raw_effort.strip().lower()
+            if isinstance(raw_description, str) and raw_description.strip():
+                description = raw_description.strip()
+        if not effort or effort == "none" or effort in seen:
+            continue
+        seen.add(effort)
+        levels.append(
+            ReasoningLevel(effort=effort, description=description or f"{effort} reasoning effort")
+        )
+    return tuple(levels)
 
 
 def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:

@@ -1375,5 +1375,8 @@
   "upstreamProxy.toasts.poolUpdateFailed": "Pool 업데이트 실패",
   "upstreamProxy.validation.hostRequired": "Host는 필수입니다",
   "upstreamProxy.validation.nameRequired": "이름은 필수입니다",
-  "upstreamProxy.validation.portInvalid": "1부터 65535 사이의 port를 입력하세요"
+  "upstreamProxy.validation.portInvalid": "1부터 65535 사이의 port를 입력하세요",
+  "modelSources.fields.reasoningEfforts": "지원되는 추론 수준",
+  "modelSources.fields.reasoningEffortsDescription": "이 모델이 지원하는 추론 수준과 기본값을 선택하세요.",
+  "modelSources.fields.defaultReasoningEffort": "기본 추론 수준"
 }

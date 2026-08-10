@@ -4,10 +4,12 @@ import { useTranslation } from "react-i18next";
 import { Checkbox } from "@/components/ui/checkbox";
 import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type {
   ModelSourceDraft,
   ModelSourceFormValues,
 } from "@/features/model-sources/components/model-source-form";
+import { REASONING_EFFORT_OPTIONS } from "@/features/model-sources/components/model-source-form";
 
 type ModelSourceFormFieldsProps = {
   control: Control<ModelSourceFormValues>;
@@ -26,6 +28,8 @@ const CAPABILITY_TOGGLES = [
   ["supportsVision", "modelSources.capabilities.vision"] as const,
   ["supportsReasoning", "modelSources.capabilities.reasoning"] as const,
 ];
+
+const DEFAULT_REASONING_EFFORTS = ["low", "medium", "high"];
 
 export function ModelSourceFormFields({
   control,
@@ -175,12 +179,78 @@ export function ModelSourceFormFields({
           <label key={key} className="flex items-center gap-2 rounded-md border p-2 text-sm">
             <Checkbox
               checked={draft[key]}
-              onCheckedChange={(checked) => updateDraft({ [key]: checked === true })}
+              onCheckedChange={(checked) =>
+                updateDraft({
+                  [key]: checked === true,
+                  ...(key === "supportsReasoning" && checked === true
+                    ? {
+                        reasoningEfforts:
+                          draft.reasoningEfforts.length > 0
+                            ? draft.reasoningEfforts
+                            : DEFAULT_REASONING_EFFORTS,
+                        defaultReasoningEffort: draft.defaultReasoningEffort || "medium",
+                      }
+                    : {}),
+                })
+              }
             />
 	            {t(labelKey)}
           </label>
         ))}
       </div>
+
+      {draft.supportsReasoning ? (
+        <div className="space-y-3 rounded-md border p-3">
+          <div>
+            <div className="text-sm font-medium">{t("modelSources.fields.reasoningEfforts")}</div>
+            <p className="text-xs text-muted-foreground">
+              {t("modelSources.fields.reasoningEffortsDescription")}
+            </p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {REASONING_EFFORT_OPTIONS.map((effort) => (
+              <label key={effort} className="flex items-center gap-2 rounded-md border p-2 text-sm">
+                <Checkbox
+                  checked={draft.reasoningEfforts.includes(effort)}
+                  disabled={draft.reasoningEfforts.length === 1 && draft.reasoningEfforts.includes(effort)}
+                  onCheckedChange={(checked) => {
+                    const next = checked
+                      ? [...draft.reasoningEfforts, effort]
+                      : draft.reasoningEfforts.filter((value) => value !== effort);
+                    const nextDefault = next.includes(draft.defaultReasoningEffort)
+                      ? draft.defaultReasoningEffort
+                      : next[0] ?? "";
+                    updateDraft({ reasoningEfforts: next, defaultReasoningEffort: nextDefault });
+                  }}
+                />
+                {effort}
+              </label>
+            ))}
+          </div>
+          <div className="space-y-1">
+            <label className="text-xs text-muted-foreground">
+              {t("modelSources.fields.defaultReasoningEffort")}
+            </label>
+            <Select
+              value={draft.defaultReasoningEffort}
+              onValueChange={(value) => updateDraft({ defaultReasoningEffort: value })}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {REASONING_EFFORT_OPTIONS.filter((effort) => draft.reasoningEfforts.includes(effort)).map(
+                  (effort) => (
+                    <SelectItem key={effort} value={effort}>
+                      {effort}
+                    </SelectItem>
+                  ),
+                )}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 }

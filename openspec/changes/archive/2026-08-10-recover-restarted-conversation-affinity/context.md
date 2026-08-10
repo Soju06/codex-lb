@@ -10,7 +10,7 @@ Unavailable means a persisted account status of `PAUSED`, `RATE_LIMITED`, or `QU
 
 Sticky rows are global, but an API key may authorize only a subset of accounts. Retirement authority follows account assignment and security authorization before model/service-tier eligibility: a scoped request cannot mark a row owned by another pool, while an in-scope owner does not lose mutation authority merely because it cannot serve the replacement model. Direct WebSocket account changes also discard proxy-generated turn-state from the retired account; only a turn-state header actually supplied by the client is preserved.
 
-A successful guarded retirement is authoritative over account objects loaded before that transaction: the retired owner remains excluded for the rest of the selection attempt even if that snapshot still reports it active. A selector that loses the retirement compare-and-set to another selector's scoped marker carries the marker's retained owner into the same exclusion path.
+Goal-restart retirement occurs only inside account selection. A live or durable HTTP bridge for the same process session is not additional ownership evidence after the client proves a self-contained resend, so bridge reuse, preferred-owner promotion, and remote forwarding must not consume the request before selection. A successful guarded retirement is also authoritative over any account objects loaded before that transaction; the retired owner remains excluded for the rest of the selection attempt even if that snapshot still reports it active. A selector that loses the retirement compare-and-set to another selector's scoped marker carries the marker's retained owner into the same exclusion path.
 
 ## Failure Modes
 
@@ -20,6 +20,7 @@ A successful guarded retirement is authoritative over account objects loaded bef
 - If an authenticated request cannot select the persisted owner under its account policy, the request fails closed without mutating that global row.
 - If a process-session ID collides with an explicit turn-state value, restart recovery moves only process-session interpretation; the turn-state request remains bound to the retained owner.
 - If the unavailable owner is in policy scope but cannot serve the requested model, guarded abandonment remains authorized and model filtering applies only to replacement selection.
+- A live HTTP bridge can retain a detached ACTIVE account object after its persisted owner becomes unavailable. A verified restart bypasses and retires that bridge instead of trusting the stale object.
 - A pre-retirement selection snapshot can still contain the old owner. Successful retirement, or an authoritative reread after losing the retirement compare-and-set, filters that owner before replacement selection so namespaced affinity cannot be recreated on it.
 - An older replica does not understand source scope. The scoped marker therefore leaves the historical timestamp tombstone empty so that replica keeps the retained hard owner instead of globally abandoning it.
 

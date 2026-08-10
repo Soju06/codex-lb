@@ -440,6 +440,11 @@ class _HTTPBridgeMixin(
         )
         if model_transition_rebind:
             durable_lookup = None
+        # This capability is consumed only by account selection. Returning an
+        # existing bridge would skip the guarded raw-owner retirement entirely,
+        # so a verified goal restart must take the fresh creation path even when
+        # the in-memory session still presents its former account as ACTIVE.
+        force_goal_restart_account_reselection = affinity.abandon_unavailable_legacy_owner
         if await _http_bridge_should_wait_for_registration(self, key, settings):
             skip_registration_gate = False
             async with self._http_bridge_lock:
@@ -680,17 +685,21 @@ class _HTTPBridgeMixin(
                 retained_handoff = bool(
                     existing and existing.closed and _http_bridge_session_has_admission_waiter(existing)
                 )
-                reusable = existing is not None and _http_bridge_session_reusable_for_lookup(
-                    session=existing,
-                    key=key,
-                    api_key=api_key,
-                    incoming_turn_state=incoming_turn_state,
-                    previous_response_id=previous_response_id,
-                    preferred_account_id=preferred_account_id,
-                    require_preferred_account=require_preferred_account,
-                    service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
-                    allow_closed_admission_handoff=retained_handoff,
-                    session_key_quarantined=_http_bridge_session_key_quarantined(self, existing.key),
+                reusable = (
+                    not force_goal_restart_account_reselection
+                    and existing is not None
+                    and _http_bridge_session_reusable_for_lookup(
+                        session=existing,
+                        key=key,
+                        api_key=api_key,
+                        incoming_turn_state=incoming_turn_state,
+                        previous_response_id=previous_response_id,
+                        preferred_account_id=preferred_account_id,
+                        require_preferred_account=require_preferred_account,
+                        service_tier_supported=_http_bridge_compatible(existing, request_model, request_service_tier),
+                        allow_closed_admission_handoff=retained_handoff,
+                        session_key_quarantined=_http_bridge_session_key_quarantined(self, existing.key),
+                    )
                 )
                 fork_key = _http_bridge_parallel_fork_key(
                     key=key,
@@ -751,7 +760,10 @@ class _HTTPBridgeMixin(
                         force_durable_takeover = True
                         self._schedule_http_bridge_session_closes([detached], reason="registry_detach")
                     existing = None
-                if existing is not None and not existing.closed and existing.account.status == AccountStatus.ACTIVE:
+                if existing is not None and (
+                    force_goal_restart_account_reselection
+                    or (not existing.closed and existing.account.status == AccountStatus.ACTIVE)
+                ):
                     old_account_id = existing.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(existing)
                     detached = self._detach_http_bridge_session_locked(
@@ -1437,7 +1449,8 @@ class _HTTPBridgeMixin(
                     )
                     continue
                 if (
-                    not session.closed
+                    not force_goal_restart_account_reselection
+                    and not session.closed
                     and _http_bridge_session_account_active(session)
                     and _http_bridge_session_allows_api_key(session, api_key)
                     and _http_bridge_compatible(session, request_model, request_service_tier, True)
@@ -1461,7 +1474,9 @@ class _HTTPBridgeMixin(
                         session.request_service_tier = request_service_tier
                         session.last_used_at = _service_time().monotonic()
                         return session
-                if not session.closed and session.account.status == AccountStatus.ACTIVE:
+                if force_goal_restart_account_reselection or (
+                    not session.closed and session.account.status == AccountStatus.ACTIVE
+                ):
                     old_account_id = session.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(session)
                     async with self._http_bridge_lock:

@@ -40,6 +40,10 @@ Deleting the row outright was rejected because tombstones distinguish deliberate
 
 The normal loop may still hold account objects loaded before retirement. Successful retirement therefore records the retired account for the lifetime of the selection call and filters it from later iterations. A compare-and-set loser rereads the marker and receives the retained retired account separately from ownerless affinity, then applies the same exclusion. Re-reading every account after the write was rejected because the request needs only one authoritative exclusion and the broader refresh would add unrelated database work.
 
+### Force verified HTTP restarts through account selection
+
+HTTP bridge reuse normally returns before account selection, and durable bridge metadata can promote the prior account to a required preferred owner or forward the request to another replica. For a verified self-contained goal restart, these paths would prevent the guarded raw-owner retirement from running. The bridge path therefore ignores that prior bridge ownership for this request, detaches any matching local bridge, and creates a replacement only after ordinary selection has evaluated the retirement capability. A bridge with visible work is detached without interrupting that work; an idle bridge is closed normally.
+
 ## Risks / Trade-offs
 
 - [A forged marker requests owner abandonment] → The complete payload must still be account-neutral and self-contained, retirement occurs only while the persisted owner is unavailable, and source-qualified abandonment cannot erase a colliding explicit turn-state owner.
@@ -47,7 +51,7 @@ The normal loop may still hold account objects loaded before retirement. Success
 - [Another restart wins the retirement compare-and-set] → The reread returns the retained retired owner as exclusion evidence so stale account inputs cannot re-pin it.
 - [A restart includes unresolved tool output or account-scoped content] → The existing fresh-replay classifier denies the capability, leaving the hard row untouched.
 - [Transport wiring drifts] → Carry one typed affinity-policy flag through the shared selection boundary and explicitly forward it from the direct WebSocket call site that expands policy fields.
-- [A stale account snapshot restores the old owner] → Successful retirement or a winner's scoped marker excludes the old owner from all later iterations of the current selection call.
+- [A stale bridge or account snapshot restores the old owner] → Verified HTTP restarts bypass bridge reuse/forwarding, and successful retirement or a winner's scoped marker excludes the old owner from all later iterations of the current selection call.
 
 ## Migration Plan
 

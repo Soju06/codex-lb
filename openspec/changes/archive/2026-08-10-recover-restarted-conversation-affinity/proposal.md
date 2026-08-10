@@ -7,7 +7,7 @@ Codex conversation restart can resend a self-contained thread under the same pro
 - Recognize the existing Codex goal-continuation context as an explicit restart signal.
 - Permit a restart-shaped, self-contained request to retire its unavailable legacy hard owner and select another account.
 - Classify accepted compatibility and transport request forms through the same canonical replay-safety body.
-- Ensure stale account snapshots cannot undo guarded owner retirement.
+- Ensure live/durable HTTP bridge reuse and stale account snapshots cannot bypass or undo guarded owner retirement.
 - Keep ordinary incremental, conversation-bound, file-pinned, and unresolved tool-state requests fail-closed on their required owner.
 - Make retirement compare-and-set so a concurrent owner change cannot be deleted.
 - Scope retirement to process-session interpretation so an equal raw explicit turn state retains its owner.
@@ -29,5 +29,6 @@ None.
 - Account selection and sticky-session persistence in the proxy module.
 - One nullable sticky-session column records source-qualified abandonment; existing tombstones remain global without backfill.
 - Responses request classification shared by HTTP and WebSocket transports.
+- HTTP Responses bridge reuse, forwarding, and replacement-session lifecycle.
 - Routed regression coverage for `/backend-api/codex/responses`.
 - No configuration or public error-envelope change.

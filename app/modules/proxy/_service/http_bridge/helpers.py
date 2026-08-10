@@ -6,7 +6,7 @@ import logging
 import sys
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
 from typing import Any, Literal, Mapping, TypeVar, cast
@@ -2647,6 +2647,15 @@ def _http_bridge_should_attempt_soft_affinity_reroute(
         "account_response_create_cap",
         "account_stream_cap",
     }
+
+
+def _persistent_http_bridge_affinity(affinity: _AffinityPolicy) -> _AffinityPolicy:
+    if not affinity.abandon_unavailable_legacy_owner:
+        return affinity
+    # Restart authority is proof attached to one canonical request body, not a
+    # property of the longer-lived process session. Never let a reused bridge
+    # grant a later ordinary request permission to retire hard ownership.
+    return replace(affinity, abandon_unavailable_legacy_owner=False)
 
 
 def _http_bridge_is_context_overflow_error(exc: ProxyResponseError) -> bool:

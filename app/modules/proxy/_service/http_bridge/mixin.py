@@ -115,6 +115,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_startup_wait_timeout,
     _mark_http_bridge_reader_handoff_reconnect_failed,
     _persist_http_bridge_replacement_account,
+    _persistent_http_bridge_affinity,
     _preferred_http_bridge_reconnect_turn_state,
     _raise_if_http_bridge_creation_superseded,
     _record_bridge_drain_recovery_allowed,
@@ -226,15 +227,6 @@ T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY = frozenset({1011})
 _HTTP_BRIDGE_BACKGROUND_CLEANUP_WARN_THRESHOLD = 100
-
-
-def _persistent_http_bridge_affinity(affinity: _AffinityPolicy) -> _AffinityPolicy:
-    if not affinity.abandon_unavailable_legacy_owner:
-        return affinity
-    # Restart authority is proof attached to one canonical request body, not a
-    # property of the process session. A bridge outlives that request, so never
-    # let later ordinary requests inherit permission to retire hard ownership.
-    return replace(affinity, abandon_unavailable_legacy_owner=False)
 
 
 class _HTTPBridgeMixin(
@@ -2025,9 +2017,7 @@ class _HTTPBridgeMixin(
     ) -> None:
         request_state.response_create_sent_at = None
         if selection_affinity is None and request_state.affinity_policy.abandon_unavailable_legacy_owner:
-            # The stored session policy deliberately drops this one-shot bit.
-            # A reconnect owned by the authorizing request must still carry its
-            # proof into guarded selection, without granting it to later turns.
+            # Storage drops this one-shot bit; its request retains reconnect authority.
             selection_affinity = request_state.affinity_policy
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,

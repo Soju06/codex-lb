@@ -63,12 +63,33 @@ async def select_responses_model_source(
         return (source, candidate) if source is not None else None
 
 
+def effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
+    """The model an API key forces, falling back to the requested one."""
+    if api_key is None or api_key.enforced_model is None:
+        return requested_model
+    return api_key.enforced_model
+
+
 async def responses_model_is_source_owned(model: str | None, api_key: ApiKeyData | None) -> bool:
     """True when ``model`` is served by an enabled Responses-capable source.
 
     Used by the WebSocket path, which cannot forward to a model source and must
     fail the session so the client falls back to the HTTP transport.
+
+    The API key's ``enforced_model`` is considered alongside the requested
+    model, matching how the HTTP handlers build their candidate list: an
+    enforced model that resolves to a source must not slip through to
+    subscription-account selection.
     """
-    if not model:
+    enforced = effective_model_for_api_key(api_key, model)
+    if not model and not enforced:
         return False
-    return await select_responses_model_source(model, api_key, require_streaming=True) is not None
+    return (
+        await select_responses_model_source(
+            model or enforced or "",
+            api_key,
+            raw_model=enforced,
+            require_streaming=True,
+        )
+        is not None
+    )

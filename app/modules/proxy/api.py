@@ -204,6 +204,7 @@ from app.modules.model_sources.forwarding import (
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.selection import (
     allowed_source_ids_for_api_key,
+    effective_model_for_api_key,
     select_responses_model_source,
 )
 from app.modules.proxy import affinity as proxy_affinity_module
@@ -6659,9 +6660,7 @@ def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: st
 
 
 def _effective_optional_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
-    if api_key is None or api_key.enforced_model is None:
-        return requested_model
-    return api_key.enforced_model
+    return effective_model_for_api_key(api_key, requested_model)
 
 
 def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | None:

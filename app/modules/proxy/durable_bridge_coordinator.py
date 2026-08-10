@@ -589,6 +589,30 @@ class DurableBridgeSessionCoordinator:
                 max_bytes=max_bytes,
             )
 
+    async def append_terminal_operation_event(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        event_text: str,
+        max_bytes: int,
+        state: str,
+        response_id: str | None = None,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).append_terminal_operation_event(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                event_text=event_text,
+                max_bytes=max_bytes,
+                state=state,
+                response_id=response_id,
+            )
+
     async def append_operation_events(
         self,
         *,

@@ -34,6 +34,8 @@
 - [x] 1.31 Keep operation transcript retention active when sticky mapping cleanup is disabled.
 - [x] 1.32 Persist and fence the one-shot recovery dispatch budget through
   replacement-session handoff, rollback, and terminal settlement.
+- [x] 1.33 Restore claimed recovery operations on every pre-admission exit and
+  atomically spool deterministic terminal failures before exposing `failed`.
 
 ## 2. Validation
 
@@ -43,3 +45,5 @@
   - Evidence: focused HTTP bridge/API tests, Ruff, Ty, migration checks, and
     strict OpenSpec validation passed after the recovery-budget handoff fix.
 - [x] 2.3 Verify disabled sticky cleanup still runs durable transcript retention.
+- [x] 2.4 Add regressions for pre-admission claim restoration and terminal
+  failure spool/state ordering.

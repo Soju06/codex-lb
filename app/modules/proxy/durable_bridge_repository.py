@@ -1663,6 +1663,67 @@ class DurableBridgeRepository:
             await self._session.commit()
         return True
 
+    async def append_terminal_operation_event(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        event_text: str,
+        max_bytes: int,
+        state: str,
+        response_id: str | None = None,
+    ) -> bool:
+        """Append a terminal event and expose its operation state atomically."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            event_size = len(event_text.encode("utf-8"))
+            persisted = event_size <= max_bytes and int(operation.event_bytes or 0) + event_size <= max_bytes
+            if persisted:
+                next_sequence = await self._session.scalar(
+                    select(func.coalesce(func.max(HttpBridgeOperationEvent.sequence_number), 0) + 1).where(
+                        HttpBridgeOperationEvent.operation_id == operation_id,
+                    )
+                )
+                sequence = int(next_sequence or 1)
+                self._session.add(
+                    HttpBridgeOperationEvent(
+                        operation_id=operation_id,
+                        sequence_number=sequence,
+                        event_fingerprint=durable_bridge_hash(f"{sequence}:{event_text}"),
+                        event_text=event_text,
+                    )
+                )
+                operation.event_bytes = int(operation.event_bytes or 0) + event_size
+            else:
+                operation.event_spool_complete = False
+            operation.state = state
+            if response_id is not None:
+                operation.response_id = response_id
+            operation.updated_at = utcnow()
+            await self._session.commit()
+        return persisted
+
     async def append_operation_events(
         self,
         *,

@@ -244,6 +244,20 @@ event instead of aborting the already-started stream.
 - **THEN** the client receives `response.failed` and the prior reservation is
   settled instead of receiving a truncated stream
 
+### Requirement: Failure spool/state ordering
+
+For an explicit deterministic failure, the proxy MUST persist the terminal SSE
+block before exposing the durable operation as failed. The event append and
+failed-state transition MUST use the same owner fence and transaction when the
+durable repository supports it.
+
+#### Scenario: Concurrent retry cannot reset an unspooled failure
+
+- **WHEN** a response failure is being settled while an identical reconnect is
+  admitted
+- **THEN** the reconnect observes the terminal operation fence and cannot reset
+  or mix the previous failure into a new transcript
+
 ### Requirement: Partial disconnect acknowledgement
 
 When a bridge disconnects after an operation has emitted any response event but

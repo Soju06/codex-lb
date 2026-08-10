@@ -1182,8 +1182,21 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.operation_registered = True
             request_state.operation_rebind_required = False
             request_state.operation_created = operation.created
+
+        async def _cleanup_unsubmitted_recovery_claim() -> None:
+            if not request_state.operation_recovery_claimed or request_state.operation_dispatched:
+                return
+            await self._cleanup_http_bridge_submit_interruption(
+                session,
+                request_state=request_state,
+                gate_acquired=False,
+                request_enqueued=False,
+                counted_in_queue=False,
+            )
+
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         if request_state.response_id is not None or request_state.response_event_count > 0:
+            await _cleanup_unsubmitted_recovery_claim()
             _log_http_bridge_event(
                 "submit_after_response_event",
                 session.key,
@@ -1205,6 +1218,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 ),
             )
         if session.upstream_control.retire_after_drain:
+            await _cleanup_unsubmitted_recovery_claim()
             if not session.upstream_close_attempted:
                 await self._retire_http_bridge_after_drain_if_ready(session)
             raise ProxyResponseError(
@@ -1224,6 +1238,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     elif http_bridge_sessions is not None:
                         current_session = http_bridge_sessions.get(session.key)
                     if current_session is None and _http_bridge_key_strength(session.key) == "hard":
+                        await _cleanup_unsubmitted_recovery_claim()
                         _log_http_bridge_event(
                             "submit_on_closed",
                             session.key,
@@ -1255,16 +1270,21 @@ class _HTTPBridgeRequestSubmitMixin:
                     # receiving 400 previous_response_not_found (which causes the
                     # CLI to drop previous_response_id and resend the full
                     # conversation history, inflating per-turn context by ~20x).
-                    recovered = await self._retry_http_bridge_request_on_fresh_upstream(
-                        session,
-                        request_state=request_state,
-                        text_data=text_data,
-                        send_request=False,
-                        require_same_account=_http_bridge_key_strength(session.key) == "hard",
-                    )
+                    try:
+                        recovered = await self._retry_http_bridge_request_on_fresh_upstream(
+                            session,
+                            request_state=request_state,
+                            text_data=text_data,
+                            send_request=False,
+                            require_same_account=_http_bridge_key_strength(session.key) == "hard",
+                        )
+                    except BaseException:
+                        await _cleanup_unsubmitted_recovery_claim()
+                        raise
                     if recovered:
                         session.closed = False
                     else:
+                        await _cleanup_unsubmitted_recovery_claim()
                         _log_http_bridge_event(
                             "submit_on_closed",
                             session.key,

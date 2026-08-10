@@ -4,7 +4,11 @@ from datetime import datetime
 
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts import mappers
-from app.modules.accounts.mappers import _effective_status_from_usage, _normalize_account_routing_policy
+from app.modules.accounts.mappers import (
+    _effective_status_from_usage,
+    _latest_usage_recorded_at,
+    _normalize_account_routing_policy,
+)
 
 
 def _usage(
@@ -37,6 +41,20 @@ def test_extract_credit_status_uses_freshest_sample() -> None:
     )
 
     assert mappers._extract_credit_status(stale, fresh) == (False, False, 0.0)
+
+
+def test_latest_usage_recorded_at_uses_newest_loaded_sample() -> None:
+    primary = _primary_usage(recorded_at=datetime(2026, 1, 1, 12, 0, 0))
+    secondary = _secondary_usage(recorded_at=datetime(2026, 1, 1, 12, 2, 0))
+    monthly = UsageHistory(
+        account_id="account-1",
+        window="monthly",
+        used_percent=20.0,
+        recorded_at=datetime(2026, 1, 1, 12, 1, 0),
+    )
+
+    assert _latest_usage_recorded_at(primary, secondary, monthly) == secondary.recorded_at
+    assert _latest_usage_recorded_at(None, None, None) is None
 
 
 def _account(status: AccountStatus = AccountStatus.QUOTA_EXCEEDED) -> Account:

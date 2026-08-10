@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import threading
@@ -16,11 +18,16 @@ from fastapi.testclient import TestClient
 from httpx import Headers
 from sqlalchemy import select
 from starlette.websockets import WebSocketDisconnect
+from websockets.asyncio.client import connect as websocket_connect
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import RefreshError
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+    WebsocketsUpstreamWebSocket,
+)
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
@@ -36,6 +43,58 @@ from app.modules.proxy.capability_routing import (
 pytestmark = pytest.mark.integration
 
 _REAL_WRITE_REQUEST_LOG = proxy_module.ProxyService._write_request_log
+
+
+@pytest.mark.asyncio
+async def test_real_websockets_keepalive_expiry_preserves_liveness_classification() -> None:
+    async def accept_without_answering_frames(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            websocket_key = next(
+                line.split(b":", 1)[1].strip()
+                for line in request.split(b"\r\n")
+                if line.lower().startswith(b"sec-websocket-key:")
+            )
+            accept = base64.b64encode(hashlib.sha1(websocket_key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+            writer.write(
+                b"HTTP/1.1 101 Switching Protocols\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Connection: Upgrade\r\n"
+                b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n"
+            )
+            await writer.drain()
+            # Read and discard every frame. In particular, never answer pings,
+            # so the production client watchdog must terminate the connection.
+            while await reader.read(65536):
+                pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except ConnectionError:
+                pass
+
+    server = await asyncio.start_server(accept_without_answering_frames, "127.0.0.1", 0)
+    async with server:
+        assert server.sockets
+        port = server.sockets[0].getsockname()[1]
+        async with websocket_connect(
+            f"ws://127.0.0.1:{port}",
+            ping_interval=0.05,
+            ping_timeout=0.05,
+            close_timeout=0.05,
+            proxy=None,
+        ) as connection:
+            upstream = WebsocketsUpstreamWebSocket(connection)
+            message = await asyncio.wait_for(upstream.receive(), timeout=1.0)
+
+    # This assertion pins the actual close code/reason emitted by the installed
+    # websockets watchdog to the adapter's stable, account-neutral classifier.
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
 
 
 def _assert_previous_response_not_found_error(error: dict[str, object]) -> None:
@@ -107,6 +166,7 @@ class _FakeUpstreamWebSocket:
         self.archived_receive_request_ids: list[str | None] = []
         self.archived_receive_texts: list[str] = []
         self.closed = False
+        self.closed_event = threading.Event()
         self._messages: asyncio.Queue[_FakeUpstreamMessage] = asyncio.Queue()
         for message in messages:
             self._messages.put_nowait(message)
@@ -130,6 +190,7 @@ class _FakeUpstreamWebSocket:
 
     async def close(self) -> None:
         self.closed = True
+        self.closed_event.set()
 
 
 class _SequencedUpstreamWebSocket(_FakeUpstreamWebSocket):
@@ -6201,6 +6262,9 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
         for call in log_calls
     )
     assert any(call["status"] == "success" and call["request_id"] == "resp_ws_inflight" for call in log_calls)
+    # TestClient runs the ASGI task in a worker thread. Wait for its owned
+    # cancellation cleanup instead of racing that thread on the plain flag.
+    assert fake_upstream.closed_event.wait(timeout=1.0)
     assert fake_upstream.closed is True
 
 

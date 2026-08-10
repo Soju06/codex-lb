@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+from app.core.utils.time import to_utc_naive
 from app.db.models import HttpBridgeSessionState
 from app.db.session import close_session
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
@@ -44,13 +45,18 @@ class DurableBridgeLookup:
     latest_input_full_fingerprint: str | None = None
     model: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
+    owner_process_epoch: str | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
             return False
         if self.lease_expires_at is None:
             return False
-        return self.lease_expires_at > now
+        # lease_expires_at is a timestamptz column: PostgreSQL yields it
+        # offset-aware while the app clock (utcnow) and SQLite yield naive
+        # UTC. Normalize both sides — comparing them raw raises TypeError
+        # on the anchored-lookup hot path.
+        return to_utc_naive(self.lease_expires_at) > to_utc_naive(now)
 
 
 class DurableBridgeSessionCoordinator:
@@ -296,6 +302,7 @@ class DurableBridgeSessionCoordinator:
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
+        owner_process_epoch: str,
         force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeLookup:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
@@ -312,6 +319,7 @@ class DurableBridgeSessionCoordinator:
                 latest_turn_state=latest_turn_state,
                 latest_response_id=latest_response_id,
                 allow_takeover=allow_takeover,
+                owner_process_epoch=owner_process_epoch,
                 force_owner_epoch_advance=force_owner_epoch_advance,
             )
         return _to_lookup(snapshot)
@@ -489,11 +497,13 @@ class DurableBridgeSessionCoordinator:
         self,
         *,
         instance_id: str,
+        owner_process_epoch: str | None = None,
         ownerless_cutoff: datetime | None = None,
     ) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).purge_owned_sessions_on_startup(
                 instance_id=instance_id,
+                owner_process_epoch=owner_process_epoch,
                 ownerless_cutoff=ownerless_cutoff,
             )
 
@@ -613,6 +623,7 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         api_key_scope=snapshot.api_key_scope,
         account_id=snapshot.account_id,
         owner_instance_id=snapshot.owner_instance_id,
+        owner_process_epoch=snapshot.owner_process_epoch,
         owner_epoch=snapshot.owner_epoch,
         lease_expires_at=snapshot.lease_expires_at,
         state=snapshot.state,

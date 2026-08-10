@@ -5405,6 +5405,9 @@ def _normalize_compaction_output_item(item: Mapping[str, JsonValue]) -> dict[str
     item_id = item.get("id")
     if isinstance(item_id, str) and item_id.strip():
         normalized["id"] = item_id
+    status = item.get("status")
+    if isinstance(status, str) and status.strip():
+        normalized["status"] = status
     return normalized
 
 
@@ -5433,25 +5436,52 @@ async def _synthetic_compaction_response_stream(
     response_id: str,
     usage: object | None,
 ) -> AsyncIterator[str]:
+    item = dict(compact_item)
+    item.setdefault("status", "completed")
     completed_response: dict[str, JsonValue] = {
         "id": response_id,
         "object": "response",
         "status": "completed",
-        "output": [dict(compact_item)],
+        "output": [item],
     }
     usage_mapping = _json_mapping_from_model_or_mapping(usage)
     if usage_mapping is not None:
         completed_response["usage"] = dict(usage_mapping)
     yield format_sse_event(
         {
-            "type": "response.output_item.done",
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "status": "in_progress",
+                "output": [],
+            },
+        }
+    )
+    yield format_sse_event(
+        {
+            "type": "response.output_item.added",
+            "sequence_number": 1,
             "output_index": 0,
-            "item": dict(compact_item),
+            "item": {
+                **item,
+                "status": "in_progress",
+            },
+        }
+    )
+    yield format_sse_event(
+        {
+            "type": "response.output_item.done",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": item,
         }
     )
     yield format_sse_event(
         {
             "type": "response.completed",
+            "sequence_number": 3,
             "response": completed_response,
         }
     )

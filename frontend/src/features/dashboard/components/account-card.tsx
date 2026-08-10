@@ -2,6 +2,7 @@ import { Clock, ExternalLink, Play, RotateCcw, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { usePrivacyStore } from "@/hooks/use-privacy";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/status-badge";
 import {
@@ -85,6 +86,7 @@ function QuotaBar({
 export function AccountCard({ account, showAccountId = false, readOnly = false, onAction }: AccountCardProps) {
   const { t } = useTranslation();
   const blurred = usePrivacyStore((s) => s.blurred);
+  const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
   const status = normalizeStatus(account.status);
   const primaryRemaining = account.usage?.primaryRemainingPercent ?? null;
   const secondaryRemaining = account.usage?.secondaryRemainingPercent ?? null;
@@ -114,7 +116,7 @@ export function AccountCard({ account, showAccountId = false, readOnly = false, 
     ? t("dashboard.accounts.disableWarmupFor", { account: title })
     : t("dashboard.accounts.enableWarmupFor", { account: title });
   const warmupDetail = account.limitWarmup
-    ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+    ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
     : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
   const hasResetCredits = availableResetCredits > 0;

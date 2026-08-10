@@ -2371,6 +2371,7 @@ class _HTTPBridgeMixin(
                 await self._unregister_http_bridge_turn_states(session)
                 await self._unregister_http_bridge_previous_response_ids(session)
                 session.last_completed_response_id = None
+                session.last_completed_response_account_id = None
                 session.last_completed_input_count = 0
                 session.last_completed_input_prefix_fingerprint = None
                 session.last_pending_tool_calls.clear()

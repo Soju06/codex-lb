@@ -264,7 +264,8 @@ def test_plan_shadow_actions_skips_accounts_blocked_by_usage_limit(
         AccountState(
             "policy-blocked",
             AccountStatus.ACTIVE,
-            used_percent=0.0,
+            used_percent=10.0,
+            primary_reset_at=int(peak_at.timestamp()),
             primary_window_minutes=300,
             usage_limit_state=usage_limit_state,
         ),
@@ -291,7 +292,15 @@ def test_plan_shadow_actions_skips_accounts_blocked_by_usage_limit(
         now=now,
     )
 
+    baseline_actions = plan_shadow_actions(
+        settings=settings,
+        states=states[1:],
+        demand_forecast=_forecast(now, peak_at=peak_at),
+        now=now,
+    )
+
     assert {action.account_id for action in actions} == {"policy-available", "policy-disabled"}
+    assert actions == baseline_actions
 
 
 def test_plan_shadow_actions_uses_observed_window_duration() -> None:
@@ -487,6 +496,37 @@ def test_simulation_sums_capacity_for_matching_reset_epochs() -> None:
 
     assert simulation.served_units == pytest.approx(120.0)
     assert simulation.unmet_demand == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    "usage_limit_state",
+    [AccountUsageLimitState.REACHED, AccountUsageLimitState.DATA_UNAVAILABLE],
+)
+def test_simulate_pool_excludes_accounts_blocked_by_usage_limit(
+    usage_limit_state: AccountUsageLimitState,
+) -> None:
+    now = datetime(2026, 5, 18, 9, 0, tzinfo=timezone.utc)
+    forecast = _forecast(now, peak_at=now, peak_units=60.0, hours=1)
+    states = [
+        AccountState(
+            "policy-blocked",
+            AccountStatus.ACTIVE,
+            used_percent=0.0,
+            primary_reset_at=int((now + timedelta(hours=1)).timestamp()),
+            primary_window_minutes=300,
+            usage_limit_state=usage_limit_state,
+        )
+    ]
+
+    simulation = simulate_pool(
+        settings=PlannerSettings(),
+        states=states,
+        demand_forecast=forecast,
+        now=now,
+    )
+
+    assert simulation.served_units == pytest.approx(0.0)
+    assert simulation.unmet_demand == pytest.approx(60.0)
 
 
 def test_simulate_pool_does_not_use_future_warmup_before_start() -> None:

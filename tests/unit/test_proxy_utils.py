@@ -3538,6 +3538,42 @@ async def test_opportunistic_admission_preserves_local_account_usage_limit_denia
 
 
 @pytest.mark.asyncio
+async def test_opportunistic_admission_keeps_setup_failures_on_burn_window_contract():
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key_opportunistic_setup_failure",
+            traffic_class=proxy_api.TRAFFIC_CLASS_OPPORTUNISTIC,
+            enforced_model=None,
+        ),
+    )
+    selection = AccountSelection(
+        account=None,
+        error_message="No account plan supports model gpt-5.4",
+        error_code="no_plan_support_for_model",
+    )
+    service = SimpleNamespace(check_opportunistic_admission=AsyncMock(return_value=selection))
+    context = SimpleNamespace(service=service)
+    request = Request({"type": "http", "method": "GET", "path": "/v1/opportunistic/admission", "headers": []})
+
+    response = await proxy_api._opportunistic_admission_denial(
+        request,
+        cast(proxy_api.ProxyContext, context),
+        api_key,
+        model="gpt-5.4",
+    )
+
+    assert response is not None
+    assert response.status_code == 429
+    assert json.loads(bytes(response.body))["error"] == {
+        "code": "rate_limit_exceeded",
+        "message": "opportunistic burn window closed: No account plan supports model gpt-5.4",
+        "type": "rate_limit_error",
+    }
+    assert response.headers["Retry-After"] == str(proxy_api._OPPORTUNISTIC_RETRY_AFTER_SECONDS)
+
+
+@pytest.mark.asyncio
 async def test_opportunistic_admission_preserves_upstream_usage_limit_denial():
     api_key = ApiKeyData(
         id="key_opportunistic_upstream_usage_limit",

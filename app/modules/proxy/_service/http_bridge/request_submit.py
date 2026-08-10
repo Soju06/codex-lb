@@ -1890,6 +1890,28 @@ class _HTTPBridgeRequestSubmitMixin:
                     for request_state in retired_request_states
                     if _http_bridge_request_counts_against_queue(request_state)
                 )
+            if response_events_seen is None:
+                # Direct retirement must derive event evidence from the same
+                # locked ownership snapshot as the pending count. Otherwise an
+                # eventful stale-gate owner looks eventless merely because its
+                # caller omitted this optional handoff, creating a false
+                # circuit strike. Explicit values remain authoritative for
+                # reader-failure callers whose pending deque was already
+                # drained before entering this shared boundary.
+                response_events_seen = max(
+                    (
+                        max(
+                            request_state.response_event_count,
+                            int(
+                                request_state.response_id is not None
+                                or request_state.latency_response_created_ms is not None
+                                or request_state.downstream_visible
+                            ),
+                        )
+                        for request_state in retired_request_states
+                    ),
+                    default=0,
+                )
         # Direct retirement (for example the all-stale stuck-gate path, where
         # the wedged reattach is the only pending request) cancels the reader
         # and fails the pendings without passing the partial-cleanup hook or
@@ -1907,7 +1929,7 @@ class _HTTPBridgeRequestSubmitMixin:
         # deliberately empties ``pending_requests`` before retirement. Without
         # that handoff, genuine pre-response failures disappear from circuit
         # accounting while idle closes and request failures look identical.
-        if retired_request_count > 0 and (response_events_seen is None or response_events_seen == 0):
+        if retired_request_count > 0 and response_events_seen == 0:
             await self._record_http_bridge_retry_circuit_failure(
                 session,
                 detail=retry_circuit_detail or detail,

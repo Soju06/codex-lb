@@ -22580,6 +22580,30 @@ async def test_http_bridge_eventless_pending_retirement_records_one_retry_circui
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_direct_retirement_derives_observed_response_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_eventless_http_bridge_owner(request_id="req-eventful-direct-retire")
+    owner.response_event_count = 1
+    session = _make_bridge_session(
+        key_value="bridge-eventful-direct-retire",
+        pending_requests=deque([owner]),
+        queued_request_count=1,
+    )
+    record_failure = AsyncMock()
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="stuck_response_create_gate",
+    )
+
+    record_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_reader_failure_preserves_pre_drain_request_for_retry_circuit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1718,19 +1718,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 if settlement_cancellation is not None:
                     raise settlement_cancellation
             else:
-                await self._cleanup_http_bridge_submit_interruption(
-                    session,
-                    request_state=request_state,
-                    gate_acquired=gate_acquired,
-                    request_enqueued=request_enqueued,
-                    counted_in_queue=True,
-                    admission_waiter_registered=admission_waiter_registered,
-                )
                 # Once the operation-tagged frame has been handed to the
                 # socket, the transport exception is ambiguous: upstream may
                 # have accepted it even though this worker saw no
                 # acknowledgement. Persist UNKNOWN under the owner fence
-                # before exposing a retryable error.
+                # before cleanup can retire the closed session and release
+                # that fence.
                 if (
                     request_state.operation_dispatched
                     and request_state.operation_registered
@@ -1767,6 +1760,14 @@ class _HTTPBridgeRequestSubmitMixin:
                             session_id=request_state.session_id,
                             upstream_error_code=error_code,
                         )
+                await self._cleanup_http_bridge_submit_interruption(
+                    session,
+                    request_state=request_state,
+                    gate_acquired=gate_acquired,
+                    request_enqueued=request_enqueued,
+                    counted_in_queue=True,
+                    admission_waiter_registered=admission_waiter_registered,
+                )
                 await self._fail_pending_websocket_requests(
                     account=session.account,
                     account_id_value=session.account.id,

@@ -803,6 +803,7 @@ class _HTTPBridgeRequestSubmitMixin:
         recovery_turn_state: str | None = None,
     ) -> None:
         request_scope_id = ensure_request_scope_id()
+        owned_unanchored_handoff = session.unanchored_reservation_id == request_scope_id
         try:
             await self._submit_http_bridge_request_with_handoff(
                 session,
@@ -813,16 +814,17 @@ class _HTTPBridgeRequestSubmitMixin:
                 recovery_turn_state=recovery_turn_state,
             )
         finally:
-            released_unanchored_handoff = session.unanchored_reservation_id == request_scope_id
             _release_http_bridge_unanchored_handoff(
                 session,
                 request_scope_id=request_scope_id,
             )
-            # Only a reserved handoff can make retirement newly ready here. An
-            # ordinary send/reader failure already owns terminal settlement;
-            # closing again would run the pending-failure funnel twice.
+            # Inner pre-submit cleanup may clear the reservation before control
+            # returns here, so ownership must be captured before awaiting it.
+            # Only that request can make detached-session retirement newly
+            # ready; an ordinary send/reader failure already owns terminal
+            # settlement, and closing again would run that funnel twice.
             if (
-                released_unanchored_handoff
+                owned_unanchored_handoff
                 and session.upstream_control.retire_after_drain
                 and not session.upstream_close_attempted
             ):

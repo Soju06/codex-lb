@@ -441,8 +441,8 @@ class _HTTPBridgeMixin(
         )
         if model_transition_rebind:
             durable_lookup = None
-        # Account selection consumes this one-shot capability; bridge reuse
-        # would bypass guarded retirement, so restart creation stays canonical.
+        # Account selection consumes this one-shot capability; canonical creation
+        # also forces takeover so a prior-ring durable owner cannot reject it.
         force_goal_restart_account_reselection = affinity.abandon_unavailable_legacy_owner
         if await _http_bridge_should_wait_for_registration(self, key, settings):
             skip_registration_gate = False
@@ -518,7 +518,7 @@ class _HTTPBridgeMixin(
             continuity_error: ProxyResponseError | None = None
             owner_mismatch_error: ProxyResponseError | None = None
             owner_forward: _HTTPBridgeOwnerForward | None = None
-            force_durable_takeover = force_durable_takeover_after_detach
+            force_durable_takeover = force_durable_takeover_after_detach or force_goal_restart_account_reselection
             missing_turn_state_alias = False
             sessions_to_close_before_create: list[_HTTPBridgeSession] = []
             session_to_return_after_close: _HTTPBridgeSession | None = None
@@ -2016,14 +2016,14 @@ class _HTTPBridgeMixin(
         selection_affinity: _AffinityPolicy | None = None,
     ) -> None:
         request_state.response_create_sent_at = None
-        if selection_affinity is None and request_state.affinity_policy.abandon_unavailable_legacy_owner:
-            # Storage drops this one-shot bit; its request retains reconnect authority.
+        goal_restart = request_state.affinity_policy.abandon_unavailable_legacy_owner
+        if selection_affinity is None and goal_restart:
+            # Storage drops this bit; its request retains reconnect and account-switch authority.
             selection_affinity = request_state.affinity_policy
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
-            kind=session.key.affinity_kind,
-            key=session.key.affinity_key,
+            kind=session.key.affinity_kind, key=session.key.affinity_key
         )
-        require_same_account = require_same_account or account_neutral_recovery
+        require_same_account = account_neutral_recovery or (require_same_account and not goal_restart)
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         session.handoff_in_progress = True

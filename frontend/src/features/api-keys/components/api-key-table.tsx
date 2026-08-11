@@ -20,13 +20,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type { ApiKey, LimitRule, LimitType } from "@/features/api-keys/schemas";
+import { useDateDisplayFormatStore, type DateDisplayFormat } from "@/hooks/use-date-format";
 import { formatCompactNumber, formatCurrency, formatTimeLong } from "@/utils/formatters";
 
-function formatExpiry(value: string | null, neverLabel: string): string {
+function formatExpiry(value: string | null, neverLabel: string, displayFormat: DateDisplayFormat): string {
   if (!value) {
     return neverLabel;
   }
-  const parsed = formatTimeLong(value);
+  const parsed = formatTimeLong(value, displayFormat);
   return `${parsed.date} ${parsed.time}`;
 }
 
@@ -103,6 +104,7 @@ export type ApiKeyTableProps = {
 
 export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiKeyTableProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   if (keys.length === 0) {
     return <EmptyState icon={KeyRound} title={t("apiKeys.table.empty")} />;
   }
@@ -136,7 +138,7 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
               <TableCell className="truncate text-xs tabular-nums">{trafficClass}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{getUsageValue(apiKey, t)}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{getLimitValue(apiKey, t)}</TableCell>
-              <TableCell className="truncate text-xs text-muted-foreground">{formatExpiry(apiKey.expiresAt, t("common.time.never"))}</TableCell>
+              <TableCell className="truncate text-xs text-muted-foreground">{formatExpiry(apiKey.expiresAt, t("common.time.never"), dateDisplayFormat)}</TableCell>
               <TableCell>
                 <Badge className={apiKey.isActive ? "bg-emerald-500 text-white" : "bg-zinc-500 text-white"}>
                   {apiKey.isActive ? t("common.states.active") : t("common.states.disabled")}

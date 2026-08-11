@@ -78,6 +78,9 @@ REALTIME_LIVE_CALL_ID_ROUTE_REGEX = (
     rf"|{_LIVE_CALL_UUID_CORE})"
 )
 _LIVE_CALL_ID_PATTERN = re.compile(rf"{REALTIME_LIVE_CALL_ID_ROUTE_REGEX}\Z")
+UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE = "upstream_websocket_liveness_timeout"
+_WEBSOCKETS_KEEPALIVE_TIMEOUT_REASON = "keepalive ping timeout"
+_AIOHTTP_HEARTBEAT_TIMEOUT_PREFIX = "No PONG received after "
 
 
 class RealtimeWebSocketProtocol(StrEnum):
@@ -99,16 +102,19 @@ class _UpstreamWebSocketPolicy:
     preserve_close_semantics: bool
 
 
+# Responses turns may be silent at the application layer for minutes, but a
+# healthy transport still answers ping control frames. Keep both watchdogs on:
+# disabling them turns a black-holed VPN route into a multi-hour request stall.
 _RESPONSES_WEBSOCKET_POLICY = _UpstreamWebSocketPolicy(
     operation="responses websocket",
     include_responses_beta=True,
     archive_payloads=True,
-    enable_routed_heartbeat=False,
+    enable_routed_heartbeat=True,
     retry_handshake_status=True,
     preserve_handshake_status=False,
     credential_safe_connect_errors=False,
     retry_routed_network_errors=True,
-    enable_direct_ping_timeout=False,
+    enable_direct_ping_timeout=True,
     preserve_close_semantics=False,
 )
 _LIVE_SIDEBAND_WEBSOCKET_POLICY = _UpstreamWebSocketPolicy(
@@ -176,6 +182,8 @@ class UpstreamWebSocketTransportError(RuntimeError):
 
 
 def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> str:
+    if _is_websocket_liveness_timeout(exc):
+        return UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
     return process_network_error_code(
         exc,
         fallback="upstream_unavailable",
@@ -183,17 +191,64 @@ def _websocket_transport_error_code(exc: BaseException, *, uses_proxy: bool) -> 
     )
 
 
+def is_account_neutral_websocket_error_code(error_code: str | None) -> bool:
+    """Return whether transport provenance rules out an account-health penalty."""
+
+    # These failures occur below the selected account's application protocol.
+    # They follow an ambiguous send, so relay owners must fail rather than
+    # replay while leaving the account eligible for unrelated requests. Keep
+    # the compatibility keepalive code here as long as adapters can emit it.
+    return error_code in {
+        PROCESS_NETWORK_UNAVAILABLE_CODE,
+        UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+        "upstream_keepalive_timeout",
+    }
+
+
+def _is_websocket_liveness_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, ConnectionClosedError):
+        # websockets emits this locally-sent 1011 when its own ping watchdog
+        # expires. A peer may acknowledge it, leaving both close frames on the
+        # exception; send-first ordering still proves the marker came from our
+        # watchdog without trusting a peer that sends the same code and reason.
+        return (
+            exc.sent is not None
+            and int(exc.sent.code) == 1011
+            and exc.sent.reason == _WEBSOCKETS_KEEPALIVE_TIMEOUT_REASON
+            and (exc.rcvd is None or exc.rcvd_then_sent is False)
+        )
+    # aiohttp surfaces its heartbeat watchdog through WSMsgType.ERROR with a
+    # ServerTimeoutError carrying this library-defined prefix.
+    return isinstance(exc, aiohttp.ServerTimeoutError) and str(exc).startswith(_AIOHTTP_HEARTBEAT_TIMEOUT_PREFIX)
+
+
+def _aiohttp_stored_liveness_exception(websocket: Any) -> Exception | None:
+    # When aiohttp's heartbeat expires between receive() calls, no waiter is
+    # available for WSMsgType.ERROR. aiohttp stores the timeout instead and the
+    # next receive returns CLOSED, so every post-connect path must consult it.
+    exception_getter = getattr(websocket, "exception", None)
+    if not callable(exception_getter):
+        return None
+    exception = exception_getter()
+    return exception if isinstance(exception, Exception) and _is_websocket_liveness_timeout(exception) else None
+
+
 def _relay_receive_error_code(error_code: str) -> str | None:
-    """Expose only account-neutral process failures across the adapter boundary."""
+    """Expose account-neutral transport failures across the adapter boundary."""
 
     # Relay owners map an absent code to their established stream_incomplete
     # contract. Leaking the adapter's generic fallback would bypass that path.
-    return error_code if error_code in {PROCESS_NETWORK_UNAVAILABLE_CODE, "upstream_keepalive_timeout"} else None
+    return error_code if is_account_neutral_websocket_error_code(error_code) else None
 
 
 def _is_keepalive_timeout_close(exc: ConnectionClosedError) -> bool:
     """Classify peer/proxy heartbeat failures without exposing socket details."""
 
+    # Treat the legacy text marker as trusted only when this endpoint initiated
+    # the close. A peer can send the same public code and reason, so peer-first
+    # ordering must retain ordinary close/error semantics.
+    if exc.sent is None or (exc.rcvd is not None and exc.rcvd_then_sent is not False):
+        return False
     reason = _close_reason_from_exception(exc)
     return "keepalive ping timeout" in f"{exc} {reason or ''}".lower()
 
@@ -282,11 +337,12 @@ class WebsocketsUpstreamWebSocket:
                 )
             error_code = _websocket_transport_error_code(exc, uses_proxy=self._uses_proxy)
             await _rotate_after_websocket_network_failure(error_code)
-            relay_error_code = (
-                "upstream_keepalive_timeout"
-                if _is_keepalive_timeout_close(exc)
-                else _relay_receive_error_code(error_code)
-            )
+            relay_error_code = _relay_receive_error_code(error_code)
+            if relay_error_code is None and _is_keepalive_timeout_close(exc):
+                # Prefer the stable, provenance-checked watchdog code above.
+                # This text fallback preserves compatibility with keepalive
+                # failures whose exception shape lacks the local-send marker.
+                relay_error_code = "upstream_keepalive_timeout"
             # ConnectionClosedError describes an incomplete close handshake,
             # not generic transport provenance. Let Responses relay owners map
             # it to stream_incomplete while live relays preserve received closes.
@@ -357,7 +413,8 @@ class CodexUpstreamWebSocket:
             if asyncio.iscoroutine(result):
                 await result
         except Exception as exc:
-            await _raise_websocket_send_error(exc, endpoint_id=self._endpoint_id, uses_proxy=True)
+            classification_exc = _aiohttp_stored_liveness_exception(self._websocket) or exc
+            await _raise_websocket_send_error(classification_exc, endpoint_id=self._endpoint_id, uses_proxy=True)
 
     async def send_bytes(self, data: bytes) -> None:
         try:
@@ -365,27 +422,43 @@ class CodexUpstreamWebSocket:
             if asyncio.iscoroutine(result):
                 await result
         except Exception as exc:
-            await _raise_websocket_send_error(exc, endpoint_id=self._endpoint_id, uses_proxy=True)
+            classification_exc = _aiohttp_stored_liveness_exception(self._websocket) or exc
+            await _raise_websocket_send_error(classification_exc, endpoint_id=self._endpoint_id, uses_proxy=True)
 
     async def receive(self) -> UpstreamWebSocketMessage:
         try:
             msg = await self._websocket.receive()
         except Exception as exc:
-            error_code = _websocket_transport_error_code(exc, uses_proxy=True)
+            classification_exc = _aiohttp_stored_liveness_exception(self._websocket) or exc
+            error_code = _websocket_transport_error_code(classification_exc, uses_proxy=True)
             await _rotate_after_websocket_network_failure(error_code)
             return UpstreamWebSocketMessage(
                 kind="error",
-                error=codex_transport_error_message("websocket receive", self._endpoint_id, exc),
+                error=codex_transport_error_message("websocket receive", self._endpoint_id, classification_exc),
                 error_code=_relay_receive_error_code(error_code),
             )
         if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED):
+            liveness_exception = _aiohttp_stored_liveness_exception(self._websocket)
+            if liveness_exception is not None:
+                return UpstreamWebSocketMessage(
+                    kind="error",
+                    close_code=_aiohttp_ws_close_code(self._websocket, msg),
+                    error=codex_transport_error_message(
+                        "websocket receive",
+                        self._endpoint_id,
+                        liveness_exception,
+                    ),
+                    error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+                )
             return UpstreamWebSocketMessage(
                 kind="close",
                 close_code=_aiohttp_ws_close_code(self._websocket, msg),
                 close_reason=_aiohttp_ws_close_reason(msg),
             )
         if msg.type == aiohttp.WSMsgType.ERROR:
-            exception = msg.data if isinstance(msg.data, BaseException) else None
+            exception = (
+                msg.data if isinstance(msg.data, Exception) else _aiohttp_stored_liveness_exception(self._websocket)
+            )
             error_code = (
                 _websocket_transport_error_code(exception, uses_proxy=True)
                 if exception is not None
@@ -845,11 +918,8 @@ async def _connect_upstream_websocket(
         settings.upstream_websocket_proxy_env() if hasattr(settings, "upstream_websocket_proxy_env") else os.environ
     )
     proxy_url = resolve_websocket_proxy_from_env(url, proxy_env) if settings.upstream_websocket_trust_env else None
-    # Long Responses turns can spend minutes without application frames,
-    # so that existing transport keeps its own watchdog disabled. Live
-    # sideband traffic uses ping/pong liveness rather than an application-
-    # frame idle timeout because WebRTC media may remain healthy while the
-    # sideband itself is silent.
+    # Ping/pong control frames verify transport liveness without treating valid
+    # application-frame silence as an idle response.
     ping_timeout = (
         settings.proxy_downstream_websocket_idle_timeout_seconds if policy.enable_direct_ping_timeout else None
     )

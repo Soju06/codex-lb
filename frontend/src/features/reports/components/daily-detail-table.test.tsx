@@ -1,14 +1,58 @@
 import userEvent from "@testing-library/user-event";
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { formatReportBucketDate } from "../date";
 
 import { DailyDetailTable } from "./daily-detail-table";
+
+beforeEach(() => {
+  useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe("DailyDetailTable", () => {
+  it("updates the Day column when the date display format changes", () => {
+    const date = "2026-06-05";
+    render(
+      <DailyDetailTable
+        startDate={date}
+        endDate={date}
+        data={[
+          {
+            date,
+            requests: 1,
+            conversations: 0,
+            inputTokens: 100,
+            outputTokens: 20,
+            cachedInputTokens: 0,
+            costUsd: 1,
+            activeAccounts: 1,
+            errorCount: 0,
+          },
+        ]}
+      />,
+    );
+
+    const row = screen.getByTestId(`daily-breakdown-row-${date}`);
+    expect(within(row).getByText(formatReportBucketDate(date, "default"))).toBeInTheDocument();
+
+    act(() => {
+      useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+    });
+
+    expect(within(row).getByText(formatReportBucketDate(date, "iso8601"))).toBeInTheDocument();
+
+    act(() => {
+      useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
+    });
+
+    expect(within(row).getByText(formatReportBucketDate(date, "default"))).toBeInTheDocument();
+  });
+
   it("fills missing days with zero rows and keeps the body scrollable", () => {
     render(
       <DailyDetailTable
@@ -44,7 +88,9 @@ describe("DailyDetailTable", () => {
     const filledRow = screen.getByTestId("daily-breakdown-row-2026-06-05");
     const zeroRow = screen.getByTestId("daily-breakdown-row-2026-06-06");
 
-    expect(within(zeroRow).getByText("2026-06-06")).toBeInTheDocument();
+    expect(
+      within(zeroRow).getByText(formatReportBucketDate("2026-06-06", "default")),
+    ).toBeInTheDocument();
     expect(within(zeroRow).getByText("$0.00")).toBeInTheDocument();
     expect(zeroRow.className).toBe(filledRow.className);
     expect(screen.getByTestId("daily-breakdown-scroll-body")).toHaveClass(

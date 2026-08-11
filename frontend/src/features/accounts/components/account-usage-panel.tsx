@@ -10,11 +10,12 @@ import type {
   AccountTrendsResponse,
   AccountUsageResetCredits,
 } from "@/features/accounts/schemas";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { quotaBarColor, quotaBarTrack } from "@/utils/account-status";
 import {
   formatCompactNumber,
   formatCurrency,
-  formatLocalDateTimeSeconds,
+  formatDateTimeInline,
   formatPercentNullable,
   formatQuotaResetLabel,
   formatResetRelative,
@@ -173,6 +174,7 @@ function ResetCreditsRow({
   onReset?: (accountId: string) => void;
 }) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   if (resetCredits == null && !loading && !unavailable) {
     return null;
   }
@@ -195,7 +197,9 @@ function ResetCreditsRow({
       <span className="flex min-w-0 flex-1 items-center justify-end gap-2">
         {nearestExpiresAt && expiryCountdown ? (
           <span className="min-w-0 max-w-[min(18rem,42vw)] truncate text-[11px] text-muted-foreground">
-            {t("accounts.usage.resetCredits.expires", { time: formatLocalDateTimeSeconds(nearestExpiresAt) })}{" "}
+            {t("accounts.usage.resetCredits.expires", {
+              time: formatDateTimeInline(nearestExpiresAt, dateDisplayFormat),
+            })}{" "}
             <span className="tabular-nums">({expiryCountdown.label})</span>
           </span>
         ) : null}

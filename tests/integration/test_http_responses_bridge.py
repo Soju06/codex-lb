@@ -30,7 +30,7 @@ from app.core.utils.request_id import (
     set_request_scope_id,
 )
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog
+from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeSessionState, RequestLog
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
@@ -532,6 +532,25 @@ class _CreatedOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
 class _SilentUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
+
+
+class _AccountScopedAnchorUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Upstream that only resolves ``previous_response_id`` values it issued.
+
+    A ``previous_response_id`` is account-scoped upstream: only the account that
+    created the response can resume it. A ``response.create`` carrying a foreign
+    anchor is accepted by the socket but never answered with ``response.created``.
+    Modelling that here makes a cross-account anchor observable as the production
+    symptom instead of a silent assertion: the turn never settles and the
+    per-bridge ``response_create_gate`` stays held.
+    """
+
+    async def send_text(self, text: str) -> None:
+        anchor = json.loads(text).get("previous_response_id")
+        if isinstance(anchor, str) and not anchor.startswith(self.response_id_prefix):
+            self.sent_text.append(text)
+            return
+        await super().send_text(text)
 
 
 class _RecordingUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
@@ -4986,6 +5005,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
         session_key_value=recovery_key,
         api_key_id=None,
         instance_id=target_settings.http_responses_session_bridge_instance_id,
+        owner_process_epoch="test-process",
         lease_ttl_seconds=60.0,
         account_id=account.id,
         model="gpt-5.1",
@@ -7533,6 +7553,7 @@ async def test_backend_responses_soft_prompt_cache_follow_up_uses_durable_owner_
         session_key_value=prompt_cache_key,
         api_key_id=None,
         instance_id="instance-a",
+        owner_process_epoch="test-process",
         lease_ttl_seconds=60.0,
         account_id=owner_account.id,
         model="gpt-5.1",
@@ -7863,6 +7884,7 @@ async def test_backend_responses_verified_full_resend_ignores_stale_broad_owner_
         session_key_value=session_id,
         api_key_id=None,
         instance_id="instance-a",
+        owner_process_epoch="test-process",
         lease_ttl_seconds=60.0,
         account_id=owner_account.id,
         model="gpt-5.1",
@@ -8271,6 +8293,178 @@ async def test_backend_responses_http_bridge_real_selector_recovers_full_resend_
     follow_up_payload = json.loads(alternate_upstream.sent_text[1])
     assert follow_up_payload["previous_response_id"] == second_response["id"]
     assert degraded_reasons == []
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_declines_cross_account_anchor_and_settles(
+    async_client, app_instance, monkeypatch
+):
+    """A restored durable anchor owned by another account must not be injected.
+
+    The durable record still names the owner account, but the owner is out of the
+    rotation so the bridge session is created on another account. Replaying the
+    owner's ``previous_response_id`` there would send an anchor upstream cannot
+    resolve with the history trimmed away: upstream never emits
+    ``response.created`` and the per-bridge response-create gate wedges. The turn
+    must go upstream as a full-history resend instead, and it must settle.
+    """
+
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_account_id = await _import_account(
+        async_client,
+        "acc_cross_account_anchor_owner",
+        "cross-account-anchor-owner@example.com",
+    )
+    serving_account_id = await _import_account(
+        async_client,
+        "acc_cross_account_anchor_serving",
+        "cross-account-anchor-serving@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    serving_account = await _get_account(serving_account_id)
+    serving_chatgpt_account_id = cast(str, serving_account.chatgpt_account_id)
+    serving_upstream = _AccountScopedAnchorUpstreamWebSocket("resp_cross_account_serving")
+    service = get_proxy_service_for_app(app_instance)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        assert account_id_header == serving_chatgpt_account_id
+        return serving_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    # The durable owner account left the rotation, so selection lands on the
+    # other account while the restored durable record still names the owner.
+    pause = await async_client.post(f"/api/accounts/{owner_account_id}/pause")
+    assert pause.status_code == 200, pause.text
+
+    stored_input: list[proxy_module.JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
+    ]
+
+    def _durable_record(
+        *,
+        account_id: str,
+        latest_response_id: str,
+        stored_items: list[proxy_module.JsonValue],
+    ) -> proxy_module.DurableBridgeLookup:
+        return proxy_module.DurableBridgeLookup(
+            session_id="durable-cross-account-anchor",
+            canonical_kind="prompt_cache",
+            canonical_key="cross-account-anchor-cache-key",
+            api_key_scope="__anonymous__",
+            account_id=account_id,
+            owner_instance_id=None,
+            owner_epoch=1,
+            lease_expires_at=None,
+            state=HttpBridgeSessionState.ACTIVE,
+            latest_turn_state=None,
+            latest_response_id=latest_response_id,
+            latest_input_item_count=len(stored_items),
+            latest_input_full_fingerprint=proxy_module._fingerprint_input_items(stored_items),
+        )
+
+    durable_record = _durable_record(
+        account_id=owner_account.id,
+        latest_response_id="resp_cross_account_owner_1",
+        stored_items=stored_input,
+    )
+
+    async def fake_lookup_request_targets(**kwargs):
+        del kwargs
+        return durable_record
+
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", fake_lookup_request_targets)
+
+    # Compaction-shaped follow-up: the stored prefix still matches, but the
+    # suffix carries no prior assistant output, so the account-neutral fresh
+    # resend projection is unavailable and the restored durable anchor is the
+    # only continuity candidate the session-level injection can reach for.
+    compacted_resend: list[proxy_module.JsonValue] = [
+        *stored_input,
+        {"role": "user", "content": [{"type": "input_text", "text": "second question"}]},
+    ]
+    session_id = "cross-account-anchor-session"
+    first_events, first_headers = await asyncio.wait_for(
+        _collect_sse_events_with_headers(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": compacted_resend,
+                "stream": True,
+            },
+            headers={"session_id": session_id},
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    _assert_created_text_delta_completed(first_events)
+    turn_state = first_headers["x-codex-turn-state"]
+
+    assert len(serving_upstream.sent_text) == 1
+    resend_payload = json.loads(serving_upstream.sent_text[0])
+    assert "previous_response_id" not in resend_payload
+    assert resend_payload["input"] == compacted_resend
+
+    bridge_session = next(
+        candidate for candidate in service._http_bridge_sessions.values() if candidate.account.id == serving_account.id
+    )
+    assert bridge_session.codex_session is True
+    # The turn settled on the serving account, so the gate is free and the
+    # session anchor is now owned by the account that actually created it.
+    assert bridge_session.response_create_gate.locked() is False
+    assert bridge_session.last_completed_response_id == "resp_cross_account_serving_1"
+    assert bridge_session.last_completed_response_account_id == serving_account.id
+
+    # Same-account continuity is untouched: once the durable record names the
+    # account that actually created the response, the very next turn anchors on
+    # it instead of resending the whole history.
+    durable_record = _durable_record(
+        account_id=serving_account.id,
+        latest_response_id="resp_cross_account_serving_1",
+        stored_items=compacted_resend,
+    )
+    second_events = await asyncio.wait_for(
+        _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": [
+                    *compacted_resend,
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "OK"}],
+                    },
+                    {"role": "user", "content": [{"type": "input_text", "text": "third question"}]},
+                ],
+                "stream": True,
+            },
+            headers={"session_id": session_id, "x-codex-turn-state": turn_state},
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+    _assert_created_text_delta_completed(second_events)
+    assert len(serving_upstream.sent_text) == 2
+    follow_up_payload = json.loads(serving_upstream.sent_text[1])
+    assert follow_up_payload["previous_response_id"] == "resp_cross_account_serving_1"
+    assert bridge_session.response_create_gate.locked() is False
 
 
 @pytest.mark.asyncio

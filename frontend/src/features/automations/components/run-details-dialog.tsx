@@ -30,7 +30,8 @@ import type {
   AutomationRunDetails,
   AutomationRunStatus,
 } from "@/features/automations/schemas";
-import { formatTimeLong } from "@/utils/formatters";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { formatDateTimeLines } from "@/utils/formatters";
 
 type RunDetailsStateBreakdown = {
   total: number;
@@ -99,6 +100,7 @@ export function RunDetailsDialog({
   accountBlurIndex,
 }: RunDetailsDialogProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] overflow-hidden sm:max-w-5xl">
@@ -238,12 +240,12 @@ export function RunDetailsDialog({
                           blurred && !!detailAccountBlur?.primary;
                         const shouldBlurSecondary =
                           blurred && !!detailAccountBlur?.secondary;
-                        const cycleStart = formatTimeLong(data.run.startedAt);
+                        const cycleStart = formatDateTimeLines(data.run.startedAt, dateDisplayFormat);
                         const dispatchAt = entry.scheduledFor
-                          ? formatTimeLong(entry.scheduledFor)
+                          ? formatDateTimeLines(entry.scheduledFor, dateDisplayFormat)
                           : null;
                         const finishedAt = entry.finishedAt
-                          ? formatTimeLong(entry.finishedAt)
+                          ? formatDateTimeLines(entry.finishedAt, dateDisplayFormat)
                           : null;
                         const state = entry.status as
                           | "pending"
@@ -292,10 +294,10 @@ export function RunDetailsDialog({
                             <TableCell className="align-middle text-xs">
                               <div className="space-y-0.5 leading-tight">
                                 <div className="font-mono tabular-nums text-foreground/95">
-                                  {cycleStart.time}
+                                  {cycleStart.primary}
                                 </div>
                                 <div className="text-muted-foreground">
-                                  {cycleStart.date}
+                                  {cycleStart.secondary}
                                 </div>
                               </div>
                             </TableCell>
@@ -303,10 +305,10 @@ export function RunDetailsDialog({
                               {dispatchAt ? (
                                 <div className="space-y-0.5 leading-tight">
                                   <div className="font-mono tabular-nums text-foreground/95">
-                                    {dispatchAt.time}
+                                    {dispatchAt.primary}
                                   </div>
                                   <div className="text-muted-foreground">
-                                    {dispatchAt.date}
+                                    {dispatchAt.secondary}
                                   </div>
                                 </div>
                               ) : (
@@ -317,10 +319,10 @@ export function RunDetailsDialog({
                               {finishedAt ? (
                                 <div className="space-y-0.5 leading-tight">
                                   <div className="font-mono tabular-nums text-foreground/95">
-                                    {finishedAt.time}
+                                    {finishedAt.primary}
                                   </div>
                                   <div className="text-muted-foreground">
-                                    {finishedAt.date}
+                                    {finishedAt.secondary}
                                   </div>
                                 </div>
                               ) : (

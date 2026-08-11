@@ -1,13 +1,16 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { createAccountSummary, createAccountTrends } from "@/test/mocks/factories";
+import { formatDateTimeInline } from "@/utils/formatters";
 
 describe("AccountUsagePanel", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
   });
 
   afterEach(() => {
@@ -128,8 +131,10 @@ describe("AccountUsagePanel", () => {
   });
 
   it("shows the nearest reset-credit expiry when provided", () => {
+    const expiresAt = "2026-01-01T02:34:56.000Z";
+    const isoExpiry = formatDateTimeInline(expiresAt, "iso8601");
     const account = createAccountSummary({
-      resetCreditNearestExpiresAt: "2026-01-01T02:00:00.000Z",
+      resetCreditNearestExpiresAt: expiresAt,
     });
 
     render(
@@ -150,6 +155,14 @@ describe("AccountUsagePanel", () => {
     const rowText = row?.textContent ?? "";
     expect(rowText.indexOf("Expires ")).toBeGreaterThan(-1);
     expect(rowText.indexOf("Expires ")).toBeLessThan(rowText.indexOf("3 available"));
+    expect(rowText).toContain(isoExpiry);
+
+    act(() => {
+      useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
+    });
+
+    expect(row?.textContent).toContain(formatDateTimeInline(expiresAt, "default"));
+    expect(row?.textContent).not.toContain(isoExpiry);
   });
 
   it("renders a usage reset action when provided", () => {

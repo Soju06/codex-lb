@@ -28,6 +28,7 @@ import type {
   StickySessionSortDir,
 } from "@/features/sticky-sessions/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
 
@@ -68,6 +69,7 @@ export type StickySessionsSectionProps = {
 
 export function StickySessionsSection({ disabled = false }: StickySessionsSectionProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const {
     params,
     setAccountQuery,
@@ -296,8 +298,8 @@ export function StickySessionsSection({ disabled = false }: StickySessionsSectio
                 </TableHeader>
                 <TableBody>
                   {entries.map((entry) => {
-                    const updated = formatTimeLong(entry.updatedAt);
-                    const expires = entry.expiresAt ? formatTimeLong(entry.expiresAt) : null;
+                    const updated = formatTimeLong(entry.updatedAt, dateDisplayFormat);
+                    const expires = entry.expiresAt ? formatTimeLong(entry.expiresAt, dateDisplayFormat) : null;
                     const selected = selectedRowIdSet.has(stickySessionRowId(entry));
                     return (
                       <TableRow key={`${entry.kind}:${entry.key}`} data-state={selected ? "selected" : undefined}>

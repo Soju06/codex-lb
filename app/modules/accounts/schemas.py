@@ -100,6 +100,7 @@ class AccountSummary(DashboardModel):
     window_minutes_secondary: int | None = None
     window_minutes_monthly: int | None = None
     last_refresh_at: datetime | None = None
+    usage_refreshed_at: datetime | None = Field(default=None, exclude=True)
     capacity_credits_primary: float | None = None
     remaining_credits_primary: float | None = None
     capacity_credits_secondary: float | None = None

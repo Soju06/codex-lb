@@ -56,7 +56,7 @@ describe("useDashboardPreferencesStore", () => {
     );
   });
 
-  it("restores stored account list sort on initialization", async () => {
+  it("migrates the legacy credits sort to purchased credits", async () => {
     window.localStorage.setItem(
       "codex-lb-dashboard-account-list-sort",
       JSON.stringify({ key: "credits", direction: "desc" }),
@@ -65,9 +65,9 @@ describe("useDashboardPreferencesStore", () => {
 
     useDashboardPreferencesStore.getState().initializePreferences();
 
-    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "credits", direction: "desc" });
+    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "purchasedCredits", direction: "desc" });
     expect(window.localStorage.getItem("codex-lb-dashboard-account-list-sort")).toBe(
-      JSON.stringify({ key: "credits", direction: "desc" }),
+      JSON.stringify({ key: "purchasedCredits", direction: "desc" }),
     );
   });
 

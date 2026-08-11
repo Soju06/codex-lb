@@ -83,15 +83,59 @@ The default compact request budget MUST be at least 180 seconds, and the default
 - **THEN** `compact_request_budget_seconds` is at least 180 seconds
 - **AND** `stream_idle_timeout_seconds` is at least 600 seconds
 
+### Requirement: Responses upstream websocket liveness is bounded
+
+The proxy MUST configure direct and routed upstream Responses WebSocket transports with finite ping/pong liveness detection derived from `proxy_downstream_websocket_idle_timeout_seconds`. When an established Responses WebSocket is terminated because its transport did not receive the required pong, the adapter MUST classify the failure as `upstream_websocket_liveness_timeout`. Direct WebSocket and HTTP bridge relay owners MUST treat that failure as account neutral, MUST NOT transparently replay a pending request whose delivery is ambiguous, MUST finalize its pending request ownership exactly once, and MUST retire the affected upstream socket so a later client retry opens a fresh connection. An HTTP bridge reader MUST suppress its own pending-deque settlement only when a concurrent submitter explicitly claimed liveness-settlement ownership under the session lifecycle lock; `session.closed` alone MUST NOT suppress settlement.
+
+#### Scenario: Direct Responses websocket loses pong liveness
+
+- **GIVEN** a direct upstream Responses WebSocket has been established
+- **WHEN** the `websockets` keepalive watchdog terminates it after a pong timeout
+- **THEN** the pending request fails with `upstream_websocket_liveness_timeout`
+- **AND** the request is not transparently replayed
+- **AND** the selected account receives no failure-health signal
+- **AND** the affected upstream socket is retired
+
+#### Scenario: Routed Responses websocket loses pong liveness
+
+- **GIVEN** a routed upstream Responses WebSocket has been established for an HTTP bridge or direct WebSocket client
+- **WHEN** the aiohttp heartbeat watchdog terminates it after a pong timeout
+- **THEN** the pending request fails with `upstream_websocket_liveness_timeout`
+- **AND** the request is not transparently replayed
+- **AND** the selected account receives no failure-health signal
+- **AND** the affected upstream socket is retired
+
+#### Scenario: Long turn remains healthy through control frames
+
+- **GIVEN** a Responses turn emits no application event within the liveness interval
+- **WHEN** the upstream WebSocket continues replying to transport pings
+- **THEN** the proxy keeps the upstream socket open
+- **AND** the existing Responses request budget remains authoritative for the turn
+
+#### Scenario: Closed bridge without a sender claim later loses pong liveness
+
+- **GIVEN** an HTTP bridge session has multiple pending requests
+- **AND** a separate submit failure marks the session closed without claiming liveness-settlement ownership
+- **WHEN** the still-running upstream transport later expires its heartbeat
+- **THEN** the reader settles every pending request with `upstream_websocket_liveness_timeout`
+- **AND** the selected account receives no failure-health signal
+
+#### Scenario: Claimed bridge settlement survives submitter cancellation
+
+- **GIVEN** an HTTP bridge submitter claims liveness-settlement ownership after its send fails
+- **WHEN** the submitter is cancelled before whole-deque settlement completes
+- **THEN** settlement continues until every pending sibling is finalized exactly once
+- **AND** the submitter cancellation is preserved after settlement completes
+
 ### Requirement: Upstream websocket drops penalize affected accounts
-When an upstream websocket closes while one or more streamed response requests are pending and have not reached a terminal event, the proxy MUST record a transient upstream error for the account before signaling failure for those pending requests, except when the close carries a classified process-wide network failure. A classified process-wide network failure MUST remain account neutral and use its network error code. For other closes, the proxy MUST surface `stream_incomplete` to affected pending requests except when a direct Responses WebSocket request has already successfully emitted a finite integer `sequence_number`. For that sequenced direct-WebSocket case, the proxy MUST record the request outcome as `stream_incomplete` without emitting a synthetic terminal frame under the active response id, then MUST close the downstream WebSocket with code 1011.
+When an upstream websocket closes while one or more streamed response requests are pending and have not reached a terminal event, the proxy MUST record a transient upstream error for the account before signaling failure for those pending requests, except when the close carries a classified process-wide network failure or upstream WebSocket liveness timeout. A classified process-wide network failure or upstream WebSocket liveness timeout MUST remain account neutral and use its classified error code. For other closes, the proxy MUST surface `stream_incomplete` to affected pending requests except when a direct Responses WebSocket request has already successfully emitted a finite integer `sequence_number`. For that sequenced direct-WebSocket case, the proxy MUST record the request outcome as `stream_incomplete` without emitting a synthetic terminal frame under the active response id, then MUST close the downstream WebSocket with code 1011.
 
 #### Scenario: websocket closes before pending responses complete
 
 - **GIVEN** a streamed response request is pending on an upstream websocket
 - **AND** the direct downstream response has not emitted a numeric sequence, or the request uses another transport
 - **WHEN** the websocket closes before a terminal response event is observed
-- **AND** the close does not carry a classified process-wide network failure
+- **AND** the close does not carry a classified process-wide network failure or upstream WebSocket liveness timeout
 - **THEN** the pending request fails with `stream_incomplete`
 - **AND** the account receives a transient upstream failure signal for routing
 
@@ -99,10 +143,19 @@ When an upstream websocket closes while one or more streamed response requests a
 
 - **GIVEN** a direct Responses WebSocket request has successfully emitted a finite integer `sequence_number`
 - **WHEN** the upstream websocket closes before a terminal response event is observed
+- **AND** the close does not carry a classified process-wide network failure or upstream WebSocket liveness timeout
 - **THEN** the request is recorded as failed with `stream_incomplete`
 - **AND** no synthetic terminal frame is emitted under the active response id
 - **AND** the downstream WebSocket closes with code 1011
 - **AND** the account receives a transient upstream failure signal for routing
+
+#### Scenario: websocket liveness timeout remains account neutral
+
+- **GIVEN** a streamed response request is pending on an upstream websocket
+- **WHEN** its transport reports `upstream_websocket_liveness_timeout`
+- **THEN** the pending request fails with that classified error code
+- **AND** the account receives no failure-health signal
+- **AND** the request is not transparently replayed
 
 ### Requirement: Single HTTP bridge previous-response misses recover or fail closed
 When an HTTP bridge session receives an anonymous upstream `previous_response_not_found` error for a single pending follow-up request, the service MUST treat the error as an internal continuity-loss signal. It MUST either recover through the existing previous-response rebind path or rewrite the error to a retryable continuity failure instead of forwarding the raw upstream invalid-request error.
@@ -1610,21 +1663,24 @@ requests MUST NOT wait on an orphaned creation future that can never complete.
 
 When `POST /backend-api/codex/responses` receives a request whose top-level `input` array contains exactly one `{"type":"compaction_trigger"}` item as its final element, the proxy SHALL remove that trigger before calling upstream compaction handling and SHALL emit a raw SSE stream that contains exactly one compaction output item.
 
-The stream MUST include a `response.output_item.done` event whose `item` is a `compaction` record, and the terminal `response.completed` event MUST carry the same single compaction item in `response.output`. When the selected encrypted upstream compaction item carries a non-empty `id`, both events MUST preserve that exact ID with its `encrypted_content` so a later replay retains the ciphertext's item binding.
+The stream MUST emit `response.created`, `response.output_item.added`, `response.output_item.done`, and `response.completed` in that order with monotonically increasing sequence numbers. The added event MUST expose the selected compaction item as in progress. The done event and terminal completed response MUST carry the same terminal `compaction` item. When the selected encrypted upstream compaction item carries a non-empty `id` or `status`, the synthetic stream MUST preserve those values with its `encrypted_content`; it MUST NOT generate a replacement item ID.
 
-For Codex-affinity standalone compact requests, `POST /backend-api/codex/responses/compact` SHALL normalize an upstream remote-compaction-v2 response that includes historical message output plus a compaction summary into the single compact output item required by Codex clients. A non-empty upstream compaction item `id` MUST be preserved in that normalized output item.
+For Codex-affinity standalone compact requests, `POST /backend-api/codex/responses/compact` SHALL normalize an upstream remote-compaction-v2 response that includes historical message output plus a compaction summary into the single compact output item required by Codex clients. A non-empty upstream compaction item `id` or `status` MUST be preserved in that normalized output item.
 
 OpenAI-style `/v1/responses/compact` is unchanged by this requirement.
 
-#### Scenario: terminal trigger is converted into a compact stream
+#### Scenario: terminal trigger emits a complete compact lifecycle
 - **WHEN** a `POST /backend-api/codex/responses` request ends with exactly one top-level `compaction_trigger`
-- **THEN** the proxy strips the trigger, invokes compact handling, and streams one `response.output_item.done` event containing a `compaction` item
-- **AND** the terminal `response.completed` event carries that same item in `response.output`
+- **THEN** the proxy strips the trigger and invokes compact handling
+- **AND** it emits created, added, done, and completed events in that order
+- **AND** their sequence numbers increase monotonically from zero
+- **AND** the done event and completed response contain the same single terminal compaction item
 
-#### Scenario: encrypted compaction item ID survives trigger streaming
-- **WHEN** compaction handling for a terminal trigger returns encrypted content in an item with a non-empty `cmp_*` ID
-- **THEN** the `response.output_item.done` item preserves that exact ID
-- **AND** the `response.completed` output item preserves the same ID with the same encrypted content
+#### Scenario: encrypted compaction item identity survives trigger streaming
+- **WHEN** compaction handling for a terminal trigger returns encrypted content with a non-empty upstream `cmp_*` ID and terminal status
+- **THEN** the added event exposes that ID with in-progress status
+- **AND** the done event and completed response preserve the exact upstream ID, terminal status, and encrypted content
+- **AND** the proxy does not synthesize a replacement item ID
 
 #### Scenario: malformed trigger placement is rejected
 - **WHEN** a `POST /backend-api/codex/responses` request contains a duplicated or non-terminal top-level `compaction_trigger` item
@@ -1634,7 +1690,7 @@ OpenAI-style `/v1/responses/compact` is unchanged by this requirement.
 #### Scenario: Codex-affinity standalone compact normalizes remote v2 output
 - **WHEN** a Codex-affinity `POST /backend-api/codex/responses/compact` request receives upstream output that contains historical message items and one compaction summary item
 - **THEN** the JSON response body contains exactly one `output` item for that compaction summary
-- **AND** the normalized item preserves the compaction summary's non-empty upstream ID
+- **AND** the normalized item preserves the compaction summary's non-empty upstream ID and status
 - **AND** it does not expose historical message items as standalone compact output
 
 ### Requirement: Request logs expose upstream Responses transport
@@ -2335,7 +2391,7 @@ top-level `instructions` unchanged.
 
 ### Requirement: Responses Lite follow-up transformations fail closed
 
-After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
+After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a complete terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. A latest output anchored by `previous_response_id` or a non-empty `conversation` remains required only when its matching call is absent from supplied input. A supplied call matches an output only when both `call_id` and the function/custom/apply-patch protocol variant are compatible. An unmatched latest tool call and a terminal tool call or matching pair classified as side-effecting by the canonical tool-safety classifier remain required compact context. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
 
 #### Scenario: Oversized compact input keeps the Lite prelude
 
@@ -2343,12 +2399,49 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **THEN** every required `additional_tools` item remains in the upstream input
 - **AND** typed and role-only system/developer state remains in the upstream input
 
-#### Scenario: Oversized compact input keeps the latest tool item
+#### Scenario: Compact input keeps a latest tool pair that fits
 
-- **WHEN** compact trimming is required and the latest input item is a tool call or tool output
+- **WHEN** compact trimming is required, the latest input item is a non-state, non-side-effecting tool call or tool output, and its complete pair fits with required anchors and trim markers
 - **THEN** the latest item remains in the upstream input
 - **AND** any matching call or output present in the supplied input is retained with it
-- **AND** the service returns `responses_compact_input_too_large` instead of silently dropping the latest item when the required pair cannot fit
+
+#### Scenario: Oversized non-state tool tail leaves room for trim markers
+
+- **WHEN** the latest input item is a non-state, non-side-effecting tool call or output whose complete pair cannot fit with required anchors and trim markers
+- **THEN** the service omits the call and output together and represents the omission with a compact-trim marker
+- **AND** it does not return `responses_compact_input_too_large` solely because the pair fit before marker framing
+- **AND** the marker does not claim omitted terminal context was preserved
+
+#### Scenario: Continuity-anchored latest tool output remains required
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest input item is a tool output without a matching call in the supplied input
+- **THEN** the output remains in the upstream input because its call belongs to the prior response
+- **AND** the service returns `responses_compact_input_too_large` when that required output cannot fit
+
+#### Scenario: Ordinary non-patch paired tail may be omitted
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest ordinary, non-`apply_patch` tool output has a matching call in supplied input
+- **THEN** compact trimming MAY omit the complete pair when it cannot fit
+- **AND** this allowance does not apply to an `apply_patch` call or output
+
+#### Scenario: Reused call ID from another tool variant does not satisfy continuity
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest tool
+  output reuses the `call_id` of an incompatible function/custom/apply-patch
+  call variant in supplied input
+- **THEN** the latest output remains required as continuity from the previous response
+- **AND** the incompatible supplied call is not retained as its pair
+
+#### Scenario: Oversized latest unmatched tool call fails closed
+
+- **WHEN** the latest compact input item is an unmatched tool call that cannot fit the compact wire budget
+- **THEN** the service returns `responses_compact_input_too_large` rather than representing the call with a compact-trim marker
+
+#### Scenario: Side-effecting tail remains required
+
+- **WHEN** the latest compact input item is an `apply_patch_call`, `apply_patch_call_output`, or a tool call or matching pair classified as side-effecting by the canonical tool-safety classifier
+- **THEN** the item and any matching counterpart remain required compact context
+- **AND** the service returns `responses_compact_input_too_large` rather than omitting the side-effecting patch record when they cannot fit
 
 #### Scenario: Reused call IDs keep only the required occurrence
 
@@ -3257,3 +3350,115 @@ Within each streaming layer (core client consumer, streaming mixin, bridge upstr
 
 - **WHEN** the rewrite step removes duplicate tool calls
 - **THEN** the returned line, payload, and validated event all reflect the rewritten content
+
+### Requirement: Durable bridge ownership distinguishes process incarnations
+
+Durable HTTP bridge ownership MUST include a per-process owner epoch in
+addition to the stable bridge instance id and the existing owner fencing epoch.
+The process owner epoch MUST be generated when the process starts and MUST be
+persisted on newly claimed durable HTTP bridge session rows.
+
+On startup, an instance MUST retire durable HTTP bridge sessions whose
+`owner_instance_id` equals the current instance id but whose process owner epoch
+is missing or differs from the current process owner epoch. Retired rows MUST
+be closed and MUST NOT remain attachable through session-header,
+turn-state, previous-response, latest-turn-state, or latest-response lookup.
+Retired rows MUST clear stored previous-response, latest-turn-state, input
+fingerprint, and pending-tool continuity anchors before any future claim can
+reuse the same canonical session key.
+
+#### Scenario: Same-container restart retires previous-process rows
+
+- **GIVEN** a durable HTTP bridge session is ACTIVE under instance
+  `container-74e8e7cda9fb` and process epoch `boot-a`
+- **WHEN** codex-lb starts again in the same container id with process epoch
+  `boot-b`
+- **THEN** startup closes the `boot-a` durable session row
+- **AND** request-target lookup for that session header, turn state, or
+  previous response no longer returns the closed row
+- **AND** rows already owned by `boot-b` remain attachable
+
+### Requirement: Dead durable anchors recover transparently when safe
+
+The proxy MUST classify proven-dead durable anchors as automatic recovery
+candidates before returning any client-visible error.
+
+When a continuity-bound HTTP bridge request would otherwise return a retryable
+`stream_idle_timeout` or cooldown terminal, and the durable lookup that supplied
+the request's previous-response anchor is proven dead because its owner
+instance, process owner epoch, or lease is no longer current, the proxy MUST
+dispatch a fresh turn transparently when the request payload has an existing
+safe replay proof, including account-neutral full-context resends and
+proxy-injected anchor requests whose captured fresh body is replay-safe. The
+client MUST receive the normal upstream stream for that fresh turn and MUST NOT
+receive a bridge-specific recovery error.
+
+When the request is bound to a client-provided anchor that cannot be safely
+replayed as a fresh turn, the proxy MUST return the same OpenAI-compatible
+`previous_response_not_found` error shape and HTTP status used by the existing
+previous-response-not-found path. The proxy MUST NOT expose a
+`bridge_continuity_recovery_required` code to clients. The proxy MUST keep the
+existing retryable `stream_idle_timeout` semantics when the durable owner is
+current and the failure is ordinary transient upstream silence.
+
+#### Scenario: Previous-process anchor with replayable context recovers automatically
+
+- **GIVEN** a request is bound to a durable previous-response anchor
+- **AND** that durable row belongs to the same instance id but a different
+  process owner epoch
+- **AND** the payload has a safe full-context replay proof
+- **WHEN** the bridge hits the pre-submit, startup-cooldown, or retry-circuit
+  idle terminal path
+- **THEN** the proxy dispatches the request as a fresh turn without the dead
+  previous-response anchor
+- **AND** the client receives the normal streaming response
+- **AND** the response does not include `stream_idle_timeout` retry guidance or
+  a bridge-specific recovery error
+
+#### Scenario: Unreplayable client anchor uses the standard not-found contract
+
+- **GIVEN** a request is bound to a client-provided durable previous-response
+  anchor
+- **AND** that durable row belongs to a dead owner
+- **AND** the payload does not have a safe fresh-turn replay proof
+- **WHEN** the bridge must fail closed
+- **THEN** the client receives the standard `previous_response_not_found`
+  error shape for `previous_response_id`
+- **AND** HTTP error collection uses the standard previous-response-not-found
+  status
+- **AND** the response does not include a bridge-specific recovery code
+
+#### Scenario: Current-owner silence remains retryable
+
+- **GIVEN** a request is bound to a durable owner whose instance id, process
+  owner epoch, and lease are current
+- **WHEN** upstream produces no response events through the existing idle window
+- **THEN** the proxy preserves the existing retryable `stream_idle_timeout`
+  behavior
+
+### Requirement: Repeated zero-event idle failures poison dead anchors
+
+For hard HTTP bridge keys, repeated zero-event idle failures MUST use the
+existing durable retry-circuit counter to identify an anchor that should no
+longer remain addressable. When consecutive failures for the same hard bridge
+key reach the configured poison threshold, the proxy MUST abandon durable
+continuity for that session and retire the bridge even when admission waiters
+exist. The default threshold MUST be no greater than seven failures.
+
+#### Scenario: Admission waiters cannot defer anchor poisoning forever
+
+- **GIVEN** a hard durable bridge key has admission waiters
+- **AND** repeated zero-event idle failures for that same key reach the poison
+  threshold
+- **WHEN** the reader failure path would normally defer retirement for the
+  admission waiter
+- **THEN** the proxy clears the durable continuity anchors
+- **AND** retires the session despite the admission waiter
+- **AND** the next attach starts from fresh durable state rather than the
+  poisoned previous-response anchor
+
+#### Scenario: Lease liveness comparison is timezone-safe
+- **GIVEN** a durable bridge session whose `lease_expires_at` was read from a `timestamptz` column (offset-aware) on PostgreSQL
+- **WHEN** the dead-owner classifier evaluates lease liveness against the application's naive-UTC clock
+- **THEN** both timestamps MUST be normalized to naive UTC before comparison
+- **AND** the anchored-lookup path MUST NOT raise on mixed-awareness datetimes

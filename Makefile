@@ -32,7 +32,14 @@ POSTGRES_PYTEST_TARGETS := \
 	tests/integration/test_accounts_api_probe.py::test_reimport_clears_pending_downgrade_evidence \
 	tests/integration/test_repositories.py::test_replace_reauthorized_discards_pending_downgrade_evidence \
 	tests/integration/test_repositories.py::test_upsert_account_slot_discards_pending_downgrade_evidence_on_reimport \
-	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade
+	tests/integration/test_migrations.py::test_account_plan_downgrade_observations_migration_upgrade_and_downgrade \
+	tests/integration/test_usage_repository.py::test_bulk_history_since_primary_query_plan_is_index_only_postgresql \
+	tests/integration/test_usage_repository.py::test_bulk_history_since_cutoff_query_plan_is_index_only_postgresql \
+	tests/integration/test_usage_repository.py::test_bulk_history_since_secondary_query_plan_is_index_only_postgresql \
+	tests/integration/test_usage_repository.py::test_bulk_history_since_covered_read_matches_non_covered_read_postgresql \
+	tests/integration/test_migrations.py::test_usage_history_bulk_covering_indexes_migration_upgrade_and_downgrade \
+	tests/integration/test_migrations.py::test_usage_history_covering_index_migration_repairs_invalid_leftover_postgresql \
+	tests/integration/test_migrations.py::test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql
 SHELL := /bin/bash
 
 .PHONY: help

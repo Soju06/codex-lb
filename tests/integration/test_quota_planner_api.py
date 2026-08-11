@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -302,88 +304,101 @@ async def test_quota_planner_warm_now_refuses_weekly_only_account(async_client, 
 async def test_quota_planner_warm_now_keeps_bootstrap_for_metadata_less_primary_rows(
     monkeypatch, async_client, db_setup
 ):
+    if not hasattr(time, "tzset"):
+        pytest.skip("tzset is required to simulate non-UTC local time")
+
     del db_setup
+    original_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Seoul"
+    time.tzset()
     encryptor = TokenEncryptor()
-    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
-    async with SessionLocal() as session:
-        account = Account(
-            id="acc-metadata-less",
-            email="metadata-less@example.test",
-            plan_type="plus",
-            access_token_encrypted=encryptor.encrypt("access"),
-            refresh_token_encrypted=encryptor.encrypt("refresh"),
-            id_token_encrypted=encryptor.encrypt("id"),
-            last_refresh=utcnow(),
-            status=AccountStatus.ACTIVE,
-        )
-        session.add(account)
-        # A legacy primary row without duration metadata plus a newer weekly
-        # row: the metadata-less sample keeps the legacy bootstrap path and
-        # must not be rejected as a superseded short window.
-        session.add(
-            UsageHistory(
+    try:
+        now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+        async with SessionLocal() as session:
+            account = Account(
+                id="acc-metadata-less",
+                email="metadata-less@example.test",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+            )
+            session.add(account)
+            # A legacy primary row without duration metadata plus a newer weekly
+            # row: the metadata-less sample keeps the legacy bootstrap path and
+            # must not be rejected as a superseded short window.
+            session.add(
+                UsageHistory(
+                    account_id="acc-metadata-less",
+                    used_percent=0.0,
+                    recorded_at=utcnow() - timedelta(hours=3),
+                    window="primary",
+                    reset_at=now_epoch - 7200,
+                    window_minutes=None,
+                )
+            )
+            session.add(
+                UsageHistory(
+                    account_id="acc-metadata-less",
+                    used_percent=40.0,
+                    recorded_at=utcnow(),
+                    window="secondary",
+                    reset_at=now_epoch + 5 * 24 * 3600,
+                    window_minutes=10080,
+                )
+            )
+            repo = QuotaPlannerRepository(session)
+            await repo.upsert_settings(
+                PlannerSettings(
+                    mode="auto",
+                    timezone="UTC",
+                    working_days=(0, 1, 2, 3, 4),
+                    working_hours_start="09:00",
+                    working_hours_end="18:00",
+                    prewarm_enabled=True,
+                    prewarm_lead_minutes=300,
+                    max_warmups_per_day=3,
+                    max_warmup_credits_per_day=1.0,
+                    min_expected_gain=1.0,
+                    forecast_quantile="p75",
+                    allow_synthetic_traffic=True,
+                    warmup_model_preference="gpt-5.4-mini",
+                    dry_run=False,
+                )
+            )
+            await repo.add_window_observation(
                 account_id="acc-metadata-less",
-                used_percent=0.0,
-                recorded_at=utcnow() - timedelta(hours=3),
-                window="primary",
-                reset_at=now_epoch - 7200,
-                window_minutes=None,
+                model="gpt-5.4-mini",
+                source="warmup_probe",
+                confidence="observed",
             )
-        )
-        session.add(
-            UsageHistory(
-                account_id="acc-metadata-less",
-                used_percent=40.0,
-                recorded_at=utcnow(),
-                window="secondary",
-                reset_at=now_epoch + 5 * 24 * 3600,
-                window_minutes=10080,
-            )
-        )
-        repo = QuotaPlannerRepository(session)
-        await repo.upsert_settings(
-            PlannerSettings(
-                mode="auto",
-                timezone="UTC",
-                working_days=(0, 1, 2, 3, 4),
-                working_hours_start="09:00",
-                working_hours_end="18:00",
-                prewarm_enabled=True,
-                prewarm_lead_minutes=300,
-                max_warmups_per_day=3,
-                max_warmup_credits_per_day=1.0,
-                min_expected_gain=1.0,
-                forecast_quantile="p75",
-                allow_synthetic_traffic=True,
-                warmup_model_preference="gpt-5.4-mini",
-                dry_run=False,
-            )
-        )
-        await repo.add_window_observation(
-            account_id="acc-metadata-less",
-            model="gpt-5.4-mini",
-            source="warmup_probe",
-            confidence="observed",
-        )
 
-    async def fake_send(self, *, account, model, request_id):
-        del self, account, model, request_id
-        return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+        async def fake_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
 
-    async def noop_record_effect(self, account, model, *, source, confidence):
-        del self, account, model, source, confidence
+        async def noop_record_effect(self, account, model, *, source, confidence):
+            del self, account, model, source, confidence
 
-    monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
-    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+        monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
 
-    response = await async_client.post(
-        "/api/quota-planner/warm-now",
-        json={"accountId": "acc-metadata-less", "model": "gpt-5.4-mini"},
-    )
+        response = await async_client.post(
+            "/api/quota-planner/warm-now",
+            json={"accountId": "acc-metadata-less", "model": "gpt-5.4-mini"},
+        )
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "executed"
+    assert payload["status"] == "executed", payload
 
 
 @pytest.mark.asyncio

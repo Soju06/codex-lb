@@ -985,7 +985,7 @@ def _websocket_event_error_payload(
     if event_type == "error":
         error = payload.get("error")
         if isinstance(error, dict):
-            return cast(dict[str, JsonValue], error)
+            return error
         # The ChatGPT-backed Codex websocket can emit OpenAI-style error
         # details directly on the event frame instead of under an ``error``
         # envelope. Normalize those fields into an error-detail object so the
@@ -995,7 +995,7 @@ def _websocket_event_error_payload(
     if event_type == "response.failed":
         response = payload.get("response")
         error = response.get("error") if isinstance(response, dict) else None
-        return cast(dict[str, JsonValue], error) if isinstance(error, dict) else None
+        return error if isinstance(error, dict) else None
     return None
 
 

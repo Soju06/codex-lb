@@ -27,7 +27,7 @@ from app.db.models import (
     RequestLog,
     RequestUsageHourlyRollup,
 )
-from app.db.session import relax_commit_durability, sqlite_writer_section
+from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
 from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, to_dimension
 from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_hourly_window
@@ -388,6 +388,12 @@ class ApiKeysRepository:
     async def commit(self) -> None:
         await self._session.commit()
 
+    async def update_last_used(self, key_id: str, *, commit: bool = True) -> None:
+        """Compatibility touch for maintenance and durability checks."""
+        await self._session.execute(update(ApiKey).where(ApiKey.id == key_id).values(last_used_at=utcnow()))
+        if commit:
+            await self._session.commit()
+
     async def rollback(self) -> None:
         await self._session.rollback()
 
@@ -603,10 +609,11 @@ class ApiKeysRepository:
         model: str,
         items: list[UsageReservationItemData],
     ) -> None:
-        # Telemetry write: reservation creation (and the limit counters it
-        # rides with) is per-request usage accounting, so the enclosing
-        # transaction's commit may skip the synchronous WAL flush.
-        await relax_commit_durability(self._session)
+        # Reservation accounting keeps full commit durability. On external/HA
+        # PostgreSQL a server failover does not kill in-flight application
+        # requests, so an acked-but-lost commit here would desynchronize the
+        # reservation ledger from requests that still complete (settlement
+        # invariant).
         reservation = ApiKeyUsageReservation(
             id=reservation_id,
             api_key_id=key_id,
@@ -739,11 +746,13 @@ class ApiKeysRepository:
         cached_input_tokens: int | None,
         cost_microdollars: int | None,
     ) -> None:
-        # Telemetry write: reservation settlement (finalize/fail/release,
-        # including the last_used_at touch that rides the same transaction)
-        # is per-request usage accounting, so the enclosing transaction's
-        # commit may skip the synchronous WAL flush.
-        await relax_commit_durability(self._session)
+        # Reservation accounting keeps full commit durability. Settlement
+        # (finalize/fail/release) is what puts completed-request usage on the
+        # books: on external/HA PostgreSQL a failover does not kill the
+        # application request, so an acked-but-lost settlement commit would
+        # leave the reservation "reserved" until the stale-release scheduler
+        # reverses the counters and records zero actual usage — dropping a
+        # completed request from token/cost/rate-limit accounting.
         await self._session.execute(
             update(ApiKeyUsageReservation)
             .where(ApiKeyUsageReservation.id == reservation_id)
@@ -800,14 +809,13 @@ class ApiKeysRepository:
                     if not reservation_ids:
                         break
 
-                    # Telemetry write: stale-reservation release settles the
-                    # same per-request accounting rows as the request-path
-                    # settlement (reservation status flip plus limit-counter
-                    # adjustments), and a crash-lost batch is simply reclaimed
-                    # by the next scheduler run. Each batch commits its own
-                    # transaction, so relax every batch individually.
-                    await relax_commit_durability(self._session)
-
+                    # Reservation accounting keeps full commit durability:
+                    # each batch flips reservation status and reverses limit
+                    # counters, mutating the same ledger as the request-path
+                    # settlement, so its durability must not depend on which
+                    # path settles the row. On external/HA PostgreSQL an
+                    # acked-but-lost batch commit silently reverts rows the
+                    # scheduler already reported as released.
                     item_result = await self._session.execute(
                         select(
                             ApiKeyUsageReservationItem.reservation_id,

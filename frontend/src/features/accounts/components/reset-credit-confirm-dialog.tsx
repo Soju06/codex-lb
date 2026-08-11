@@ -4,9 +4,10 @@ import {
   useRateLimitResetCredits,
 } from "@/features/accounts/hooks/use-accounts";
 import type { RateLimitResetCreditItem } from "@/features/accounts/schemas";
+import { useDateDisplayFormatStore, type DateDisplayFormat } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 import { getErrorMessage } from "@/utils/errors";
-import { formatLocalDateTimeSeconds, formatSingleUnitRemaining } from "@/utils/formatters";
+import { formatDateTimeInline, formatSingleUnitRemaining } from "@/utils/formatters";
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -44,11 +45,13 @@ function CreditExpiryLine({
   label,
   suffix,
   colorClass,
+  dateDisplayFormat,
 }: {
   expiresAt: string | null | undefined;
   label: string;
   suffix?: string;
   colorClass?: string;
+  dateDisplayFormat: DateDisplayFormat;
 }) {
   if (!expiresAt) {
     return <p className="text-xs text-muted-foreground">{label}{suffix ? ` ${suffix}` : ""}</p>;
@@ -57,7 +60,7 @@ function CreditExpiryLine({
   return (
     <p className="text-xs text-muted-foreground">
       {label}{" "}
-      {formatLocalDateTimeSeconds(expiresAt)}{" "}
+      {formatDateTimeInline(expiresAt, dateDisplayFormat)}{" "}
       <span
         className={cn(
           "tabular-nums",
@@ -82,6 +85,7 @@ export function ResetCreditConfirmDialog({
   summaryAvailableCount = 0,
 }: ResetCreditConfirmDialogProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const { resetCreditConsumeMutation } = useAccountMutations();
   const redeemRequestIdRef = useRef<string | null>(null);
   const snapshotQuery = useRateLimitResetCredits(accountId, open);
@@ -164,6 +168,7 @@ export function ResetCreditConfirmDialog({
                   expiresAt={soonest.expiresAt}
                   label={t("accounts.resetCreditDialog.resetExpiresOn")}
                   suffix={t("accounts.resetCreditDialog.willBeUsed")}
+                  dateDisplayFormat={dateDisplayFormat}
                 />
                 {otherCredits.map((credit) => (
                   <CreditExpiryLine
@@ -171,6 +176,7 @@ export function ResetCreditConfirmDialog({
                     expiresAt={credit.expiresAt}
                     label={t("accounts.resetCreditDialog.otherExpiresOn")}
                     colorClass="text-muted-foreground"
+                    dateDisplayFormat={dateDisplayFormat}
                   />
                 ))}
                 {!soonest.expiresAt && otherCredits.length === 0 ? (

@@ -299,15 +299,14 @@ async def get_background_session() -> AsyncIterator[AsyncSession]:
 async def relax_commit_durability(session: AsyncSession) -> None:
     """Relax commit durability for the current telemetry write transaction.
 
-    High-frequency append-only accounting/telemetry writes (request logs,
-    API-key usage reservations, usage history entries) dominate the slow-query
-    profile on PostgreSQL because every commit waits for a WAL fsync. Those
-    rows describe in-flight requests: if the server crashes, the in-flight
-    requests are lost anyway, so losing the final unflushed WAL window (bounded
-    by three times ``wal_writer_delay`` — up to ~600 ms at the default 200 ms
-    setting) keeps accounting semantics identical. For such transactions
-    this helper emits ``SET LOCAL synchronous_commit = off`` so the commit
-    returns without waiting for the WAL flush.
+    High-frequency append-only telemetry writes (request-log inserts, usage
+    history appends) dominate the slow-query profile on PostgreSQL because
+    every commit waits for a WAL fsync. Those rows are pure observability:
+    losing the final unflushed WAL window (bounded by three times
+    ``wal_writer_delay`` — up to ~600 ms at the default 200 ms setting) keeps
+    accounting semantics identical. For such transactions this helper emits
+    ``SET LOCAL synchronous_commit = off`` so the commit returns without
+    waiting for the WAL flush.
 
     ``SET LOCAL`` is transaction-scoped: PostgreSQL reverts it automatically
     at COMMIT/ROLLBACK, so nothing leaks onto the pooled connection. Executed
@@ -318,7 +317,11 @@ async def relax_commit_durability(session: AsyncSession) -> None:
 
     No-op on SQLite (durability there is governed by ``PRAGMA synchronous``).
     MUST NOT be used for configuration writes (accounts, API keys, settings,
-    limits management): those keep full durability.
+    limits management) or for API-key usage-reservation accounting (creation,
+    settlement, stale release): on external/HA PostgreSQL a server failover
+    does not kill in-flight application requests, so an acked-but-lost
+    reservation commit would desynchronize the accounting ledger from
+    requests that still complete. Those paths keep full durability.
     """
     bind = session.get_bind()
     if bind is None or bind.dialect.name != "postgresql":

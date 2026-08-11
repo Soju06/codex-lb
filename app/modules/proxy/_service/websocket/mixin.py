@@ -376,6 +376,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
     _assign_websocket_response_id,
+    _clear_websocket_stale_previous_response_cache,
     _find_websocket_request_state_by_response_id,
     _forget_websocket_stale_previous_response,
     _is_websocket_response_create,
@@ -4191,6 +4192,10 @@ class _WebSocketMixin:
     ) -> str | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+
+        if not getattr(proxy, "_websocket_stale_previous_response_cache_initialized", False):
+            _clear_websocket_stale_previous_response_cache()
+            setattr(proxy, "_websocket_stale_previous_response_cache_initialized", True)
 
         def _record_lookup_metadata(
             *,

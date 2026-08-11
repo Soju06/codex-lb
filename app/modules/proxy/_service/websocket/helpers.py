@@ -354,6 +354,17 @@ _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_LIMIT = 4096
 _websocket_stale_previous_response_index: dict[tuple[str, str | None], float] = {}
 
 
+def _clear_websocket_stale_previous_response_cache() -> None:
+    """Drop process-local negative entries when a proxy service is created.
+
+    The cache intentionally is not durable: it only suppresses repeated
+    lookups during a short recovery window. Clearing it with the service
+    lifecycle prevents entries from one app/test instance from affecting a
+    later instance that happens to receive the same synthetic response id.
+    """
+    _websocket_stale_previous_response_index.clear()
+
+
 def _prune_websocket_stale_previous_response_cache(now: float | None = None) -> None:
     current_time = time.monotonic() if now is None else now
     for cache_key, expires_at in tuple(_websocket_stale_previous_response_index.items()):

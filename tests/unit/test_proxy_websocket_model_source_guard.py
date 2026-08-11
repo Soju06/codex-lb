@@ -74,8 +74,11 @@ async def _run_guard(monkeypatch: pytest.MonkeyPatch, *, is_source_owned: bool):
         raising=False,
     )
 
-    service = cast(ws_mixin._WebSocketMixin, ws_mixin._WebSocketMixin())
-    request_state = cast(object, type("S", (), {"request_log_id": "log-1", "request_id": "req-1"})())
+    service = ws_mixin._WebSocketMixin()
+    request_state = cast(
+        ws_mixin._WebSocketRequestState,
+        type("S", (), {"request_log_id": "log-1", "request_id": "req-1"})(),
+    )
 
     account = await service._select_websocket_connect_account(  # type: ignore[attr-defined]
         anyio.current_time() + 30,

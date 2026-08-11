@@ -847,6 +847,86 @@ async def test_activity_and_top_error_exclude_cancelled_terminals(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_first_fold_pass_repairs_legacy_folded_rollout_window(db_setup):
+    """Rolling-upgrade fence (#1552): the cancelled_count migration lands
+    before old replicas drain, so a legacy leader can fold post-migration
+    hours with the old error fold (cancelled counted in error_count,
+    cancelled_count 0, client_disconnected in the error satellite) and
+    advance the watermark. The first hourly fold pass of new code must
+    refold the trailing window from raw — without touching buckets below
+    the surviving-raw clamp."""
+    now = utcnow()
+    hour = floor_to_hour(now - timedelta(hours=30))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_rw_fix", "rollout-fix@example.com"))
+        logs = RequestLogsRepository(session)
+        await _add_log(logs, account_id="acc_rw_fix", request_id="r_fix_ok", requested_at=hour)
+        for index in range(2):
+            await _add_log(
+                logs,
+                account_id="acc_rw_fix",
+                request_id=f"r_fix_cx_{index}",
+                requested_at=hour + timedelta(seconds=30 + index),
+                status="cancelled",
+                error_code="client_disconnected",
+            )
+        await _add_log(
+            logs,
+            account_id="acc_rw_fix",
+            request_id="r_fix_err",
+            requested_at=hour + timedelta(seconds=90),
+            status="error",
+            error_code="upstream_500",
+        )
+
+    time_rollup_module._upgrade_repair_done = True  # fold without the repair first
+    assert await run_hourly_fold_pass(now=now) >= 1
+
+    # Simulate the bucket having been folded by a LEGACY replica after the
+    # migration: old error fold, no cancelled split, cancelled disconnects
+    # in the error satellite. Also plant an orphaned rollup bucket BELOW the
+    # earliest surviving raw row (retention-pruned history) inside the
+    # repair span — the raw clamp must leave it untouched.
+    orphan_epoch = epoch_seconds(hour - timedelta(hours=2))
+    async with SessionLocal() as session:
+        await session.execute(
+            update(RequestUsageHourlyRollup)
+            .where(RequestUsageHourlyRollup.bucket_epoch == epoch_seconds(hour))
+            .values(error_count=3, cancelled_count=0)
+        )
+        repo = RequestUsageTimeRollupRepository(session)
+        await repo.add_errors(
+            [
+                HourlyErrorRollupRow(
+                    bucket_epoch=epoch_seconds(hour),
+                    account_id="acc_rw_fix",
+                    error_code="client_disconnected",
+                    error_count=2,
+                )
+            ]
+        )
+        await repo.add_hourly([_hourly_row(orphan_epoch, account_id="acc_rw_fix", request_count=5, error_count=5)])
+        await session.commit()
+
+    # New code's first pass (one-shot flag re-armed) repairs the window even
+    # though the watermark is already at target (no forward slice to fold).
+    time_rollup_module._upgrade_repair_done = False
+    await run_hourly_fold_pass(now=now)
+    time_rollup_module._upgrade_repair_done = True
+
+    hourly, errors, _demand, _watermark = await _dump_all_rollups()
+    repaired = next(r for r in hourly if r.bucket_epoch == epoch_seconds(hour))
+    assert repaired.request_count == 4
+    assert repaired.error_count == 1
+    assert repaired.cancelled_count == 2
+    error_keys = {(r.bucket_epoch, r.error_code): r.error_count for r in errors}
+    assert error_keys == {(epoch_seconds(hour), "upstream_500"): 1}
+    orphan = next(r for r in hourly if r.bucket_epoch == orphan_epoch)
+    assert orphan.request_count == 5
+    assert orphan.error_count == 5
+
+
+@pytest.mark.asyncio
 async def test_model_rewrite_skips_folded_rows(db_setup):
     """`update_model_for_request` must never rewrite rows below ANY rollup
     watermark (the bound is max(lifetime, hourly)): model is a folded

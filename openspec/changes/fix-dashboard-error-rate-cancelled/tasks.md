@@ -12,6 +12,11 @@
       usage builders, request-log aggregates, reports, and fleet metrics.
 - [x] 2.2 Exclude cancelled rows from `top_error` (raw paths) and exclude
       `client_disconnected` read-side from the folded error satellite.
+- [x] 2.4 Record model-source stream disconnects as `status='cancelled'`
+      (matching the main proxy path), with regression at the route.
+- [x] 2.5 Repair the rolling-upgrade fold window: one-shot bounded refold of
+      the trailing window on new code's first fold pass (leader-gated,
+      idempotent, clamped to surviving raw; no historical backfill).
 - [x] 2.3 Surface cancelled counts: dashboard overview metrics (demand-grain
       sourced), usage summary metrics, reports daily/summary rows, fleet
       pressure metrics.

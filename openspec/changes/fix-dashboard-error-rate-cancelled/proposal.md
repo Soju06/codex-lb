@@ -24,6 +24,10 @@ forward, not a numerator-only patch):
   rollup fold, the raw-tail bucket/activity/summary aggregates, the reports
   daily/summary aggregates, and the fleet pressure metrics. The error-rate
   denominator stays total requests.
+- Normalize the model-source streaming producer: a downstream disconnect
+  mid-stream (`CancelledError`/`GeneratorExit`) is recorded as
+  `status='cancelled'` (matching the main proxy streaming path) instead of
+  `status='error'`, so the status-driven numerators classify it correctly.
 - Exclude cancelled rows from `top_error` derivation; exclude the
   `client_disconnected` code read-side from the folded error satellite
   (historical satellite rows were folded under the old filter).
@@ -49,6 +53,20 @@ populate `cancelled_count`; pre-existing rows read `cancelled_count = 0`
 via the column's server default. The dashboard-overview cancelled total does
 not suffer this because it is sourced from the demand grain, which has
 carried `status` as a dimension across all folded history.
+
+Rolling-upgrade fence: the migration runs before old replicas drain, so a
+legacy leader can still fold post-migration hours with the old error fold
+and advance the shared watermark. Old writers run old code and cannot be
+fenced, so new code repairs instead: the first hourly fold pass of each
+new-code process refolds the trailing `UPGRADE_REPAIR_WINDOW` (48h — one
+backfill slice, comfortably longer than any rollout) below the watermark
+from raw, clamped to hours fully covered by surviving raw rows (retention
+prunes oldest-first with a contiguous frontier, so the clamp is exact).
+Idempotent DELETE-then-INSERT recomputation under the existing leader gate
+and fold-state row lock; the watermark does not move; buckets below the
+clamp — including all pre-deployment history — keep the disclosed legacy
+fold. This is a targeted repair of the rollout window, not a historical
+backfill.
 
 ## Capabilities
 

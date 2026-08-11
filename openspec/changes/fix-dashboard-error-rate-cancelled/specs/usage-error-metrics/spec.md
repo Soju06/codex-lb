@@ -10,6 +10,9 @@ when `status NOT IN ('success', 'cancelled')`. Rows with `status =
 'cancelled'` (normal client-side disconnect terminals, e.g.
 `error_code=client_disconnected`) MUST NOT be counted in any error numerator.
 Error-rate denominators MUST remain the total request count of the window.
+Every request-log producer MUST record a downstream client disconnect as
+`status='cancelled'`; in particular the model-source streaming path MUST NOT
+record a mid-stream client disconnect as `status='error'`.
 
 #### Scenario: Cancelled rows do not inflate the dashboard error rate
 
@@ -26,6 +29,16 @@ Error-rate denominators MUST remain the total request count of the window.
   metrics are computed
 - **THEN** each reports `error_count` / `total_errors` and each fleet
   `error_count` equals `1`
+
+#### Scenario: Model-source stream disconnects land as cancelled
+
+- **GIVEN** a streamed model-source request whose downstream client
+  disconnects mid-stream
+- **WHEN** the request log is written
+- **THEN** the row has `status='cancelled'` and
+  `error_code='client_disconnected'`
+- **AND** the window's error count excludes it, its cancelled count includes
+  it, and `top_error` does not report `client_disconnected`
 
 ### Requirement: Hourly rollups fold a cancelled_count measure
 
@@ -59,6 +72,38 @@ disclosed step change at deploy.
 - **WHEN** the dashboard reads it after upgrading
 - **THEN** the read succeeds with `cancelled_count=0` and the row's stored
   `error_count` unchanged
+
+### Requirement: New code repairs the rolling-upgrade fold window
+
+Because the migration runs before old replicas drain, a legacy replica may
+fold post-migration hours with the old error fold and advance the shared
+watermark. The first hourly fold pass of each new-code process MUST refold,
+from raw request logs, the trailing repair window below the current
+watermark (a bounded span that comfortably exceeds any rolling-upgrade
+duration), clamped to whole hours fully covered by surviving raw rows. The
+repair MUST be idempotent (converging DELETE-then-INSERT recomputation),
+MUST run under the existing fold leader gate and fold-state row lock, MUST
+NOT move the watermark, and MUST NOT touch folded buckets below the
+surviving-raw clamp (retention-pruned history is irrecoverable and keeps
+the disclosed legacy fold). This is a targeted repair of the rollout window
+only — not a historical backfill.
+
+#### Scenario: A legacy-folded post-migration bucket is repaired
+
+- **GIVEN** a bucket inside the repair window whose rollup rows carry the
+  legacy fold (cancelled rows in `error_count`, `cancelled_count=0`,
+  `client_disconnected` in the error satellite) while its raw rows survive
+- **WHEN** the new code runs its first hourly fold pass
+- **THEN** the bucket is recomputed with `error_count` excluding cancelled
+  rows, `cancelled_count` populated, and the `client_disconnected` satellite
+  rows removed
+
+#### Scenario: Buckets below the surviving-raw clamp are preserved
+
+- **GIVEN** a folded bucket inside the repair span whose raw rows were
+  already pruned by retention
+- **WHEN** the repair runs
+- **THEN** that bucket's rollup rows are left untouched
 
 ### Requirement: Top error excludes cancelled terminals
 

@@ -4811,7 +4811,11 @@ async def _source_chat_stream_with_settlement(
         # Client disconnect surfaces as CancelledError (task cancellation) or
         # GeneratorExit (generator aclose); both bypass ``except Exception``
         # and would leave the reservation charged until stale cleanup.
-        status = "error"
+        # Recorded as a cancelled terminal — the same normal client-side
+        # disconnect classification the main proxy streaming path writes —
+        # so it stays out of every error-rate numerator and top_error
+        # (#1552).
+        status = "cancelled"
         error_code = "client_disconnected"
         error_message = "client disconnected before stream completed"
         await _aclose_stream(stream)

@@ -2509,11 +2509,50 @@ async def test_resolve_websocket_previous_response_owner_suppresses_confirmed_st
             request_state=request_state,
         )
 
-    assert request_logs.lookup_calls == []
+    assert request_logs.lookup_calls == [("resp_stale_anchor_cache", None, "sid-stale-anchor-cache")]
     assert request_state.previous_response_owner_lookup_source == "stale_response_cache"
     assert request_state.previous_response_owner_lookup_outcome == "hit"
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_resolve_websocket_previous_response_owner_revalidates_shared_owner_after_stale_cache(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    request_logs.response_owner_by_id[("resp_stale_anchor_shared_owner", None, "sid-shared-owner")] = "acc-shared"
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_stale_anchor_shared_owner",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_stale_anchor_shared_owner",
+        session_id="sid-shared-owner",
+    )
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id=request_state.previous_response_id,
+        api_key_id=None,
+    )
+
+    owner = await service._resolve_websocket_previous_response_owner(
+        previous_response_id=request_state.previous_response_id,
+        api_key=None,
+        session_id=request_state.session_id,
+        surface="websocket_stream",
+        request_state=request_state,
+    )
+
+    assert owner == "acc-shared"
+    assert request_logs.lookup_calls == [("resp_stale_anchor_shared_owner", None, "sid-shared-owner")]
+    assert request_state.previous_response_owner_lookup_source == "request_logs"
+    assert request_state.previous_response_owner_lookup_outcome == "hit"
+    assert not websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id=request_state.previous_response_id,
+        api_key_id=None,
+    )
 
 
 def test_remember_websocket_previous_response_owner_invalidates_stale_anchor_cache(monkeypatch):

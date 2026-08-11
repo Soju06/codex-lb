@@ -48,7 +48,9 @@ class _HTTPBridgeRetryCircuitState:
     half_open_until: float = 0.0
 
 
-def _initialize_http_bridge_retry_circuit(service: Any) -> None:
+def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: Any = None) -> None:
+    if reset_transient_cache is not None:
+        reset_transient_cache()
     service._http_bridge_retry_circuits = {}
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()

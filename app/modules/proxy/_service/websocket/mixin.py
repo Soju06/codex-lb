@@ -376,7 +376,6 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
     _assign_websocket_response_id,
-    _clear_websocket_stale_previous_response_cache,
     _find_websocket_request_state_by_response_id,
     _forget_websocket_stale_previous_response,
     _is_websocket_response_create,
@@ -4193,10 +4192,6 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
 
-        if not getattr(proxy, "_websocket_stale_previous_response_cache_initialized", False):
-            _clear_websocket_stale_previous_response_cache()
-            setattr(proxy, "_websocket_stale_previous_response_cache_initialized", True)
-
         def _record_lookup_metadata(
             *,
             source: str,
@@ -4211,27 +4206,12 @@ class _WebSocketMixin:
             request_state.previous_response_owner_requested_at = requested_at
             request_state.previous_response_owner_session_id = owner_session_id
 
-        if previous_response_id is None:
-            return None
-        response_id = previous_response_id.strip()
-        if not response_id:
-            return None
-        api_key_id = api_key.id if api_key is not None else None
-        session_id_value = _facade()._normalize_session_id(session_id)
-        if (
-            request_state is not None
-            and not force_request_log_lookup
-            and not request_state.fresh_upstream_request_is_retry_safe
-            and _is_websocket_stale_previous_response(
-                previous_response_id=response_id,
-                api_key_id=api_key_id,
-            )
-        ):
-            _record_lookup_metadata(source="stale_response_cache", outcome="hit")
+        def _raise_stale_response_cache_suppression(*, outcome: str) -> NoReturn:
+            _record_lookup_metadata(source="stale_response_cache", outcome=outcome)
             _record_continuity_owner_resolution(
                 surface=surface,
                 source="stale_response_cache",
-                outcome="hit",
+                outcome=outcome,
                 previous_response_id=response_id,
                 session_id=session_id_value,
             )
@@ -4243,6 +4223,23 @@ class _WebSocketMixin:
                     error_type="server_error",
                 ),
             )
+
+        if previous_response_id is None:
+            return None
+        response_id = previous_response_id.strip()
+        if not response_id:
+            return None
+        api_key_id = api_key.id if api_key is not None else None
+        session_id_value = _facade()._normalize_session_id(session_id)
+        stale_cache_hit = (
+            request_state is not None
+            and not force_request_log_lookup
+            and not request_state.fresh_upstream_request_is_retry_safe
+            and _is_websocket_stale_previous_response(
+                previous_response_id=response_id,
+                api_key_id=api_key_id,
+            )
+        )
         cache_key = (response_id, api_key_id, session_id_value)
         cached_account_id = (
             None if force_request_log_lookup else proxy._websocket_previous_response_account_index.get(cache_key)
@@ -4274,6 +4271,8 @@ class _WebSocketMixin:
                     session_id=session_id_value,
                 )
         except Exception as exc:
+            if stale_cache_hit:
+                _raise_stale_response_cache_suppression(outcome="lookup_failed")
             if fallback_account_id is not None:
                 _record_lookup_metadata(source="request_cache_fallback", outcome="hit")
                 _record_continuity_owner_resolution(
@@ -4308,6 +4307,8 @@ class _WebSocketMixin:
                 _facade()._previous_response_owner_lookup_failed_error_envelope(),
             ) from exc
         if owner_record is None:
+            if stale_cache_hit:
+                _raise_stale_response_cache_suppression(outcome="hit")
             if force_request_log_lookup:
                 proxy._websocket_previous_response_account_index.pop(cache_key, None)
                 if session_id_value is not None:

@@ -14,9 +14,13 @@
       `client_disconnected` read-side from the folded error satellite.
 - [x] 2.4 Record model-source stream disconnects as `status='cancelled'`
       (matching the main proxy path), with regression at the route.
-- [x] 2.5 Repair the rolling-upgrade fold window: one-shot bounded refold of
-      the trailing window on new code's first fold pass (leader-gated,
-      idempotent, clamped to surviving raw; no historical backfill).
+- [x] 2.5 Repair the rolling-upgrade fold window: persisted
+      `upgrade_repair_from` marker (migration-stamped; epoch default for
+      old-code bootstraps; NULL only written by new code) driving a chunked,
+      crash-resumable refold of the exact legacy-suspect range, plus a
+      trailing-window flip-flop defense on each process's first fold pass
+      (leader-gated, idempotent, clamped to surviving raw; no historical
+      backfill).
 - [x] 2.3 Surface cancelled counts: dashboard overview metrics (demand-grain
       sourced), usage summary metrics, reports daily/summary rows, fleet
       pressure metrics.

@@ -241,6 +241,18 @@ class AccountUsageRollupState(Base):
         nullable=False,
         server_default=text("'1970-01-01 00:00:00'"),
     )
+    # Start of the hourly range a legacy (pre-cancelled_count) fold pass may
+    # have written after the migration ran (#1552 rolling-upgrade fence).
+    # The migration stamps existing rows with their hourly_folded_through;
+    # the epoch server default covers a state row bootstrapped by an OLD
+    # replica after the migration (its entire backfill is legacy-folded).
+    # Only NEW code writes NULL, after refolding [marker, watermark) from
+    # raw — so NULL always means "no legacy-suspect range outstanding".
+    upgrade_repair_from: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
 
 
 class RequestUsageHourlyRollup(Base):

@@ -848,13 +848,14 @@ async def test_activity_and_top_error_exclude_cancelled_terminals(db_setup):
 
 @pytest.mark.asyncio
 async def test_first_fold_pass_repairs_legacy_folded_rollout_window(db_setup):
-    """Rolling-upgrade fence (#1552): the cancelled_count migration lands
-    before old replicas drain, so a legacy leader can fold post-migration
-    hours with the old error fold (cancelled counted in error_count,
-    cancelled_count 0, client_disconnected in the error satellite) and
-    advance the watermark. The first hourly fold pass of new code must
-    refold the trailing window from raw — without touching buckets below
-    the surviving-raw clamp."""
+    """Rolling-upgrade flip-flop defense (#1552): with the persisted
+    `upgrade_repair_from` marker already NULL (new-code bootstrap, or a
+    completed marker repair), a legacy leader that regains fold leadership
+    mid-rollout can still write legacy buckets (cancelled counted in
+    error_count, cancelled_count 0, client_disconnected in the error
+    satellite). Each new-code process's first hourly fold pass must refold
+    the trailing UPGRADE_REPAIR_WINDOW from raw — without touching buckets
+    below the surviving-raw clamp."""
     now = utcnow()
     hour = floor_to_hour(now - timedelta(hours=30))
     async with SessionLocal() as session:
@@ -924,6 +925,93 @@ async def test_first_fold_pass_repairs_legacy_folded_rollout_window(db_setup):
     orphan = next(r for r in hourly if r.bucket_epoch == orphan_epoch)
     assert orphan.request_count == 5
     assert orphan.error_count == 5
+
+
+@pytest.mark.asyncio
+async def test_upgrade_repair_marker_covers_multi_slice_legacy_advance(db_setup):
+    """Rolling-upgrade fence, marker path (#1552): a legacy leader can
+    advance up to TS_MAX_SLICES_PER_PASS x TS_FOLD_SLICE in one pass, so no
+    fixed trailing window covers its damage. The persisted
+    `upgrade_repair_from` marker (stamped by the migration, epoch-defaulted
+    for old-code bootstraps) makes new code refold the exact suspect range
+    `[marker, watermark)` in chunks — persisting progress through the
+    marker — and clear it to NULL when done."""
+    now = utcnow()
+    # Two legacy-corrupted buckets more than one TS_FOLD_SLICE (48h) apart:
+    # the far one is unreachable by the trailing flip-flop window alone.
+    hour_far = floor_to_hour(now - timedelta(hours=70))
+    hour_near = floor_to_hour(now - timedelta(hours=30))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_mk", "marker-fix@example.com"))
+        logs = RequestLogsRepository(session)
+        for label, hour in (("far", hour_far), ("near", hour_near)):
+            await _add_log(logs, account_id="acc_mk", request_id=f"r_mk_{label}_ok", requested_at=hour)
+            for index in range(2):
+                await _add_log(
+                    logs,
+                    account_id="acc_mk",
+                    request_id=f"r_mk_{label}_cx_{index}",
+                    requested_at=hour + timedelta(seconds=30 + index),
+                    status="cancelled",
+                    error_code="client_disconnected",
+                )
+            await _add_log(
+                logs,
+                account_id="acc_mk",
+                request_id=f"r_mk_{label}_err",
+                requested_at=hour + timedelta(seconds=90),
+                status="error",
+                error_code="upstream_500",
+            )
+
+    time_rollup_module._upgrade_repair_done = True  # fold without the repair first
+    assert await run_hourly_fold_pass(now=now) >= 1
+
+    # Rewrite BOTH buckets to the legacy fold and arm the marker as the
+    # migration would have (stamped at the pre-rollout watermark, before a
+    # legacy leader advanced ~70h of slices past it).
+    marker = floor_to_hour(now - timedelta(hours=72))
+    async with SessionLocal() as session:
+        for hour in (hour_far, hour_near):
+            await session.execute(
+                update(RequestUsageHourlyRollup)
+                .where(RequestUsageHourlyRollup.bucket_epoch == epoch_seconds(hour))
+                .values(error_count=3, cancelled_count=0)
+            )
+        await RequestUsageTimeRollupRepository(session).add_errors(
+            [
+                HourlyErrorRollupRow(
+                    bucket_epoch=epoch_seconds(hour),
+                    account_id="acc_mk",
+                    error_code="client_disconnected",
+                    error_count=2,
+                )
+                for hour in (hour_far, hour_near)
+            ]
+        )
+        await session.execute(update(AccountUsageRollupState).values(upgrade_repair_from=marker))
+        await session.commit()
+
+    time_rollup_module._upgrade_repair_done = False
+    await run_hourly_fold_pass(now=now)
+    time_rollup_module._upgrade_repair_done = True
+
+    hourly, errors, _demand, _watermark = await _dump_all_rollups()
+    for hour in (hour_far, hour_near):
+        repaired = next(r for r in hourly if r.bucket_epoch == epoch_seconds(hour))
+        assert repaired.request_count == 4
+        assert repaired.error_count == 1
+        assert repaired.cancelled_count == 2
+    error_keys = {(r.bucket_epoch, r.error_code): r.error_count for r in errors}
+    assert error_keys == {
+        (epoch_seconds(hour_far), "upstream_500"): 1,
+        (epoch_seconds(hour_near), "upstream_500"): 1,
+    }
+    async with SessionLocal() as session:
+        state = (
+            await session.execute(select(AccountUsageRollupState).where(AccountUsageRollupState.id == 1))
+        ).scalar_one()
+        assert state.upgrade_repair_from is None
 
 
 @pytest.mark.asyncio

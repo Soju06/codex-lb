@@ -56,14 +56,28 @@ carried `status` as a dimension across all folded history.
 
 Rolling-upgrade fence: the migration runs before old replicas drain, so a
 legacy leader can still fold post-migration hours with the old error fold
-and advance the shared watermark. Old writers run old code and cannot be
-fenced, so new code repairs instead: the first hourly fold pass of each
-new-code process refolds the trailing `UPGRADE_REPAIR_WINDOW` (48h — one
-backfill slice, comfortably longer than any rollout) below the watermark
-from raw, clamped to hours fully covered by surviving raw rows (retention
-prunes oldest-first with a contiguous frontier, so the clamp is exact).
-Idempotent DELETE-then-INSERT recomputation under the existing leader gate
-and fold-state row lock; the watermark does not move; buckets below the
+and advance the shared watermark — up to `TS_MAX_SLICES_PER_PASS x
+TS_FOLD_SLICE` per pass when a backfill is behind, so no fixed trailing
+window can bound the damage. Old writers run old code and cannot be fenced,
+so the suspect range is persisted instead: the migration adds
+`account_usage_rollup_state.upgrade_repair_from`, stamping existing rows
+with their migration-time `hourly_folded_through`; the column's epoch server
+default marks a state row bootstrapped by an OLD replica after the migration
+(its whole backfill is legacy-folded), while new code's own bootstrap writes
+NULL — a value only new code ever writes. New code refolds
+`[upgrade_repair_from, hourly_folded_through)` from raw in slice-sized
+chunks (progress persists through the marker; a crash resumes; a
+pass-bounded incomplete repair continues next pass) and clears the marker
+when done. With the marker NULL, each process's first fold pass still
+refolds the trailing `UPGRADE_REPAIR_WINDOW` (48h — one backfill slice,
+comfortably longer than any rollout) as flip-flop defense: an old replica
+that regains fold leadership after the marker was cleared writes legacy
+buckets the marker no longer tracks, and the rollout that makes this
+possible guarantees another new-code process starts afterwards. Both paths
+clamp to hours fully covered by surviving raw rows (retention prunes
+oldest-first with a contiguous frontier, so the clamp is exact), run
+idempotent DELETE-then-INSERT recomputation under the existing leader gate
+and fold-state row lock, and never move the watermark; buckets below the
 clamp — including all pre-deployment history — keep the disclosed legacy
 fold. This is a targeted repair of the rollout window, not a historical
 backfill.
@@ -88,8 +102,10 @@ backfill.
   `app/modules/dashboard/builders.py` (+ schemas),
   `app/core/usage/logs.py`, `app/core/usage/types.py`, `app/db/models.py`.
 - **DB:** additive migration adding
-  `request_usage_hourly_rollups.cancelled_count` (server default 0);
-  downgrade drops the column.
+  `request_usage_hourly_rollups.cancelled_count` (server default 0) and
+  `account_usage_rollup_state.upgrade_repair_from` (nullable, epoch server
+  default, stamped to the migration-time watermark on existing rows);
+  downgrade drops both columns.
 - **API:** additive fields only — `cancelledCount` on dashboard overview
   metrics and fleet pressure metrics, `cancelled7d` on usage summary
   metrics, `cancelled_count` / `total_cancelled` on report rows. Existing

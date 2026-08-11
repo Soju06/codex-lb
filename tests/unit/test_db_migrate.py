@@ -478,11 +478,15 @@ def test_request_logs_transport_stays_in_additive_migration_chain(tmp_path: Path
 def test_hourly_rollup_cancelled_count_migration_round_trips_with_default_zero(tmp_path: Path) -> None:
     """#1552: the cancelled_count measure is additive on the current head —
     rows folded before the migration read 0 via the server default (no
-    backfill) and the downgrade drops only the new column."""
+    backfill) and the downgrade drops only the new columns. The fold-state
+    row is stamped with the migration-time watermark as the legacy-suspect
+    repair start (`upgrade_repair_from`), while rows inserted WITHOUT the
+    column afterwards (an old replica's bootstrap) default to the epoch."""
     db_path = tmp_path / "rollup-cancelled-count.db"
     url = _db_url(db_path)
     parent_revision = "20260806_120000_add_http_bridge_owner_process_epoch"
     cancelled_revision = "20260811_000000_add_hourly_rollup_cancelled_count"
+    watermark = "2026-08-10 07:00:00"
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
     engine = create_engine(to_sync_database_url(url))
@@ -511,11 +515,17 @@ def test_hourly_rollup_cancelled_count_migration_round_trips_with_default_zero(t
                     "error_count": 7,
                 },
             )
+            # The fold-state row (seeded by an earlier migration) sits
+            # mid-history at migration time.
+            connection.execute(
+                text("UPDATE account_usage_rollup_state SET hourly_folded_through = :hourly WHERE id = 1"),
+                {"hourly": watermark},
+            )
 
         result = run_upgrade(url, cancelled_revision, bootstrap_legacy=False)
         assert result.current_revision == cancelled_revision
 
-        with engine.connect() as connection:
+        with engine.begin() as connection:
             columns = {column["name"] for column in inspect(connection).get_columns("request_usage_hourly_rollups")}
             assert "cancelled_count" in columns
             row = connection.execute(
@@ -525,12 +535,34 @@ def test_hourly_rollup_cancelled_count_migration_round_trips_with_default_zero(t
                 )
             ).one()
             assert tuple(row) == (10, 7, 0)
+            # Existing state row: suspect range starts at the migration-time
+            # watermark.
+            marker = connection.execute(
+                text("SELECT upgrade_repair_from FROM account_usage_rollup_state WHERE id = 1")
+            ).scalar_one()
+            assert str(marker) == watermark
+            # An old replica's bootstrap after the migration omits the new
+            # column: the epoch server default marks its whole backfill
+            # legacy-suspect.
+            connection.execute(
+                text(
+                    "INSERT INTO account_usage_rollup_state (id, folded_through, hourly_folded_through) "
+                    "VALUES (2, :folded_through, :hourly)"
+                ),
+                {"folded_through": watermark, "hourly": watermark},
+            )
+            legacy_bootstrap_marker = connection.execute(
+                text("SELECT upgrade_repair_from FROM account_usage_rollup_state WHERE id = 2")
+            ).scalar_one()
+            assert str(legacy_bootstrap_marker) == "1970-01-01 00:00:00"
 
         command.downgrade(_build_alembic_config(url), parent_revision)
 
         with engine.connect() as connection:
             columns = {column["name"] for column in inspect(connection).get_columns("request_usage_hourly_rollups")}
             assert "cancelled_count" not in columns
+            state_columns = {column["name"] for column in inspect(connection).get_columns("account_usage_rollup_state")}
+            assert "upgrade_repair_from" not in state_columns
             row = connection.execute(
                 text(
                     "SELECT request_count, error_count "

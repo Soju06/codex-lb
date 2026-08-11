@@ -77,16 +77,33 @@ disclosed step change at deploy.
 
 Because the migration runs before old replicas drain, a legacy replica may
 fold post-migration hours with the old error fold and advance the shared
-watermark. The first hourly fold pass of each new-code process MUST refold,
-from raw request logs, the trailing repair window below the current
-watermark (a bounded span that comfortably exceeds any rolling-upgrade
-duration), clamped to whole hours fully covered by surviving raw rows. The
-repair MUST be idempotent (converging DELETE-then-INSERT recomputation),
+watermark — by up to its full per-pass slice budget, so no fixed trailing
+window can bound the damage. The migration MUST persist the legacy-suspect
+range start on the fold-state row (`upgrade_repair_from`): existing rows are
+stamped with their migration-time `hourly_folded_through`, and the column's
+epoch server default covers a state row bootstrapped by an old replica after
+the migration (its entire backfill is legacy-suspect); new code's own
+bootstrap MUST write the marker as NULL, and NULL MUST only ever be written
+by new code, meaning no legacy-suspect range is outstanding.
+
+While the marker is set, the hourly fold pass MUST refold
+`[upgrade_repair_from, hourly_folded_through)` from raw request logs in
+bounded slice-sized chunks, persisting progress by advancing the marker with
+each chunk's commit and setting it to NULL only once the range is covered —
+a crash resumes instead of restarting, and a pass-bounded incomplete repair
+continues on later passes. With the marker NULL, the first fold pass of each
+new-code process MUST still refold the trailing repair window below the
+watermark (a span that comfortably exceeds any rolling-upgrade duration) as
+defense against a legacy replica regaining fold leadership after the marker
+was cleared.
+
+Both paths MUST be idempotent (converging DELETE-then-INSERT recomputation),
 MUST run under the existing fold leader gate and fold-state row lock, MUST
 NOT move the watermark, and MUST NOT touch folded buckets below the
-surviving-raw clamp (retention-pruned history is irrecoverable and keeps
-the disclosed legacy fold). This is a targeted repair of the rollout window
-only — not a historical backfill.
+surviving-raw clamp (whole hours fully covered by surviving raw rows;
+retention-pruned history is irrecoverable and keeps the disclosed legacy
+fold). This is a targeted repair of the rollout window only — not a
+historical backfill.
 
 #### Scenario: A legacy-folded post-migration bucket is repaired
 
@@ -97,6 +114,15 @@ only — not a historical backfill.
 - **THEN** the bucket is recomputed with `error_count` excluding cancelled
   rows, `cancelled_count` populated, and the `client_disconnected` satellite
   rows removed
+
+#### Scenario: A multi-slice legacy advance is fully repaired via the marker
+
+- **GIVEN** `upgrade_repair_from` set below legacy-folded buckets spanning
+  more than one fold slice (a legacy leader advanced several slices in one
+  pass)
+- **WHEN** the new code runs its hourly fold passes
+- **THEN** every bucket in `[upgrade_repair_from, watermark)` with surviving
+  raw rows is recomputed and the marker ends NULL
 
 #### Scenario: Buckets below the surviving-raw clamp are preserved
 

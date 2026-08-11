@@ -192,6 +192,25 @@ def _client_reasoning_effort_from_model(model: str | None) -> str | None:
     return None
 
 
+def normalize_source_reasoning_aliases(payload: dict[str, JsonValue]) -> None:
+    """Align effort-bearing aliases while preserving unrelated source controls."""
+    provider_thinking = payload.get("thinking")
+    preserve_provider_thinking = False
+    if "thinking" in payload:
+        probe: dict[str, JsonValue] = {"thinking": provider_thinking}
+        if "enable_thinking" in payload:
+            probe["enable_thinking"] = payload["enable_thinking"]
+        normalize_reasoning_aliases(probe)
+        normalized_reasoning = probe.get("reasoning")
+        normalized_effort = normalized_reasoning.get("effort") if is_json_mapping(normalized_reasoning) else None
+        preserve_provider_thinking = not (isinstance(normalized_effort, str) and bool(normalized_effort.strip()))
+    if preserve_provider_thinking:
+        payload.pop("thinking", None)
+    normalize_reasoning_aliases(payload)
+    if preserve_provider_thinking:
+        payload["thinking"] = provider_thinking
+
+
 def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,

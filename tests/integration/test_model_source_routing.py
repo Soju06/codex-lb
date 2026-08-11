@@ -1675,11 +1675,15 @@ async def test_source_chat_reasoning_allowlist_materializes_canonicalized_model_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("with_allowlist", [False, True])
-async def test_source_responses_without_selected_effort_preserves_provider_thinking_object(
+@pytest.mark.parametrize(
+    ("with_allowlist", "reasoning"),
+    [(False, None), (True, None), (True, {"effort": "low"})],
+)
+async def test_source_responses_preserves_effortless_provider_thinking_object(
     async_client,
     source_upstream,
     with_allowlist,
+    reasoning,
 ):
     if with_allowlist:
         await _enable_api_key_auth(async_client)
@@ -1720,20 +1724,23 @@ async def test_source_responses_without_selected_effort_preserves_provider_think
         assert created.status_code == 200
         headers["Authorization"] = f"Bearer {created.json()['key']}"
 
-    response = await async_client.post(
-        "/v1/responses",
-        headers=headers,
-        json={
-            "model": model,
-            "instructions": "hi",
-            "input": [],
-            "thinking": thinking,
-        },
-    )
+    request_payload = {
+        "model": model,
+        "instructions": "hi",
+        "input": [],
+        "thinking": thinking,
+    }
+    if reasoning is not None:
+        request_payload["reasoning"] = reasoning
+
+    response = await async_client.post("/v1/responses", headers=headers, json=request_payload)
 
     assert response.status_code == 200
     assert captured["thinking"] == thinking
-    assert "reasoning" not in captured
+    if reasoning is None:
+        assert "reasoning" not in captured
+    else:
+        assert captured["reasoning"] == reasoning
 
 
 @pytest.mark.asyncio
@@ -1787,6 +1794,63 @@ async def test_source_responses_reasoning_allowlist_strips_conflicting_aliases(a
     assert response.status_code == 200
     assert captured["reasoning"] == {"effort": "low"}
     assert "thinking" not in captured
+
+
+@pytest.mark.asyncio
+async def test_source_responses_reasoning_allowlist_rejects_thinking_hidden_by_blank_alias(
+    async_client,
+    source_upstream,
+):
+    await _enable_api_key_auth(async_client)
+    source_hits = 0
+
+    async def responses(_request: web.Request) -> web.Response:
+        nonlocal source_hits
+        source_hits += 1
+        return web.json_response(
+            {
+                "id": "resp_blank_reasoning_alias",
+                "object": "response",
+                "status": "completed",
+                "model": "source-blank-reasoning-alias",
+                "output": [],
+            }
+        )
+
+    base_url = await source_upstream(responses)
+    model = "source-blank-reasoning-alias"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-blank-reasoning-alias",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-blank-reasoning-alias-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["low"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "reasoningEffort": " ",
+            "thinking": "max",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+    assert source_hits == 0
 
 
 @pytest.mark.asyncio

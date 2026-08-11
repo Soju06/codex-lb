@@ -131,7 +131,6 @@ from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
     extract_input_file_ids,
-    normalize_reasoning_aliases,
     normalize_tool_type,
     responses_request_has_explicit_prompt_cache_controls,
     strip_replayed_tool_call_namespaces_from_payload,
@@ -234,6 +233,7 @@ from app.modules.proxy.request_policy import (
     enforce_strict_text_format,
     model_alias_requests_fast_mode,
     normalize_responses_request_payload,
+    normalize_source_reasoning_aliases,
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
@@ -4242,7 +4242,7 @@ async def _source_responses_response(
         api_key.enforced_reasoning_effort is not None
         or (api_key.allowed_reasoning_efforts is not None and payload._codex_lb_client_reasoning_effort is not None)
     ):
-        normalize_reasoning_aliases(source_payload)
+        normalize_source_reasoning_aliases(source_payload)
     strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))

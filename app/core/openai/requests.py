@@ -1752,8 +1752,19 @@ def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     else:
         reasoning_map = {}
 
-    alias_effort = reasoning_effort if isinstance(reasoning_effort, str) else snake_case_reasoning_effort
-    if isinstance(alias_effort, str) and "effort" not in reasoning_map:
+    existing_effort = reasoning_map.get("effort")
+    if isinstance(existing_effort, str) and not existing_effort.strip():
+        reasoning_map.pop("effort")
+
+    alias_effort = next(
+        (
+            candidate.strip()
+            for candidate in (reasoning_effort, snake_case_reasoning_effort)
+            if isinstance(candidate, str) and candidate.strip()
+        ),
+        None,
+    )
+    if alias_effort is not None and "effort" not in reasoning_map:
         reasoning_map["effort"] = alias_effort
     if isinstance(reasoning_summary, str) and "summary" not in reasoning_map:
         reasoning_map["summary"] = reasoning_summary

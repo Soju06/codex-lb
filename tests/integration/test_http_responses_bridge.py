@@ -14431,7 +14431,7 @@ async def test_v1_responses_http_bridge_quarantines_reattach_that_streams_withou
     ``response.created`` must quarantine the session so the next request does
     not rebuild the identical anchored reattach and instead completes on the
     fresh no-anchor path."""
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_quarantine_silent",

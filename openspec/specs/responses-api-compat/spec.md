@@ -2391,7 +2391,7 @@ top-level `instructions` unchanged.
 
 ### Requirement: Responses Lite follow-up transformations fail closed
 
-After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
+After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a complete terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. A latest output anchored by `previous_response_id` or a non-empty `conversation` remains required only when its matching call is absent from supplied input. A supplied call matches an output only when both `call_id` and the function/custom/apply-patch protocol variant are compatible. An unmatched latest tool call and a terminal tool call or matching pair classified as side-effecting by the canonical tool-safety classifier remain required compact context. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
 
 #### Scenario: Oversized compact input keeps the Lite prelude
 
@@ -2399,12 +2399,49 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **THEN** every required `additional_tools` item remains in the upstream input
 - **AND** typed and role-only system/developer state remains in the upstream input
 
-#### Scenario: Oversized compact input keeps the latest tool item
+#### Scenario: Compact input keeps a latest tool pair that fits
 
-- **WHEN** compact trimming is required and the latest input item is a tool call or tool output
+- **WHEN** compact trimming is required, the latest input item is a non-state, non-side-effecting tool call or tool output, and its complete pair fits with required anchors and trim markers
 - **THEN** the latest item remains in the upstream input
 - **AND** any matching call or output present in the supplied input is retained with it
-- **AND** the service returns `responses_compact_input_too_large` instead of silently dropping the latest item when the required pair cannot fit
+
+#### Scenario: Oversized non-state tool tail leaves room for trim markers
+
+- **WHEN** the latest input item is a non-state, non-side-effecting tool call or output whose complete pair cannot fit with required anchors and trim markers
+- **THEN** the service omits the call and output together and represents the omission with a compact-trim marker
+- **AND** it does not return `responses_compact_input_too_large` solely because the pair fit before marker framing
+- **AND** the marker does not claim omitted terminal context was preserved
+
+#### Scenario: Continuity-anchored latest tool output remains required
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest input item is a tool output without a matching call in the supplied input
+- **THEN** the output remains in the upstream input because its call belongs to the prior response
+- **AND** the service returns `responses_compact_input_too_large` when that required output cannot fit
+
+#### Scenario: Ordinary non-patch paired tail may be omitted
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest ordinary, non-`apply_patch` tool output has a matching call in supplied input
+- **THEN** compact trimming MAY omit the complete pair when it cannot fit
+- **AND** this allowance does not apply to an `apply_patch` call or output
+
+#### Scenario: Reused call ID from another tool variant does not satisfy continuity
+
+- **WHEN** a compact request carries `previous_response_id` or a non-empty `conversation` and its latest tool
+  output reuses the `call_id` of an incompatible function/custom/apply-patch
+  call variant in supplied input
+- **THEN** the latest output remains required as continuity from the previous response
+- **AND** the incompatible supplied call is not retained as its pair
+
+#### Scenario: Oversized latest unmatched tool call fails closed
+
+- **WHEN** the latest compact input item is an unmatched tool call that cannot fit the compact wire budget
+- **THEN** the service returns `responses_compact_input_too_large` rather than representing the call with a compact-trim marker
+
+#### Scenario: Side-effecting tail remains required
+
+- **WHEN** the latest compact input item is an `apply_patch_call`, `apply_patch_call_output`, or a tool call or matching pair classified as side-effecting by the canonical tool-safety classifier
+- **THEN** the item and any matching counterpart remain required compact context
+- **AND** the service returns `responses_compact_input_too_large` rather than omitting the side-effecting patch record when they cannot fit
 
 #### Scenario: Reused call IDs keep only the required occurrence
 
@@ -3313,3 +3350,115 @@ Within each streaming layer (core client consumer, streaming mixin, bridge upstr
 
 - **WHEN** the rewrite step removes duplicate tool calls
 - **THEN** the returned line, payload, and validated event all reflect the rewritten content
+
+### Requirement: Durable bridge ownership distinguishes process incarnations
+
+Durable HTTP bridge ownership MUST include a per-process owner epoch in
+addition to the stable bridge instance id and the existing owner fencing epoch.
+The process owner epoch MUST be generated when the process starts and MUST be
+persisted on newly claimed durable HTTP bridge session rows.
+
+On startup, an instance MUST retire durable HTTP bridge sessions whose
+`owner_instance_id` equals the current instance id but whose process owner epoch
+is missing or differs from the current process owner epoch. Retired rows MUST
+be closed and MUST NOT remain attachable through session-header,
+turn-state, previous-response, latest-turn-state, or latest-response lookup.
+Retired rows MUST clear stored previous-response, latest-turn-state, input
+fingerprint, and pending-tool continuity anchors before any future claim can
+reuse the same canonical session key.
+
+#### Scenario: Same-container restart retires previous-process rows
+
+- **GIVEN** a durable HTTP bridge session is ACTIVE under instance
+  `container-74e8e7cda9fb` and process epoch `boot-a`
+- **WHEN** codex-lb starts again in the same container id with process epoch
+  `boot-b`
+- **THEN** startup closes the `boot-a` durable session row
+- **AND** request-target lookup for that session header, turn state, or
+  previous response no longer returns the closed row
+- **AND** rows already owned by `boot-b` remain attachable
+
+### Requirement: Dead durable anchors recover transparently when safe
+
+The proxy MUST classify proven-dead durable anchors as automatic recovery
+candidates before returning any client-visible error.
+
+When a continuity-bound HTTP bridge request would otherwise return a retryable
+`stream_idle_timeout` or cooldown terminal, and the durable lookup that supplied
+the request's previous-response anchor is proven dead because its owner
+instance, process owner epoch, or lease is no longer current, the proxy MUST
+dispatch a fresh turn transparently when the request payload has an existing
+safe replay proof, including account-neutral full-context resends and
+proxy-injected anchor requests whose captured fresh body is replay-safe. The
+client MUST receive the normal upstream stream for that fresh turn and MUST NOT
+receive a bridge-specific recovery error.
+
+When the request is bound to a client-provided anchor that cannot be safely
+replayed as a fresh turn, the proxy MUST return the same OpenAI-compatible
+`previous_response_not_found` error shape and HTTP status used by the existing
+previous-response-not-found path. The proxy MUST NOT expose a
+`bridge_continuity_recovery_required` code to clients. The proxy MUST keep the
+existing retryable `stream_idle_timeout` semantics when the durable owner is
+current and the failure is ordinary transient upstream silence.
+
+#### Scenario: Previous-process anchor with replayable context recovers automatically
+
+- **GIVEN** a request is bound to a durable previous-response anchor
+- **AND** that durable row belongs to the same instance id but a different
+  process owner epoch
+- **AND** the payload has a safe full-context replay proof
+- **WHEN** the bridge hits the pre-submit, startup-cooldown, or retry-circuit
+  idle terminal path
+- **THEN** the proxy dispatches the request as a fresh turn without the dead
+  previous-response anchor
+- **AND** the client receives the normal streaming response
+- **AND** the response does not include `stream_idle_timeout` retry guidance or
+  a bridge-specific recovery error
+
+#### Scenario: Unreplayable client anchor uses the standard not-found contract
+
+- **GIVEN** a request is bound to a client-provided durable previous-response
+  anchor
+- **AND** that durable row belongs to a dead owner
+- **AND** the payload does not have a safe fresh-turn replay proof
+- **WHEN** the bridge must fail closed
+- **THEN** the client receives the standard `previous_response_not_found`
+  error shape for `previous_response_id`
+- **AND** HTTP error collection uses the standard previous-response-not-found
+  status
+- **AND** the response does not include a bridge-specific recovery code
+
+#### Scenario: Current-owner silence remains retryable
+
+- **GIVEN** a request is bound to a durable owner whose instance id, process
+  owner epoch, and lease are current
+- **WHEN** upstream produces no response events through the existing idle window
+- **THEN** the proxy preserves the existing retryable `stream_idle_timeout`
+  behavior
+
+### Requirement: Repeated zero-event idle failures poison dead anchors
+
+For hard HTTP bridge keys, repeated zero-event idle failures MUST use the
+existing durable retry-circuit counter to identify an anchor that should no
+longer remain addressable. When consecutive failures for the same hard bridge
+key reach the configured poison threshold, the proxy MUST abandon durable
+continuity for that session and retire the bridge even when admission waiters
+exist. The default threshold MUST be no greater than seven failures.
+
+#### Scenario: Admission waiters cannot defer anchor poisoning forever
+
+- **GIVEN** a hard durable bridge key has admission waiters
+- **AND** repeated zero-event idle failures for that same key reach the poison
+  threshold
+- **WHEN** the reader failure path would normally defer retirement for the
+  admission waiter
+- **THEN** the proxy clears the durable continuity anchors
+- **AND** retires the session despite the admission waiter
+- **AND** the next attach starts from fresh durable state rather than the
+  poisoned previous-response anchor
+
+#### Scenario: Lease liveness comparison is timezone-safe
+- **GIVEN** a durable bridge session whose `lease_expires_at` was read from a `timestamptz` column (offset-aware) on PostgreSQL
+- **WHEN** the dead-owner classifier evaluates lease liveness against the application's naive-UTC clock
+- **THEN** both timestamps MUST be normalized to naive UTC before comparison
+- **AND** the anchored-lookup path MUST NOT raise on mixed-awareness datetimes

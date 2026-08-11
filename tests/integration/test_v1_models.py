@@ -7,6 +7,7 @@ import pytest
 
 from app.core.openai.model_registry import ModelRegistryExport, ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.types import JsonValue
+from app.modules.proxy import api as proxy_api
 
 pytestmark = pytest.mark.integration
 
@@ -95,6 +96,33 @@ async def _populate_test_registry() -> None:
         _make_upstream_model("gpt-5.3-codex"),
     ]
     await registry.update({"plus": models, "pro": models})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/models", "/backend-api/codex/models"])
+async def test_models_routes_release_reservation_when_catalog_read_fails(async_client, monkeypatch, path):
+    """Both public model routes settle their reservation on a catalog failure."""
+    released: list[str] = []
+
+    async def enforce(*args, **kwargs):
+        del args, kwargs
+        return type("Reservation", (), {"reservation_id": "models-route-failure"})()
+
+    async def release(reservation):
+        released.append(reservation.reservation_id)
+
+    async def boom(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("model_sources catalog read failed")
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", enforce)
+    monkeypatch.setattr(proxy_api, "_release_reservation_deferring_cancellation", release)
+    monkeypatch.setattr(proxy_api, "_list_enabled_source_catalog_models", boom)
+
+    with pytest.raises(RuntimeError, match="catalog read failed"):
+        await async_client.get(path)
+
+    assert released == ["models-route-failure"]
 
 
 async def _create_model_source(

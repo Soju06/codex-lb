@@ -1425,11 +1425,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_block = format_sse_event(payload)
                 if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
                     matched_request_state.deferred_reasoning_downstream_texts.append(event_block)
+                    matched_request_state.last_upstream_activity_at = now
                     matched_request_state.upstream_model_output_seen = True
                     suppress_downstream_event = True
                     deferred_reasoning_prelude_event = True
                 elif event_type in _MODEL_OUTPUT_EVENT_TYPES:
                     matched_request_state.upstream_model_output_seen = True
+                    if not suppress_downstream_event:
+                        matched_request_state.downstream_visible = True
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:

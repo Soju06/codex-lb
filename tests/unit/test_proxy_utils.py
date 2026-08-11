@@ -25,6 +25,8 @@ import pytest
 from aiohttp.client_exceptions import ClientConnectorCertificateError
 from aiohttp.client_reqrep import ConnectionKey, RequestInfo
 from fastapi import WebSocket
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
 from websockets.exceptions import ConnectionClosedError
@@ -98,6 +100,7 @@ from app.modules.proxy.work_admission import AdmissionLease
 from app.modules.request_logs.repository import PreviousResponseOwnerRecord, RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from tests.unit._proxy_test_helpers import runtime_basic_auth_url
+from tests.unit.hypothesis_strategies import json_objects, json_values
 
 pytestmark = pytest.mark.unit
 
@@ -21977,6 +21980,131 @@ def test_slim_response_create_ignores_malformed_unhashable_item_type():
     assert first_item["content"] == [
         {"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}
     ]
+
+
+def _non_user_item(value: JsonValue) -> JsonValue:
+    if not isinstance(value, dict):
+        return value
+    item = dict(value)
+    if item.get("role") == "user":
+        item["role"] = "assistant"
+    return item
+
+
+@given(
+    extra=json_objects,
+    historical=st.lists(json_values.map(_non_user_item), max_size=5),
+    recent=st.lists(json_values.map(_non_user_item), max_size=5),
+)
+@settings(max_examples=30, deadline=None)
+def test_slim_response_create_preserves_recent_suffix_and_top_level_fields(extra, historical, recent):
+    recent_user = {"role": "user", "content": "latest request"}
+    payload = cast(
+        dict[str, JsonValue],
+        {
+            **{key: value for key, value in extra.items() if key != "input"},
+            "input": [*historical, recent_user, *recent],
+        },
+    )
+    original = deepcopy(payload)
+    original_input = cast(list[JsonValue], original["input"])
+
+    slimmed_payload, _ = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+
+    assert payload == original
+    assert {key: value for key, value in slimmed_payload.items() if key != "input"} == {
+        key: value for key, value in original.items() if key != "input"
+    }
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+    preserve_from = len(historical)
+    assert slimmed_input[preserve_from:] == original_input[preserve_from:]
+    assert json.dumps(slimmed_input[preserve_from:], ensure_ascii=True, sort_keys=True) == json.dumps(
+        original_input[preserve_from:], ensure_ascii=True, sort_keys=True
+    )
+
+
+@given(
+    cases=st.lists(
+        st.sampled_from(["top_image", "content_image", "tool_image", "file_image", "plain"]),
+        min_size=1,
+        max_size=5,
+    )
+)
+@settings(max_examples=30, deadline=None)
+def test_slim_response_create_counts_historical_image_replacements_and_is_idempotent(cases):
+    historical: list[JsonValue] = []
+    expected_images = 0
+    inline_url = "data:image/png;base64,AAAA"
+    for index, case in enumerate(cases):
+        if case == "top_image":
+            historical.append({"type": "input_image", "image_url": inline_url, "id": f"image-{index}"})
+            expected_images += 1
+        elif case == "content_image":
+            historical.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "input_image", "image_url": inline_url, "id": f"image-{index}"}],
+                }
+            )
+            expected_images += 1
+        elif case == "tool_image":
+            historical.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": f"call-{index}",
+                    "output": [{"type": "input_image", "image_url": inline_url}],
+                }
+            )
+            expected_images += 1
+        elif case == "file_image":
+            historical.append({"type": "input_image", "image_url": "file-id", "id": f"file-{index}"})
+        else:
+            historical.append({"role": "assistant", "content": f"ordinary-{index}"})
+
+    latest = {"role": "user", "content": "latest"}
+    payload = cast(dict[str, JsonValue], {"input": [*historical, latest]})
+    original = deepcopy(payload)
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+
+    assert payload == original
+    if expected_images:
+        assert summary is not None
+        assert summary["historical_images_slimmed"] == expected_images
+    else:
+        assert summary is None
+    assert cast(list[JsonValue], slimmed_payload["input"])[-1] == latest
+
+    second_payload, second_summary = proxy_service._slim_response_create_payload_for_upstream(
+        slimmed_payload, max_bytes=256
+    )
+    assert second_payload == slimmed_payload
+    assert second_summary is None
+
+
+@given(sizes=st.lists(st.integers(min_value=0, max_value=34 * 1024), min_size=1, max_size=5))
+@settings(max_examples=30, deadline=None)
+def test_slim_response_create_counts_oversized_historical_tool_outputs(sizes):
+    historical = [
+        {
+            "type": "custom_tool_call_output",
+            "call_id": f"call-{index}",
+            "output": "x" * size,
+        }
+        for index, size in enumerate(sizes)
+    ]
+    latest = {"role": "user", "content": "latest"}
+    payload = cast(dict[str, JsonValue], {"input": [*historical, latest]})
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+
+    expected_count = sum(size > 32 * 1024 for size in sizes)
+    if expected_count:
+        assert summary is not None
+        assert summary["historical_tool_outputs_slimmed"] == expected_count
+    else:
+        assert summary is None
+    assert cast(list[JsonValue], slimmed_payload["input"])[-1] == latest
 
 
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):

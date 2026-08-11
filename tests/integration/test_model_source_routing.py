@@ -1495,7 +1495,16 @@ async def test_allowlisted_source_model_routes_through(async_client, source_upst
 
 
 @pytest.mark.asyncio
-async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(async_client, source_upstream):
+@pytest.mark.parametrize(
+    ("reasoning_field", "reasoning_value"),
+    [("reasoning_effort", "max"), ("thinking", "minimal")],
+)
+async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(
+    async_client,
+    source_upstream,
+    reasoning_field,
+    reasoning_value,
+):
     await _enable_api_key_auth(async_client)
     source_hits = 0
 
@@ -1523,7 +1532,7 @@ async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(as
         json={
             "model": model,
             "messages": [{"role": "user", "content": "hi"}],
-            "reasoning_effort": "max",
+            reasoning_field: reasoning_value,
         },
     )
 
@@ -1666,7 +1675,14 @@ async def test_source_chat_reasoning_allowlist_materializes_canonicalized_model_
 
 
 @pytest.mark.asyncio
-async def test_source_responses_without_policy_preserves_provider_thinking_object(async_client, source_upstream):
+@pytest.mark.parametrize("with_allowlist", [False, True])
+async def test_source_responses_without_selected_effort_preserves_provider_thinking_object(
+    async_client,
+    source_upstream,
+    with_allowlist,
+):
+    if with_allowlist:
+        await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}
 
     async def responses(request: web.Request) -> web.Response:
@@ -1683,17 +1699,30 @@ async def test_source_responses_without_policy_preserves_provider_thinking_objec
 
     base_url = await source_upstream(responses)
     model = "source-provider-thinking"
-    await _create_model_source(
+    source_id = await _create_model_source(
         async_client,
         name="source-provider-thinking",
         model=model,
         base_url=base_url,
         supports_responses=True,
     )
-    thinking = {"type": "enabled", "budget": 4096, "budget_tokens": 2048, "vendor_hint": "keep"}
+    thinking = {"type": "adaptive", "budget": 4096, "budget_tokens": 2048, "vendor_hint": "keep"}
+    headers: dict[str, str] = {}
+    if with_allowlist:
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={
+                "name": "source-provider-thinking-key",
+                "assignedSourceIds": [source_id],
+                "allowedReasoningEfforts": ["low"],
+            },
+        )
+        assert created.status_code == 200
+        headers["Authorization"] = f"Bearer {created.json()['key']}"
 
     response = await async_client.post(
         "/v1/responses",
+        headers=headers,
         json={
             "model": model,
             "instructions": "hi",

@@ -4239,7 +4239,8 @@ async def _source_responses_response(
     )
     source_payload = payload.model_dump_for_forwarding()
     if api_key is not None and (
-        api_key.allowed_reasoning_efforts is not None or api_key.enforced_reasoning_effort is not None
+        api_key.enforced_reasoning_effort is not None
+        or (api_key.allowed_reasoning_efforts is not None and payload._codex_lb_client_reasoning_effort is not None)
     ):
         normalize_reasoning_aliases(source_payload)
     strip_replayed_tool_call_namespaces_from_payload(source_payload)

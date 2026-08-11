@@ -359,6 +359,7 @@ def test_reasoning_effort_allowlist_is_idempotent_after_wire_normalization() -> 
     [
         ("reasoningEffort", "max", "max"),
         ("reasoning_effort", "max", "max"),
+        ("thinking", "minimal", "minimal"),
         ("thinking", {"effort": "max", "summary": "auto"}, "max"),
         ("enable_thinking", True, "medium"),
     ],

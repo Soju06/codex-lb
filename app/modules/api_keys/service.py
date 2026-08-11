@@ -11,7 +11,7 @@ from hashlib import sha256
 from math import ceil
 from typing import Protocol
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.core.auth.api_key_cache import get_api_key_cache
 from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
@@ -51,6 +51,7 @@ TRAFFIC_CLASS_FOREGROUND = "foreground"
 TRAFFIC_CLASS_OPPORTUNISTIC = "opportunistic"
 _SUPPORTED_TRAFFIC_CLASSES = frozenset({TRAFFIC_CLASS_FOREGROUND, TRAFFIC_CLASS_OPPORTUNISTIC})
 _SUPPORTED_TRANSPORT_POLICY_OVERRIDES = frozenset({"smart", "always_http", "always_websocket"})
+_REASONING_POLICY_EXCLUSIVE_CONSTRAINT = "ck_api_keys_reasoning_policy_exclusive"
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -517,8 +518,12 @@ class ApiKeysService:
                 await self._repository.upsert_limits(created.id, limit_rows, commit=False)
 
             await self._repository.commit()
-        except Exception:
+        except Exception as exc:
             await self._repository.rollback()
+            if isinstance(exc, IntegrityError) and _is_reasoning_policy_constraint_error(exc):
+                raise ApiKeyValidationError(
+                    "enforced_reasoning_effort and allowed_reasoning_efforts cannot be configured together"
+                ) from exc
             raise
 
         created = await self._repository.get_by_id(created.id)
@@ -723,8 +728,12 @@ class ApiKeysService:
                 await self._repository.upsert_limits(key_id, limit_rows, commit=False)
 
             await self._repository.commit()
-        except Exception:
+        except Exception as exc:
             await self._repository.rollback()
+            if isinstance(exc, IntegrityError) and _is_reasoning_policy_constraint_error(exc):
+                raise ApiKeyValidationError(
+                    "enforced_reasoning_effort and allowed_reasoning_efforts cannot be configured together"
+                ) from exc
             raise
 
         if (
@@ -1356,6 +1365,10 @@ def _deserialize_allowed_reasoning_efforts(payload: str | None) -> list[str] | N
         return _normalize_allowed_reasoning_efforts(parsed)
     except (ApiKeyValidationError, TypeError, json.JSONDecodeError):
         return []
+
+
+def _is_reasoning_policy_constraint_error(exc: IntegrityError) -> bool:
+    return _REASONING_POLICY_EXCLUSIVE_CONSTRAINT in str(exc).lower()
 
 
 def _normalize_allowed_models(allowed_models: list[str] | None) -> list[str] | None:

@@ -149,6 +149,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [draft, updateDraft] = useReducer(apiKeyEditDraftReducer, apiKey, createApiKeyEditDraft);
+  const hasMalformedReasoningPolicy = apiKey.allowedReasoningEfforts?.length === 0;
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(draft.limitRules);
@@ -170,7 +171,8 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as ReasoningEffortType,
-      ...(draft.selectedReasoningEfforts.length > 0 || apiKey.allowedReasoningEfforts !== null
+      ...(draft.selectedReasoningEfforts.length > 0 ||
+        (apiKey.allowedReasoningEfforts !== null && !hasMalformedReasoningPolicy)
         ? { allowedReasoningEfforts: draft.selectedReasoningEfforts.length > 0 ? draft.selectedReasoningEfforts : null }
         : {}),
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
@@ -286,7 +288,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               <div className="text-sm font-medium">{t("apiKeys.form.enforcedReasoning")}</div>
               <Select
                 value={draft.enforcedReasoningEffort}
-                disabled={draft.selectedReasoningEfforts.length > 0}
+                disabled={draft.selectedReasoningEfforts.length > 0 || hasMalformedReasoningPolicy}
                 onValueChange={(enforcedReasoningEffort) => updateDraft({ enforcedReasoningEffort, selectedReasoningEfforts: [] })}
               >
                 <SelectTrigger>

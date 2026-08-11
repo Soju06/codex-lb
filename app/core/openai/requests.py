@@ -1781,7 +1781,7 @@ def _normalize_thinking_alias(
         return {"effort": "medium"} if thinking else None
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+        if normalized in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
             return {"effort": normalized}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}

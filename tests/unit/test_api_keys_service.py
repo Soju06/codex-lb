@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -774,6 +774,37 @@ async def test_update_key_validates_effective_reasoning_policy() -> None:
 
     assert updated.enforced_reasoning_effort is None
     assert updated.allowed_reasoning_efforts == ["low", "medium"]
+
+
+@pytest.mark.asyncio
+async def test_update_key_translates_reasoning_policy_constraint_race() -> None:
+    class ConstraintFailingRepository(_FakeApiKeysRepository):
+        fail_reasoning_policy_commit = False
+
+        async def commit(self) -> None:
+            if self.fail_reasoning_policy_commit:
+                raise IntegrityError(
+                    "UPDATE api_keys",
+                    {},
+                    Exception("CHECK constraint failed: ck_api_keys_reasoning_policy_exclusive"),
+                )
+            await super().commit()
+
+    repo = ConstraintFailingRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(ApiKeyCreateData(name="concurrent-reasoning-policy", allowed_models=None))
+    repo.fail_reasoning_policy_commit = True
+
+    with pytest.raises(ApiKeyValidationError, match="cannot be configured together"):
+        await service.update_key(
+            created.id,
+            ApiKeyUpdateData(
+                allowed_reasoning_efforts=["low"],
+                allowed_reasoning_efforts_set=True,
+            ),
+        )
+
+    assert repo.rollback_calls == 1
 
 
 @pytest.mark.asyncio

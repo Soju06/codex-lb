@@ -460,7 +460,7 @@ def test_provider_thinking_string_alias_accepts_catalog_advertised_efforts():
     # GPT-5.6 catalog entries advertise ``max`` and ``ultra``
     # (codex-rs/models-manager/models.json at rust-v0.144.1); the string-form
     # thinking alias must accept every catalog-advertised effort.
-    for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+    for effort in ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
         payload = {
             "model": "gpt-5.6-sol",
             "instructions": "hi",

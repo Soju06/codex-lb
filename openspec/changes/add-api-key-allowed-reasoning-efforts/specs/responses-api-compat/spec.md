@@ -26,6 +26,8 @@ aliases MUST be aligned with the authorized canonical `reasoning.effort` or
 removed so a conflicting alias cannot select a disallowed effort upstream.
 When no reasoning policy is active, source egress MUST retain existing
 provider-shaped reasoning controls and their source-specific fields.
+An allowlist MUST also preserve provider-shaped controls that select no effort;
+their unrelated fields do not participate in effort authorization.
 
 #### Scenario: Reject max before upstream dispatch
 
@@ -48,6 +50,14 @@ provider-shaped reasoning controls and their source-specific fields.
 - **WHEN** a Responses request omits `reasoning.effort` and uses no effort alias
 - **THEN** the proxy does not add or replace a reasoning effort
 - **AND** the request continues through the existing route
+
+#### Scenario: Effort-less provider controls remain compatible
+
+- **GIVEN** a source-routed model and an API key with
+  `allowedReasoningEfforts: ["low"]`
+- **WHEN** a Responses request supplies
+  `thinking: {"type": "adaptive", "budget_tokens": 2048}` without an effort
+- **THEN** the source receives the original `thinking` object
 
 #### Scenario: Source-routed conflicting alias cannot override policy
 

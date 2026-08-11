@@ -12,7 +12,8 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - Bare process-session headers use a header-inaccessible, source-separated storage key and are soft only for self-contained pre-visible work.
 - Account-cap spillover is request-local: it selects an alternate without deleting or rebinding the process-session row.
 - Raw and legacy Codex rows remain hard during rolling upgrades because they may represent explicit turn-state ownership.
-- A raw legacy Codex owner can be abandoned only for an explicit goal-continuation restart whose canonical upstream payload passes the account-neutral fresh-replay proof, and only while that owner has a persisted unavailable status. Canonicalization keeps accepted compatibility fields and transport envelopes from changing classification. The compare-and-set tombstone preserves a concurrent rebind or owner recovery.
+- A raw legacy Codex owner can be abandoned only for an explicit goal-continuation restart whose canonical upstream payload passes the account-neutral fresh-replay proof, and only while that owner has a persisted unavailable status. Canonicalization keeps accepted compatibility fields and transport envelopes from changing classification. The compare-and-set marker is scoped to `session_header`, so an explicit turn-state lookup with colliding raw text retains the stored owner; a concurrent rebind or owner recovery still wins.
+- Restart mutation authority is the authenticated account-assignment and security-policy scope before model and service-tier eligibility. Model filtering constrains only replacement selection.
 - The retired owner is excluded from stale account snapshots for the remainder of the request.
 - Durable file pins, responses, conversations, live/durable bridges, replay, and reattach sources are independent hard evidence; conflicting evidence fails closed instead of using source precedence. Opaque file IDs with no live durable pin remain unpinned for compatibility with uploads that occurred outside the current process.
 - Dashboard prompt-cache TTL is persisted in settings so operators can adjust it without restart.
@@ -31,6 +32,7 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - Cleanup failures are logged and retried on the next interval; request handling continues.
 - Manual purge and delete operations are dashboard-auth protected and return normal dashboard API errors on invalid input or missing keys.
 - Mixed-version replicas may temporarily produce both raw and namespaced rows. The raw row wins conservatively, which may reduce spillover but cannot weaken continuity.
+- A raw process-session value may collide with an explicit turn-state value. Source-qualified abandonment lets the process session recover without making the retained raw account disappear from turn-state lookup.
 - Partial file-pin coverage or conflicting hard-owner metadata returns a stable fail-closed error before upstream dispatch; zero file-pin coverage preserves the established opaque-ID forwarding path.
 - A turn-state token learned from a retired WebSocket is discarded before a movable bare-session request connects to another account.
 - An ordinary same-session request, or a goal-marked request that still carries previous-response, conversation, account-scoped file/image, or unresolved tool state, remains fail-closed on an unavailable raw owner.
@@ -45,15 +47,17 @@ For an explicit restart example, session `thread-1` has a raw legacy mapping to
 quota-exceeded account A while account B is active. Codex resends the complete
 account-neutral thread under `thread-1`, without previous-response or
 conversation continuity, and includes its goal-continuation marker. The proxy
-tombstones the still-current A mapping, selects B, and records subsequent
-session/response continuity on B. If A recovers or the row is rebound before
-the tombstone commits, the compare-and-set misses and the request remains
-fail-closed.
+marks the still-current A mapping abandoned for process-session interpretation,
+selects B, and records subsequent session/response continuity on B. An explicit
+turn-state request using the same raw text still resolves A. If A recovers or
+the row is rebound before the marker commits, the compare-and-set misses and
+the request remains fail-closed.
 
 ## Operational Notes
 
 No schema or setting migration is required for bare-session spillover. Namespaced rows appear lazily, and old raw rows age out only through existing operational controls. Rollback simply removes the spillover capability and leaves both row forms readable.
 
-Goal-restart recovery also adds no setting or schema migration. Its tombstones
-use the existing `continuity_abandoned_at` lifecycle and remain readable after
-rollback.
+Goal-restart recovery adds no setting. Its nullable abandonment-scope migration
+requires no backfill: historical NULL scope remains global, while
+`session_header` preserves an equal explicit turn-state owner. Downgrade must
+not reinterpret live source-qualified markers with an older binary.

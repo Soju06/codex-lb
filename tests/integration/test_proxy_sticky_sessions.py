@@ -344,7 +344,24 @@ async def test_codex_goal_restart_retires_unavailable_legacy_owner_and_stays_on_
         "acc_goal_restart_replacement",
     ]
 
+    # The raw compatibility text can also be a different client's explicit
+    # turn state. Session-header abandonment must not erase that hard owner or
+    # dispatch the turn-state continuation on the replacement account.
+    turn_state_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "continue", "input": [], "stream": True},
+        headers={"x-codex-turn-state": raw_session},
+    )
+    assert turn_state_response.status_code == 502
+    assert turn_state_response.json()["error"]["code"] == "turn_state_owner_unavailable"
+    assert seen == [
+        "acc_goal_restart_owner",
+        "acc_goal_restart_replacement",
+        "acc_goal_restart_replacement",
+    ]
+
     async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
         rows = {
             row.key: row
             for row in (
@@ -356,10 +373,24 @@ async def test_codex_goal_restart_retires_unavailable_legacy_owner_and_stays_on_
                 )
             ).scalars()
         }
+        session_header_owner = await repo.get_account_id(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="session_header",
+        )
+        turn_state_owner = await repo.get_account_id(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="turn_state",
+        )
     assert rows[raw_session].account_id == owner_id
     assert rows[raw_session].continuity_abandoned_at is not None
+    assert rows[raw_session].continuity_abandonment_scope == "session_header"
     assert rows[selection_key].account_id == replacement_id
     assert rows[selection_key].continuity_abandoned_at is None
+    assert rows[selection_key].continuity_abandonment_scope is None
+    assert session_header_owner is None
+    assert turn_state_owner == owner_id
 
 
 @pytest.mark.asyncio
@@ -408,7 +439,7 @@ async def test_codex_goal_restart_cas_miss_reloads_concurrently_rebound_raw_owne
         )
         await session.commit()
 
-    original_tombstone = StickySessionsRepository.tombstone_if_owner_unavailable
+    original_tombstone = StickySessionsRepository.abandon_legacy_session_header_owner_if_unavailable
     race_count = 0
 
     async def rebind_before_tombstone(
@@ -440,7 +471,7 @@ async def test_codex_goal_restart_cas_miss_reloads_concurrently_rebound_raw_owne
 
     monkeypatch.setattr(
         StickySessionsRepository,
-        "tombstone_if_owner_unavailable",
+        "abandon_legacy_session_header_owner_if_unavailable",
         rebind_before_tombstone,
     )
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
@@ -2185,7 +2216,7 @@ async def test_unavailable_owner_tombstone_compare_and_set_preserves_concurrent_
         await repo.upsert(key, "acc_restart_cas_old", kind=StickySessionKind.CODEX_SESSION)
         # Simulate a newer claim landing after selection read the old owner.
         await repo.upsert(key, "acc_restart_cas_new", kind=StickySessionKind.CODEX_SESSION)
-        retired = await repo.tombstone_if_owner_unavailable(
+        retired = await repo.abandon_legacy_session_header_owner_if_unavailable(
             key,
             kind=StickySessionKind.CODEX_SESSION,
             expected_account_id="acc_restart_cas_old",

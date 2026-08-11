@@ -77,6 +77,9 @@ class SelectionInputsProtocol(Protocol):
     @property
     def effective_continuity_owner_candidates(self) -> list[Account]: ...
 
+    @property
+    def effective_sticky_mutation_authority_account_ids(self) -> frozenset[str]: ...
+
 
 SelectionInputsT = TypeVar("SelectionInputsT", bound=SelectionInputsProtocol)
 
@@ -336,6 +339,7 @@ async def run_sticky_selection_path(
                     sticky_key,
                     kind=sticky_kind,
                     max_age_seconds=sticky_max_age_seconds,
+                    continuity_source=sticky_source,
                 )
                 sticky_existing_account_id = sticky_owner_lookup.account_id
                 # `is True` (not a truthy check): an un-configured test double
@@ -485,9 +489,9 @@ async def run_sticky_selection_path(
         # other authenticated policies narrow a request's mutation authority.
         # Keep this check on the pre-health continuity pool: quota exhaustion
         # may authorize retirement, but being outside policy scope never does.
-        legacy_owner_in_effective_policy_scope = isinstance(sticky_existing_account_id, str) and any(
-            account.id == sticky_existing_account_id
-            for account in selection_inputs.effective_continuity_owner_candidates
+        legacy_owner_in_effective_policy_scope = (
+            isinstance(sticky_existing_account_id, str)
+            and sticky_existing_account_id in selection_inputs.effective_sticky_mutation_authority_account_ids
         )
         if (
             abandon_unavailable_legacy_owner
@@ -499,7 +503,7 @@ async def run_sticky_selection_path(
             and legacy_owner_in_effective_policy_scope
         ):
             async with owner._repo_factory() as repos:
-                owner_retired = await repos.sticky_sessions.tombstone_if_owner_unavailable(
+                owner_retired = await repos.sticky_sessions.abandon_legacy_session_header_owner_if_unavailable(
                     legacy_sticky_key,
                     kind=StickySessionKind.CODEX_SESSION,
                     expected_account_id=sticky_existing_account_id,
@@ -509,6 +513,7 @@ async def run_sticky_selection_path(
                     authoritative_legacy_owner = await repos.sticky_sessions.get_account_id_and_abandonment(
                         legacy_sticky_key,
                         kind=StickySessionKind.CODEX_SESSION,
+                        continuity_source="session_header",
                     )
             # One guarded write is authoritative for this selection. Repeating
             # it in capacity-wait retries would add write pressure and could
@@ -520,7 +525,7 @@ async def run_sticky_selection_path(
                 # again so namespaced affinity, leases, and admission checks
                 # are established through the existing selection path.
                 logger.info(
-                    "Legacy Codex session owner retired for self-contained goal restart account_id=%s",
+                    "Legacy Codex session-header owner abandoned for self-contained goal restart account_id=%s",
                     "<redacted>" if redact_sensitive_details else sticky_existing_account_id,
                 )
                 retired_legacy_owner_account_ids.add(sticky_existing_account_id)

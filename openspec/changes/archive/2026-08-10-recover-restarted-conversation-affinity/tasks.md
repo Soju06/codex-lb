@@ -4,6 +4,7 @@
 - [x] 1.2 Add negative coverage for ordinary requests, account-dependent payloads, healthy owners, and compare-and-set races.
 - [x] 1.3 Add routed regressions for scoped-owner retirement and synthesized WebSocket turn-state cleanup.
 - [x] 1.4 Add regressions for canonical compatibility classification and stale post-retirement selection inputs.
+- [x] 1.5 Add regressions proving a colliding explicit turn state retains its owner and model eligibility does not narrow mutation authority.
 
 ## 2. Implementation
 
@@ -12,12 +13,15 @@
 - [x] 2.3 Thread the capability through HTTP and WebSocket selection and rerun normal selection after successful retirement.
 - [x] 2.4 Restrict retirement mutation to the authenticated effective account scope and preserve generated turn-state cleanup across account changes.
 - [x] 2.5 Prevent stale account snapshots from undoing successful restart retirement.
+- [x] 2.6 Persist source-qualified session-header abandonment while retaining hard explicit turn-state ownership.
+- [x] 2.7 Separate authenticated sticky-mutation authority from model and service-tier replacement eligibility.
 
 ## 3. Validation and Documentation
 
 - [x] 3.1 Run focused regressions, relevant sticky/session suites, lint/type checks, and strict OpenSpec validation.
 - [x] 3.2 Review the diff for fail-closed continuity, async/session ownership, transport parity, and simplicity-gate compliance.
 - [x] 3.3 Promote stable context to the main capability docs and verify the change.
+- [x] 3.4 Add reversible migration coverage for source-qualified sticky abandonment metadata.
 
 ## 4. Local Deployment
 

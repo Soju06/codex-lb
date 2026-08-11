@@ -357,7 +357,7 @@ class _RetiringStaleOwnerStickySessionsRepository(_StubStickySessionsRepository)
         self.account_ids_by_key = {raw_key: owner_account_id}
         self.tombstones: list[tuple[str, str]] = []
 
-    async def tombstone_if_owner_unavailable(
+    async def abandon_legacy_session_header_owner_if_unavailable(
         self,
         key: str,
         *,
@@ -3096,6 +3096,64 @@ async def test_goal_restart_does_not_repin_retired_owner_from_stale_selection_sn
         selection_key: replacement.id,
     }
     assert all(account_id != stale_owner.id for _, account_id, _ in sticky_repo.upserts)
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
+async def test_goal_restart_mutation_authority_precedes_model_eligibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    owner = _make_account("goal-restart-model-ineligible-owner")
+    replacement = _make_account("goal-restart-model-eligible-replacement")
+    raw_session = "goal-restart-model-authority"
+    selection_key = _codex_session_selection_key(raw_session)
+    sticky_repo = _RetiringStaleOwnerStickySessionsRepository(
+        raw_key=raw_session,
+        owner_account_id=owner.id,
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository([owner, replacement]),
+            _StubUsageRepository(
+                {
+                    owner.id: _usage_row(303, owner.id, window="primary", reset_at=now_epoch + 300),
+                    replacement.id: _usage_row(304, replacement.id, window="primary", reset_at=now_epoch + 300),
+                },
+                {},
+            ),
+            sticky_repo,
+        )
+    )
+
+    monkeypatch.setattr(load_balancer_module, "_mapped_model_has_registry_entry", lambda _model: True)
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model",
+        lambda accounts, _model, **_kwargs: [account for account in accounts if account.id == replacement.id],
+    )
+    monkeypatch.setattr(
+        load_balancer_module,
+        "_filter_accounts_for_model_with_catalog_evidence",
+        lambda accounts, _model, **_kwargs: load_balancer_module._ModelAccountFilterResult(
+            accounts=[account for account in accounts if account.id == replacement.id],
+            general_model_account_ids=frozenset({replacement.id}),
+        ),
+    )
+
+    selected = await balancer.select_account(
+        sticky_key=selection_key,
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="session_header",
+        legacy_sticky_key=raw_session,
+        abandon_unavailable_legacy_owner=True,
+        model="gpt-model-authority",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == replacement.id
+    assert sticky_repo.tombstones == [(raw_session, owner.id)]
     await balancer.release_account_lease(selected.lease)
 
 

@@ -10,6 +10,8 @@ Codex conversation restart can resend a self-contained thread under the same pro
 - Ensure stale account snapshots cannot undo guarded owner retirement.
 - Keep ordinary incremental, conversation-bound, file-pinned, and unresolved tool-state requests fail-closed on their required owner.
 - Make retirement compare-and-set so a concurrent owner change cannot be deleted.
+- Scope retirement to process-session interpretation so an equal raw explicit turn state retains its owner.
+- Derive mutation authority before model and service-tier replacement eligibility.
 - Cover the public Codex Responses route and subsequent continuity on the replacement owner.
 
 ## Capabilities
@@ -25,6 +27,7 @@ None.
 ## Impact
 
 - Account selection and sticky-session persistence in the proxy module.
+- One nullable sticky-session column records source-qualified abandonment; existing tombstones remain global without backfill.
 - Responses request classification shared by HTTP and WebSocket transports.
 - Routed regression coverage for `/backend-api/codex/responses`.
-- No schema, configuration, or public error-envelope change.
+- No configuration or public error-envelope change.

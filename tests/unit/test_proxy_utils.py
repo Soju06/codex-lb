@@ -10604,7 +10604,7 @@ async def test_unavailable_owner_tombstone_locks_account_status_before_retiremen
     )
     repo = StickySessionsRepository(cast(Any, fake_session))
 
-    retired = await repo.tombstone_if_owner_unavailable(
+    retired = await repo.abandon_legacy_session_header_owner_if_unavailable(
         "goal-restart-lock",
         kind=StickySessionKind.CODEX_SESSION,
         expected_account_id="acc-recovered-before-lock",

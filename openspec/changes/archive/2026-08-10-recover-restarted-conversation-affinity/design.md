@@ -16,7 +16,7 @@ Current replicas distinguish newly namespaced soft process-session affinity from
 - Reallocate hard rows because of local caps, retry exclusions, transient health, or budget pressure.
 - Make arbitrary full-resend requests mobile without the Codex restart marker.
 - Change previous-response, conversation, file, bridge, or turn-state ownership semantics.
-- Add a setting, schema migration, or new client-visible error code.
+- Add a setting or new client-visible error code.
 
 ## Decisions
 
@@ -28,11 +28,13 @@ This reuses the proof applied to cross-account replay instead of maintaining a s
 
 ### Limit retirement to legacy process-session ownership and durable statuses
 
-Selection may consume the capability only for a raw compatibility row reached through typed `session_header` provenance. Explicit turn-state rows remain hard. The repository update also requires the current owner to be `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED`; local capacity, runtime-health, exclusion, and budget decisions cannot authorize retirement.
+Selection may consume the capability only for a raw compatibility row reached through typed `session_header` provenance. That provenance describes the current request, not the historical row: raw storage mixed process-session and explicit turn-state values, so equal client-controlled text cannot prove which source wrote it. The repository therefore marks abandonment as applying only to `session_header` interpretation and retains the row's account for explicit `turn_state` lookup. The repository update also requires the current owner to be `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED`; local capacity, runtime-health, exclusion, and budget decisions cannot authorize retirement.
+
+Mutation authority is the authenticated account-assignment and security-policy scope before requested-model and service-tier filtering. Model eligibility still constrains the replacement pool, but cannot make an otherwise authorized raw owner appear out of scope.
 
 ### Tombstone with compare-and-set, then rerun normal selection
 
-The repository will atomically set `continuity_abandoned_at` only when the key, kind, expected account, non-tombstoned state, and unavailable account status still match. Selection clears its cached legacy owner and repeats its normal loop. The existing tombstone semantics then authorize fresh selection and allow the namespaced process-session row to claim the replacement owner.
+The repository will atomically set `continuity_abandoned_at` plus `continuity_abandonment_scope=session_header` only when the key, kind, expected account, non-tombstoned state, and unavailable account status still match. Selection clears its cached legacy owner and repeats its normal loop. Source-aware lookup treats that row as abandoned for process-session selection but continues returning the retained account to an explicit turn-state request. The existing tombstone semantics then authorize fresh process-session selection and allow the namespaced row to claim the replacement owner.
 
 Deleting the row outright was rejected because tombstones distinguish deliberate continuity abandonment from an unknown owner. Blindly updating after an earlier status read was rejected because a concurrent rebind or account recovery could otherwise be lost.
 
@@ -40,7 +42,7 @@ The normal loop may still hold account objects loaded before retirement. The suc
 
 ## Risks / Trade-offs
 
-- [A forged marker requests owner abandonment] → The complete payload must still be account-neutral and self-contained, the caller controls only its own session key, and retirement occurs only while the persisted owner is unavailable.
+- [A forged marker requests owner abandonment] → The complete payload must still be account-neutral and self-contained, retirement occurs only while the persisted owner is unavailable, and source-qualified abandonment cannot erase a colliding explicit turn-state owner.
 - [A concurrent request changes ownership or restores the account] → One compare-and-set statement verifies both mapping owner and account status at write time; a miss preserves fail-closed behavior.
 - [A restart includes unresolved tool output or account-scoped content] → The existing fresh-replay classifier denies the capability, leaving the hard row untouched.
 - [Transport wiring drifts] → Carry one typed affinity-policy flag through the shared selection boundary and explicitly forward it from the direct WebSocket call site that expands policy fields.
@@ -48,7 +50,7 @@ The normal loop may still hold account objects loaded before retirement. The suc
 
 ## Migration Plan
 
-No database migration is required because `continuity_abandoned_at` already exists. Deploy the new image, then reproduce a marked restart against an unavailable legacy owner and verify a replacement account is selected. Rollback is an image replacement; existing tombstones remain compatible with the prior stale-owner cleanup behavior.
+Add nullable `sticky_sessions.continuity_abandonment_scope`. Existing rows require no backfill: a non-null abandonment timestamp with NULL scope retains its historical meaning as a global stale-hard tombstone. Goal restart writes `session_header`; ordinary upsert clears both fields, and stale-hard cleanup may later promote a source-qualified marker to global after the normal age threshold. Downgrade drops only the scope column; operators must not downgrade while source-qualified rows exist because older code would interpret them globally.
 
 ## Open Questions
 

@@ -228,6 +228,11 @@ class _SelectionInputs(SelectionInputsProtocol):
     # exclusion, runtime-health, budget, and account-cap filters. Keep that
     # stronger candidate pool alongside the effective routing pool.
     continuity_owner_candidates: list[Account] | None = None
+    # Sticky-row mutation is authorized by account assignment and security
+    # policy, before model/service-tier eligibility. Keep this separate from
+    # continuity ambiguity: a model-ineligible account can still own the raw
+    # row that this authenticated request is allowed to retire.
+    sticky_mutation_authority_account_ids: frozenset[str] | None = None
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
@@ -243,6 +248,12 @@ class _SelectionInputs(SelectionInputsProtocol):
         if self.continuity_owner_candidates is None:
             return self.accounts
         return self.continuity_owner_candidates
+
+    @property
+    def effective_sticky_mutation_authority_account_ids(self) -> frozenset[str]:
+        if self.sticky_mutation_authority_account_ids is None:
+            return frozenset(account.id for account in self.effective_continuity_owner_candidates)
+        return self.sticky_mutation_authority_account_ids
 
 
 def _required_continuity_owner_failure(
@@ -573,6 +584,20 @@ class LoadBalancer:
                 # Ownership scope and routing availability are separate. Even
                 # an already-empty routing pool must have its owner candidates
                 # security-filtered before conversation ambiguity is decided.
+                security_scope_accounts = (
+                    selection_inputs.runtime_accounts
+                    if selection_inputs.runtime_accounts is not None
+                    else [
+                        *selection_inputs.effective_continuity_owner_candidates,
+                        *selection_inputs.accounts,
+                    ]
+                )
+                security_authorized_account_ids = frozenset(
+                    account.id for account in security_scope_accounts if bool(account.security_work_authorized)
+                )
+                authorized_mutation_account_ids = (
+                    selection_inputs.effective_sticky_mutation_authority_account_ids & security_authorized_account_ids
+                )
                 authorized_owner_candidates = [
                     account
                     for account in selection_inputs.effective_continuity_owner_candidates
@@ -588,6 +613,7 @@ class LoadBalancer:
                         latest_secondary={},
                         latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=authorized_owner_candidates,
+                        sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
@@ -599,6 +625,7 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=authorized_owner_candidates,
+                    sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -620,6 +647,9 @@ class LoadBalancer:
                         latest_secondary={},
                         latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
+                        sticky_mutation_authority_account_ids=(
+                            selection_inputs.effective_sticky_mutation_authority_account_ids
+                        ),
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
@@ -631,6 +661,9 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
+                    sticky_mutation_authority_account_ids=(
+                        selection_inputs.effective_sticky_mutation_authority_account_ids
+                    ),
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -697,6 +730,7 @@ class LoadBalancer:
                     # Raw rows may be historical turn-state ownership. The
                     # bounded thread TTL must never age out that hard evidence.
                     max_age_seconds=None,
+                    continuity_source="session_header",
                 )
             if required_account_id is not None and (
                 legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
@@ -1055,6 +1089,7 @@ class LoadBalancer:
             if account_ids is not None:
                 allowed_account_ids = set(account_ids)
                 scoped_accounts = [account for account in scoped_accounts if account.id in allowed_account_ids]
+            sticky_mutation_authority_account_ids = frozenset(account.id for account in scoped_accounts)
             accounts = _selectable_accounts(scoped_accounts)
             pre_model_filter_accounts = accounts
             model_catalog_omitted_account_ids: frozenset[str] = frozenset()
@@ -1096,6 +1131,7 @@ class LoadBalancer:
                         continuity_owner_candidates=[
                             _clone_account(account) for account in continuity_owner_candidates
                         ],
+                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -1110,6 +1146,7 @@ class LoadBalancer:
                         latest_secondary={},
                         latest_monthly={},
                         continuity_owner_candidates=[],
+                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -1126,6 +1163,7 @@ class LoadBalancer:
                         continuity_owner_candidates=[
                             _clone_account(account) for account in continuity_owner_candidates
                         ],
+                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -1139,6 +1177,7 @@ class LoadBalancer:
                     latest_secondary={},
                     latest_monthly={},
                     continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
+                    sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                     error_message=(
@@ -1172,6 +1211,7 @@ class LoadBalancer:
                         continuity_owner_candidates=[
                             _clone_account(account) for account in continuity_owner_candidates
                         ],
+                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                         error_message=additional_filter.error_message,
@@ -1188,6 +1228,7 @@ class LoadBalancer:
                     latest_secondary={},
                     latest_monthly={},
                     continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
+                    sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
@@ -1248,6 +1289,7 @@ class LoadBalancer:
                     account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
                 },
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
+                sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 ignore_standard_quota_account_ids=ignore_standard_quota_account_ids,
@@ -2951,6 +2993,11 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             None
             if selection_inputs.continuity_owner_candidates is None
             else [_clone_account(account) for account in selection_inputs.continuity_owner_candidates]
+        ),
+        sticky_mutation_authority_account_ids=(
+            None
+            if selection_inputs.sticky_mutation_authority_account_ids is None
+            else frozenset(selection_inputs.sticky_mutation_authority_account_ids)
         ),
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(

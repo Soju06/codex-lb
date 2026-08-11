@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import socket
 import time
 from collections import deque
 from collections.abc import AsyncGenerator
@@ -7061,7 +7062,11 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
 
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(async_client, monkeypatch):
-    _install_bridge_settings(monkeypatch, enabled=True)
+    # The app lifespan registers the process hostname in the durable bridge
+    # ring before this test installs its settings. Keep the test on that same
+    # instance so the startup heartbeat cannot make the reconnect path look
+    # like a cross-replica ownership conflict.
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(async_client, "acc_http_bridge_reconnect", "http-bridge-reconnect@example.com")
     account = await _get_account(account_id)
     first_upstream = _ClosingBridgeUpstreamWebSocket()

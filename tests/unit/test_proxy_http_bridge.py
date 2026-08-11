@@ -412,6 +412,7 @@ async def test_submit_hard_turn_walks_race_path_chain_before_recording(
     assert json.loads(recorded["request_text"])["previous_response_id"] == "resp-2"
     assert recorded["parent_response_id"] == "resp-2"
     assert json.loads(request_state.request_text or "{}")["previous_response_id"] == "resp-2"
+    assert request_state.proxy_injected_previous_response_id is True
 
 
 def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_anchor(

@@ -1165,6 +1165,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                 text_data = _text_with_previous_response_id(text_data, completed_response_id)
                                 request_state.request_text = text_data
                                 request_state.previous_response_id = completed_response_id
+                                request_state.proxy_injected_previous_response_id = True
                                 operation_parent_response_id = completed_response_id
                                 hard_turn_chain_advanced = True
                                 seen_hard_turn_response_ids.add(completed_response_id)

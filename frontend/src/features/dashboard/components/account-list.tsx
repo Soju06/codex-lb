@@ -6,6 +6,11 @@ import { EmptyState } from "@/components/empty-state";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import type { AccountAction } from "@/features/dashboard/components/account-card";
+import {
+  accountSubscriptionCredits,
+  formatCreditValue,
+  formatPurchasedCredits,
+} from "@/features/dashboard/account-credit-display";
 import type { AccountSummary } from "@/features/dashboard/schemas";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { usePrivacyStore } from "@/hooks/use-privacy";
@@ -22,7 +27,7 @@ import {
 
 const ACCOUNT_LIST_VISIBLE_ROWS = 8;
 const ACCOUNT_LIST_ROW_HEIGHT_REM = 4.5;
-const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 6rem minmax(8rem,0.8fr) 6.5rem";
+const ACCOUNT_LIST_COLUMNS = "minmax(13rem,1.3fr) 7.75rem 5rem minmax(14rem,1.2fr) 7.5rem 7.5rem minmax(8rem,0.8fr) 6.5rem";
 
 type AccountListProps = {
   accounts: AccountSummary[];
@@ -32,7 +37,7 @@ type AccountListProps = {
   onAction?: (account: AccountSummary, action: AccountAction) => void;
 };
 
-export type AccountListSortKey = "account" | "status" | "plan" | "quota" | "credits" | "warmup";
+export type AccountListSortKey = "account" | "status" | "plan" | "quota" | "subscriptionCredits" | "purchasedCredits" | "warmup";
 export type SortDirection = "asc" | "desc";
 export type AccountListSort = {
   key: AccountListSortKey;
@@ -44,7 +49,8 @@ const SORTABLE_HEADERS: Array<{ key: AccountListSortKey; label: string }> = [
   { key: "status", label: "Status" },
   { key: "plan", label: "Plan" },
   { key: "quota", label: "Quota" },
-  { key: "credits", label: "Credits" },
+  { key: "subscriptionCredits", label: "Subscription" },
+  { key: "purchasedCredits", label: "Purchased" },
   { key: "warmup", label: "Warm-up" },
 ];
 
@@ -53,7 +59,8 @@ const SORTABLE_HEADER_KEY: Record<AccountListSortKey, string> = {
   status: "dashboard.accountList.headers.status",
   plan: "dashboard.accountList.headers.plan",
   quota: "dashboard.accountList.headers.quota",
-  credits: "dashboard.accountList.headers.credits",
+  subscriptionCredits: "dashboard.accountList.headers.subscriptionCredits",
+  purchasedCredits: "dashboard.accountList.headers.purchasedCredits",
   warmup: "dashboard.accountList.headers.warmup",
 };
 
@@ -124,31 +131,8 @@ function accountQuotaSortValue(account: AccountSummary): number | null {
   return Math.min(...values);
 }
 
-function accountCreditsLabel(account: AccountSummary) {
-  const monthlyOnly =
-    account.windowMinutesMonthly != null &&
-    account.windowMinutesPrimary == null &&
-    account.windowMinutesSecondary == null;
-  const weeklyOnly = account.windowMinutesPrimary == null && account.windowMinutesSecondary != null;
-  const displayCredits = account.creditsBalance ?? (
-    monthlyOnly
-      ? account.remainingCreditsMonthly
-      : weeklyOnly
-        ? account.remainingCreditsSecondary
-        : (account.remainingCreditsSecondary ?? account.remainingCreditsPrimary)
-  );
-  if (account.creditsUnlimited) {
-    return "Unlimited";
-  }
-  return displayCredits === null || displayCredits === undefined ? "-" : displayCredits.toFixed(2);
-}
-
-function accountCreditsSortValue(account: AccountSummary): number | null {
-  if (account.creditsUnlimited) {
-    return Number.POSITIVE_INFINITY;
-  }
-  const value = Number(accountCreditsLabel(account));
-  return Number.isFinite(value) ? value : null;
+function accountPurchasedCreditsSortValue(account: AccountSummary): number | null {
+  return account.creditsUnlimited ? Number.POSITIVE_INFINITY : (account.creditsBalance ?? null);
 }
 
 function compareNullableNumber(a: number | null, b: number | null, direction: SortDirection): number {
@@ -190,8 +174,11 @@ function compareAccountsBySort(a: AccountSummary, b: AccountSummary, sort: Accou
     case "quota":
       result = compareNullableNumber(accountQuotaSortValue(a), accountQuotaSortValue(b), sort.direction);
       break;
-    case "credits":
-      result = compareNullableNumber(accountCreditsSortValue(a), accountCreditsSortValue(b), sort.direction);
+    case "subscriptionCredits":
+      result = compareNullableNumber(accountSubscriptionCredits(a), accountSubscriptionCredits(b), sort.direction);
+      break;
+    case "purchasedCredits":
+      result = compareNullableNumber(accountPurchasedCreditsSortValue(a), accountPurchasedCreditsSortValue(b), sort.direction);
       break;
     case "warmup":
       result = compareText(accountWarmupSortValue(a), accountWarmupSortValue(b));
@@ -202,7 +189,7 @@ function compareAccountsBySort(a: AccountSummary, b: AccountSummary, sort: Accou
     result = compareText(accountTitle(a), accountTitle(b));
     return sort.direction === "asc" ? result : -result;
   }
-  if (sort.key === "quota" || sort.key === "credits") {
+  if (sort.key === "quota" || sort.key === "subscriptionCredits" || sort.key === "purchasedCredits") {
     return result;
   }
   return sort.direction === "asc" ? result : -result;
@@ -327,7 +314,7 @@ export function AccountList({
       className="overflow-x-auto rounded-lg border bg-card"
     >
       <div
-        className="min-w-[54rem] divide-y overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        className="min-w-[76rem] divide-y overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         style={{ maxHeight: `${ACCOUNT_LIST_VISIBLE_ROWS * ACCOUNT_LIST_ROW_HEIGHT_REM}rem` }}
       >
         <div
@@ -398,7 +385,10 @@ export function AccountList({
               <span className="text-xs text-muted-foreground">{formatSlug(account.planType)}</span>
               <AccountQuotaCells account={account} />
 	              <span className="font-medium tabular-nums">
-	                {account.creditsUnlimited ? t("common.states.unlimited") : accountCreditsLabel(account)}
+	                {formatCreditValue(accountSubscriptionCredits(account))}
+	              </span>
+	              <span className="font-medium tabular-nums">
+	                {formatPurchasedCredits(account, t("common.states.unlimited"))}
 	              </span>
 	              <div className="min-w-0 text-xs">
 	                <p className={cn("font-medium", account.limitWarmupEnabled ? "text-primary" : "text-muted-foreground")}>

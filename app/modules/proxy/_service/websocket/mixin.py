@@ -377,7 +377,9 @@ from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
     _assign_websocket_response_id,
     _find_websocket_request_state_by_response_id,
+    _forget_websocket_stale_previous_response,
     _is_websocket_response_create,
+    _is_websocket_stale_previous_response,
     _match_websocket_request_state_for_anonymous_event,
     _matching_websocket_request_states_for_missing_tool_output_error,
     _matching_websocket_request_states_for_previous_response_error,
@@ -4145,6 +4147,10 @@ class _WebSocketMixin:
         account_id_value = account_id.strip()
         if not account_id_value:
             return
+        _forget_websocket_stale_previous_response(
+            previous_response_id=response_id,
+            api_key_id=api_key_id,
+        )
         cache_keys = [(response_id, api_key_id, None)]
         normalized_session_id = _facade()._normalize_session_id(session_id)
         if normalized_session_id is not None:
@@ -4207,6 +4213,31 @@ class _WebSocketMixin:
             return None
         api_key_id = api_key.id if api_key is not None else None
         session_id_value = _facade()._normalize_session_id(session_id)
+        if (
+            request_state is not None
+            and not force_request_log_lookup
+            and not request_state.fresh_upstream_request_is_retry_safe
+            and _is_websocket_stale_previous_response(
+                previous_response_id=response_id,
+                api_key_id=api_key_id,
+            )
+        ):
+            _record_lookup_metadata(source="stale_response_cache", outcome="hit")
+            _record_continuity_owner_resolution(
+                surface=surface,
+                source="stale_response_cache",
+                outcome="hit",
+                previous_response_id=response_id,
+                session_id=session_id_value,
+            )
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "stream_incomplete",
+                    "Previous response is temporarily unavailable; retrying is suppressed for the recovery window.",
+                    error_type="server_error",
+                ),
+            )
         cache_key = (response_id, api_key_id, session_id_value)
         cached_account_id = (
             None if force_request_log_lookup else proxy._websocket_previous_response_account_index.get(cache_key)

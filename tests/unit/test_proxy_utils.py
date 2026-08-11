@@ -2481,6 +2481,83 @@ async def test_resolve_websocket_previous_response_owner_cache_hit_keeps_owner_s
 
 
 @pytest.mark.asyncio
+async def test_resolve_websocket_previous_response_owner_suppresses_confirmed_stale_anchor(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_stale_anchor_cache",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_stale_anchor_cache",
+        session_id="sid-stale-anchor-cache",
+    )
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id=request_state.previous_response_id,
+        api_key_id=None,
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._resolve_websocket_previous_response_owner(
+            previous_response_id=request_state.previous_response_id,
+            api_key=None,
+            session_id=request_state.session_id,
+            surface="websocket_stream",
+            request_state=request_state,
+        )
+
+    assert request_logs.lookup_calls == []
+    assert request_state.previous_response_owner_lookup_source == "stale_response_cache"
+    assert request_state.previous_response_owner_lookup_outcome == "hit"
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+
+
+def test_remember_websocket_previous_response_owner_invalidates_stale_anchor_cache(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_invalidate",
+        api_key_id="key-stale-anchor",
+    )
+
+    service._remember_websocket_previous_response_owner(
+        previous_response_id="resp_stale_anchor_invalidate",
+        api_key_id="key-stale-anchor",
+        account_id="acc-new-owner",
+    )
+
+    assert not websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_invalidate",
+        api_key_id="key-stale-anchor",
+    )
+
+
+def test_websocket_stale_previous_response_cache_expires(monkeypatch):
+    clock = {"value": 100.0}
+    monkeypatch.setattr(websocket_helpers_module.time, "monotonic", lambda: clock["value"])
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_expiry",
+        api_key_id=None,
+    )
+
+    assert websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_expiry",
+        api_key_id=None,
+    )
+    clock["value"] += websocket_helpers_module._WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_TTL_SECONDS
+    assert not websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_expiry",
+        api_key_id=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_resolve_websocket_previous_response_owner_force_refresh_replaces_stale_cache():
     request_logs = _RequestLogsRecorder()
     request_logs.response_owner_by_id[("resp_force_refresh", None, "sid-force-refresh")] = "acc_authoritative"
@@ -32591,6 +32668,7 @@ def test_maybe_rewrite_websocket_previous_response_not_found_masks_lost_local_an
 
 def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found(monkeypatch, caplog):
     fixed_now = utcnow()
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_connect_failure",
         model="gpt-5.1",
@@ -32662,6 +32740,10 @@ def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found
             "value": 1.0,
         }
     ]
+    assert not websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id="resp_prev_anchor",
+        api_key_id=None,
+    )
 
 
 def test_sanitize_websocket_terminal_stale_error_marks_missing_anchor_source_unknown():

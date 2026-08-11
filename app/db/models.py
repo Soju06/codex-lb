@@ -7,6 +7,7 @@ from enum import Enum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -1093,6 +1094,12 @@ class ApiFirewallAllowlist(Base):
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
+    __table_args__ = (
+        CheckConstraint(
+            "allowed_reasoning_efforts IS NULL OR enforced_reasoning_effort IS NULL",
+            name="ck_api_keys_reasoning_policy_exclusive",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
@@ -1108,7 +1115,6 @@ class ApiKey(Base):
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     allowed_reasoning_efforts: Mapped[str | None] = mapped_column(Text, nullable=True)
-    api_key_policy_schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     traffic_class: Mapped[str] = mapped_column(
         String,

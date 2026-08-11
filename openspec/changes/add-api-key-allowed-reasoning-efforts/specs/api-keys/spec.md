@@ -14,10 +14,8 @@ catalog order.
 `enforcedReasoningEffort`. Create and PATCH requests MUST validate the
 effective persisted state, including an unchanged counterpart field. Existing
 API keys whose persisted allowlist is null MUST remain unrestricted.
-The persistence layer MUST prevent a serving version that does not understand
-the allowlist from creating a new API key without an explicit policy schema
-version. It MUST also reject a row that contains both an allowlist and a fixed
-reasoning effort, so an older partial update cannot create an ambiguous policy.
+The persistence layer MUST reject a row that contains both an allowlist and a
+fixed reasoning effort.
 
 #### Scenario: Create an effort-selectable key
 

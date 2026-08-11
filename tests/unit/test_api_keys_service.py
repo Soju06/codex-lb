@@ -23,7 +23,6 @@ from app.db.models import (
 from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer
 from app.modules.api_keys.repository import (
     _UNSET,
-    API_KEY_POLICY_HASH_PREFIX,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ReservationResult,
@@ -97,7 +96,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         for row in self.rows.values():
-            if row.key_hash in {key_hash, f"{API_KEY_POLICY_HASH_PREFIX}{key_hash}"}:
+            if row.key_hash == key_hash:
                 row.limits = self._limits.get(row.id, [])
                 row.account_assignments = self._account_assignments.get(row.id, [])
                 row.source_assignments = self._source_assignments.get(row.id, [])
@@ -723,56 +722,7 @@ async def test_create_key_normalizes_allowed_reasoning_efforts() -> None:
     stored = await repo.get_by_id(created.id)
     assert stored is not None
     assert stored.allowed_reasoning_efforts == '["low", "high", "xhigh"]'
-    assert stored.key_hash.startswith(API_KEY_POLICY_HASH_PREFIX)
     assert (await service.validate_key(created.key)).id == created.id
-
-
-@pytest.mark.asyncio
-async def test_reasoning_policy_hash_guard_survives_update_and_regeneration() -> None:
-    repo = _FakeApiKeysRepository()
-    service = ApiKeysService(repo)
-    created = await service.create_key(
-        ApiKeyCreateData(
-            name="policy-hash-guard",
-            allowed_models=None,
-            allowed_reasoning_efforts=["low"],
-        )
-    )
-
-    regenerated = await service.regenerate_key(created.id)
-    stored = await repo.get_by_id(created.id)
-    assert stored is not None
-    assert stored.key_hash.startswith(API_KEY_POLICY_HASH_PREFIX)
-    assert (await service.validate_key(regenerated.key)).id == created.id
-
-    unrestricted = await service.update_key(
-        created.id,
-        ApiKeyUpdateData(allowed_reasoning_efforts=None, allowed_reasoning_efforts_set=True),
-    )
-    stored = await repo.get_by_id(created.id)
-    assert stored is not None
-    assert not stored.key_hash.startswith(API_KEY_POLICY_HASH_PREFIX)
-    assert unrestricted.allowed_reasoning_efforts is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("field", ["api_key_policy_schema_version", "key_hash"])
-async def test_validate_key_rejects_malformed_reasoning_policy_rows(field: str) -> None:
-    repo = _FakeApiKeysRepository()
-    service = ApiKeysService(repo)
-    created = await service.create_key(
-        ApiKeyCreateData(
-            name="malformed-policy-row",
-            allowed_models=None,
-            allowed_reasoning_efforts=["low"],
-        )
-    )
-    row = await repo.get_by_id(created.id)
-    assert row is not None
-    setattr(row, field, 0 if field == "api_key_policy_schema_version" else row.key_hash.removeprefix("policy:"))
-
-    with pytest.raises(ApiKeyInvalidError):
-        await service.validate_key(created.key)
 
 
 @pytest.mark.asyncio

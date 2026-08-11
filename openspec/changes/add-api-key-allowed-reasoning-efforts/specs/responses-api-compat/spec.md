@@ -21,6 +21,9 @@ request that omits an effort MUST retain current default behavior.
 Applying the policy more than once to the same request, including across a
 signed internal HTTP bridge hop, MUST be idempotent and MUST NOT re-authorize
 an already-normalized wire value as though it were the original client choice.
+Before source-routed Responses traffic is forwarded, accepted reasoning
+aliases MUST be aligned with the authorized canonical `reasoning.effort` or
+removed so a conflicting alias cannot select a disallowed effort upstream.
 
 #### Scenario: Reject max before upstream dispatch
 
@@ -43,3 +46,12 @@ an already-normalized wire value as though it were the original client choice.
 - **WHEN** a Responses request omits `reasoning.effort` and uses no effort alias
 - **THEN** the proxy does not add or replace a reasoning effort
 - **AND** the request continues through the existing route
+
+#### Scenario: Source-routed conflicting alias cannot override policy
+
+- **GIVEN** a source-routed model and an API key with
+  `allowedReasoningEfforts: ["low"]`
+- **WHEN** a Responses request supplies `reasoning.effort: "low"` and
+  `thinking: "max"`
+- **THEN** the source receives the canonical `reasoning.effort: "low"`
+- **AND** it does not receive the conflicting `thinking` alias

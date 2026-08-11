@@ -2123,7 +2123,7 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
 
     db_path = tmp_path / "api-key-reasoning-policy.db"
     url = _db_url(db_path)
-    parent_revision = "20260806_020000_add_usage_history_bulk_covering_indexes"
+    parent_revision = "20260806_120000_add_http_bridge_owner_process_epoch"
     target_revision = "20260806_030000_add_api_key_allowed_reasoning_efforts"
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
@@ -2136,7 +2136,6 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
         with engine.connect() as connection:
             before = {column["name"] for column in inspect(connection).get_columns("api_keys")}
             assert "allowed_reasoning_efforts" not in before
-            assert "api_key_policy_schema_version" not in before
 
         with engine.begin() as connection:
             connection.execute(
@@ -2158,40 +2157,31 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
         with engine.connect() as connection:
             inspector = inspect(connection)
             columns = {column["name"] for column in inspector.get_columns("api_keys")}
-            assert {"allowed_reasoning_efforts", "api_key_policy_schema_version"} <= columns
+            assert "allowed_reasoning_efforts" in columns
             assert "ck_api_keys_reasoning_policy_exclusive" in {
                 constraint["name"]
                 for constraint in inspector.get_check_constraints("api_keys")
                 if constraint.get("name")
             }
-            assert "ck_api_keys_reasoning_policy_hash_guard" in {
-                constraint["name"]
-                for constraint in inspector.get_check_constraints("api_keys")
-                if constraint.get("name")
-            }
-            assert connection.execute(
-                text(
-                    "SELECT api_key_policy_schema_version, allowed_reasoning_efforts "
-                    "FROM api_keys WHERE id = 'key_reasoning_policy_migration'"
-                )
-            ).one() == (1, None)
-            connection.execute(
-                text(
-                    "UPDATE api_keys SET allowed_reasoning_efforts = :allowed, key_hash = :policy_hash "
-                    "WHERE id = 'key_reasoning_policy_migration'"
-                ),
-                {"allowed": '["low"]', "policy_hash": "policy:hash_reasoning_policy_migration"},
-            )
-            connection.commit()
-            # A pre-policy reader hashes without the marker and must not see
-            # a restricted key. A pre-policy writer cannot remove the marker
-            # through an ordinary reasoning-policy update because the check
-            # constraint rejects the mixed-version state.
             assert (
                 connection.execute(
-                    text("SELECT COUNT(*) FROM api_keys WHERE key_hash = 'hash_reasoning_policy_migration'")
+                    text("SELECT allowed_reasoning_efforts FROM api_keys WHERE id = 'key_reasoning_policy_migration'")
                 ).scalar_one()
-                == 0
+                is None
+            )
+            connection.execute(
+                text(
+                    "UPDATE api_keys SET allowed_reasoning_efforts = :allowed "
+                    "WHERE id = 'key_reasoning_policy_migration'"
+                ),
+                {"allowed": '["low"]'},
+            )
+            connection.commit()
+            assert (
+                connection.execute(
+                    text("SELECT key_hash FROM api_keys WHERE id = 'key_reasoning_policy_migration'")
+                ).scalar_one()
+                == "hash_reasoning_policy_migration"
             )
             with pytest.raises(sa_exc.IntegrityError):
                 connection.execute(
@@ -2206,18 +2196,23 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
         with engine.connect() as connection:
             columns = {column["name"] for column in inspect(connection).get_columns("api_keys")}
             assert "allowed_reasoning_efforts" not in columns
-            assert "api_key_policy_schema_version" not in columns
+            assert (
+                connection.execute(
+                    text("SELECT key_hash FROM api_keys WHERE id = 'key_reasoning_policy_migration'")
+                ).scalar_one()
+                == "hash_reasoning_policy_migration"
+            )
 
         command.upgrade(config, target_revision)
         with engine.connect() as connection:
             columns = {column["name"] for column in inspect(connection).get_columns("api_keys")}
-            assert {"allowed_reasoning_efforts", "api_key_policy_schema_version"} <= columns
-            assert connection.execute(
-                text(
-                    "SELECT api_key_policy_schema_version, allowed_reasoning_efforts "
-                    "FROM api_keys WHERE id = 'key_reasoning_policy_migration'"
-                )
-            ).one() == (1, None)
+            assert "allowed_reasoning_efforts" in columns
+            assert (
+                connection.execute(
+                    text("SELECT allowed_reasoning_efforts FROM api_keys WHERE id = 'key_reasoning_policy_migration'")
+                ).scalar_one()
+                is None
+            )
     finally:
         engine.dispose()
 

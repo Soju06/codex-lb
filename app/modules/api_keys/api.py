@@ -119,9 +119,6 @@ def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> l
     return limit_inputs
 
 
-# Policy-aware clients use the versioned write path so an older replica returns
-# 404 instead of silently dropping the new allowlist field.
-@router.post("/v2/", response_model=ApiKeyCreateResponse)
 @router.post("/", response_model=ApiKeyCreateResponse)
 async def create_api_key(
     request: Request,
@@ -176,7 +173,6 @@ async def list_api_keys(
     return [_to_response(row) for row in rows]
 
 
-@router.patch("/v2/{key_id}", response_model=ApiKeyResponse)
 @router.patch("/{key_id}", response_model=ApiKeyResponse)
 async def update_api_key(
     request: Request,

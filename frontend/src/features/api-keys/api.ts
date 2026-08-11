@@ -10,14 +10,7 @@ import {
 } from "@/features/api-keys/schemas";
 
 export const API_KEYS_BASE_PATH = "/api/api-keys";
-// The versioned path is intentionally unknown to pre-policy replicas. This
-// makes mixed-version policy writes fail closed instead of losing the field.
-const API_KEYS_POLICY_BASE_PATH = `${API_KEYS_BASE_PATH}/v2`;
 const MODELS_PATH = "/api/models";
-
-function usesReasoningPolicy(payload: object): boolean {
-  return "allowedReasoningEfforts" in payload;
-}
 
 export function listApiKeys() {
   return get(`${API_KEYS_BASE_PATH}/`, ApiKeyListSchema);
@@ -25,20 +18,14 @@ export function listApiKeys() {
 
 export function createApiKey(payload: unknown) {
   const validated = ApiKeyCreateRequestSchema.parse(payload);
-  const basePath = usesReasoningPolicy(validated)
-    ? API_KEYS_POLICY_BASE_PATH
-    : API_KEYS_BASE_PATH;
-  return post(`${basePath}/`, ApiKeyCreateResponseSchema, {
+  return post(`${API_KEYS_BASE_PATH}/`, ApiKeyCreateResponseSchema, {
     body: validated,
   });
 }
 
 export function updateApiKey(keyId: string, payload: unknown) {
   const validated = ApiKeyUpdateRequestSchema.parse(payload);
-  const basePath = usesReasoningPolicy(validated)
-    ? API_KEYS_POLICY_BASE_PATH
-    : API_KEYS_BASE_PATH;
-  return patch(`${basePath}/${encodeURIComponent(keyId)}`, ApiKeySchema, {
+  return patch(`${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}`, ApiKeySchema, {
     body: validated,
   });
 }

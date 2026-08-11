@@ -95,8 +95,15 @@ routing. Source-routed chat also resolves `ultra` to the `max` wire value for
 every accepted chat reasoning spelling (`reasoning_effort`, `reasoningEffort`,
 `reasoning.effort`, and `thinking`) after the request passes the allowlist.
 When a client supplies conflicting spellings, the outbound values are aligned
-to the already-authorized converted Responses effort so a source cannot select
-a disallowed value from an ignored alias.
+to the already-authorized client-plane effort so a source cannot select a
+disallowed value from an ignored alias. Other accepted client-plane values,
+including `minimal` and model-alias-derived `xhigh`, remain unchanged for an
+external source that may support them directly.
+
+Source-routed Responses traffic likewise normalizes all accepted reasoning
+aliases before egress. The canonical `reasoning.effort` wins when aliases
+conflict, and the aliases are removed so an external source cannot select a
+different, unauthorized value.
 
 The origin route records that policy has already been applied when it forwards
 the signed request to an owner instance. The owner still authenticates the
@@ -128,28 +135,17 @@ enforcement, and the owner receives an explicit internal call-site marker.
 - **Operators switch policies through a partial PATCH**: effective-state
   validation rejects a key that would hold both settings; the dashboard sends
   the clearing value in the same request.
-- **Older replicas during a rolling upgrade**: policy-enabled keys store the
-  same digest behind a `policy:` storage prefix. New readers accept both the
-  legacy and protected storage form, while an older reader only looks up the
-  plain digest and therefore fails closed. A database check constraint keeps
-  an older writer's key regeneration from replacing the protected digest with
-  a plain one. The dashboard sends create and policy-bearing update requests
-  to `/api/api-keys/v2/`, which does not exist on an older replica, so those
-  writes fail closed instead of silently dropping the new field. Cache
-  invalidation strips the prefix before evicting the client-token digest.
+- **Mixed-version replicas during a rolling upgrade**: this feature does not
+  add protocol machinery for mixed application versions. Operators running a
+  multi-replica deployment must complete the application rollout before
+  creating or changing reasoning allowlists.
 
 ## Migration Plan
 
-The migration adds the nullable allowlist column plus a non-null policy schema
-version. Existing rows are backfilled with version `1` and retain current
+The migration adds one nullable allowlist column. Existing rows retain current
 unrestricted behavior because their allowlist remains `NULL`. The database
-also rejects rows that combine a fixed effort with an allowlist and requires a
-protected storage digest whenever the allowlist is present. During a rolling
-upgrade, an older reader cannot authenticate a policy-enabled key and an older
-writer cannot silently remove that protection while regenerating it. The
-versioned dashboard write path also refuses policy mutations on an older
-replica. Rolling back drops the new columns and constraints without changing
-other stored data.
+rejects rows that combine a fixed effort with an allowlist. Rolling back drops
+the constraint and column without changing key identity or other stored data.
 
 ## Open Questions
 

@@ -7,7 +7,7 @@ import pytest
 
 from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.model_registry import ModelRegistry
-from app.core.openai.requests import ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.request_policy import (
@@ -358,6 +358,7 @@ def test_reasoning_effort_allowlist_is_idempotent_after_wire_normalization() -> 
     ("field", "value", "expected_effort"),
     [
         ("reasoningEffort", "max", "max"),
+        ("reasoning_effort", "max", "max"),
         ("thinking", {"effort": "max", "summary": "auto"}, "max"),
         ("enable_thinking", True, "medium"),
     ],
@@ -388,6 +389,38 @@ def test_reasoning_effort_allowlist_checks_responses_alias_fields(
 
     with pytest.raises(ProxyReasoningEffortNotAllowed, match=expected_effort):
         apply_api_key_enforcement(request, api_key)
+
+
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+@pytest.mark.parametrize(("alias_effort", "wire_effort"), [("minimal", "low"), ("ultra", "max")])
+def test_reasoning_aliases_receive_wire_normalization_after_allowlist(
+    request_type,
+    alias_effort: str,
+    wire_effort: str,
+) -> None:
+    request = request_type.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "reasoningEffort": alias_effort,
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-reasoning-alias-wire-normalization",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=[alias_effort],
+            enforced_service_tier=None,
+        ),
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.reasoning is not None
+    assert request.reasoning.effort == wire_effort
 
 
 def test_reasoning_effort_allowlist_checks_explicit_effort_with_fast_model_alias() -> None:
@@ -499,7 +532,7 @@ def test_reasoning_effort_allowlist_keeps_client_plane_efforts_distinct(
         apply_api_key_enforcement(request, api_key)
 
 
-def test_source_chat_reasoning_aliases_use_wire_safe_ultra_alias() -> None:
+def test_source_chat_reasoning_aliases_remain_unchanged_without_policy() -> None:
     payload: dict[str, JsonValue] = {
         "reasoning_effort": "ultra",
         "reasoningEffort": "ultra",
@@ -510,10 +543,10 @@ def test_source_chat_reasoning_aliases_use_wire_safe_ultra_alias() -> None:
     apply_api_key_enforcement_to_chat_payload(payload, None)
 
     assert payload == {
-        "reasoning_effort": "max",
-        "reasoningEffort": "max",
-        "thinking": {"effort": "max", "summary": "auto"},
-        "reasoning": {"effort": "max", "summary": "auto"},
+        "reasoning_effort": "ultra",
+        "reasoningEffort": "ultra",
+        "thinking": {"effort": "ultra", "summary": "auto"},
+        "reasoning": {"effort": "ultra", "summary": "auto"},
     }
 
 
@@ -534,3 +567,22 @@ def test_source_chat_reasoning_policy_aligns_conflicting_aliases() -> None:
         "thinking": {"effort": "low", "summary": "auto", "type": "budget", "budget": 4096},
         "reasoning": {"effort": "low", "summary": "auto"},
     }
+
+
+@pytest.mark.parametrize("effort", ["minimal", "xhigh"])
+def test_source_chat_reasoning_policy_preserves_client_plane_effort(effort: str) -> None:
+    payload: dict[str, JsonValue] = {"reasoning_effort": "low"}
+
+    apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort=effort)
+
+    assert payload == {
+        "reasoning_effort": effort,
+    }
+
+
+def test_source_chat_reasoning_policy_preserves_caller_alias_set() -> None:
+    payload: dict[str, JsonValue] = {"thinking": "ultra"}
+
+    apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="ultra")
+
+    assert payload == {"thinking": "max"}

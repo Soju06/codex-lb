@@ -2,11 +2,9 @@
 
 The nullable column preserves the existing unrestricted policy for every
 existing API key. New writes serialize a non-empty canonical JSON list.
-The schema version column makes legacy writers fail closed during rolling
-upgrades instead of silently dropping a requested policy.
 
 Revision ID: 20260806_030000_add_api_key_allowed_reasoning_efforts
-Revises: 20260806_020000_add_usage_history_bulk_covering_indexes
+Revises: 20260806_120000_add_http_bridge_owner_process_epoch
 Create Date: 2026-08-06 03:00:00.000000
 """
 
@@ -17,16 +15,13 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260806_030000_add_api_key_allowed_reasoning_efforts"
-down_revision = "20260806_020000_add_usage_history_bulk_covering_indexes"
+down_revision = "20260806_120000_add_http_bridge_owner_process_epoch"
 branch_labels = None
 depends_on = None
 
 _TABLE = "api_keys"
 _COLUMN = "allowed_reasoning_efforts"
-_SCHEMA_VERSION_COLUMN = "api_key_policy_schema_version"
-_SCHEMA_VERSION = 1
 _POLICY_CHECK = "ck_api_keys_reasoning_policy_exclusive"
-_POLICY_HASH_CHECK = "ck_api_keys_reasoning_policy_hash_guard"
 
 
 def _columns(connection: Connection) -> set[str]:
@@ -46,44 +41,25 @@ def _check_constraints(connection: Connection) -> set[str]:
 def upgrade() -> None:
     connection = op.get_bind()
     columns = _columns(connection)
-    if _COLUMN not in columns or _SCHEMA_VERSION_COLUMN not in columns:
+    if _COLUMN not in columns:
         with op.batch_alter_table(_TABLE) as batch_op:
-            if _COLUMN not in columns:
-                batch_op.add_column(sa.Column(_COLUMN, sa.Text(), nullable=True))
-            if _SCHEMA_VERSION_COLUMN not in columns:
-                batch_op.add_column(sa.Column(_SCHEMA_VERSION_COLUMN, sa.Integer(), nullable=True))
+            batch_op.add_column(sa.Column(_COLUMN, sa.Text(), nullable=True))
 
-    op.execute(
-        sa.text(
-            f"UPDATE {_TABLE} SET {_SCHEMA_VERSION_COLUMN} = {_SCHEMA_VERSION} WHERE {_SCHEMA_VERSION_COLUMN} IS NULL"
-        )
-    )
     constraints = _check_constraints(connection)
-    with op.batch_alter_table(_TABLE) as batch_op:
-        if _POLICY_CHECK not in constraints:
+    if _POLICY_CHECK not in constraints:
+        with op.batch_alter_table(_TABLE) as batch_op:
             batch_op.create_check_constraint(
                 _POLICY_CHECK,
                 f"{_COLUMN} IS NULL OR enforced_reasoning_effort IS NULL",
             )
-        if _POLICY_HASH_CHECK not in constraints:
-            batch_op.create_check_constraint(
-                _POLICY_HASH_CHECK,
-                f"{_COLUMN} IS NULL OR key_hash LIKE 'policy:%'",
-            )
-        batch_op.alter_column(_SCHEMA_VERSION_COLUMN, existing_type=sa.Integer(), nullable=False)
 
 
 def downgrade() -> None:
     connection = op.get_bind()
     columns = _columns(connection)
-    if _COLUMN not in columns and _SCHEMA_VERSION_COLUMN not in columns:
+    if _COLUMN not in columns:
         return
     with op.batch_alter_table(_TABLE) as batch_op:
         if _POLICY_CHECK in _check_constraints(connection):
             batch_op.drop_constraint(_POLICY_CHECK, type_="check")
-        if _POLICY_HASH_CHECK in _check_constraints(connection):
-            batch_op.drop_constraint(_POLICY_HASH_CHECK, type_="check")
-        if _SCHEMA_VERSION_COLUMN in columns:
-            batch_op.drop_column(_SCHEMA_VERSION_COLUMN)
-        if _COLUMN in columns:
-            batch_op.drop_column(_COLUMN)
+        batch_op.drop_column(_COLUMN)

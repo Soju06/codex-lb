@@ -363,6 +363,15 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     return normalized
 
 
+def _normalize_responses_request_input(data: JsonValue) -> JsonValue:
+    normalized = _normalize_responses_input_instructions(data)
+    if not is_json_mapping(normalized):
+        return normalized
+    payload: MutableJsonObject = dict(normalized)
+    normalize_reasoning_aliases(payload)
+    return payload
+
+
 def _is_responses_lite_input(input_value: list[JsonValue]) -> bool:
     # Responses Lite requests carry their tool bundle as an input item with
     # type=additional_tools and deliberately place base instructions as a
@@ -617,7 +626,7 @@ class ResponsesRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _move_input_instruction_messages(cls, data: JsonValue) -> JsonValue:
-        return _normalize_responses_input_instructions(data)
+        return _normalize_responses_request_input(data)
 
     model: str = Field(min_length=1)
     instructions: str
@@ -745,7 +754,7 @@ class ResponsesCompactRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _move_input_instruction_messages(cls, data: JsonValue) -> JsonValue:
-        return _normalize_responses_input_instructions(data)
+        return _normalize_responses_request_input(data)
 
     model: str = Field(min_length=1)
     instructions: str
@@ -1741,6 +1750,7 @@ def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:
 
 def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     reasoning_effort = payload.pop("reasoningEffort", None)
+    snake_case_reasoning_effort = payload.pop("reasoning_effort", None)
     reasoning_summary = payload.pop("reasoningSummary", None)
     provider_thinking = payload.pop("thinking", None)
     provider_enable_thinking = payload.pop("enable_thinking", None)
@@ -1751,8 +1761,9 @@ def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     else:
         reasoning_map = {}
 
-    if isinstance(reasoning_effort, str) and "effort" not in reasoning_map:
-        reasoning_map["effort"] = reasoning_effort
+    alias_effort = reasoning_effort if isinstance(reasoning_effort, str) else snake_case_reasoning_effort
+    if isinstance(alias_effort, str) and "effort" not in reasoning_map:
+        reasoning_map["effort"] = alias_effort
     if isinstance(reasoning_summary, str) and "summary" not in reasoning_map:
         reasoning_map["summary"] = reasoning_summary
 

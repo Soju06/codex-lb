@@ -13,8 +13,9 @@ After a source-routed Chat Completions request passes the policy, any accepted
 `ultra` value MUST use the upstream wire value `max` regardless of whether the
 client expressed it through `reasoning_effort`, `reasoningEffort`,
 `reasoning.effort`, or `thinking`. If several reasoning spellings conflict,
-every retained outbound spelling MUST be aligned to the effort authorized from
-the converted Responses request.
+every retained outbound spelling MUST be aligned to the authorized client-plane
+effort. Other allowed client-plane efforts MUST remain unchanged for the
+external source.
 
 #### Scenario: Source-routed chat request is rejected before forwarding
 
@@ -29,3 +30,9 @@ the converted Responses request.
 - **GIVEN** a source-routed chat model and an API key that allows `ultra`
 - **WHEN** a Chat Completions client supplies `thinking: "ultra"`
 - **THEN** the source receives `thinking: "max"`
+
+#### Scenario: Source-routed chat preserves an allowed client-plane effort
+
+- **GIVEN** a source-routed chat model and an API key that allows `minimal`
+- **WHEN** a Chat Completions client supplies `reasoning_effort: "minimal"`
+- **THEN** the source receives `reasoning_effort: "minimal"`

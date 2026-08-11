@@ -1,6 +1,6 @@
 ## 1. Contract and persistence
 
-- [x] 1.1 Add nullable `allowed_reasoning_efforts` persistence, a policy schema-version guard, and a reversible migration from the current Alembic head.
+- [x] 1.1 Add nullable `allowed_reasoning_efforts` persistence and a reversible migration from the current Alembic head.
 - [x] 1.2 Extend API-key request/response schemas, service data, repository updates, and cache-facing mapping with normalized list semantics.
 - [x] 1.3 Validate non-empty supported values and mutual exclusion with `enforced_reasoning_effort` on create and effective PATCH state.
 

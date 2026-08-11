@@ -169,8 +169,6 @@ def _client_reasoning_effort(payload: ResponsesRequest | ResponsesCompactRequest
         alias_payload = dict(extra)
         if reasoning is not None:
             alias_payload["reasoning"] = reasoning
-        if "reasoning_effort" in alias_payload and "reasoningEffort" not in alias_payload:
-            alias_payload["reasoningEffort"] = alias_payload["reasoning_effort"]
         normalize_reasoning_aliases(alias_payload)
         normalized_reasoning = alias_payload.get("reasoning")
         if is_json_mapping(normalized_reasoning):
@@ -388,30 +386,14 @@ def apply_api_key_enforcement_to_chat_payload(
     applied to the outbound dict as well or the upstream receives the
     caller's values while accounting uses the enforced ones.
     """
-    # Source-routed chat requests preserve their chat-shaped payload, while
-    # Responses traffic resolves ``ultra`` to ``max`` before it reaches an
-    # upstream. Keep the wire contract identical for both routes.
-    for key in ("reasoning_effort", "reasoningEffort", "thinking"):
-        value = payload.get(key)
-        if isinstance(value, str):
-            payload[key] = resolve_wire_reasoning_effort(value)
-        elif key == "thinking" and isinstance(value, dict):
-            effort = value.get("effort")
-            if isinstance(effort, str):
-                payload[key] = {**value, "effort": resolve_wire_reasoning_effort(effort)}
-    reasoning = payload.get("reasoning")
-    if isinstance(reasoning, dict):
-        effort = reasoning.get("effort")
-        if isinstance(effort, str):
-            payload["reasoning"] = {**reasoning, "effort": resolve_wire_reasoning_effort(effort)}
-
     if allowed_reasoning_effort is not None:
         wire_effort = resolve_wire_reasoning_effort(allowed_reasoning_effort)
         # Chat requests can express the same setting through several provider
         # aliases. Once the Responses conversion has authorized one effective
-        # choice, make every retained alias agree so a source cannot honor a
-        # conflicting, disallowed value from the original payload.
-        payload["reasoning_effort"] = wire_effort
+        # choice, make every caller-supplied alias agree without adding fields
+        # that the selected source may not accept.
+        if "reasoning_effort" in payload:
+            payload["reasoning_effort"] = wire_effort
         if "reasoningEffort" in payload:
             payload["reasoningEffort"] = wire_effort
         if "thinking" in payload:
@@ -419,9 +401,8 @@ def apply_api_key_enforcement_to_chat_payload(
             payload["thinking"] = {**thinking, "effort": wire_effort} if isinstance(thinking, dict) else wire_effort
         payload.pop("enable_thinking", None)
         reasoning = payload.get("reasoning")
-        payload["reasoning"] = (
-            {**reasoning, "effort": wire_effort} if isinstance(reasoning, dict) else {"effort": wire_effort}
-        )
+        if isinstance(reasoning, dict):
+            payload["reasoning"] = {**reasoning, "effort": wire_effort}
 
     if api_key is None:
         return

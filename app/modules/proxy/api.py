@@ -131,6 +131,7 @@ from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
     extract_input_file_ids,
+    normalize_reasoning_aliases,
     normalize_tool_type,
     responses_request_has_explicit_prompt_cache_controls,
     strip_replayed_tool_call_namespaces_from_payload,
@@ -3889,10 +3890,8 @@ async def v1_chat_completions(
             model=request_model,
             api_key=api_key,
             allowed_reasoning_effort=(
-                responses_payload.reasoning.effort
-                if api_key is not None
-                and api_key.allowed_reasoning_efforts is not None
-                and responses_payload.reasoning is not None
+                responses_payload._codex_lb_client_reasoning_effort
+                if api_key is not None and api_key.allowed_reasoning_efforts is not None
                 else None
             ),
             reservation=reservation,
@@ -4239,6 +4238,10 @@ async def _source_responses_response(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
     source_payload = payload.model_dump_for_forwarding()
+    if api_key is not None and (
+        api_key.allowed_reasoning_efforts is not None or api_key.enforced_reasoning_effort is not None
+    ):
+        normalize_reasoning_aliases(source_payload)
     strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))

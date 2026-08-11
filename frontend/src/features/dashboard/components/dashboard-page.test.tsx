@@ -11,6 +11,7 @@ import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
+import type { AccountListSort } from "@/features/dashboard/components/account-list";
 
 import { DashboardPage } from "./dashboard-page";
 
@@ -56,15 +57,15 @@ vi.mock("@/features/dashboard/components/account-list", () => ({
     onSortChange,
   }: {
     accounts: Array<{ accountId: string }>;
-    sort: { key: string; direction: string } | null;
-    onSortChange: (sort: { key: string; direction: string }) => void;
+    sort: AccountListSort;
+    onSortChange: (sort: AccountListSort) => void;
   }) => {
     accountListSpy({ accounts, sort });
     return (
       <button
         type="button"
         data-testid="account-list"
-        onClick={() => onSortChange({ key: "credits", direction: "desc" })}
+        onClick={() => onSortChange({ key: "purchasedCredits", direction: "desc" })}
       >
         List for {accounts.length} accounts
       </button>
@@ -539,7 +540,7 @@ describe("DashboardPage", () => {
 
     await user.click(screen.getByTestId("account-list"));
 
-    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "credits", direction: "desc" });
+    expect(useDashboardPreferencesStore.getState().accountListSort).toEqual({ key: "purchasedCredits", direction: "desc" });
   });
 
   it("renders conversation badge between Statuses and Reset in filters", () => {

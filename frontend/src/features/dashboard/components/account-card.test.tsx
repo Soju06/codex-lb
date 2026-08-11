@@ -101,16 +101,31 @@ describe("AccountCard", () => {
     expect(container.querySelector(".privacy-blur")).not.toBeNull();
   });
 
-  it("renders the credits row", () => {
+  it("renders subscription and purchased credits separately", () => {
     const account = createAccountSummary({
-      creditsBalance: 959,
-      remainingCreditsSecondary: 0,
+      creditsBalance: 0,
+      remainingCreditsSecondary: 5_065.2,
     });
 
     render(<AccountCard account={account} />);
 
-    expect(screen.getByText("Credits:")).toBeInTheDocument();
-    expect(screen.getByText("959.00")).toBeInTheDocument();
+    expect(screen.getByText("Subscription quota:")).toBeInTheDocument();
+    expect(screen.getByText("5065.20")).toBeInTheDocument();
+    expect(screen.getByText("Purchased credits:")).toBeInTheDocument();
+    expect(screen.getByText("0.00")).toBeInTheDocument();
+  });
+
+  it("applies unlimited only to purchased credits", () => {
+    const account = createAccountSummary({
+      creditsUnlimited: true,
+      creditsBalance: null,
+      remainingCreditsSecondary: 5_065.2,
+    });
+
+    render(<AccountCard account={account} />);
+
+    expect(screen.getByText("5065.20")).toBeInTheDocument();
+    expect(screen.getByText("Unlimited")).toBeInTheDocument();
   });
 
   it("renders re-auth status and action for re-auth required accounts", () => {

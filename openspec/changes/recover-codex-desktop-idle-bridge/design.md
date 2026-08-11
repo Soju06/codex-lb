@@ -19,7 +19,10 @@ Current `main` already provides terminal request settlement, whole-session retir
 **Non-Goals:**
 
 - Replay a pre-visible request, retry clean upstream closes, or persist retry cooldowns across replicas.
-- Recover a request after any matched `response.*` lifecycle event; eventful missing-created recovery remains outside this narrow change.
+- Replay or move a request after any matched `response.*` lifecycle event. A
+  missing-created stream that is still producing buffered response-lifecycle
+  evidence stays on the same bridge and re-anchors the watchdog from that
+  activity; downstream-visible output suppresses this narrow watchdog entirely.
 - Change account selection, continuity ownership, request budgets, public `/v1/responses`, or operator settings.
 - Merge PR #1394, deploy the result, or alter the current Mac mini runtime as part of this code change.
 
@@ -44,10 +47,15 @@ The proactive timeout applies only while the current HTTP request:
 - owns the response-create gate and is awaiting `response.created`;
 - has a current send timestamp;
 - has no response id or recorded `response.created` latency;
-- has no matched `response.*` lifecycle event;
 - has no downstream-visible output or sequence evidence.
 
-Leading non-response telemetry such as `codex.rate_limits` does not change those conditions. Any matched response lifecycle event protects the request from this narrow watchdog, even if it later becomes stale; handling that ambiguous state safely requires broader sibling and replay coordination and is intentionally deferred.
+Leading non-response telemetry such as `codex.rate_limits` does not change
+those conditions. Matched response-lifecycle events before `response.created`
+keep the missing-created watchdog armed but re-anchor it from the most recent
+upstream response activity, so actively reasoning streams are not timed out from
+the original send timestamp. Once output is forwarded downstream, the watchdog
+is suppressed and existing stream/request-budget timeout behavior owns the
+request.
 
 ### 4. Fail the whole bridge session closed
 
@@ -67,7 +75,11 @@ Explicit `x-stainless-*` headers or an OpenAI User-Agent retain comment liveness
 
 - **A send fails after the timestamp is set.** Existing send-error cleanup retires or settles the request before the watchdog can act; tests cover that the timestamp alone is not sufficient eligibility.
 - **A quiet upstream accepted the request but emitted no event.** The proxy returns an explicit failure rather than risking a duplicate replay. The selected account remains healthy because silence is not proof of account failure.
-- **A matched lifecycle event arrives just before timeout.** Eligibility is rechecked under the existing request/session synchronization before retirement, and any matched `response.*` event suppresses this watchdog.
+- **A matched lifecycle event arrives just before timeout.** Eligibility is
+  rechecked under the existing request/session synchronization before
+  retirement, and response-lifecycle activity re-anchors the watchdog. If the
+  event is forwarded downstream, downstream-visible evidence suppresses this
+  narrow watchdog.
 - **Whole-session retirement interrupts a healthy sibling.** This narrow design chooses fail-closed session cleanup rather than attempting unsafe sibling isolation on current `main`. Existing terminal settlement must cover every pending sibling exactly once.
 - **A client spoofs native identity.** The only benefit is an ignored vendor liveness event on the authenticated Codex backend route; explicit SDK markers still take precedence.
 

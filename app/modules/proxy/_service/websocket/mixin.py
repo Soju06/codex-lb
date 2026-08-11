@@ -1591,6 +1591,35 @@ class _WebSocketMixin:
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
+                                if await responses_model_is_source_owned(
+                                    request_state.model, request_state.api_key or api_key
+                                ):
+                                    # Socket reuse bypasses connect-time selection, so a later
+                                    # response.create that switches to a source-owned model
+                                    # would otherwise be forwarded to the subscription account
+                                    # already attached to the open upstream. Model sources are
+                                    # only reachable from the HTTP request path.
+                                    source_message = (
+                                        f"Model {request_state.model!r} is served by an "
+                                        "OpenAI-compatible model source, which is only reachable "
+                                        "over the HTTP transport; retry the request over HTTPS."
+                                    )
+                                    _facade().logger.info(
+                                        "Websocket model source requires http transport "
+                                        "request_id=%s model=%s stage=response_create",
+                                        request_state.request_log_id or request_state.request_id,
+                                        request_state.model,
+                                    )
+                                    await proxy._release_websocket_request_state_reservation(request_state)
+                                    await proxy._emit_websocket_terminal_error(
+                                        websocket,
+                                        client_send_lock=client_send_lock,
+                                        request_state=request_state,
+                                        error_code="model_source_requires_http_transport",
+                                        error_message=source_message,
+                                        error_type="invalid_request_error",
+                                    )
+                                    continue
                             except ProxyResponseError as exc:
                                 (
                                     status_code,

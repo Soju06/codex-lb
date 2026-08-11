@@ -12,3 +12,5 @@
 - [x] Add spec delta for `responses-api-compat`.
 - [x] Cover the guard and the source-owned check with unit and integration
       tests, including the `require_streaming` edge and the enforced-model case.
+- [x] Apply the guard to every prepared `response.create` so socket reuse cannot
+      forward a source-owned model to the open subscription upstream (Codex P2).

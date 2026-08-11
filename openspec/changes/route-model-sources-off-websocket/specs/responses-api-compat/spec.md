@@ -4,13 +4,20 @@
 
 Model sources are reachable only from the HTTP request path. When a WebSocket
 Responses session requests a model that resolves to an enabled,
-Responses-capable OpenAI-compatible model source, the system SHALL fail the
-WebSocket connect before selecting a subscription account, and SHALL NOT
-dispatch the request to a subscription account.
+Responses-capable OpenAI-compatible model source, the system SHALL NOT dispatch
+the request to a subscription account.
 
-The failure MUST use error code `model_source_requires_http_transport` and MUST
-be emitted as a service-level connect failure (HTTP status `503`), so that Codex
-clients fall back to the HTTP transport, where source routing is applied.
+The check SHALL be applied on the connect path before account selection, and
+SHALL also be applied to every prepared `response.create`, so that a turn which
+switches to a source-owned model on an already-open subscription upstream is
+also rejected instead of being forwarded.
+
+Both failures MUST use error code `model_source_requires_http_transport`. On the
+connect path the failure MUST be emitted as a service-level connect failure
+(HTTP status `503`), so that Codex clients fall back to the HTTP transport,
+where source routing is applied. For a prepared `response.create` on an
+established session the failure MUST be emitted as a terminal error for that
+turn, and any usage reservation held for the turn MUST be released.
 
 #### Scenario: Source-owned model over WebSocket fails the connect
 
@@ -19,23 +26,24 @@ clients fall back to the HTTP transport, where source routing is applied.
 - **THEN** the system fails the connect with error code `model_source_requires_http_transport`
 - **AND** no subscription account is selected for the request
 
+#### Scenario: Later turn switching to a source-owned model is rejected
+
+- **GIVEN** a WebSocket Responses session already has an open subscription-account upstream
+- **AND** an enabled OpenAI-compatible model source exposes model `m` with Responses support
+- **WHEN** a subsequent `response.create` requests model `m`
+- **THEN** the system emits a terminal error with code `model_source_requires_http_transport`
+- **AND** the frame is not forwarded to the subscription account on the open upstream
+- **AND** the turn's usage reservation is released
+
+#### Scenario: An API key that enforces a source-owned model is rejected
+
+- **GIVEN** an API key whose `enforced_model` resolves to an enabled model source
+- **WHEN** the key opens a WebSocket Responses session requesting any model
+- **THEN** the enforced model is resolved against the model sources
+- **AND** the session fails with `model_source_requires_http_transport`
+
 #### Scenario: Subscription models are unaffected
 
 - **GIVEN** a model that is not served by any enabled model source
 - **WHEN** a client opens a WebSocket Responses session requesting that model
 - **THEN** account selection proceeds unchanged
-
-### Requirement: The WebSocket guard honors an enforced source model
-
-An API key's `enforced_model` MUST be considered alongside the requested model
-when deciding whether a WebSocket request is source-owned, matching the
-candidate list the HTTP handlers build. Otherwise a key that forces a
-source-owned model would still reach subscription-account selection.
-
-#### Scenario: An enforced source model fails the WebSocket connect
-
-- **GIVEN** an enabled Responses-capable source serving `source-model`
-- **AND** an API key whose `enforced_model` is `source-model`
-- **WHEN** a WebSocket request arrives for a subscription model
-- **THEN** the request is treated as source-owned and the session fails with
-  `model_source_requires_http_transport`

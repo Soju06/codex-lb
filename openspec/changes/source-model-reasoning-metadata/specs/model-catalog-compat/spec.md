@@ -15,6 +15,12 @@ be reported only when it matches one of the advertised efforts. A source model
 without reasoning metadata MUST continue to advertise no efforts, no default,
 and no summary support.
 
+Declared efforts MUST be normalized (trimmed and lowercased) and MUST be
+restricted to the efforts the client surfaces understand: `minimal`, `low`,
+`medium`, `high`, `xhigh`, `max`, `ultra`. An effort outside that set MUST be
+dropped. Codex clients deserialize the model catalog as a whole, so an
+operator typo must not be able to affect entries other than its own.
+
 #### Scenario: Effort slugs are advertised in declaration order
 
 - **GIVEN** a source model whose `raw_metadata_json` sets
@@ -42,6 +48,15 @@ and no summary support.
 - **THEN** the entry advertises exactly `low` and `high`
 - **AND** `default_reasoning_level` is absent
 
+#### Scenario: Unknown efforts and casing variants are normalized away
+
+- **GIVEN** a source model whose `raw_metadata_json` sets
+  `"supported_reasoning_levels": [" Low ", "HIGH", "turbo"]` and
+  `"default_reasoning_level": " HIGH "`
+- **WHEN** a client fetches the Codex model catalog
+- **THEN** the entry advertises exactly `low` and `high`
+- **AND** `default_reasoning_level` is `high`
+
 #### Scenario: Models without reasoning metadata keep the previous behavior
 
 - **GIVEN** a source model with no `raw_metadata_json`
@@ -49,33 +64,83 @@ and no summary support.
 - **THEN** the entry advertises no reasoning efforts, no default effort, and no
   reasoning-summary support
 
-### Requirement: Declared efforts survive the unsupported-effort normalization
+### Requirement: Declared reasoning efforts imply the chat-path reasoning opt-in
 
-The `minimal` normalization exists to work around a ChatGPT/Codex backend that
-drops the value, and MUST NOT be applied to models that backend does not serve.
-When a populated model-registry snapshot has no entry for the requested model,
-the requested reasoning effort MUST be forwarded unchanged. When no snapshot is
-available the existing conservative rewrite MUST still apply, because the
-request cannot then be attributed to a model source.
+A source model that declares `supported_reasoning_levels` MUST be treated as
+having opted into reasoning for the chat-completions path, as if
+`"supports_reasoning": true` were set. Advertising efforts on `/v1/models` while
+the chat-completions sanitizer strips the client's reasoning fields would make
+the same capability simultaneously visible and inert. The explicit
+`"supports_reasoning": true` opt-in MUST keep working for models that declare no
+levels.
 
-#### Scenario: A source model keeps a declared minimal effort
+#### Scenario: Declaring levels enables reasoning on the chat path
 
-- **GIVEN** a populated registry snapshot that lists only subscription models
-- **AND** a request for a model absent from that snapshot with
-  `reasoning.effort` of `minimal`
-- **WHEN** the unsupported-effort normalization runs
-- **THEN** the effort remains `minimal`
+- **GIVEN** a source model that declares `supported_reasoning_levels` and does
+  not set `"supports_reasoning"`
+- **WHEN** a chat-completions request for that model carries reasoning fields
+- **THEN** the fields are forwarded rather than stripped
 
-#### Scenario: Subscription models keep the workaround
+#### Scenario: Models with neither key keep reasoning stripped
 
-- **GIVEN** a populated registry snapshot that lists the requested model
-- **AND** a request with `reasoning.effort` of `minimal`
-- **WHEN** the unsupported-effort normalization runs
+- **GIVEN** a source model with no reasoning metadata
+- **WHEN** a chat-completions request for that model carries reasoning fields
+- **THEN** the fields are stripped as before
+
+### Requirement: The unsupported-effort rewrite is undone for source-routed requests
+
+The `minimal` normalization works around a ChatGPT/Codex backend that drops the
+value, hanging the stream. Model sources do not have that defect, so a request
+served by one MUST NOT be downgraded by it.
+
+Whether a request is served by a model source is known only after source
+selection, which runs after enforcement. The rewrite MUST therefore be applied
+unconditionally at enforcement time, and the replaced effort MUST be reported to
+the caller so it can be restored once a source has actually been selected.
+Restoration MUST occur only when a source was selected and the replaced effort
+is among the efforts that source declares for the model. The reported effort
+MUST be the post-enforcement value, so restoring it cannot resurrect an effort
+an API key overrode.
+
+Registry membership MUST NOT be used to decide this. A populated snapshot can
+omit a genuine subscription model — a partial refresh, an account unavailable
+during refresh, or an operator-mapped slug outside the bootstrap set — and those
+requests still reach the ChatGPT backend, where skipping the rewrite restores
+the hang. Conversely a source model whose slug shadows a subscription slug is
+present in the snapshot yet source-routed.
+
+#### Scenario: A source that declared the effort receives it unchanged
+
+- **GIVEN** a source model declaring `["minimal", "low", "high"]`
+- **AND** a request for that model with `reasoning.effort` of `minimal`
+- **WHEN** the request is routed to the source
+- **THEN** the source receives `minimal`
+
+#### Scenario: A source that did not declare the effort keeps the safe value
+
+- **GIVEN** a source model declaring `["low", "high"]`
+- **AND** a request for that model with `reasoning.effort` of `minimal`
+- **WHEN** the request is routed to the source
+- **THEN** the source receives the rewritten effort
+
+#### Scenario: Subscription requests keep the workaround
+
+- **GIVEN** a request with `reasoning.effort` of `minimal` that is not routed to
+  a model source, including one whose model is absent from a populated registry
+  snapshot
+- **WHEN** the request is forwarded
 - **THEN** the effort is rewritten to the model's lowest supported effort
 
-#### Scenario: An unavailable snapshot keeps the conservative rewrite
+#### Scenario: WebSocket requests keep the workaround
 
-- **GIVEN** no registry snapshot is available
-- **AND** a request with `reasoning.effort` of `minimal`
-- **WHEN** the unsupported-effort normalization runs
-- **THEN** the effort is rewritten to the default fallback
+- **GIVEN** a WebSocket Responses request with `reasoning.effort` of `minimal`
+- **WHEN** the request is forwarded
+- **THEN** the effort is rewritten, because the WebSocket transport never
+  reaches a model source
+
+#### Scenario: An enforced effort is not resurrected by restoration
+
+- **GIVEN** an API key that enforces a reasoning effort
+- **AND** a request for a source model that declares the client's original effort
+- **WHEN** the request is routed to the source
+- **THEN** the source receives the enforced effort

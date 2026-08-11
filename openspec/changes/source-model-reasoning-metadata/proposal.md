@@ -25,29 +25,33 @@ declared rather than inferred.
 - Accept both effort slugs (`["low", "high"]`) and objects
   (`[{"effort": "low", "description": "..."}]`), ignoring malformed entries.
 - Keep the existing no-reasoning behavior for models that do not opt in.
-- Skip the `minimal` normalization workaround for models a populated registry
-  snapshot does not list, so a declared effort reaches the source unchanged.
+- Normalize declared efforts and clamp them to the set the client surfaces
+  understand, so one operator typo cannot affect other catalog entries.
+- Undo the `minimal` normalization for requests that are actually routed to a
+  model source and that declared the effort, instead of inferring the route
+  from registry membership.
 
 ## Relationship to `supports_reasoning`
 
-`raw_metadata_json` now carries two independent reasoning keys, and operators
-need to know both:
+`raw_metadata_json` carries two reasoning keys with different jobs:
 
 - `supported_reasoning_levels` / `default_reasoning_level` drive **catalog
-  advertising**. Codex clients read them from the Codex model catalog to
-  populate the reasoning-effort picker.
+  advertising**. Codex clients read them to populate the reasoning-effort picker.
 - `supports_reasoning` gates `sanitize_source_chat_payload`, which strips
-  `reasoning`, `reasoning_effort` and the related toggles on the **Chat
+  `reasoning`, `reasoning_effort` and related toggles on the **Chat
   Completions** path only. The Responses path forwards them regardless.
 
-Declaring levels without also setting `supports_reasoning` therefore advertises
-efforts that Codex (Responses) honors while chat-completions callers silently
-lose them. This change documents the split rather than coupling the two keys,
-because the chat-path sanitizer protects backends that reject unknown fields and
-inferring that opt-in from an advertising declaration would remove that
-protection silently. The dashboard side of this — a single `Reasoning` toggle
-that only affects the chat path, and no UI for the levels at all — is tracked
-separately in #1672.
+Declaring levels now implies the chat-path opt-in. The earlier revision of this
+change documented the split instead, but that left `/v1/models` reporting
+`supports_reasoning: true` (it is derived from a non-empty level set) for a
+model whose chat requests are silently stripped — a contradiction visible on the
+API surface, not merely a documentation subtlety. The explicit
+`"supports_reasoning": true` opt-in still works on its own for models that
+declare no levels, so the sanitizer keeps protecting backends that reject
+unknown fields.
+
+The dashboard side of this — a single `Reasoning` toggle that only affects the
+chat path, and no UI for the levels at all — is tracked separately in #1672.
 
 ## Capabilities
 

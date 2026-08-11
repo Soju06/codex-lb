@@ -13,6 +13,13 @@ from app.db.models import ModelSource, ModelSourceModel
 
 DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000
 
+# Reasoning efforts the client surfaces understand. Operator-declared levels are
+# clamped to this set: they are advertised verbatim in the Codex model catalog,
+# which clients deserialize as a whole, so one typo must not be able to affect
+# entries beyond its own. The dashboard applies the same clamp when it exposes
+# efforts, and the frontend schema carries the matching enum.
+SUPPORTED_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+
 # ``web_search_preview`` is the legacy alias for ``web_search``; request
 # validation normalizes it, but accept both here so operator opt-in covers
 # payloads regardless of normalization order.
@@ -94,7 +101,9 @@ def _reasoning_levels_from_metadata(raw: dict[str, JsonValue]) -> tuple[Reasonin
         ["low", "high", "max"]
         [{"effort": "low", "description": "Low reasoning effort"}]
 
-    Anything else is ignored, keeping the previous no-reasoning default for
+    Efforts are normalized (trimmed and lowercased) and clamped to
+    ``SUPPORTED_REASONING_EFFORTS``. Anything else -- a malformed entry, an
+    unknown effort -- is ignored, keeping the previous no-reasoning default for
     models that never opted in.
     """
     declared = raw.get("supported_reasoning_levels")
@@ -105,17 +114,22 @@ def _reasoning_levels_from_metadata(raw: dict[str, JsonValue]) -> tuple[Reasonin
     for item in declared:
         if isinstance(item, str):
             effort = item
-            description = f"{item} reasoning effort"
+            description = f"{item.strip().lower()} reasoning effort"
         elif is_json_mapping(item):
             effort_value = item.get("effort")
             if not isinstance(effort_value, str):
                 continue
             effort = effort_value
             description_value = item.get("description")
-            description = description_value if isinstance(description_value, str) else f"{effort} reasoning effort"
+            description = (
+                description_value
+                if isinstance(description_value, str)
+                else f"{effort.strip().lower()} reasoning effort"
+            )
         else:
             continue
-        if not effort or effort in seen:
+        effort = effort.strip().lower()
+        if effort not in SUPPORTED_REASONING_EFFORTS or effort in seen:
             continue
         seen.add(effort)
         levels.append(ReasoningLevel(effort=effort, description=description))
@@ -130,9 +144,25 @@ def _default_reasoning_level_from_metadata(
     declared = raw.get("default_reasoning_level")
     if not isinstance(declared, str):
         return None
-    if not any(level.effort == declared for level in levels):
+    normalized = declared.strip().lower()
+    if not any(level.effort == normalized for level in levels):
         return None
-    return declared
+    return normalized
+
+
+def _enabled_source_model(source: ModelSource, model: str) -> ModelSourceModel | None:
+    return next(
+        (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
+        None,
+    )
+
+
+def source_model_reasoning_levels(source: ModelSource, model: str) -> tuple[ReasoningLevel, ...]:
+    """Reasoning efforts the operator declared for a source model."""
+    entry = _enabled_source_model(source, model)
+    if entry is None:
+        return ()
+    return _reasoning_levels_from_metadata(_raw_metadata(entry))
 
 
 def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
@@ -140,16 +170,19 @@ def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
 
     Source catalog entries have no first-class reasoning flag; a model that
     genuinely supports reasoning can opt in with ``"supports_reasoning": true``
-    in ``raw_metadata_json``. Everything else is treated as non-reasoning so
+    in ``raw_metadata_json``. Declaring ``supported_reasoning_levels`` implies
+    the same opt-in: advertising efforts to clients while the chat-completions
+    sanitizer strips them would make the capability visible on ``/v1/models``
+    and inert on the wire. Everything else is treated as non-reasoning so
     client-sent reasoning toggles are stripped before forwarding.
     """
-    entry = next(
-        (candidate for candidate in source.models if candidate.model == model and candidate.is_enabled),
-        None,
-    )
+    entry = _enabled_source_model(source, model)
     if entry is None:
         return False
-    return _raw_metadata(entry).get("supports_reasoning") is True
+    raw = _raw_metadata(entry)
+    if raw.get("supports_reasoning") is True:
+        return True
+    return bool(_reasoning_levels_from_metadata(raw))
 
 
 def source_model_request_overrides(source: ModelSource, model: str) -> dict[str, JsonValue]:

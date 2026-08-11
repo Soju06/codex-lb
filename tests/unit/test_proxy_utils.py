@@ -2060,13 +2060,15 @@ def test_normalize_unsupported_reasoning_effort_rewrites_minimal_to_low(caplog):
     assert any("reasoning_effort_normalized" in record.message for record in caplog.records)
 
 
-def test_normalize_unsupported_reasoning_effort_keeps_effort_for_model_outside_registry(caplog):
-    """Model sources are not served by the ChatGPT/Codex backend.
+def test_normalize_unsupported_reasoning_effort_rewrites_a_model_absent_from_the_snapshot():
+    """Snapshot membership must not decide whether the workaround applies.
 
-    The ``minimal`` rewrite works around a backend quirk that only applies to
-    subscription models. A populated snapshot that does not list the model
-    means the request will be routed to an OpenAI-compatible model source, so
-    the operator-declared effort must survive untouched.
+    A populated snapshot can omit a genuine subscription model -- a partial
+    refresh, an account unavailable during refresh, or an operator-mapped slug
+    outside the bootstrap set -- and those requests still reach the ChatGPT
+    backend through the unfiltered fallback. Skipping the rewrite for them
+    would restore the no-completion hang it exists to prevent, so the rewrite
+    is unconditional here and only undone once a source is actually selected.
     """
     from app.core.openai.requests import ResponsesReasoning
 
@@ -2081,13 +2083,11 @@ def test_normalize_unsupported_reasoning_effort_keeps_effort_for_model_outside_r
     # Snapshot is populated, but only with an unrelated subscription model.
     registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
 
-    with caplog.at_level(logging.INFO, logger="app.modules.proxy.request_policy"):
-        proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
 
     assert payload.reasoning is not None
-    assert payload.reasoning.effort == "minimal"
-    assert any("reasoning_effort_normalization_skipped" in record.message for record in caplog.records)
-    assert not any("reasoning_effort_normalized" in record.message for record in caplog.records)
+    assert payload.reasoning.effort == "low"
+    assert replaced == "minimal", "the replaced effort must be reported so a source route can restore it"
 
 
 def test_normalize_unsupported_reasoning_effort_still_rewrites_known_subscription_model():
@@ -2108,6 +2108,106 @@ def test_normalize_unsupported_reasoning_effort_still_rewrites_known_subscriptio
 
     assert payload.reasoning is not None
     assert payload.reasoning.effort == "low"
+
+
+def _reasoning_model_source(levels: list[str]) -> "ModelSource":
+    import json as _json
+
+    from app.core.openai.model_registry import MODEL_SOURCE_KIND_OPENAI_COMPATIBLE
+    from app.db.models import ModelSource, ModelSourceModel
+
+    return ModelSource(
+        id="src_restore",
+        name="Restore",
+        kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+        base_url="http://127.0.0.1:8000/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+        supports_audio_transcriptions=False,
+        models=[
+            ModelSourceModel(
+                model="qwen3.8-max",
+                is_enabled=True,
+                supports_streaming=True,
+                raw_metadata_json=_json.dumps({"supported_reasoning_levels": levels}),
+            )
+        ],
+    )
+
+
+def _payload_with_effort(model: str, effort: str):
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate({"model": model, "instructions": "hello", "input": []})
+    payload.reasoning = ResponsesReasoning(effort=effort)
+    return payload
+
+
+def test_restore_source_reasoning_effort_undoes_the_rewrite_for_a_declared_effort():
+    """The workaround targets a ChatGPT backend quirk that model sources do not
+    have, so a source that declared the effort must receive it unchanged."""
+    payload = _payload_with_effort("qwen3.8-max", "minimal")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+    assert payload.reasoning is not None and payload.reasoning.effort == "low"
+
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["minimal", "low", "high"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning.effort == "minimal"
+
+
+def test_restore_source_reasoning_effort_skips_an_undeclared_effort():
+    """Sources without the effort in their declared set keep the safe value, so
+    a source that never advertised ``minimal`` is not sent it."""
+    payload = _payload_with_effort("qwen3.8-max", "minimal")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["low", "high"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning is not None and payload.reasoning.effort == "low"
+
+
+def test_restore_source_reasoning_effort_cannot_resurrect_an_enforced_effort():
+    """The captured value is post-enforcement, so an API key that pinned an
+    effort still wins after the restore."""
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = _payload_with_effort("qwen3.8-max", "minimal")
+    api_key = proxy_service.ApiKeyData(
+        id="key_effort",
+        name="effort-enforcement-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort="high",
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    replaced = proxy_request_policy.apply_api_key_enforcement(payload, api_key).pre_normalization_reasoning_effort
+
+    assert payload.reasoning is not None and payload.reasoning.effort == "high"
+    assert replaced is None, "nothing was rewritten, so there is nothing to restore"
+
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["minimal", "low", "high"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning.effort == "high"
+    assert isinstance(payload.reasoning, ResponsesReasoning)
 
 
 def test_normalize_unsupported_reasoning_effort_falls_back_to_low_without_registry():

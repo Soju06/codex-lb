@@ -2645,11 +2645,14 @@ class _WebSocketMixin:
             payload,
             openai_compat=openai_cache_affinity,
         )
+        # The effort the normalizer replaced is discarded here on purpose: the
+        # WebSocket transport never reaches a model source, so the rewrite that
+        # works around the backend hang must stick.
         service_tier_was_enforced = apply_api_key_enforcement(
             responses_payload,
             refreshed_api_key,
             prohibit_fast_mode=prohibit_fast_mode,
-        )
+        ).service_tier_was_enforced
         apply_enforced_service_tier_model_fallback(
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,

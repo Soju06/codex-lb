@@ -16,3 +16,11 @@
       out-of-range default, and the no-metadata default.
 - [x] 3.2 Manual end-to-end check that `/backend-api/codex/models` advertises the
       declared efforts and that forwarding behavior is unchanged.
+- [x] Replace the registry-membership skip with a restore at the source-routing
+      branch, gated on the effort being declared for that source model.
+- [x] Report the replaced effort from the normalizer and thread it through
+      enforcement; subscription-only paths (WebSocket, stream, collect, compact,
+      chat) discard it so the workaround still applies there.
+- [x] Normalize and clamp declared efforts to the supported vocabulary.
+- [x] Treat a non-empty declared level set as the chat-path reasoning opt-in.
+

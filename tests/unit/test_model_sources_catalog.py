@@ -9,8 +9,10 @@ from app.db.models import ModelSource, ModelSourceModel
 from app.modules.model_sources.catalog import (
     DEFAULT_SOURCE_CONTEXT_WINDOW,
     source_model_audio_cost_usd,
+    source_model_reasoning_levels,
     source_model_request_overrides,
     source_model_supported_tool_types,
+    source_model_supports_reasoning,
     source_models_to_upstream_models,
 )
 
@@ -304,3 +306,47 @@ def test_source_model_reasoning_levels_ignore_non_list_metadata() -> None:
     raw = json.dumps({"supported_reasoning_levels": "high"})
     [model] = source_models_to_upstream_models([_reasoning_source(raw)])
     assert model.supported_reasoning_levels == ()
+
+
+def test_source_model_reasoning_levels_are_normalized_and_clamped() -> None:
+    """Declared efforts are advertised verbatim in a catalog clients parse as a
+    whole, so an unknown effort must be dropped rather than forwarded."""
+    raw = json.dumps(
+        {
+            "supported_reasoning_levels": [" Low ", "HIGH", "turbo", "midium", "low"],
+            "default_reasoning_level": " HIGH ",
+        }
+    )
+    [model] = source_models_to_upstream_models([_reasoning_source(raw)])
+    assert [level.effort for level in model.supported_reasoning_levels] == ["low", "high"]
+    assert model.default_reasoning_level == "high"
+
+
+def test_source_model_default_level_outside_declared_set_is_dropped() -> None:
+    raw = json.dumps({"supported_reasoning_levels": ["low"], "default_reasoning_level": "max"})
+    [model] = source_models_to_upstream_models([_reasoning_source(raw)])
+    assert model.default_reasoning_level is None
+
+
+def test_declared_levels_imply_the_chat_path_reasoning_opt_in() -> None:
+    """Advertising efforts on /v1/models while the chat sanitizer strips them
+    would make the capability visible and inert at the same time."""
+    raw = json.dumps({"supported_reasoning_levels": ["low", "high"]})
+    source = _reasoning_source(raw)
+    assert source_model_supports_reasoning(source, "reasoning-model") is True
+
+
+def test_no_declared_levels_keeps_the_explicit_reasoning_opt_in() -> None:
+    assert source_model_supports_reasoning(_reasoning_source(None), "reasoning-model") is False
+    explicit = _reasoning_source(json.dumps({"supports_reasoning": True}))
+    assert source_model_supports_reasoning(explicit, "reasoning-model") is True
+
+
+def test_source_model_reasoning_levels_accessor_matches_the_catalog() -> None:
+    raw = json.dumps({"supported_reasoning_levels": ["minimal", "low"]})
+    source = _reasoning_source(raw)
+    assert [level.effort for level in source_model_reasoning_levels(source, "reasoning-model")] == [
+        "minimal",
+        "low",
+    ]
+    assert source_model_reasoning_levels(source, "unknown-model") == ()

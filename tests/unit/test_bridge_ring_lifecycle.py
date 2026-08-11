@@ -761,6 +761,70 @@ async def test_terminal_operation_event_exposes_failure_after_spooling(
 
 
 @pytest.mark.asyncio
+async def test_consumed_recovery_checkpoint_does_not_rebind_failed_operation(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        original = await _claim(
+            repository,
+            instance_id="inst-consumed-original",
+            session_key_value="sid-consumed-original",
+        )
+        replacement = await _claim(
+            repository,
+            instance_id="inst-consumed-replacement",
+            session_key_value="sid-consumed-replacement",
+        )
+        fingerprint = durable_bridge_hash("consumed-failed-operation")
+        operation_id = durable_bridge_operation_id(original.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=original.id,
+            instance_id="inst-consumed-original",
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-consumed",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_terminal_operation_event(
+            operation_id=operation_id,
+            session_id=original.id,
+            instance_id="inst-consumed-original",
+            owner_epoch=original.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+        )
+
+        existing = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=replacement.id,
+            instance_id="inst-consumed-replacement",
+            owner_epoch=replacement.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-replacement",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            recovery_attempt_consumed=True,
+        )
+
+        assert existing is not None
+        assert existing.created is False
+        assert existing.session_id == original.id
+        assert existing.state == "failed"
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.session_id == original.id
+        assert persisted.state == "failed"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_unknown_operation_recovery_claim_is_atomic_and_single_use(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

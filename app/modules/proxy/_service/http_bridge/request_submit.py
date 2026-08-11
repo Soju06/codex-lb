@@ -1091,9 +1091,17 @@ class _HTTPBridgeRequestSubmitMixin:
                     return operation
 
                 existing_operation = await lookup_operation()
+                if recovery_attempt_consumed and existing_operation is None:
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "bridge_continuity_persistence_failed",
+                            "The recovery checkpoint was already consumed; retry the request.",
+                        ),
+                    )
                 hard_turn_chain_advanced = False
                 seen_hard_turn_response_ids: set[str] = set()
-                while True:
+                while not recovery_attempt_consumed:
                     terminal_hard_turn_response_id = _http_bridge_terminal_hard_turn_response_id(
                         request_state,
                         existing_operation,
@@ -1194,6 +1202,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         "recovery_attempt_fingerprint": request_state.recovery_attempt_fingerprint
                         if request_state.recovery_attempt_claimed
                         else None,
+                        "recovery_attempt_consumed": recovery_attempt_consumed,
                     },
                     operation_id=operation_id,
                     session_id=session.durable_session_id,

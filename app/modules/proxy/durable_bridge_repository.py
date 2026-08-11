@@ -1091,6 +1091,7 @@ class DurableBridgeRepository:
         recovery_attempt_session_id: str | None = None,
         recovery_attempt_owner_epoch: int | None = None,
         recovery_attempt_fingerprint: str | None = None,
+        recovery_attempt_consumed: bool = False,
     ) -> DurableBridgeOperationSnapshot | None:
         """Create a fenced operation identity, or return the existing one."""
         async with sqlite_writer_section():
@@ -1122,6 +1123,13 @@ class DurableBridgeRepository:
                     ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
                 operation = await self._session.scalar(fingerprint_statement.with_for_update())
             if operation is not None:
+                if recovery_attempt_consumed:
+                    # A REPLAYED recovery checkpoint is immutable. Return the
+                    # existing row for safe transcript replay or fail-closed
+                    # handling; never rebind a failed row and clear its spool.
+                    snapshot = _to_operation_snapshot(operation)
+                    await self._session.rollback()
+                    return snapshot
                 rebound = False
                 handoff_allowed = True
                 if operation.session_id != session_id and operation.state not in {"completed", "incomplete"}:

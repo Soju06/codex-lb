@@ -526,6 +526,7 @@ class DurableBridgeSessionCoordinator:
         recovery_attempt_session_id: str | None = None,
         recovery_attempt_owner_epoch: int | None = None,
         recovery_attempt_fingerprint: str | None = None,
+        recovery_attempt_consumed: bool = False,
     ) -> DurableBridgeOperationSnapshot | None:
         async with self._session() as session:
             return await DurableBridgeRepository(session).record_operation(
@@ -542,6 +543,7 @@ class DurableBridgeSessionCoordinator:
                 recovery_attempt_session_id=recovery_attempt_session_id,
                 recovery_attempt_owner_epoch=recovery_attempt_owner_epoch,
                 recovery_attempt_fingerprint=recovery_attempt_fingerprint,
+                recovery_attempt_consumed=recovery_attempt_consumed,
             )
 
     async def get_operation_events(self, *, operation_id: str) -> list[str]:

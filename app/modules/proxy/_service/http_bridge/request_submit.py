@@ -297,10 +297,11 @@ def _http_bridge_terminal_hard_turn_response_id(
 
     Hard turn-state requests can omit ``previous_response_id``. Their durable
     operation fingerprint is therefore otherwise identical for repeated
-    prompts. A terminal, fully spooled operation represents the prior turn,
+    prompts. A terminal operation with a response id represents the prior turn,
     not an in-flight retry, so the next request must advance from its response
     rather than replaying that transcript. Recovery/rebind states retain the
-    operation identity and are intentionally excluded here.
+    operation identity and are intentionally excluded here. Spool completeness
+    is required only when replaying the stored transcript.
     """
     if (
         (request_state.previous_response_id is not None and not allow_anchored_continuation)
@@ -313,8 +314,6 @@ def _http_bridge_terminal_hard_turn_response_id(
     operation_state = getattr(operation, "state", None)
     operation_state = getattr(operation_state, "value", operation_state)
     if operation_state != "completed":
-        return None
-    if not getattr(operation, "event_spool_complete", False):
         return None
     response_id = getattr(operation, "response_id", None)
     return response_id if isinstance(response_id, str) and response_id else None
@@ -1245,22 +1244,23 @@ class _HTTPBridgeRequestSubmitMixin:
                     ),
                 )
             if not operation.created:
-                if operation.state in {"completed", "incomplete"} and getattr(operation, "event_spool_complete", False):
-                    get_operation_events = getattr(self._durable_bridge, "get_operation_events", None)
-                    replay_events = (
-                        await get_operation_events(operation_id=operation.operation_id)
-                        if callable(get_operation_events)
-                        else []
-                    )
-                    if replay_events and request_state.event_queue is not None:
-                        request_state.operation_replay = True
-                        request_state.operation_id = operation.operation_id
-                        request_state.operation_fingerprint = operation_fingerprint
-                        request_state.operation_registered = True
-                        for replay_event in replay_events:
-                            await request_state.event_queue.put(replay_event)
-                        await request_state.event_queue.put(None)
-                        return
+                if operation.state in {"completed", "incomplete"}:
+                    if getattr(operation, "event_spool_complete", False):
+                        get_operation_events = getattr(self._durable_bridge, "get_operation_events", None)
+                        replay_events = (
+                            await get_operation_events(operation_id=operation.operation_id)
+                            if callable(get_operation_events)
+                            else []
+                        )
+                        if replay_events and request_state.event_queue is not None:
+                            request_state.operation_replay = True
+                            request_state.operation_id = operation.operation_id
+                            request_state.operation_fingerprint = operation_fingerprint
+                            request_state.operation_registered = True
+                            for replay_event in replay_events:
+                                await request_state.event_queue.put(replay_event)
+                            await request_state.event_queue.put(None)
+                            return
                 if recovery_attempt_consumed:
                     raise ProxyResponseError(
                         502,

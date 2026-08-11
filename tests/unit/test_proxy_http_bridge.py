@@ -194,6 +194,17 @@ def test_http_bridge_inserts_previous_response_id_for_hard_turn_advance() -> Non
     )
     assert response_id == "resp-prior-turn"
     assert (
+        http_bridge_request_submit_module._http_bridge_terminal_hard_turn_response_id(
+            request_state,
+            SimpleNamespace(
+                state="completed",
+                event_spool_complete=False,
+                response_id="resp-completed-but-unsynced",
+            ),
+        )
+        == "resp-completed-but-unsynced"
+    )
+    assert (
         json.loads(
             http_bridge_request_submit_module._text_with_previous_response_id(
                 '{"type":"response.create","input":"same"}',
@@ -19950,6 +19961,82 @@ async def test_process_http_bridge_upstream_text_marks_text_delta_downstream_vis
     forwarded_payload = proxy_service.parse_sse_data_json(forwarded)
     assert forwarded_payload is not None
     assert forwarded_payload["delta"] == "I started"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_recovery_releases_origin_after_terminal_event_following_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-recovery-origin-terminal",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
+        transport="http",
+        skip_request_log=True,
+        recovery_attempt_fingerprint="recovery-origin-terminal-fingerprint",
+        recovery_attempt_session_id="durable-recovery-origin",
+        recovery_attempt_owner_epoch=4,
+    )
+    session = _make_bridge_session(
+        key_value="recovery-origin-terminal",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-replacement"
+    session.durable_owner_epoch = 9
+    mark_replayed = AsyncMock(return_value=True)
+    release_origin = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            mark_recovery_attempt_replayed=mark_replayed,
+            release_live_session=release_origin,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="replacement-instance"),
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {"type": "response.created", "response": {"id": "resp-recovery-origin", "status": "in_progress"}},
+            separators=(",", ":"),
+        ),
+    )
+    release_origin.assert_not_awaited()
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.incomplete",
+                "response": {
+                    "id": "resp-recovery-origin",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert mark_replayed.await_count == 2
+    release_origin.assert_awaited_once_with(
+        session_id="durable-recovery-origin",
+        instance_id="replacement-instance",
+        owner_epoch=4,
+        draining=False,
+    )
 
 
 @pytest.mark.asyncio

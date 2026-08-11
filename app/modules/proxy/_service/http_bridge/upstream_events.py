@@ -2352,12 +2352,15 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         if (
             isinstance(event_type, str)
-            and event_type.startswith("response.")
+            and (event_type.startswith("response.") or event_type == "error")
             and matched_request_state is not None
             and matched_request_state.recovery_attempt_fingerprint is not None
             and recovery_attempt_session_id is not None
             and recovery_attempt_owner_epoch is not None
-            and (event_type == "response.completed" or not matched_request_state.recovery_attempt_event_observed)
+            and (
+                event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
+                or not matched_request_state.recovery_attempt_event_observed
+            )
         ):
             settlement_marked = False
             for settlement_attempt in range(3):
@@ -2385,7 +2388,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                             response_id=response_id,
                             release_origin_lease=(
                                 recovery_attempt_session_id != session.durable_session_id
-                                and event_type in {"response.completed", "response.failed"}
+                                and event_type
+                                in {"response.completed", "response.failed", "response.incomplete", "error"}
                             ),
                         )
                 except Exception:
@@ -2402,14 +2406,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                             response_id=response_id,
                             release_origin_lease=(
                                 recovery_attempt_session_id != session.durable_session_id
-                                and event_type in {"response.completed", "response.failed"}
+                                and event_type
+                                in {"response.completed", "response.failed", "response.incomplete", "error"}
                             ),
                         )
                     else:
                         await asyncio.sleep(0.05 * (settlement_attempt + 1))
             if (
                 settlement_marked
-                and event_type in {"response.completed", "response.failed"}
+                and event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and recovery_attempt_session_id != session.durable_session_id
             ):
                 try:

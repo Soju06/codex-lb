@@ -19,6 +19,7 @@ import app.core.clients.proxy_websocket as proxy_websocket_module
 from app.core.clients.codex import CodexTransportError, CodexWebSocketResult
 from app.core.clients.proxy import ProxyResponseError, is_confirmed_pre_dispatch_transport_error
 from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     CodexUpstreamWebSocket,
     RealtimeWebSocketProtocol,
     UpstreamWebSocketTransportError,
@@ -148,6 +149,9 @@ class _FakeCodexWebSocket:
     async def receive(self) -> object:
         return b'{"type":"response.completed"}'
 
+    def exception(self) -> BaseException | None:
+        return None
+
     async def close(self, *, code: int = 1000, message: bytes = b"") -> None:
         del code, message
         self.closed = True
@@ -229,6 +233,121 @@ async def test_live_direct_adapter_preserves_abnormal_close_code_and_reason() ->
 
 
 @pytest.mark.asyncio
+async def test_direct_adapter_classifies_keepalive_timeout() -> None:
+    class Connection:
+        async def recv(self):
+            raise ConnectionClosedError(None, Close(1011, "keepalive ping timeout"))
+
+    websocket = WebsocketsUpstreamWebSocket(cast(Any, Connection()))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+async def test_direct_adapter_classifies_keepalive_timeout_after_close_ack() -> None:
+    class Connection:
+        async def recv(self):
+            raise ConnectionClosedError(
+                Close(1000, "acknowledged"),
+                Close(1011, "keepalive ping timeout"),
+                False,
+            )
+
+    websocket = WebsocketsUpstreamWebSocket(cast(Any, Connection()))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+async def test_direct_adapter_does_not_trust_peer_keepalive_timeout_marker() -> None:
+    class Connection:
+        async def recv(self):
+            raise ConnectionClosedError(
+                Close(1011, "keepalive ping timeout"),
+                Close(1011, "keepalive ping timeout"),
+                True,
+            )
+
+    websocket = WebsocketsUpstreamWebSocket(cast(Any, Connection()))
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_routed_adapter_classifies_heartbeat_timeout() -> None:
+    websocket = CodexUpstreamWebSocket(
+        _FakeCodexErrorWebSocket(aiohttp.ServerTimeoutError("No PONG received after 60.0 seconds"))
+    )
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+async def test_routed_adapter_classifies_heartbeat_timeout_stored_between_receive_calls() -> None:
+    heartbeat_timeout = aiohttp.ServerTimeoutError("No PONG received after 60.0 seconds")
+
+    class ClosedWebSocket(_FakeCodexWebSocket):
+        async def receive(self) -> aiohttp.WSMessage:
+            return aiohttp.WSMessage(aiohttp.WSMsgType.CLOSED, None, None)
+
+        def exception(self) -> BaseException | None:
+            return heartbeat_timeout
+
+    websocket = CodexUpstreamWebSocket(ClosedWebSocket())
+
+    message = await websocket.receive()
+
+    assert message.kind == "error"
+    assert message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    ["request", b"request"],
+    ids=["text", "bytes"],
+)
+async def test_routed_adapter_send_preserves_stored_heartbeat_timeout(
+    payload: str | bytes,
+) -> None:
+    heartbeat_timeout = aiohttp.ServerTimeoutError("No PONG received after 60.0 seconds")
+
+    class ClosedWebSocket(_FakeCodexWebSocket):
+        async def send_str(self, data: str) -> None:
+            del data
+            raise RuntimeError("Cannot write to closing transport")
+
+        async def send_bytes(self, data: bytes) -> None:
+            del data
+            raise RuntimeError("Cannot write to closing transport")
+
+        def exception(self) -> BaseException | None:
+            return heartbeat_timeout
+
+    websocket = CodexUpstreamWebSocket(ClosedWebSocket())
+
+    with pytest.raises(UpstreamWebSocketTransportError) as exc_info:
+        if isinstance(payload, str):
+            await websocket.send_text(payload)
+        else:
+            await websocket.send_bytes(payload)
+
+    assert exc_info.value.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+
+
+@pytest.mark.asyncio
 async def test_codex_responses_websocket_closes_owned_client_when_context_exit_fails():
     class _FailingContext:
         async def __aexit__(self, *_args: object) -> None:
@@ -266,6 +385,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -294,7 +414,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert kwargs["proxy"] is None
     assert kwargs["open_timeout"] == 7.0
     assert "ping_interval" not in kwargs
-    assert kwargs["ping_timeout"] is None
+    assert kwargs["ping_timeout"] == 120.0
     assert kwargs["max_size"] == 4321
     assert "subprotocols" not in kwargs
     additional_headers = cast(dict[str, str], kwargs["additional_headers"])
@@ -328,6 +448,7 @@ async def test_direct_websocket_network_send_and_receive_are_typed_and_rotate_wi
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -366,6 +487,7 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -390,6 +512,7 @@ async def test_connect_responses_websocket_routed_codex_call_preserves_size_limi
     assert call["route"] is route
     assert call["timeout"] == 7.0
     assert call["max_msg_size"] == 4321
+    assert call["heartbeat"] == 120.0
     assert "max_size" not in call
     assert "protocols" not in call
     assert websocket.response_header("x-codex-turn-state") == "turn-routed"
@@ -666,6 +789,7 @@ async def test_connect_responses_websocket_routed_transport_error_maps_proxy_err
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -702,6 +826,7 @@ async def test_connect_responses_websocket_routed_pre_dispatch_failure_carries_p
             upstream_connect_timeout_seconds=7.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
         ),
     )
 
@@ -752,6 +877,7 @@ async def test_connect_responses_websocket_routed_tls_verification_failure_is_no
             upstream_connect_timeout_seconds=7.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
         ),
     )
 
@@ -802,6 +928,7 @@ async def test_connect_responses_websocket_appends_required_beta_header(monkeypa
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -837,6 +964,7 @@ async def test_connect_responses_websocket_drops_http_responses_beta_and_encodin
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -902,6 +1030,7 @@ async def test_connect_responses_websocket_maps_invalid_status(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=False,
         ),
@@ -938,6 +1067,7 @@ async def test_connect_responses_websocket_can_opt_in_to_env_proxy(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -976,6 +1106,7 @@ async def test_connect_responses_websocket_disables_proxy_when_env_proxy_is_unse
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1023,6 +1154,7 @@ async def test_connect_responses_websocket_sanitizes_ws_error_payload(monkeypatc
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1078,6 +1210,7 @@ async def test_connect_responses_websocket_uses_all_proxy_fallback(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1120,6 +1253,7 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_all_proxy(mon
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1164,6 +1298,7 @@ async def test_connect_responses_websocket_uses_socks_proxy_before_https_proxy(m
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1208,6 +1343,7 @@ async def test_connect_responses_websocket_normalizes_http_socks_env_proxy(monke
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1250,6 +1386,7 @@ async def test_connect_responses_websocket_uses_settings_proxy_env(monkeypatch):
         lambda: _Settings(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1293,6 +1430,7 @@ async def test_connect_responses_websocket_respects_settings_no_proxy(monkeypatc
         lambda: _Settings(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1329,6 +1467,7 @@ async def test_connect_responses_websocket_uses_https_proxy_fallback_for_ws(monk
         lambda: SimpleNamespace(
             upstream_base_url="http://chatgpt.local/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1387,6 +1526,7 @@ async def test_connect_responses_websocket_traverses_http_proxy_smoke(monkeypatc
                 lambda: SimpleNamespace(
                     upstream_base_url=f"http://127.0.0.1:{upstream_port}/backend-api",
                     upstream_connect_timeout_seconds=7.0,
+                    proxy_downstream_websocket_idle_timeout_seconds=120.0,
                     max_sse_event_bytes=4321,
                     upstream_websocket_trust_env=True,
                 ),
@@ -1425,6 +1565,7 @@ async def test_connect_responses_websocket_ignores_cgi_http_proxy(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="http://chatgpt.local/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1472,6 +1613,7 @@ async def test_connect_responses_websocket_maps_generic_invalid_handshake(monkey
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),
@@ -1506,6 +1648,7 @@ async def test_connect_responses_websocket_maps_invalid_proxy(monkeypatch):
         lambda: SimpleNamespace(
             upstream_base_url="https://chatgpt.com/backend-api",
             upstream_connect_timeout_seconds=7.0,
+            proxy_downstream_websocket_idle_timeout_seconds=120.0,
             max_sse_event_bytes=4321,
             upstream_websocket_trust_env=True,
         ),

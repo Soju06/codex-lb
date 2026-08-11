@@ -6,6 +6,7 @@ import { useAccountQuotaDisplayStore, type AccountQuotaDisplayPreference } from 
 import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 import { useThemeStore, type ThemePreference } from "@/hooks/use-theme";
 import { useTimeFormatStore, type TimeFormatPreference } from "@/hooks/use-time-format";
+import { useDateDisplayFormatStore, type DateDisplayFormat } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 
 const THEME_OPTIONS: { value: ThemePreference; labelKey: string; icon: typeof Sun }[] = [
@@ -17,6 +18,11 @@ const THEME_OPTIONS: { value: ThemePreference; labelKey: string; icon: typeof Su
 const TIME_FORMAT_OPTIONS: { value: TimeFormatPreference; labelKey: string }[] = [
   { value: "12h", labelKey: "settings.appearance.timeFormat.h12" },
   { value: "24h", labelKey: "settings.appearance.timeFormat.h24" },
+];
+
+const DATE_FORMAT_OPTIONS: { value: DateDisplayFormat; labelKey: string }[] = [
+  { value: "default", labelKey: "settings.appearance.dateFormat.default" },
+  { value: "iso8601", labelKey: "settings.appearance.dateFormat.iso8601" },
 ];
 
 const QUOTA_DISPLAY_OPTIONS: {
@@ -51,6 +57,8 @@ export function AppearanceSettings() {
   const setQuotaDisplay = useAccountQuotaDisplayStore((s) => s.setQuotaDisplay);
   const accountBurnrateEnabled = useDashboardPreferencesStore((s) => s.accountBurnrateEnabled);
   const setAccountBurnrateEnabled = useDashboardPreferencesStore((s) => s.setAccountBurnrateEnabled);
+  const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
+  const setDateDisplayFormat = useDateDisplayFormatStore((s) => s.setDateDisplayFormat);
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -109,6 +117,31 @@ export function AppearanceSettings() {
                   className={cn(
                     "rounded-md px-3 py-1.5 text-left text-xs font-medium transition-colors duration-200",
                     timeFormat === value
+                      ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <span className="block">{t(labelKey)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-medium">{t("settings.appearance.dateFormat.label")}</p>
+              <p className="text-xs text-muted-foreground">{t("settings.appearance.dateFormat.description")}</p>
+            </div>
+            <div className="flex items-center gap-1 rounded-lg border border-border/50 bg-muted/40 p-0.5">
+              {DATE_FORMAT_OPTIONS.map(({ value, labelKey }) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={dateDisplayFormat === value}
+                  onClick={() => setDateDisplayFormat(value)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 text-left text-xs font-medium transition-colors duration-200",
+                    dateDisplayFormat === value
                       ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
                       : "text-muted-foreground hover:text-foreground",
                   )}

@@ -33,3 +33,23 @@
       re-applied migration rebuilds it as a valid covering index.
 - [x] 2.5 Gates: `uv run ruff check .`, `uv run ruff format .`,
       `uv run ty check app`, targeted pytest on SQLite and PostgreSQL.
+
+## 3. Hardening (post-review follow-up)
+
+- [x] 3.1 Alembic revision `20260808_000000_tune_usage_history_autovacuum`:
+      insert-driven autovacuum tuning for `usage_history`
+      (`autovacuum_vacuum_insert_scale_factor = 0.02`,
+      `autovacuum_vacuum_insert_threshold = 50000`,
+      `autovacuum_analyze_scale_factor = 0.02`), mirroring
+      `20260717_000000` for the other insert-heavy tables; downgrade
+      RESETs, non-PostgreSQL no-op, idempotent over the reference
+      deployment's manual hotfix.
+- [x] 3.2 PostgreSQL round-trip test for the reloptions (set on upgrade,
+      reset on downgrade, harmless re-apply over the manual hotfix).
+- [x] 3.3 Register the PostgreSQL-only covering-path tests (plan-shape,
+      row-equality, migration round-trip/repair, autovacuum reloptions)
+      in `POSTGRES_PYTEST_TARGETS` so CI runs them against PostgreSQL.
+- [x] 3.4 Grow the plan-shape fixture to hundreds of rows per account so
+      the covering index wins the cost comparison deterministically
+      (20-row fixtures tie with the non-covering key twin on
+      PostgreSQL 16 and flake); verify 3 consecutive PostgreSQL runs.

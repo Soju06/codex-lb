@@ -1166,8 +1166,7 @@ When API-key authentication and proxy-header trust are disabled, a loopback sock
 
 ### Requirement: GPT-5.6 usage cost pricing matches the current published rates
 
-When computing API-key usage, request-log, reservation, or aggregate cost for
-the canonical GPT-5.6 models, the system MUST use these USD-per-1M-token rates
+When computing API-key usage, request-log, reservation, or aggregate cost for the canonical GPT-5.6 models, the system MUST use these USD-per-1M-token rates
 for input, cached input, and output:
 
 | Model | Standard | Fast/priority | Flex | Standard long context |

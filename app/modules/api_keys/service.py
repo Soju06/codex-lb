@@ -1022,9 +1022,11 @@ class ApiKeysService:
                 await self._repository.rollback()
                 raise
 
-            # Write-behind: the periodic flusher persists last_used_at
-            # (coalesced, greatest-wins) instead of this settlement commit.
-            self._last_used_coalescer.record(reservation.api_key_id, utcnow())
+        # Write-behind: the periodic flusher persists last_used_at (coalesced,
+        # greatest-wins) instead of this settlement commit. Recorded outside
+        # sqlite_writer_section(): during shutdown write-through the record
+        # flushes immediately, and that flush takes the writer section itself.
+        await self._last_used_coalescer.record(reservation.api_key_id, utcnow())
 
     async def touch_usage_reservation(self, reservation_id: str) -> bool:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
@@ -1118,7 +1120,7 @@ class ApiKeysService:
             output_tokens=output_tokens,
             cost_microdollars=cost_microdollars,
         )
-        self._last_used_coalescer.record(key_id, utcnow())
+        await self._last_used_coalescer.record(key_id, utcnow())
 
     async def get_key_trends(self, key_id: str) -> ApiKeyTrendsData | None:
         row = await self._repository.get_by_id(key_id)

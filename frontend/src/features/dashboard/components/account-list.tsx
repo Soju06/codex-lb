@@ -7,6 +7,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import type { AccountAction } from "@/features/dashboard/components/account-card";
 import type { AccountSummary } from "@/features/dashboard/schemas";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
@@ -286,6 +287,7 @@ export function AccountList({
   onAction,
 }: AccountListProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const blurred = usePrivacyStore((s) => s.blurred);
   const [uncontrolledSort, setUncontrolledSort] = useState<AccountListSort>(null);
   const sort = controlledSort === undefined ? uncontrolledSort : controlledSort;
@@ -353,7 +355,7 @@ export function AccountList({
           const compactId = formatCompactAccountId(account.accountId);
           const showAccountId = account.isEmailDuplicate === true;
 	          const warmupDetail = account.limitWarmup
-	            ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+	            ? `${formatSlug(account.limitWarmup.status)} | ${formatWarmupWindow(account.limitWarmup.window)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
 	            : t("accounts.listItem.noAttempts");
           const availableResetCredits = account.availableResetCredits ?? 0;
           const hasResetCredits = availableResetCredits > 0;

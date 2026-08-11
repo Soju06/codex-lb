@@ -858,7 +858,13 @@ async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and
         lines = [line async for line in resp.aiter_lines() if line]
 
     events = list(_iter_sse_events(lines))
-    assert [event["type"] for event in events] == ["response.output_item.done", "response.completed"]
+    assert [event["type"] for event in events] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [event["sequence_number"] for event in events] == [0, 1, 2, 3]
     assert selection_preferred_ids == [owner_account.id]
     assert seen_payload["model"] == "gpt-5.1"
     compact_input = cast(list[Mapping[str, object]], seen_payload["input"])
@@ -875,19 +881,21 @@ async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and
     assert compact_payload["prompt_cache_key"] == "compact-cache-affinity"
     assert "include" not in compact_payload
     assert "stream" not in compact_payload
-    assert events[0]["item"] == {
+    assert events[1]["item"] == {
         "id": "cmp_trigger_summary",
         "type": "compaction",
+        "status": "in_progress",
         "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
     }
-    assert events[1]["response"]["output"] == [
-        {
-            "id": "cmp_trigger_summary",
-            "type": "compaction",
-            "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
-        }
-    ]
-    assert events[1]["response"]["usage"] == {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
+    terminal_item = {
+        "id": "cmp_trigger_summary",
+        "type": "compaction",
+        "status": "completed",
+        "encrypted_content": "ENCRYPTED_CONTEXT_COMPACTION_SUMMARY",
+    }
+    assert events[2]["item"] == terminal_item
+    assert events[3]["response"]["output"] == [terminal_item]
+    assert events[3]["response"]["usage"] == {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
     assert lines[-1] == "data: [DONE]"
 
 
@@ -949,7 +957,13 @@ async def test_proxy_responses_compaction_trigger_preserves_conversation(async_c
         lines = [line async for line in resp.aiter_lines() if line]
 
     events = list(_iter_sse_events(lines))
-    assert [event["type"] for event in events] == ["response.output_item.done", "response.completed"]
+    assert [event["type"] for event in events] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [event["sequence_number"] for event in events] == [0, 1, 2, 3]
     assert seen_payload["conversation"] == "conv_compact_anchor"
     assert seen_payload["account_id"] == raw_account_id
     compact_payload = cast(Mapping[str, object], seen_payload["payload"])

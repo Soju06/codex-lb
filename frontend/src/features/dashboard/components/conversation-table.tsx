@@ -15,13 +15,14 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import type { AccountSummary, ConversationEntry } from "@/features/dashboard/schemas";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import {
   formatCompactNumber,
   formatConversationDuration,
   formatCurrency,
   formatNumber,
-  formatTimeLong,
+  formatDateTimeLines,
 } from "@/utils/formatters";
 
 export type ConversationTableProps = {
@@ -50,6 +51,7 @@ export function ConversationTable({
   onSelect,
 }: ConversationTableProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const blurred = usePrivacyStore((s) => s.blurred);
   const accountLabelMap = useMemo(() => {
     const labels = new Map<string, string>();
@@ -126,7 +128,7 @@ export function ConversationTable({
             </TableHeader>
             <TableBody>
               {conversations.map((conversation) => {
-                const time = formatTimeLong(conversation.lastRequest);
+                const time = formatDateTimeLines(conversation.lastRequest, dateDisplayFormat);
                 const accountLabel = conversation.representativeAccount
                   ? (accountLabelMap.get(conversation.representativeAccount) ?? conversation.representativeAccount)
                   : null;
@@ -139,8 +141,8 @@ export function ConversationTable({
                   <TableRow key={conversation.conversationId} className="align-top">
                     <TableCell className="pl-4 align-top">
                       <div className="leading-tight">
-                        <div className="text-sm font-medium">{time.time}</div>
-                        <div className="text-xs text-muted-foreground">{time.date}</div>
+                        <div className="text-sm font-medium">{time.primary}</div>
+                        <div className="text-xs text-muted-foreground">{time.secondary}</div>
                       </div>
                     </TableCell>
                     <TableCell className="align-top font-mono text-xs tabular-nums">

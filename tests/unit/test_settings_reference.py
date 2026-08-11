@@ -51,7 +51,10 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # gate, issue #1535). Not a hardcoded default because the right congestion
 # threshold depends on pool size and workload mix, and 0-means-off is the P1
 # default-off switch; the companion min-guarantee constant stayed hardcoded.
-MAX_SETTINGS_FIELDS = 117
+# 117 -> 118: http_responses_session_bridge_anchor_poison_failure_threshold
+# (bridge restart anchor poisoning). Not hardcoded because operators need a
+# bounded deployment-specific poison threshold while recovery telemetry matures.
+MAX_SETTINGS_FIELDS = 118
 
 
 def test_generated_settings_reference_matches_code() -> None:

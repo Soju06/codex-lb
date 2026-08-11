@@ -23,9 +23,9 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 logger = logging.getLogger(__name__)
 
 # Guardian cadence and backoff tuning (fixed; issue #1340 / PRINCIPLES.md P2).
-# The guardian is an off-by-default background refresher; these values are
-# implementation details, not operator contract. ``AuthGuardianScheduler``
-# keeps them as constructor fields so tests can exercise the behavior.
+# The guardian is a background refresher; these values are implementation
+# details, not operator contract. ``AuthGuardianScheduler`` keeps them as
+# constructor fields so tests can exercise the behavior.
 _INTERVAL_SECONDS = 21600
 _MAX_REFRESH_AGE_SECONDS = 43200
 _BATCH_SIZE = 100
@@ -33,6 +33,10 @@ _CONCURRENCY = 3
 _JITTER_SECONDS = 300.0
 _FAILURE_BACKOFF_BASE_SECONDS = 300.0
 _FAILURE_BACKOFF_MAX_SECONDS = 3600.0
+
+# RATE_LIMITED and QUOTA_EXCEEDED recover to ACTIVE through usage-refresh
+# reconciliation, then become guardian-eligible within the max-age window.
+_AUTH_GUARDIAN_ELIGIBLE_STATUSES = frozenset({AccountStatus.ACTIVE, AccountStatus.PAUSED})
 
 
 _T = TypeVar("_T")
@@ -149,12 +153,12 @@ class AuthGuardianScheduler:
                     max_age_seconds=self.max_age_seconds,
                     limit=len(accounts),
                 )
-                candidates = [account for account in candidates if not self._in_backoff(account.id)]
-                candidates = candidates[: max(0, self.batch_size)]
-            if not candidates:
+                candidate_ids = [account.id for account in candidates if not self._in_backoff(account.id)]
+                candidate_ids = candidate_ids[: max(0, self.batch_size)]
+            if not candidate_ids:
                 return
             semaphore = asyncio.Semaphore(max(1, self.concurrency))
-            await asyncio.gather(*(self._refresh_candidate(account.id, semaphore) for account in candidates))
+            await asyncio.gather(*(self._refresh_candidate(account_id, semaphore) for account_id in candidate_ids))
 
     async def _refresh_candidate(self, account_id: str, semaphore: asyncio.Semaphore) -> None:
         if self._in_backoff(account_id):
@@ -165,7 +169,8 @@ class AuthGuardianScheduler:
                 if account is None:
                     self._failures.pop(account_id, None)
                     return
-                if not _auth_guardian_account_is_stale_active(
+                source_status = account.status.value
+                if not _auth_guardian_account_is_stale_eligible(
                     account,
                     now=self.now(),
                     max_age_seconds=self.max_age_seconds,
@@ -185,9 +190,11 @@ class AuthGuardianScheduler:
                     if exc.is_permanent:
                         get_account_selection_cache().invalidate()
                     logger.warning(
-                        "Auth Guardian refresh failed account_id=%s account_alias=%s code=%s permanent=%s transport=%s",
+                        "Auth Guardian refresh failed account_id=%s account_alias=%s status=%s code=%s permanent=%s "
+                        "transport=%s",
                         account.id,
                         _safe_account_alias(account),
+                        source_status,
                         exc.code,
                         exc.is_permanent,
                         exc.transport_error,
@@ -196,9 +203,10 @@ class AuthGuardianScheduler:
                 except Exception as exc:
                     self._record_failure(account_id)
                     logger.warning(
-                        "Auth Guardian refresh failed account_id=%s account_alias=%s error_type=%s",
+                        "Auth Guardian refresh failed account_id=%s account_alias=%s status=%s error_type=%s",
                         account.id,
                         _safe_account_alias(account),
+                        source_status,
                         exc.__class__.__name__,
                         exc_info=True,
                     )
@@ -206,9 +214,10 @@ class AuthGuardianScheduler:
                 self._failures.pop(account_id, None)
                 get_account_selection_cache().invalidate()
                 logger.info(
-                    "Auth Guardian refreshed account_id=%s account_alias=%s",
+                    "Auth Guardian refreshed account_id=%s account_alias=%s status=%s",
                     account.id,
                     _safe_account_alias(account),
+                    source_status,
                 )
 
     def _in_backoff(self, account_id: str) -> bool:
@@ -242,7 +251,7 @@ def select_auth_guardian_candidates(
     candidates = [
         account
         for account in accounts
-        if _auth_guardian_account_is_stale_active(
+        if _auth_guardian_account_is_stale_eligible(
             account,
             now=now,
             max_age_seconds=max_age_seconds,
@@ -280,13 +289,13 @@ def build_auth_guardian_scheduler() -> AuthGuardianScheduler:
     )
 
 
-def _auth_guardian_account_is_stale_active(
+def _auth_guardian_account_is_stale_eligible(
     account: Account,
     *,
     now: datetime,
     max_age_seconds: int,
 ) -> bool:
-    if account.status != AccountStatus.ACTIVE:
+    if account.status not in _AUTH_GUARDIAN_ELIGIBLE_STATUSES:
         return False
     age = to_utc_naive(now) - to_utc_naive(account.last_refresh)
     return age > timedelta(seconds=max_age_seconds)

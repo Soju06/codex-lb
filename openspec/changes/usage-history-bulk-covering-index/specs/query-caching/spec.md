@@ -34,3 +34,28 @@ schema parity but MAY omit the covering payload.
 - **GIVEN** a database whose `usage_history` table lacks one of the covering indexes
 - **WHEN** the schema drift check runs
 - **THEN** it MUST report the missing index by name
+
+### Requirement: Append-heavy usage-history visibility is maintained for the covering path
+Covering indexes alone do not keep the bulk read heap-free: `usage_history`
+is append-heavy (high-frequency inserts, no updates or deletes), and with
+PostgreSQL's default insert-driven autovacuum trigger the freshly appended
+pages stay outside the visibility map long enough that "index-only" scans
+degrade into per-row heap fetches. The `usage_history` table on PostgreSQL
+MUST therefore carry per-table insert-driven autovacuum tuning
+(`autovacuum_vacuum_insert_scale_factor = 0.02`,
+`autovacuum_vacuum_insert_threshold = 50000`,
+`autovacuum_analyze_scale_factor = 0.02`, matching the tuning already
+applied to the other insert-heavy tables by `20260717_000000`) so the
+visibility map stays fresh and the covering read path remains index-only.
+Non-PostgreSQL backends MUST NOT be affected (no visibility map).
+
+#### Scenario: Migration sets the insert-driven autovacuum parameters
+- **GIVEN** a PostgreSQL database migrated past the covering-index revision
+- **WHEN** the autovacuum tuning revision is applied
+- **THEN** `usage_history` reloptions MUST include `autovacuum_vacuum_insert_scale_factor=0.02`, `autovacuum_vacuum_insert_threshold=50000`, and `autovacuum_analyze_scale_factor=0.02`
+- **AND** downgrading the revision MUST reset those three parameters
+
+#### Scenario: Re-applying over a manually tuned deployment is harmless
+- **GIVEN** a PostgreSQL deployment where the identical autovacuum settings were already applied manually (the reference deployment's hotfix)
+- **WHEN** the autovacuum tuning revision is applied
+- **THEN** the migration MUST complete without error and leave the same settings in place

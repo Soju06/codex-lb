@@ -1791,6 +1791,7 @@ class HttpBridgeSessionRecord(Base):
     session_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
     owner_instance_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    owner_process_epoch: Mapped[str | None] = mapped_column(String(64), nullable=True)
     owner_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     state: Mapped[HttpBridgeSessionState] = mapped_column(
@@ -2126,7 +2127,12 @@ Index("idx_automation_runs_job_id_started_at", AutomationRun.job_id, AutomationR
 Index("idx_automation_runs_status_started_at", AutomationRun.status, AutomationRun.started_at)
 Index("idx_automation_runs_scheduled_for", AutomationRun.scheduled_for)
 Index("idx_automation_runs_cycle_key_started_at", AutomationRun.cycle_key, AutomationRun.started_at)
-Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
+Index(
+    "idx_http_bridge_sessions_owner_state",
+    HttpBridgeSessionRecord.owner_instance_id,
+    HttpBridgeSessionRecord.owner_process_epoch,
+    HttpBridgeSessionRecord.state,
+)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())
 Index(

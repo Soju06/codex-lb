@@ -22,6 +22,7 @@ import type {
   QuotaPlannerMode,
   QuotaPlannerSettings,
 } from "@/features/quota-planner/schemas";
+import { useDateDisplayFormatStore, type DateDisplayFormat } from "@/hooks/use-date-format";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
 
@@ -39,8 +40,8 @@ function formatNumber(value: number): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
 }
 
-function formatInlineTime(value: string): string {
-  const formatted = formatTimeLong(value);
+function formatInlineTime(value: string, displayFormat: DateDisplayFormat): string {
+  const formatted = formatTimeLong(value, displayFormat);
   return `${formatted.date} ${formatted.time}`;
 }
 
@@ -65,6 +66,7 @@ interface QuotaPlannerSectionProps {
 
 export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const {
     settingsQuery,
     decisionsQuery,
@@ -368,7 +370,7 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                   <div className="flex justify-between gap-3">
 	                    <span className="text-muted-foreground">{t("quotaPlanner.forecast.peakSlot")}</span>
                     <span className="text-right font-medium">
-	                      {forecast.peakSlotStart ? formatInlineTime(forecast.peakSlotStart) : t("quotaPlanner.forecast.noDemand")}
+                          {forecast.peakSlotStart ? formatInlineTime(forecast.peakSlotStart, dateDisplayFormat) : t("quotaPlanner.forecast.noDemand")}
                     </span>
                   </div>
                 </div>
@@ -449,7 +451,10 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
               ) : (
                 <div className="divide-y">
                   {decisions.slice(0, 8).map((decision) => {
-                    const targetPeak = detailValue(decision.details, "target_peak_at");
+                    const targetPeakAt = decision.details?.target_peak_at;
+                    const targetPeak = typeof targetPeakAt === "string" && targetPeakAt
+                      ? formatInlineTime(targetPeakAt, dateDisplayFormat)
+                      : null;
                     const warmupCycle = detailValue(decision.details, "warmup_cycle");
                     const expectedGain = detailValue(decision.details, "expected_gain");
                     const expectedCost = detailValue(decision.details, "expected_cost");
@@ -457,12 +462,12 @@ export function QuotaPlannerSection({ disabled = false }: QuotaPlannerSectionPro
                       detailValue(decision.details, "skip_reason") || detailValue(decision.details, "noop_reason");
                     return (
                       <div key={decision.id} className="grid gap-2 px-3 py-2 text-xs sm:grid-cols-[9rem_1fr_5rem_5rem]">
-                        <span className="text-muted-foreground">{formatInlineTime(decision.createdAt)}</span>
+                        <span className="text-muted-foreground">{formatInlineTime(decision.createdAt, dateDisplayFormat)}</span>
                         <span className="min-w-0">
                           <span className="block truncate">
                             {decision.action}
                             {decision.accountId ? ` ${decision.accountId}` : ""} · {decision.status}
-	                            {decision.scheduledAt ? ` · ${t("quotaPlanner.decisions.scheduled", { time: formatInlineTime(decision.scheduledAt) })}` : ""}
+                            {decision.scheduledAt ? ` · ${t("quotaPlanner.decisions.scheduled", { time: formatInlineTime(decision.scheduledAt, dateDisplayFormat) })}` : ""}
                           </span>
                           <span className="block truncate text-muted-foreground">
 	                            {targetPeak ? t("quotaPlanner.decisions.peak", { value: targetPeak }) : decision.reason ?? t("quotaPlanner.decisions.noReason")}

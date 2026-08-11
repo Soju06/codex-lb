@@ -3,6 +3,7 @@ import { ArrowDown, ArrowUp, ArrowUpDown, Download } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { buildContinuousDailyRows } from "../daily-series";
 import type { DailyReportRow } from "../schemas";
 import { formatReportBucketDate } from "../date";
@@ -27,6 +28,7 @@ function formatTokens(v: number): string {
 
 export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const [sort, setSort] = useState<{ key: SortKey; direction: SortDirection }>({
     key: "date",
     direction: "desc",
@@ -121,7 +123,7 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
                   className="border-b border-border/50 last:border-0"
                 >
                   <td className="py-2.5 pr-4 font-medium text-foreground">
-                    {formatDate(row.date)}
+                    {formatReportBucketDate(row.date, dateDisplayFormat)}
                   </td>
                   <td className="py-2.5 pr-4 text-right text-foreground">
                     {row.requests}
@@ -208,10 +210,6 @@ function ColumnGroup() {
       <col style={{ width: "14%" }} />
     </colgroup>
   );
-}
-
-function formatDate(iso: string): string {
-  return formatReportBucketDate(iso);
 }
 
 function sortRows(

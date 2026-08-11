@@ -75,8 +75,9 @@ describe("reports date helpers", () => {
     expect(daysAgoLocalISO(1, localNoon)).toBe("2026-06-01");
   });
 
-  it("formats report bucket strings without parsing them as UTC instants", () => {
-    expect(formatReportBucketDate("2026-06-01")).toBe("2026-06-01");
+  it("formats report bucket strings for the selected display format without a UTC shift", () => {
+    expect(formatReportBucketDate("2026-06-01", "default")).toBe("06/01/2026");
+    expect(formatReportBucketDate("2026-06-01", "iso8601")).toBe("2026-06-01");
   });
 
   it("returns the live browser timezone and refreshes the cached value", () => {

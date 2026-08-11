@@ -1076,17 +1076,22 @@ class _HTTPBridgeRequestSubmitMixin:
             operation_tagged_text = _text_with_operation_id(text_data, operation_id)
             _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
             try:
-                existing_operation = None
                 get_operation_by_fingerprint = getattr(self._durable_bridge, "get_operation_by_fingerprint", None)
-                if callable(get_operation_by_fingerprint):
-                    existing_operation = await _call_with_supported_optional_kwargs(
-                        get_operation_by_fingerprint,
-                        optional_kwargs={"api_key_scope": api_key_scope},
-                        request_fingerprint=operation_fingerprint,
-                    )
                 get_operation = getattr(self._durable_bridge, "get_operation", None)
-                if existing_operation is None and callable(get_operation):
-                    existing_operation = await get_operation(operation_id=operation_id)
+
+                async def lookup_operation() -> Any:
+                    operation = None
+                    if callable(get_operation_by_fingerprint):
+                        operation = await _call_with_supported_optional_kwargs(
+                            get_operation_by_fingerprint,
+                            optional_kwargs={"api_key_scope": api_key_scope},
+                            request_fingerprint=operation_fingerprint,
+                        )
+                    if operation is None and callable(get_operation):
+                        operation = await get_operation(operation_id=operation_id)
+                    return operation
+
+                existing_operation = await lookup_operation()
                 hard_turn_chain_advanced = False
                 seen_hard_turn_response_ids: set[str] = set()
                 while True:
@@ -1096,83 +1101,85 @@ class _HTTPBridgeRequestSubmitMixin:
                         allow_anchored_continuation=hard_turn_chain_advanced,
                     )
                     if (
-                        terminal_hard_turn_response_id is None
-                        or terminal_hard_turn_response_id in seen_hard_turn_response_ids
+                        terminal_hard_turn_response_id is not None
+                        and terminal_hard_turn_response_id not in seen_hard_turn_response_ids
                     ):
-                        break
-                    # A completed operation with the same body is the prior
-                    # hard turn, not a replay request: advance from its
-                    # response instead of replaying the old transcript. Keep
-                    # walking the chain because repeated identical turns can
-                    # have several terminal operations with successive
-                    # response anchors.
-                    seen_hard_turn_response_ids.add(terminal_hard_turn_response_id)
-                    hard_turn_chain_advanced = True
-                    text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
-                    request_state.previous_response_id = terminal_hard_turn_response_id
-                    request_state.proxy_injected_previous_response_id = True
-                    request_state.hard_continuity_anchor = True
-                    operation_parent_response_id = terminal_hard_turn_response_id
-                    operation_fingerprint = durable_bridge_operation_fingerprint(
-                        api_key_scope=api_key_scope,
-                        request_text=_text_without_account_installation_id(text_data),
-                    )
-                    operation_id = durable_bridge_operation_id(
-                        session.durable_session_id,
-                        operation_fingerprint,
-                    )
-                    operation_tagged_text = _text_with_operation_id(text_data, operation_id)
-                    _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
-                    existing_operation = None
-                    if callable(get_operation_by_fingerprint):
-                        existing_operation = await _call_with_supported_optional_kwargs(
-                            get_operation_by_fingerprint,
-                            optional_kwargs={"api_key_scope": api_key_scope},
-                            request_fingerprint=operation_fingerprint,
+                        # A completed operation with the same body is the
+                        # prior hard turn, not a replay request: advance from
+                        # its response instead of replaying that transcript.
+                        # Keep walking the chain because repeated identical
+                        # turns can have several terminal operations with
+                        # successive response anchors.
+                        seen_hard_turn_response_ids.add(terminal_hard_turn_response_id)
+                        hard_turn_chain_advanced = True
+                        text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
+                        request_state.previous_response_id = terminal_hard_turn_response_id
+                        request_state.proxy_injected_previous_response_id = True
+                        request_state.hard_continuity_anchor = True
+                        operation_parent_response_id = terminal_hard_turn_response_id
+                        operation_fingerprint = durable_bridge_operation_fingerprint(
+                            api_key_scope=api_key_scope,
+                            request_text=_text_without_account_installation_id(text_data),
                         )
-                    if existing_operation is None and callable(get_operation):
-                        existing_operation = await get_operation(operation_id=operation_id)
-                # If another worker durably observed the previous turn's
-                # completion, advance a new continuation to that response
-                # anchor instead of replaying the timed-out turn.
-                if existing_operation is None:
-                    get_latest_completed = getattr(self._durable_bridge, "get_latest_completed_operation", None)
-                    if callable(get_latest_completed):
-                        completed_operation = await _call_with_supported_optional_kwargs(
-                            get_latest_completed,
-                            optional_kwargs={"request_fingerprint": operation_fingerprint},
-                            session_id=session.durable_session_id,
-                            parent_response_id=operation_parent_response_id,
+                        operation_id = durable_bridge_operation_id(
+                            session.durable_session_id,
+                            operation_fingerprint,
                         )
-                        if completed_operation is None:
-                            get_latest_completed_any_session = getattr(
-                                self._durable_bridge,
-                                "get_latest_completed_operation_any_session",
-                                None,
+                        operation_tagged_text = _text_with_operation_id(text_data, operation_id)
+                        _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
+                        existing_operation = await lookup_operation()
+                        continue
+
+                    # If another worker durably observed the previous turn's
+                    # completion, advance a new continuation to that response
+                    # anchor instead of replaying the timed-out turn. Re-run
+                    # the operation lookup after this race-path advancement so
+                    # two completions observed back-to-back are both walked.
+                    if existing_operation is None:
+                        get_latest_completed = getattr(self._durable_bridge, "get_latest_completed_operation", None)
+                        if callable(get_latest_completed):
+                            completed_operation = await _call_with_supported_optional_kwargs(
+                                get_latest_completed,
+                                optional_kwargs={"request_fingerprint": operation_fingerprint},
+                                session_id=session.durable_session_id,
+                                parent_response_id=operation_parent_response_id,
                             )
-                            if callable(get_latest_completed_any_session):
-                                completed_operation = await _call_with_supported_optional_kwargs(
-                                    get_latest_completed_any_session,
-                                    optional_kwargs={
-                                        "api_key_scope": api_key_scope,
-                                        "request_fingerprint": operation_fingerprint,
-                                    },
-                                    parent_response_id=request_state.previous_response_id,
+                            if completed_operation is None:
+                                get_latest_completed_any_session = getattr(
+                                    self._durable_bridge,
+                                    "get_latest_completed_operation_any_session",
+                                    None,
                                 )
-                        completed_response_id = getattr(completed_operation, "response_id", None)
-                        if completed_response_id and completed_response_id != request_state.previous_response_id:
-                            text_data = _text_with_previous_response_id(text_data, completed_response_id)
-                            request_state.previous_response_id = completed_response_id
-                            operation_parent_response_id = completed_response_id
-                            request_state.hard_continuity_anchor = True
-                            operation_fingerprint = durable_bridge_operation_fingerprint(
-                                api_key_scope=api_key_scope,
-                                request_text=_text_without_account_installation_id(text_data),
-                            )
-                            operation_id = durable_bridge_operation_id(
-                                session.durable_session_id,
-                                operation_fingerprint,
-                            )
+                                if callable(get_latest_completed_any_session):
+                                    completed_operation = await _call_with_supported_optional_kwargs(
+                                        get_latest_completed_any_session,
+                                        optional_kwargs={
+                                            "api_key_scope": api_key_scope,
+                                            "request_fingerprint": operation_fingerprint,
+                                        },
+                                        parent_response_id=request_state.previous_response_id,
+                                    )
+                            completed_response_id = getattr(completed_operation, "response_id", None)
+                            if completed_response_id and completed_response_id != request_state.previous_response_id:
+                                text_data = _text_with_previous_response_id(text_data, completed_response_id)
+                                request_state.previous_response_id = completed_response_id
+                                operation_parent_response_id = completed_response_id
+                                hard_turn_chain_advanced = True
+                                seen_hard_turn_response_ids.add(completed_response_id)
+                                request_state.hard_continuity_anchor = True
+                                operation_fingerprint = durable_bridge_operation_fingerprint(
+                                    api_key_scope=api_key_scope,
+                                    request_text=_text_without_account_installation_id(text_data),
+                                )
+                                operation_id = durable_bridge_operation_id(
+                                    session.durable_session_id,
+                                    operation_fingerprint,
+                                )
+                                operation_tagged_text = _text_with_operation_id(text_data, operation_id)
+                                _enforce_http_bridge_response_create_text_size(request_state, operation_tagged_text)
+                                existing_operation = await lookup_operation()
+                                continue
+                    break
                 operation = await _call_with_supported_optional_kwargs(
                     record_operation,
                     optional_kwargs={

@@ -330,6 +330,88 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
     assert recorded["parent_response_id"] == "resp-3"
 
 
+@pytest.mark.asyncio
+async def test_submit_hard_turn_walks_race_path_chain_before_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-turn-race-chain")
+    session.durable_session_id = "durable-hard-turn-race-chain"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-turn-race-chain",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+        request_text='{"type":"response.create","input":"same"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    operation_lookups = iter(
+        [
+            None,
+            SimpleNamespace(state="completed", event_spool_complete=True, response_id="resp-2"),
+            None,
+        ]
+    )
+    latest_completed = iter(
+        [
+            SimpleNamespace(state="completed", event_spool_complete=True, response_id="resp-1"),
+            None,
+        ]
+    )
+    recorded: dict[str, Any] = {}
+
+    async def get_operation_by_fingerprint(**_kwargs: Any) -> Any:
+        return next(operation_lookups)
+
+    async def get_operation(**_kwargs: Any) -> None:
+        return None
+
+    async def get_latest_completed_operation(**_kwargs: Any) -> Any:
+        return next(latest_completed)
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after operation identity assertion")
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=get_operation_by_fingerprint,
+            get_operation=get_operation,
+            get_latest_completed_operation=get_latest_completed_operation,
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-hard-turn-race-chain",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-hard-turn-race-chain",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert json.loads(recorded["request_text"])["previous_response_id"] == "resp-2"
+    assert recorded["parent_response_id"] == "resp-2"
+
+
 def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_anchor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -242,6 +242,42 @@ async def test_ensure_fresh_detached_refresh_owns_session_on_caller_cancel(monke
 
 
 @pytest.mark.asyncio
+async def test_ensure_fresh_preserves_paused_status_on_success(monkeypatch):
+    async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        return TokenRefreshResult(
+            access_token="access-new",
+            refresh_token="refresh-new",
+            id_token="id-new",
+            account_id="acc_paused",
+            plan_type="plus",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_paused",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.PAUSED,
+        deactivation_reason=None,
+    )
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    await manager.ensure_fresh(account, force=True)
+
+    assert account.status is AccountStatus.PAUSED
+    assert repo.status_payload is None
+    assert repo.tokens_payload is not None
+
+
+@pytest.mark.asyncio
 async def test_refresh_account_preserves_plan_type_when_missing(monkeypatch):
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(

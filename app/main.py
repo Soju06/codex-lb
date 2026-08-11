@@ -81,6 +81,7 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
     RING_HEARTBEAT_INTERVAL_SECONDS,
@@ -276,6 +277,7 @@ async def lifespan(app: FastAPI):
         )
         deleted_bridge_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_owned_sessions_on_startup(
             instance_id=settings.http_responses_session_bridge_instance_id,
+            owner_process_epoch=http_bridge_owner_process_epoch(),
             ownerless_cutoff=ownerless_cutoff,
         )
         if deleted_bridge_rows > 0:
@@ -626,8 +628,11 @@ async def lifespan(app: FastAPI):
             # A stopped poller must not keep receiving propagation requests.
             set_cache_invalidation_poller(None)
         await api_key_limit_reset_scheduler.stop()
-        # Final last_used_at flush; settlement tasks were drained above, so
-        # every recorded touch is pending by now.
+        # Final last_used_at flush (bounded retries). Settlement tasks were
+        # drained above; if that drain timed out, a surviving task's later
+        # record() write-throughs immediately (stop() switches the coalescer
+        # to shutdown write-through mode before the final flush), so a late
+        # touch is never parked in a pending map with no remaining flusher.
         await api_key_last_used_flush_scheduler.stop()
         await usage_scheduler.stop()
         await stop_live_usage_ingestor()

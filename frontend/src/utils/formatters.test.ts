@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { RESET_ERROR_LABEL } from "@/utils/constants";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 import i18n from "@/i18n";
 import {
@@ -40,6 +41,7 @@ describe("formatters", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
     useTimeFormatStore.setState({ timeFormat: "12h" });
   });
 
@@ -146,6 +148,18 @@ describe("formatters", () => {
     expect(twentyFourHour).not.toMatch(/AM|PM/);
     expect(formatDateTimeInline(iso)).toContain(twentyFourHour);
     expect(formatChartDateTime(iso)).not.toMatch(/AM|PM/);
+  });
+
+  it("keeps semantic date/time fields stable and orders ISO display date-first", () => {
+    const iso = "2026-08-09T14:30:45.000Z";
+    const local = new Date(iso);
+    const expectedDate = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, "0")}-${String(local.getDate()).padStart(2, "0")}`;
+    const expectedTime = `${String(local.getHours()).padStart(2, "0")}:${String(local.getMinutes()).padStart(2, "0")}:${String(local.getSeconds()).padStart(2, "0")}`;
+
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+
+    expect(formatTimeLong(iso)).toEqual({ time: expectedTime, date: expectedDate });
+    expect(formatDateTimeInline(iso)).toBe(`${expectedDate} ${expectedTime}`);
   });
 
   it("formats local timestamps as yyyy-mm-dd hh:mm:ss", () => {

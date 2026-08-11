@@ -16,7 +16,7 @@ def test_settings_multi_replica_defaults():
     assert settings.log_format == "text"
     assert settings.leader_election_enabled is True
     assert settings.leader_election_ttl_seconds == 60
-    assert settings.auth_guardian_enabled is False
+    assert settings.auth_guardian_enabled is True
     assert settings.circuit_breaker_enabled is False
     assert settings.backpressure_max_concurrent_requests == 0
     assert settings.bulkhead_proxy_limit == 512

@@ -37,6 +37,7 @@ from app.core import shutdown as shutdown_state
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     CodexUpstreamWebSocket,
     UpstreamWebSocket,
     UpstreamWebSocketTransportError,
@@ -27504,8 +27505,170 @@ async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_sen
         "response.created",
         "response.failed",
     ]
-    assert downstream.close_calls == [(1011, "upstream replay requires a fresh request")]
+    assert downstream.close_calls[0] == (1011, "upstream replay requires a fresh request")
     handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_proxy_responses_websocket_liveness_race_awaits_reader_settlement(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(proxy_service.ProxyService, "_handle_stream_error", handle_stream_error)
+
+    request_texts = [
+        json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "instructions": "",
+                "input": [{"role": "user", "content": label}],
+                "stream": True,
+            },
+            separators=(",", ":"),
+        )
+        for label in ("first", "second")
+    ]
+
+    class RacingDownstreamWebSocket:
+        def __init__(self) -> None:
+            self.request_index = 0
+            self.first_created = asyncio.Event()
+            self.done = asyncio.Event()
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if self.request_index == 0:
+                self.request_index = 1
+                return {"type": "websocket.receive", "text": request_texts[0]}
+            if self.request_index == 1:
+                await self.first_created.wait()
+                self.request_index = 2
+                return {"type": "websocket.receive", "text": request_texts[1]}
+            await self.done.wait()
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            payload = json.loads(text)
+            if payload.get("type") == "response.created":
+                self.first_created.set()
+            if sum(json.loads(item).get("type") == "response.failed" for item in self.sent_text) == 2:
+                self.done.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self.done.set()
+
+    settlement_started = asyncio.Event()
+    allow_settlement = asyncio.Event()
+
+    class RacingUpstreamWebSocket:
+        def __init__(self) -> None:
+            self.send_count = 0
+            self.receive_count = 0
+            self.second_send_started = asyncio.Event()
+            self.closed = False
+
+        async def send_text(self, _text: str) -> None:
+            self.send_count += 1
+            if self.send_count == 2:
+                self.second_send_started.set()
+                await settlement_started.wait()
+                raise UpstreamWebSocketTransportError(
+                    "Codex upstream websocket send failed: heartbeat expired",
+                    error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+                )
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def receive(self) -> SimpleNamespace:
+            self.receive_count += 1
+            if self.receive_count == 1:
+                return SimpleNamespace(
+                    kind="text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {"id": "resp_liveness_race", "status": "in_progress"},
+                        },
+                        separators=(",", ":"),
+                    ),
+                    data=None,
+                    close_code=None,
+                    error=None,
+                    error_code=None,
+                )
+            await self.second_send_started.wait()
+            return SimpleNamespace(
+                kind="error",
+                text=None,
+                data=None,
+                close_code=1011,
+                error="Codex upstream websocket receive failed: heartbeat expired",
+                error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+
+    released_request_ids: list[str] = []
+
+    async def controlled_release(request_state: proxy_service._WebSocketRequestState) -> None:
+        if not settlement_started.is_set():
+            settlement_started.set()
+            await allow_settlement.wait()
+        released_request_ids.append(request_state.request_id)
+
+    downstream = RacingDownstreamWebSocket()
+    upstream = RacingUpstreamWebSocket()
+    account = _make_account("acc_ws_liveness_race")
+
+    async def connect(*_args: object, **_kwargs: object):
+        return account, upstream
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", connect)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", controlled_release)
+
+    proxy_task = asyncio.create_task(
+        service.proxy_responses_websocket(
+            cast(WebSocket, downstream),
+            {},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            api_key=None,
+        )
+    )
+    try:
+        await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
+        assert proxy_task.done() is False
+        allow_settlement.set()
+        await asyncio.wait_for(proxy_task, timeout=1.0)
+    finally:
+        allow_settlement.set()
+        if not proxy_task.done():
+            proxy_task.cancel()
+        await asyncio.gather(proxy_task, return_exceptions=True)
+
+    emitted = [json.loads(text) for text in downstream.sent_text]
+    failures = [payload for payload in emitted if payload.get("type") == "response.failed"]
+    assert len(failures) == 2
+    assert {payload["response"]["error"]["code"] for payload in failures} == {UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE}
+    assert len(released_request_ids) == 2
+    assert len(set(released_request_ids)) == 2
+    assert upstream.send_count == 2
+    assert upstream.closed is True
+    handle_stream_error.assert_not_awaited()
+    assert len(request_logs.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -28373,12 +28536,21 @@ async def test_relay_upstream_websocket_latches_transport_end_before_pending_loc
 
 
 @pytest.mark.asyncio
-async def test_relay_upstream_websocket_network_failure_is_neutral_and_not_replayed(monkeypatch):
+@pytest.mark.parametrize(
+    "error_code",
+    ["proxy_network_unavailable", UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE],
+    ids=["process-network", "liveness-timeout"],
+)
+async def test_relay_upstream_websocket_account_neutral_failure_is_not_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+) -> None:
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     handle_stream_error = AsyncMock()
+    release_reservation = AsyncMock()
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
-    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", AsyncMock())
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
 
     class _FakeDownstreamWebSocket:
         def __init__(self) -> None:
@@ -28390,19 +28562,22 @@ async def test_relay_upstream_websocket_network_failure_is_neutral_and_not_repla
         async def close(self, code: int = 1000, reason: str | None = None) -> None:
             del code, reason
 
-    class _NetworkFailureUpstream:
+    class _AccountNeutralFailureUpstream:
+        def __init__(self) -> None:
+            self.closed = False
+
         async def receive(self) -> SimpleNamespace:
             return SimpleNamespace(
                 kind="error",
                 text=None,
                 data=None,
                 close_code=None,
-                error="Codex upstream websocket receive failed via proxy endpoint ep_1: OSError",
-                error_code="proxy_network_unavailable",
+                error="Upstream websocket liveness failed",
+                error_code=error_code,
             )
 
         async def close(self) -> None:
-            return None
+            self.closed = True
 
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_network_failure",
@@ -28418,10 +28593,11 @@ async def test_relay_upstream_websocket_network_failure_is_neutral_and_not_repla
     pending_requests = deque([request_state])
     upstream_control = proxy_service._WebSocketUpstreamControl()
     downstream = _FakeDownstreamWebSocket()
+    upstream = _AccountNeutralFailureUpstream()
 
     await service._relay_upstream_websocket_messages(
         cast(WebSocket, downstream),
-        cast(proxy_service.UpstreamWebSocket, _NetworkFailureUpstream()),
+        cast(proxy_service.UpstreamWebSocket, upstream),
         account=_make_account("acc_ws_network_failure"),
         account_id_value="acc_ws_network_failure",
         pending_requests=pending_requests,
@@ -28439,8 +28615,85 @@ async def test_relay_upstream_websocket_network_failure_is_neutral_and_not_repla
     assert upstream_control.reconnect_requested is True
     assert list(pending_requests) == []
     handle_stream_error.assert_not_awaited()
+    release_reservation.assert_awaited_once_with(request_state)
+    # Upstream now retires every terminal receive before the reader exits; the
+    # liveness distinction controls replay and account health, not ownership.
+    assert upstream.closed is True
     terminal = json.loads(downstream.sent_text[-1])
-    assert terminal["response"]["error"]["code"] == "proxy_network_unavailable"
+    assert terminal["response"]["error"]["code"] == error_code
+
+
+@pytest.mark.asyncio
+async def test_relay_upstream_websocket_liveness_timeout_preserves_sequenced_failure_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    fail_pending = AsyncMock()
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+
+    class _DownstreamWebSocket:
+        def __init__(self) -> None:
+            self.close_calls: list[tuple[int, str | None]] = []
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            self.close_calls.append((code, reason))
+
+    class _LivenessTimeoutUpstream:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def receive(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                kind="error",
+                text=None,
+                data=None,
+                close_code=1011,
+                error="Upstream websocket liveness failed",
+                error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_sequenced_liveness_timeout",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        request_text='{"type":"response.create","model":"gpt-5.1","input":"hi"}',
+        response_create_sent_at=0.0,
+        awaiting_response_created=False,
+        last_downstream_sequence_number=1,
+    )
+    pending_requests = deque([request_state])
+    downstream = _DownstreamWebSocket()
+    upstream = _LivenessTimeoutUpstream()
+
+    await service._relay_upstream_websocket_messages(
+        cast(WebSocket, downstream),
+        cast(proxy_service.UpstreamWebSocket, upstream),
+        account=_make_account("acc_ws_sequenced_liveness_timeout"),
+        account_id_value="acc_ws_sequenced_liveness_timeout",
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        response_create_gate=asyncio.Semaphore(1),
+        proxy_request_budget_seconds=5.0,
+        stream_idle_timeout_seconds=5.0,
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    fail_pending.assert_awaited_once()
+    fail_pending_args = fail_pending.await_args
+    assert fail_pending_args is not None
+    assert fail_pending_args.kwargs["penalize_account"] is False
+    assert fail_pending_args.kwargs["suppress_sequenced_downstream_errors"] is True
+    assert upstream.closed is True
+    assert downstream.close_calls[0] == (1011, "upstream replay requires a fresh request")
 
 
 @pytest.mark.asyncio

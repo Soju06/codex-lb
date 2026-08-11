@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { createAccountSummary, createConversationEntry } from "@/test/mocks/factories";
 import { ConversationTable } from "@/features/dashboard/components/conversation-table";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { formatTimeLong } from "@/utils/formatters";
 
 describe("ConversationTable", () => {
   beforeEach(() => {
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
     usePrivacyStore.setState({ blurred: false });
   });
 
@@ -196,6 +198,38 @@ describe("ConversationTable", () => {
     );
 
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("renders ISO dates before times while preserving formatter field semantics", () => {
+    const iso = "2026-08-09T14:30:45.000Z";
+
+    render(
+      <ConversationTable
+        conversations={[createConversationEntry({ lastRequest: iso })]}
+        accounts={[]}
+        total={1}
+        limit={25}
+        offset={0}
+        hasMore={false}
+        onLimitChange={vi.fn()}
+        onOffsetChange={vi.fn()}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    const defaultFormatted = formatTimeLong(iso);
+    const initialCellText = screen.getByText(defaultFormatted.time).closest("td")?.textContent ?? "";
+    expect(initialCellText.indexOf(defaultFormatted.time)).toBeLessThan(initialCellText.indexOf(defaultFormatted.date));
+
+    act(() => {
+      useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+    });
+
+    const formatted = formatTimeLong(iso);
+    const dateElement = screen.getByText(formatted.date);
+    const cellText = dateElement.closest("td")?.textContent ?? "";
+    expect(formatted).toEqual({ time: expect.any(String), date: expect.any(String) });
+    expect(cellText.indexOf(formatted.date)).toBeLessThan(cellText.indexOf(formatted.time));
   });
 
   it("uses the em-dash fallback for a null cached total", () => {

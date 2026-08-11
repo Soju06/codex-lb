@@ -47,6 +47,16 @@ slow-query log.
   `postgresql_include=[...]`) and register them in
   `_MANUAL_DRIFT_INDEX_REQUIREMENTS` so a missing index fails schema-drift
   checks fast on both backends.
+- Tune `usage_history` insert-driven autovacuum on PostgreSQL
+  (`autovacuum_vacuum_insert_scale_factor = 0.02`,
+  `autovacuum_vacuum_insert_threshold = 50000`,
+  `autovacuum_analyze_scale_factor = 0.02`, mirroring `20260717_000000`
+  for `request_logs`/`additional_usage_history`): the table is
+  append-heavy, and with the default insert trigger the visibility map
+  goes stale enough that the covering "index-only" scans degrade into
+  per-row heap fetches (observed on the reference deployment; resolved
+  there by the same settings applied manually — the migration codifies
+  them and is idempotent over that hotfix).
 - No query text changes; results are byte-identical.
 
 ### Deliberately kept (write-amplification note)
@@ -101,7 +111,9 @@ declared closed.
 
 ## Impact
 
-One Alembic revision (two covering indexes; `CREATE INDEX CONCURRENTLY`
-on PostgreSQL with invalid-leftover repair), `app/db/models.py` index
-declarations, `app/db/migrate.py` manual drift index list. No API or
-query change; read results are unchanged.
+Two Alembic revisions (two covering indexes via `CREATE INDEX
+CONCURRENTLY` on PostgreSQL with invalid-leftover repair; `usage_history`
+insert-driven autovacuum tuning), `app/db/models.py` index declarations,
+`app/db/migrate.py` manual drift index list, `Makefile`
+`POSTGRES_PYTEST_TARGETS` registration for the PostgreSQL-only tests. No
+API or query change; read results are unchanged.

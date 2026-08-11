@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/table";
 import { useConversationDetails } from "@/features/dashboard/hooks/use-conversation-details";
 import type { ConversationModelStat } from "@/features/dashboard/schemas";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { formatCompactNumber, formatCurrency, formatDateTimeInline, formatElapsed, formatModelLabel } from "@/utils/formatters";
 
 type DetailSortKey =
@@ -48,6 +49,7 @@ export function ConversationDetailsDialog({
   onOpenChange,
 }: ConversationDetailsDialogProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const detailsQuery = useConversationDetails(conversationId, open);
   const [sortState, setSortState] = useState<{ conversationId: string | null; sort: SortState }>({
     conversationId: null,
@@ -118,8 +120,8 @@ export function ConversationDetailsDialog({
                   mono
                   translateNo
                 />
-                <DetailField label={t("dashboard.conversations.details.start")} value={formatDateTimeInline(detailsQuery.data.start)} />
-                <DetailField label={t("dashboard.conversations.details.latest")} value={formatDateTimeInline(detailsQuery.data.latest)} />
+                <DetailField label={t("dashboard.conversations.details.start")} value={formatDateTimeInline(detailsQuery.data.start, dateDisplayFormat)} />
+                <DetailField label={t("dashboard.conversations.details.latest")} value={formatDateTimeInline(detailsQuery.data.latest, dateDisplayFormat)} />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <DetailField label={t("dashboard.conversations.details.accountCount")} value={formatCompactNumber(detailsQuery.data.accountCount)} />

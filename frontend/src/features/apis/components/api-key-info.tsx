@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import type { ApiKey, LimitType } from "@/features/api-keys/schemas";
+import { useDateDisplayFormatStore, type DateDisplayFormat } from "@/hooks/use-date-format";
 import { cn } from "@/lib/utils";
 import {
 	formatCompactNumber,
@@ -23,9 +24,9 @@ export type ApiKeyInfoProps = {
 	allowUsageSummaryFallback?: boolean;
 };
 
-function formatExpiry(value: string | null, neverLabel: string): string {
+function formatExpiry(value: string | null, neverLabel: string, displayFormat: DateDisplayFormat): string {
 	if (!value) return neverLabel;
-	const parsed = formatTimeLong(value);
+	const parsed = formatTimeLong(value, displayFormat);
 	return `${parsed.date} ${parsed.time}`;
 }
 
@@ -41,6 +42,7 @@ export function ApiKeyInfo({
 	allowUsageSummaryFallback = true,
 }: ApiKeyInfoProps) {
 	const { t } = useTranslation();
+	const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
 	const expired = isExpired(apiKey);
 	const models = apiKey.allowedModels?.join(", ") || t("apiKeys.modelSelect.all");
 	const enforcedModel = apiKey.enforcedModel || null;
@@ -89,7 +91,7 @@ export function ApiKeyInfo({
 							expired ? "text-red-600 dark:text-red-400" : "",
 						)}
 					>
-						{expired ? t("common.states.expired") : formatExpiry(apiKey.expiresAt, t("common.time.never"))}
+						{expired ? t("common.states.expired") : formatExpiry(apiKey.expiresAt, t("common.time.never"), dateDisplayFormat)}
 					</dd>
 				</div>
 				<div className="flex items-start justify-between gap-2">

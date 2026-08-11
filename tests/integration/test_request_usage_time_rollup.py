@@ -506,6 +506,19 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
             )
         )
         await session.commit()
+        # hour0, own model bucket: cancelled (client-disconnect) terminals —
+        # counted in request_count and cancelled_count, kept OUT of
+        # error_count and the error satellite (#1552).
+        for index in range(2):
+            await _add_log(
+                logs,
+                account_id="acc_f",
+                request_id=f"r_cancelled_{index}",
+                requested_at=hour0 + timedelta(seconds=400 + index * 30),
+                model="gpt-5.6-cx",
+                status="cancelled",
+                error_code="client_disconnected",
+            )
         # hour1: warmup kind is folded verbatim (reads filter by dimension),
         # plus a cached>input clamp case.
         await _add_log(
@@ -582,6 +595,12 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     h0 = by_key[(epoch_seconds(hour0), "acc_f", _S, "gpt-5.1-codex", _S, "normal", False)]
     assert h0.request_count == 2
     assert h0.error_count == 1
+    assert h0.cancelled_count == 0
+
+    cancelled = by_key[(epoch_seconds(hour0), "acc_f", _S, "gpt-5.6-cx", _S, "normal", False)]
+    assert cancelled.request_count == 2
+    assert cancelled.error_count == 0
+    assert cancelled.cancelled_count == 2
     assert h0.input_tokens == 300
     assert h0.output_tokens == 50
     assert h0.reasoning_tokens == 30
@@ -619,6 +638,8 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     tail_bucket = epoch_seconds(floor_to_hour(now))
     assert not any(r.bucket_epoch == tail_bucket for r in hourly)
 
+    # The cancelled rows carry error_code=client_disconnected but never
+    # reach the error satellite: they are not errors.
     error_keys = {(r.bucket_epoch, r.account_id, r.error_code): r.error_count for r in errors}
     assert error_keys == {
         (epoch_seconds(hour0), "acc_f", "upstream_500"): 1,
@@ -657,6 +678,11 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     assert (epoch_seconds(hour1), "acc_f", _S, "gpt-5.1-codex", _S, "warmup", "success", False) in demand_keys
     assert (epoch_seconds(hour2), "acc_f", "key_1", "gpt-5.1-codex", _S, "normal", "success", False) in demand_keys
     assert (epoch_seconds(hour4), _S, _S, "gpt-5.1-codex", _S, "normal", "error", True) in demand_keys
+    # The demand grain keeps the full status split, so the cancelled rows
+    # land in their own status bin (the dashboard cancelled breakdown reads
+    # this grain across all folded history).
+    cancelled_slot = demand_keys[(epoch_seconds(hour0), "acc_f", _S, "gpt-5.6-cx", _S, "normal", "cancelled", False)]
+    assert cancelled_slot.request_count == 2
 
 
 @pytest.mark.asyncio
@@ -749,6 +775,75 @@ async def test_top_error_empty_code_winner_coerces_to_none(db_setup):
         assert await logs.top_error_between(folded_hour + timedelta(seconds=25), folded_hour + timedelta(hours=1)) == (
             "boom"
         )
+
+
+@pytest.mark.asyncio
+async def test_activity_and_top_error_exclude_cancelled_terminals(db_setup):
+    """Regression for #1552 at the dashboard-overview read paths: cancelled
+    (client-disconnect) rows on BOTH sides of the fold boundary stay in the
+    request total, leave the error numerator and top_error, and surface as
+    the demand-grain-sourced cancelled count. Historical error-satellite rows
+    folded under the legacy `status != 'success'` filter still carry
+    client_disconnected counts — the read must drop that code."""
+    now = utcnow()
+    folded_hour = floor_to_hour(now - timedelta(days=2))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_cx", "cancelled-ts@example.com"))
+        logs = RequestLogsRepository(session)
+        # Folded side: 1 success, 2 cancelled, 1 genuine error.
+        await _add_log(logs, account_id="acc_cx", request_id="r_cx_ok", requested_at=folded_hour)
+        for index in range(2):
+            await _add_log(
+                logs,
+                account_id="acc_cx",
+                request_id=f"r_cx_folded_{index}",
+                requested_at=folded_hour + timedelta(seconds=30 + index),
+                status="cancelled",
+                error_code="client_disconnected",
+            )
+        await _add_log(
+            logs,
+            account_id="acc_cx",
+            request_id="r_cx_err",
+            requested_at=folded_hour + timedelta(seconds=90),
+            status="error",
+            error_code="upstream_500",
+        )
+        # Raw tail: 1 more cancelled row.
+        await _add_log(
+            logs,
+            account_id="acc_cx",
+            request_id="r_cx_tail",
+            requested_at=now - timedelta(minutes=1),
+            status="cancelled",
+            error_code="client_disconnected",
+        )
+
+    assert await run_hourly_fold_pass(now=now) >= 1
+
+    # Simulate a bucket folded BEFORE this release: the legacy error fold
+    # counted cancelled rows, so old satellite rows carry the code.
+    async with SessionLocal() as session:
+        await RequestUsageTimeRollupRepository(session).add_errors(
+            [
+                HourlyErrorRollupRow(
+                    bucket_epoch=epoch_seconds(folded_hour),
+                    account_id="acc_cx",
+                    error_code="client_disconnected",
+                    error_count=200,
+                )
+            ]
+        )
+        await session.commit()
+
+    since = folded_hour - timedelta(hours=1)
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        activity = await logs.aggregate_activity_between(since, now)
+        assert activity.request_count == 5
+        assert activity.error_count == 1
+        assert activity.cancelled_count == 3
+        assert await logs.top_error_between(since, now) == "upstream_500"
 
 
 @pytest.mark.asyncio

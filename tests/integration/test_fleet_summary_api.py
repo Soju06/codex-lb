@@ -698,6 +698,7 @@ async def test_fleet_observability_reports_pressure_and_sticky_without_sensitive
             "label": "observe@example.com",
             "requestCount": 3,
             "errorCount": 1,
+            "cancelledCount": 0,
             "inputTokens": 150,
             "cachedInputTokens": 70,
             "outputTokens": 35,
@@ -744,6 +745,58 @@ async def test_fleet_observability_reports_pressure_and_sticky_without_sensitive
     assert "sticky-observe" not in raw
     assert "203.0.113" not in raw
     assert "secret upstream error body" not in raw
+
+
+@pytest.mark.asyncio
+async def test_fleet_observability_excludes_cancelled_from_error_count(async_client, db_setup):
+    # Regression for #1552: cancelled (client-disconnect) terminals are not
+    # upstream errors — they leave errorCount/topErrorCode and surface as
+    # cancelledCount instead.
+    await get_settings_cache().invalidate()
+    plain_key = await _create_api_key("fleet-observability-cancelled-key")
+    await _seed_account_with_windows(
+        "acc_cancelled",
+        "cancelled@example.com",
+        primary_used_percent=10.0,
+        secondary_used_percent=20.0,
+        primary_reset_at=1735862400,
+        secondary_reset_at=1736467200,
+    )
+    now = utcnow()
+    await _seed_request_log(
+        "acc_cancelled",
+        "req-cancelled-success",
+        requested_at=now - timedelta(minutes=3),
+    )
+    for index in range(2):
+        await _seed_request_log(
+            "acc_cancelled",
+            f"req-cancelled-disconnect-{index}",
+            requested_at=now - timedelta(minutes=4 + index),
+            status="cancelled",
+            error_code="client_disconnected",
+        )
+    await _seed_request_log(
+        "acc_cancelled",
+        "req-cancelled-error",
+        requested_at=now - timedelta(minutes=6),
+        status="error",
+        error_code="upstream_500",
+    )
+
+    response = await async_client.get(
+        "/api/fleet/observability",
+        headers={"Authorization": f"Bearer {plain_key}"},
+    )
+
+    assert response.status_code == 200
+    thirty = _window(response.json(), "30m")
+    assert thirty["requestCount"] == 4
+    assert thirty["errorCount"] == 1
+    assert thirty["cancelledCount"] == 2
+    assert thirty["topErrorCode"] == "upstream_500"
+    assert thirty["byAccount"][0]["errorCount"] == 1
+    assert thirty["byAccount"][0]["cancelledCount"] == 2
 
 
 @pytest.mark.asyncio

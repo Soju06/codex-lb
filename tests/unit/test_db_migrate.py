@@ -475,6 +475,75 @@ def test_request_logs_transport_stays_in_additive_migration_chain(tmp_path: Path
         assert "transport" in columns
 
 
+def test_hourly_rollup_cancelled_count_migration_round_trips_with_default_zero(tmp_path: Path) -> None:
+    """#1552: the cancelled_count measure is additive on the current head —
+    rows folded before the migration read 0 via the server default (no
+    backfill) and the downgrade drops only the new column."""
+    db_path = tmp_path / "rollup-cancelled-count.db"
+    url = _db_url(db_path)
+    parent_revision = "20260806_120000_add_http_bridge_owner_process_epoch"
+    cancelled_revision = "20260811_000000_add_hourly_rollup_cancelled_count"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.begin() as connection:
+            # A pre-migration folded row: error_count still holds the legacy
+            # status != 'success' fold (cancelled rows included).
+            connection.execute(
+                text(
+                    "INSERT INTO request_usage_hourly_rollups "
+                    "(bucket_epoch, account_id, api_key_id, model, service_tier, request_kind, is_deleted, "
+                    "request_count, error_count, input_tokens, output_tokens, reasoning_tokens, "
+                    "output_or_reasoning_tokens, cached_input_tokens, cached_input_tokens_clamped, "
+                    "cost_usd, cost_count) "
+                    "VALUES (:bucket_epoch, :account_id, :api_key_id, :model, :service_tier, :request_kind, 0, "
+                    ":request_count, :error_count, 0, 0, 0, 0, 0, 0, 0.0, 0)"
+                ),
+                {
+                    "bucket_epoch": 1_753_300_800,
+                    "account_id": "acc_legacy",
+                    "api_key_id": "\x1f",
+                    "model": "gpt-5.1-codex",
+                    "service_tier": "\x1f",
+                    "request_kind": "normal",
+                    "request_count": 10,
+                    "error_count": 7,
+                },
+            )
+
+        result = run_upgrade(url, cancelled_revision, bootstrap_legacy=False)
+        assert result.current_revision == cancelled_revision
+
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("request_usage_hourly_rollups")}
+            assert "cancelled_count" in columns
+            row = connection.execute(
+                text(
+                    "SELECT request_count, error_count, cancelled_count "
+                    "FROM request_usage_hourly_rollups WHERE account_id = 'acc_legacy'"
+                )
+            ).one()
+            assert tuple(row) == (10, 7, 0)
+
+        command.downgrade(_build_alembic_config(url), parent_revision)
+
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("request_usage_hourly_rollups")}
+            assert "cancelled_count" not in columns
+            row = connection.execute(
+                text(
+                    "SELECT request_count, error_count "
+                    "FROM request_usage_hourly_rollups WHERE account_id = 'acc_legacy'"
+                )
+            ).one()
+            assert tuple(row) == (10, 7)
+    finally:
+        engine.dispose()
+
+    assert inspect_migration_state(url).current_revision == parent_revision
+
+
 def test_request_log_useragent_family_migration_backfills_only_slash_values(tmp_path: Path) -> None:
     db_path = tmp_path / "request-log-useragent-families.db"
     url = _db_url(db_path)

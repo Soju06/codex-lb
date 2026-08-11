@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.core import usage as usage_core
-from app.core.usage.logs import cached_input_tokens_from_log, cost_from_log, total_tokens_from_log
+from app.core.usage.logs import (
+    CANCELLED_STATUS,
+    NON_ERROR_STATUSES,
+    cached_input_tokens_from_log,
+    cost_from_log,
+    total_tokens_from_log,
+)
 from app.core.usage.types import (
     BucketConversationAggregate,
     BucketModelAggregate,
@@ -50,6 +56,7 @@ class ActivityMetricsSummary:
     cached_input_tokens: int | None = None
     error_rate: float | None = None
     error_count: int | None = None
+    cancelled_count: int | None = None
     top_error: str | None = None
     conversation_count: int = 0
     conversation_request_count: int = 0
@@ -100,6 +107,7 @@ def build_trends_from_buckets(
 
     total_requests = 0
     total_errors = 0
+    total_cancelled = 0
     total_tokens = 0
     total_cached_tokens = 0
     total_cost_usd = 0.0
@@ -116,6 +124,7 @@ def build_trends_from_buckets(
 
         total_requests += row.request_count
         total_errors += row.error_count
+        total_cancelled += row.cancelled_count
         total_tokens += row.input_tokens + row.output_tokens
         total_cached_tokens += row.cached_input_tokens
         total_cost_usd += float(row.cost_usd)
@@ -164,6 +173,7 @@ def build_trends_from_buckets(
         cached_input_tokens=total_cached_tokens,
         error_rate=error_rate_total,
         error_count=total_errors,
+        cancelled_count=total_cancelled,
         top_error=top_error,
     )
 
@@ -196,6 +206,7 @@ def build_activity_summaries(
             cached_input_tokens=aggregate.cached_input_tokens,
             error_rate=error_rate,
             error_count=aggregate.error_count,
+            cancelled_count=aggregate.cancelled_count,
             top_error=top_error,
             conversation_count=aggregate.conversation_count,
             conversation_request_count=aggregate.conversation_request_count,
@@ -314,6 +325,7 @@ def build_usage_metrics_from_aggregate(aggregate: UsageSummaryLogsAggregate | No
             cached_tokens_secondary_window=aggregate.cached_input_tokens if aggregate else 0,
             error_rate_7d=None,
             top_error=aggregate.top_error if aggregate else None,
+            cancelled_7d=aggregate.cancelled_count if aggregate else 0,
         )
     return UsageMetricsSummary(
         requests_7d=aggregate.request_count,
@@ -321,6 +333,7 @@ def build_usage_metrics_from_aggregate(aggregate: UsageSummaryLogsAggregate | No
         cached_tokens_secondary_window=aggregate.cached_input_tokens,
         error_rate_7d=aggregate.error_count / aggregate.request_count,
         top_error=aggregate.top_error,
+        cancelled_7d=aggregate.cancelled_count,
     )
 
 
@@ -352,7 +365,11 @@ def _cost_summary_from_logs(logs: list[RequestLog]) -> UsageCostSummary:
 
 def _usage_metrics(logs_secondary: list[RequestLog]) -> UsageMetricsSummary:
     total_requests = len(logs_secondary)
-    error_logs = [log for log in logs_secondary if log.status != "success"]
+    # Cancelled terminals are normal client disconnects, not upstream
+    # failures — they leave the error numerator (and top_error) but stay in
+    # the request total (#1552).
+    error_logs = [log for log in logs_secondary if log.status not in NON_ERROR_STATUSES]
+    cancelled_count = sum(1 for log in logs_secondary if log.status == CANCELLED_STATUS)
     error_rate: float | None = None
     if total_requests > 0:
         error_rate = len(error_logs) / total_requests
@@ -365,6 +382,7 @@ def _usage_metrics(logs_secondary: list[RequestLog]) -> UsageMetricsSummary:
         cached_tokens_secondary_window=cached_tokens_secondary,
         error_rate_7d=error_rate,
         top_error=top_error,
+        cancelled_7d=cancelled_count,
     )
 
 
@@ -434,6 +452,7 @@ def _metrics_summary_to_model(metrics: UsageMetricsSummary) -> UsageMetrics:
             "cached_tokens_secondary_window": metrics.cached_tokens_secondary_window,
             "error_rate_7d": metrics.error_rate_7d,
             "top_error": metrics.top_error,
+            "cancelled_7d": metrics.cancelled_7d,
         }
     )
 

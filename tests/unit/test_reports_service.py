@@ -57,6 +57,7 @@ async def test_get_reports_averages_use_inclusive_local_calendar_days(
         total_requests=30,
         conversation_count=0,
         total_errors=0,
+        total_cancelled=0,
         active_accounts=1,
     )
     repo = SimpleNamespace(
@@ -147,6 +148,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                     total_requests=2,
                     conversation_count=1,
                     total_errors=0,
+                    total_cancelled=0,
                     active_accounts=1,
                 ),
                 SimpleNamespace(
@@ -157,6 +159,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                     total_requests=1,
                     conversation_count=0,
                     total_errors=0,
+                    total_cancelled=0,
                     active_accounts=1,
                 ),
             ]
@@ -173,6 +176,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                     cost_usd=1.2,
                     active_accounts=1,
                     error_count=0,
+                    cancelled_count=0,
                     median_ttft_ms=123.456,
                     median_tps=78.901,
                     median_queue_ms=45.678,

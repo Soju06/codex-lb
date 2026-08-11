@@ -63,6 +63,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import BigInteger, ColumnElement, Integer, and_, case, cast, delete, func, insert, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import (
     AccountUsageRollupState,
@@ -166,6 +167,7 @@ class HourlyUsageRollupRow:
     is_deleted: bool
     request_count: int = 0
     error_count: int = 0
+    cancelled_count: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
@@ -222,6 +224,7 @@ _HOURLY_KEY_COLUMNS = (
 _HOURLY_MEASURE_COLUMNS = (
     "request_count",
     "error_count",
+    "cancelled_count",
     "input_tokens",
     "output_tokens",
     "reasoning_tokens",
@@ -271,8 +274,8 @@ def _merge_rows(rows: Iterable, key_width: int, columns: tuple[str, ...], row_ty
 
 
 # Rows per multi-VALUES upsert statement. asyncpg rejects statements with
-# more than 32,767 bind parameters; at 17 columns (the widest table) 1,000
-# rows binds 17,000 — comfortable margin on both dialects. Lifecycle mirrors
+# more than 32,767 bind parameters; at 18 columns (the widest table) 1,000
+# rows binds 18,000 — comfortable margin on both dialects. Lifecycle mirrors
 # rekey an account's ENTIRE folded history in one call (thousands of rows
 # for a long-lived account), so unchunked upserts would abort the whole
 # lifecycle transaction.
@@ -486,7 +489,8 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
             RequestLog.request_kind,
             is_deleted,
             func.count(RequestLog.id),
-            func.coalesce(func.sum(case((RequestLog.status != "success", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((RequestLog.status.not_in(NON_ERROR_STATUSES), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((RequestLog.status == CANCELLED_STATUS, 1), else_=0)), 0),
             func.coalesce(func.sum(RequestLog.input_tokens), 0),
             func.coalesce(func.sum(RequestLog.output_tokens), 0),
             func.coalesce(func.sum(RequestLog.reasoning_tokens), 0),
@@ -505,14 +509,16 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
 def _error_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
     bucket = _requested_at_epoch_bucket_expr(session, HOURLY_BUCKET_SECONDS).label("bucket_epoch")
     account_id = _dimension_expr(RequestLog.account_id).label("account_id")
-    # Exact reproduction of the top-error read filter:
-    # warmup kinds excluded, soft-deleted rows INCLUDED.
+    # Exact reproduction of the top-error read filter: warmup kinds excluded,
+    # soft-deleted rows INCLUDED, cancelled terminals excluded (they are not
+    # errors; buckets folded before that exclusion still carry
+    # client_disconnected counts, which the reads drop by error_code).
     stmt = (
         select(bucket, account_id, RequestLog.error_code, func.count(RequestLog.id))
         .where(
             *window,
             RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-            RequestLog.status != "success",
+            RequestLog.status.not_in(NON_ERROR_STATUSES),
             RequestLog.error_code.is_not(None),
         )
         .group_by(bucket, account_id, RequestLog.error_code)

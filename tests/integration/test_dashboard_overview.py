@@ -1028,6 +1028,78 @@ async def test_dashboard_overview_respects_selected_timeframe(
 
 
 @pytest.mark.asyncio
+async def test_dashboard_overview_error_rate_excludes_cancelled_requests(async_client, db_setup):
+    """Regression for #1552: cancelled/client_disconnected terminals are
+    normal agent lifecycle — they must not inflate the overview error rate
+    or top error, and they surface as a distinct cancelled count."""
+    now = utcnow().replace(microsecond=0)
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        logs_repo = RequestLogsRepository(session)
+
+        await accounts_repo.upsert(_make_account("acc_cancelled", "cancelled@example.com"))
+        await usage_repo.add_entry(
+            "acc_cancelled",
+            20.0,
+            window="primary",
+            recorded_at=now - timedelta(minutes=5),
+        )
+        await usage_repo.add_entry(
+            "acc_cancelled",
+            40.0,
+            window="secondary",
+            recorded_at=now - timedelta(minutes=2),
+        )
+        await logs_repo.add_log(
+            account_id="acc_cancelled",
+            request_id="req_cx_success",
+            model="gpt-5.1",
+            input_tokens=100,
+            output_tokens=50,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(minutes=10),
+        )
+        # Cancelled rows dominate the window (multi-agent disconnect churn).
+        for index in range(2):
+            await logs_repo.add_log(
+                account_id="acc_cancelled",
+                request_id=f"req_cx_cancelled_{index}",
+                model="gpt-5.1",
+                input_tokens=10,
+                output_tokens=0,
+                latency_ms=20,
+                status="cancelled",
+                error_code="client_disconnected",
+                requested_at=now - timedelta(minutes=20 + index),
+            )
+        await logs_repo.add_log(
+            account_id="acc_cancelled",
+            request_id="req_cx_error",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=0,
+            latency_ms=20,
+            status="error",
+            error_code="upstream_500",
+            requested_at=now - timedelta(minutes=30),
+        )
+
+    response = await async_client.get("/api/dashboard/overview")
+    assert response.status_code == 200
+    metrics = response.json()["summary"]["metrics"]
+
+    assert metrics["requests"] == 4
+    assert metrics["errorCount"] == 1
+    assert metrics["errorRate"] == pytest.approx(0.25)
+    assert metrics["cancelledCount"] == 2
+    assert metrics["topError"] == "upstream_500"
+
+
+@pytest.mark.asyncio
 async def test_dashboard_overview_invalid_timeframe_returns_validation_error(async_client):
     response = await async_client.get("/api/dashboard/overview?timeframe=90d")
     assert response.status_code == 422

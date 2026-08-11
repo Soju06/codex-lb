@@ -272,8 +272,15 @@ class RequestUsageHourlyRollup(Base):
     request_kind: Mapped[str] = mapped_column(String, primary_key=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
-    # sum(status != 'success') — status is folded as a measure, not a dimension.
+    # sum(status NOT IN ('success', 'cancelled')) — status is folded as a
+    # measure, not a dimension. Rows folded before cancelled_count existed
+    # keep the legacy sum(status != 'success') fold (no backfill; a disclosed
+    # step change on error-rate trends).
     error_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    # sum(status = 'cancelled') — client-side disconnect terminals, split out
+    # of error_count so dashboards can show success/cancelled/error distinctly.
+    # 0 (server default) on rows folded before the measure existed.
+    cancelled_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     reasoning_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
@@ -299,9 +306,12 @@ class RequestUsageHourlyErrorRollup(Base):
 
     ``error_code`` has unbounded cardinality, so it is isolated from the main
     hourly rollup. Fold filter reproduces the top-error read exactly:
-    non-warmup kinds, ``status != 'success'``, ``error_code IS NOT NULL``
-    (soft-deleted rows included). ``account_id`` is carried only so account
-    hard-deletion can mirror raw row removal.
+    non-warmup kinds, ``status NOT IN ('success', 'cancelled')``,
+    ``error_code IS NOT NULL`` (soft-deleted rows included). Rows folded
+    before cancelled rows left the error fold still carry
+    ``client_disconnected`` counts; the top-error reads exclude that code.
+    ``account_id`` is carried only so account hard-deletion can mirror raw
+    row removal.
     """
 
     __tablename__ = "request_usage_hourly_error_rollups"

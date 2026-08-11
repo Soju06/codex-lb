@@ -594,3 +594,16 @@ def test_source_chat_reasoning_policy_preserves_authorized_enable_thinking() -> 
     apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="medium")
 
     assert payload == {"enable_thinking": True}
+
+
+def test_source_chat_reasoning_policy_materializes_model_alias_effort_for_canonical_source() -> None:
+    payload: dict[str, JsonValue] = {}
+
+    apply_api_key_enforcement_to_chat_payload(
+        payload,
+        None,
+        allowed_reasoning_effort="xhigh",
+        materialize_allowed_reasoning_effort=True,
+    )
+
+    assert payload == {"reasoning_effort": "xhigh"}

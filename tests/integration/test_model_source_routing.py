@@ -1620,6 +1620,52 @@ async def test_source_chat_reasoning_allowlist_preserves_enable_thinking(async_c
 
 
 @pytest.mark.asyncio
+async def test_source_chat_reasoning_allowlist_materializes_canonicalized_model_alias_effort(
+    async_client,
+    source_upstream,
+):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def completion(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("gpt-5.6-sol"))
+
+    base_url = await source_upstream(completion)
+    model = "gpt-5.6-sol"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-canonical-model-alias-effort",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-canonical-model-alias-effort-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["xhigh"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": f"{model}-xhigh",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["model"] == model
+    assert captured["reasoning_effort"] == "xhigh"
+    assert "reasoning" not in captured
+
+
+@pytest.mark.asyncio
 async def test_source_responses_without_policy_preserves_provider_thinking_object(async_client, source_upstream):
     captured: dict[str, object] = {}
 

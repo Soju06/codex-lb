@@ -4555,6 +4555,7 @@ async def _source_chat_completion_response(
         source_payload,
         api_key,
         allowed_reasoning_effort=allowed_reasoning_effort,
+        materialize_allowed_reasoning_effort=allowed_reasoning_effort is not None and payload.model != model,
     )
     sanitize_source_chat_payload(
         source_payload,

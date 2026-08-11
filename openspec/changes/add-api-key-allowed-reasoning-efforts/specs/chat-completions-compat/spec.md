@@ -17,6 +17,9 @@ every retained outbound spelling MUST be aligned to the authorized client-plane
 effort. Other allowed client-plane efforts MUST remain unchanged for the
 external source. A sole `enable_thinking: true` control authorized as `medium`
 MUST remain enabled on source egress.
+When source selection replaces an effort-bearing model alias with a canonical
+source model slug and the client supplied no separate reasoning control, the
+service MUST materialize that authorized effort as `reasoning_effort`.
 
 #### Scenario: Source-routed chat request is rejected before forwarding
 
@@ -43,3 +46,12 @@ MUST remain enabled on source egress.
 - **GIVEN** a source-routed chat model and an API key that allows `medium`
 - **WHEN** a Chat Completions client supplies only `enable_thinking: true`
 - **THEN** the source receives `enable_thinking: true`
+
+#### Scenario: Canonical source retains effort from a model alias
+
+- **GIVEN** a source registered for `gpt-5.6-sol` and an API key that allows
+  `xhigh`
+- **WHEN** a Chat Completions client requests `gpt-5.6-sol-xhigh` without a
+  separate reasoning control
+- **THEN** the source receives model `gpt-5.6-sol`
+- **AND** it receives `reasoning_effort: "xhigh"`

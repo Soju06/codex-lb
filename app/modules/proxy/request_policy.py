@@ -384,6 +384,7 @@ def apply_api_key_enforcement_to_chat_payload(
     api_key: ApiKeyData | None,
     *,
     allowed_reasoning_effort: str | None = None,
+    materialize_allowed_reasoning_effort: bool = False,
 ) -> None:
     """Mirror :func:`apply_api_key_enforcement` onto a chat-completions wire payload.
 
@@ -413,6 +414,11 @@ def apply_api_key_enforcement_to_chat_payload(
         reasoning = payload.get("reasoning")
         if isinstance(reasoning, dict):
             payload["reasoning"] = {**reasoning, "effort": wire_effort}
+        if materialize_allowed_reasoning_effort and not any(
+            key in payload
+            for key in ("reasoning_effort", "reasoningEffort", "thinking", "enable_thinking", "reasoning")
+        ):
+            payload["reasoning_effort"] = wire_effort
 
     if api_key is None:
         return

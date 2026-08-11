@@ -328,6 +328,7 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
     assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
     assert json.loads(recorded["request_text"])["previous_response_id"] == "resp-3"
     assert recorded["parent_response_id"] == "resp-3"
+    assert json.loads(request_state.request_text or "{}")["previous_response_id"] == "resp-3"
 
 
 @pytest.mark.asyncio
@@ -410,6 +411,7 @@ async def test_submit_hard_turn_walks_race_path_chain_before_recording(
     assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
     assert json.loads(recorded["request_text"])["previous_response_id"] == "resp-2"
     assert recorded["parent_response_id"] == "resp-2"
+    assert json.loads(request_state.request_text or "{}")["previous_response_id"] == "resp-2"
 
 
 def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_anchor(

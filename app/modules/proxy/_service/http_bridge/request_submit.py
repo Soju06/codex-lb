@@ -1113,6 +1113,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         seen_hard_turn_response_ids.add(terminal_hard_turn_response_id)
                         hard_turn_chain_advanced = True
                         text_data = _text_with_previous_response_id(text_data, terminal_hard_turn_response_id)
+                        request_state.request_text = text_data
                         request_state.previous_response_id = terminal_hard_turn_response_id
                         request_state.proxy_injected_previous_response_id = True
                         request_state.hard_continuity_anchor = True
@@ -1162,6 +1163,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             completed_response_id = getattr(completed_operation, "response_id", None)
                             if completed_response_id and completed_response_id != request_state.previous_response_id:
                                 text_data = _text_with_previous_response_id(text_data, completed_response_id)
+                                request_state.request_text = text_data
                                 request_state.previous_response_id = completed_response_id
                                 operation_parent_response_id = completed_response_id
                                 hard_turn_chain_advanced = True

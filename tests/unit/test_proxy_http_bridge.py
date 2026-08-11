@@ -24079,7 +24079,14 @@ async def test_http_bridge_reader_failure_classifies_each_operation_from_its_own
         pending_requests=deque([eventless, streamed]),
         queued_request_count=2,
     )
+    event_order: list[str] = []
     update_operation = AsyncMock()
+
+    async def discard_operation(*, operation_id: str) -> None:
+        event_order.append(f"discard:{operation_id}")
+
+    update_operation.side_effect = lambda *args, **kwargs: event_order.append(f"update:{kwargs['state']}")
+    service._http_bridge_operation_event_batcher = cast(Any, SimpleNamespace(discard_operation=discard_operation))
     monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", update_operation)
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
     monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
@@ -24091,6 +24098,8 @@ async def test_http_bridge_reader_failure_classifies_each_operation_from_its_own
     )
 
     assert [call.kwargs["state"] for call in update_operation.await_args_list] == ["unknown", "acknowledged"]
+    assert event_order[:2] == ["discard:op-eventless-sibling", "discard:op-streamed-sibling"]
+    assert event_order[2:] == ["update:unknown", "update:acknowledged"]
 
 
 @pytest.mark.asyncio

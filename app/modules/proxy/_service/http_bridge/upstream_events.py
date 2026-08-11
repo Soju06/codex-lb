@@ -989,6 +989,20 @@ class _HTTPBridgeUpstreamEventsMixin:
         operation_states: list[Any] = [
             request_state for request_state in pending_request_states if getattr(request_state, "operation_id", None)
         ]
+        # Remove the disconnected attempt's in-memory spool before publishing
+        # UNKNOWN/ACKNOWLEDGED state. A same-replica reconnect may reclaim the
+        # operation as soon as that state is visible; discarding afterward
+        # could then delete the replacement attempt's events.
+        discard_operation = getattr(
+            getattr(self, "_http_bridge_operation_event_batcher", None),
+            "discard_operation",
+            None,
+        )
+        if callable(discard_operation):
+            for request_state in operation_states:
+                operation_id = getattr(request_state, "operation_id", None)
+                if operation_id:
+                    await discard_operation(operation_id=operation_id)
         for request_state in operation_states:
             # A shared websocket can carry several logical response.create
             # requests. Classify each operation from its own event count;
@@ -1024,16 +1038,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                 response_create_gate=session.response_create_gate,
                 penalize_account=penalize_account,
             )
-            discard_operation = getattr(
-                getattr(self, "_http_bridge_operation_event_batcher", None),
-                "discard_operation",
-                None,
-            )
-            if callable(discard_operation):
-                for request_state in operation_states:
-                    operation_id = getattr(request_state, "operation_id", None)
-                    if operation_id:
-                        await discard_operation(operation_id=operation_id)
             if (
                 failed_pending_count > 0
                 and reservations_settled is not False

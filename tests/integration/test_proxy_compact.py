@@ -28,6 +28,146 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.asyncio
+async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_and_releases_reservation(
+    async_client,
+    monkeypatch,
+):
+    """A forwarded owner must not report compact success when its sole API-key
+    usage settlement fails. The `usage_settlement_failed` error is surfaced
+    without another upstream or account-health attempt, and a fresh repository
+    releases the held quota."""
+    from app.core.config.settings import get_settings
+    from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+    from app.db.models import ApiKeyUsageReservation
+    from app.modules.api_keys.service import ApiKeyUsageReservationData
+    from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
+    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
+
+    email = "compact-forwarded-settlement-failure@example.com"
+    raw_account_id = "acc_compact_forwarded_settlement_failure"
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    settings_resp = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings_resp.status_code == 200
+
+    create = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "compact-forwarded-settlement-failure-key",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
+        },
+    )
+    assert create.status_code == 200
+    key_id = create.json()["id"]
+    key = create.json()["key"]
+
+    compact_model = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    async with SessionLocal() as session:
+        api_keys_service = ApiKeysService(ApiKeysRepository(session))
+        reservation = await api_keys_service.enforce_limits_for_request(
+            key_id,
+            request_model=compact_model.model,
+            request_service_tier=None,
+            request_usage_budget=estimate_api_key_request_usage(compact_model),
+        )
+    async with SessionLocal() as session:
+        row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
+        assert row is not None
+        assert row.status == "reserved"
+
+    forwarded_payload = ResponsesRequest.model_validate(
+        {
+            "model": compact_model.model,
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+            "stream": True,
+        }
+    )
+    context = HTTPBridgeForwardContext(
+        origin_instance="origin-instance",
+        target_instance=get_settings().http_responses_session_bridge_instance_id,
+        codex_session_affinity=True,
+        downstream_turn_state=None,
+        reservation=ApiKeyUsageReservationData(
+            reservation_id=reservation.reservation_id,
+            key_id=key_id,
+            model=compact_model.model,
+        ),
+    )
+    headers = build_owner_forward_headers(
+        headers={"authorization": f"Bearer {key}"},
+        payload=forwarded_payload,
+        context=context,
+    )
+
+    compact_calls: list[str | None] = []
+
+    async def fake_compact(payload, request_headers, access_token, account_id):
+        del payload, request_headers, access_token
+        compact_calls.append(account_id)
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": compact_model.model,
+                "output": [
+                    {
+                        "id": "cmp_forwarded_settlement_failure",
+                        "type": "compaction",
+                        "encrypted_content": "enc_forwarded_settlement_failure",
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "total_tokens": 10,
+                },
+            }
+        )
+
+    finalize_attempts: list[str] = []
+
+    async def fail_finalize(self, reservation_id: str, **kwargs: object) -> None:
+        del self, kwargs
+        finalize_attempts.append(reservation_id)
+        raise RuntimeError("compact settlement persistence failed")
+
+    handle_stream_error = AsyncMock(return_value={"failure_class": "upstream"})
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", fail_finalize)
+    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", handle_stream_error)
+
+    response = await async_client.post(
+        "/internal/bridge/responses",
+        json=forwarded_payload.model_dump_for_forwarding(),
+        headers=headers,
+    )
+
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "usage_settlement_failed"
+    assert compact_calls == [raw_account_id]
+    assert finalize_attempts == [reservation.reservation_id]
+    handle_stream_error.assert_not_awaited()
+
+    async with SessionLocal() as session:
+        row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
+        assert row is not None
+        assert row.status == "released"
+
+
 def _encode_jwt(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
@@ -255,6 +395,53 @@ async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_bef
         )
         for item in upstream_input
     )
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_omits_oversized_optional_tool_tail_before_upstream(async_client, monkeypatch):
+    email = "compact-optional-tail@example.com"
+    raw_account_id = "acc_compact_optional_tail"
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
+    )
+    assert response.status_code == 200
+
+    seen_payloads: list[dict[str, object]] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token, account_id
+        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    call = {
+        "type": "function_call",
+        "name": "read_file",
+        "call_id": "call-route-tail",
+        "arguments": "x" * 450_000,
+    }
+    output = {
+        "type": "function_call_output",
+        "call_id": "call-route-tail",
+        "output": "latest ordinary result",
+    }
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [call, {"role": "assistant", "content": "middle"}, output],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    compact_input = cast(list[object], seen_payloads[0]["input"])
+    assert call not in compact_input
+    assert output not in compact_input
+    assert "[compact trim]" in json.dumps(compact_input)
+    assert "most recent context" not in json.dumps(compact_input)
 
 
 @pytest.mark.asyncio
@@ -1323,145 +1510,6 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
         assert row.status == "released", f"forwarded reservation leaked held quota; status={row.status!r}"
-
-
-@pytest.mark.asyncio
-async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_and_releases_reservation(
-    async_client,
-    monkeypatch,
-):
-    """A forwarded owner must not report compact success when its sole API-key
-    usage settlement fails. The failure is surfaced without another upstream or
-    account-health attempt, and a fresh repository releases the held quota."""
-    from app.core.config.settings import get_settings
-    from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
-    from app.db.models import ApiKeyUsageReservation
-    from app.modules.api_keys.service import ApiKeyUsageReservationData
-    from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-    from app.modules.proxy.http_bridge_forwarding import HTTPBridgeForwardContext, build_owner_forward_headers
-
-    email = "compact-forwarded-settlement-failure@example.com"
-    raw_account_id = "acc_compact_forwarded_settlement_failure"
-    auth_json = _make_auth_json(raw_account_id, email)
-    response = await async_client.post(
-        "/api/accounts/import",
-        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
-    )
-    assert response.status_code == 200
-
-    settings_resp = await async_client.put(
-        "/api/settings",
-        json={
-            "stickyThreadsEnabled": False,
-            "preferEarlierResetAccounts": False,
-            "totpRequiredOnLogin": False,
-            "apiKeyAuthEnabled": True,
-        },
-    )
-    assert settings_resp.status_code == 200
-
-    create = await async_client.post(
-        "/api/api-keys/",
-        json={
-            "name": "compact-forwarded-settlement-failure-key",
-            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000}],
-        },
-    )
-    assert create.status_code == 200
-    key_id = create.json()["id"]
-    key = create.json()["key"]
-
-    compact_model = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
-    async with SessionLocal() as session:
-        api_keys_service = ApiKeysService(ApiKeysRepository(session))
-        reservation = await api_keys_service.enforce_limits_for_request(
-            key_id,
-            request_model=compact_model.model,
-            request_service_tier=None,
-            request_usage_budget=estimate_api_key_request_usage(compact_model),
-        )
-    async with SessionLocal() as session:
-        row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
-        assert row is not None
-        assert row.status == "reserved"
-
-    forwarded_payload = ResponsesRequest.model_validate(
-        {
-            "model": compact_model.model,
-            "instructions": "hi",
-            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
-            "stream": True,
-        }
-    )
-    context = HTTPBridgeForwardContext(
-        origin_instance="origin-instance",
-        target_instance=get_settings().http_responses_session_bridge_instance_id,
-        codex_session_affinity=True,
-        downstream_turn_state=None,
-        reservation=ApiKeyUsageReservationData(
-            reservation_id=reservation.reservation_id,
-            key_id=key_id,
-            model=compact_model.model,
-        ),
-    )
-    headers = build_owner_forward_headers(
-        headers={"authorization": f"Bearer {key}"},
-        payload=forwarded_payload,
-        context=context,
-    )
-
-    compact_calls: list[str | None] = []
-
-    async def fake_compact(payload, request_headers, access_token, account_id):
-        del payload, request_headers, access_token
-        compact_calls.append(account_id)
-        return CompactResponsePayload.model_validate(
-            {
-                "object": "response.compaction",
-                "model": compact_model.model,
-                "output": [
-                    {
-                        "id": "cmp_forwarded_settlement_failure",
-                        "type": "compaction",
-                        "encrypted_content": "enc_forwarded_settlement_failure",
-                    }
-                ],
-                "usage": {
-                    "input_tokens": 7,
-                    "output_tokens": 3,
-                    "total_tokens": 10,
-                },
-            }
-        )
-
-    finalize_attempts: list[str] = []
-
-    async def fail_finalize(self, reservation_id: str, **kwargs: object) -> None:
-        del self, kwargs
-        finalize_attempts.append(reservation_id)
-        raise RuntimeError("compact settlement persistence failed")
-
-    handle_stream_error = AsyncMock(return_value={"failure_class": "upstream"})
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
-    monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", fail_finalize)
-    monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", handle_stream_error)
-
-    response = await async_client.post(
-        "/internal/bridge/responses",
-        json=forwarded_payload.model_dump_for_forwarding(),
-        headers=headers,
-    )
-
-    assert response.status_code == 502, response.text
-    assert response.json()["error"]["code"] == "usage_settlement_failed"
-    assert compact_calls == [raw_account_id]
-    assert finalize_attempts == [reservation.reservation_id]
-    handle_stream_error.assert_not_awaited()
-
-    async with SessionLocal() as session:
-        row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
-        assert row is not None
-        assert row.status == "released"
 
 
 @pytest.mark.asyncio

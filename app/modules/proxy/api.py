@@ -3328,6 +3328,16 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         request_model=None,
         request_service_tier=None,
     )
+    try:
+        return await _build_codex_models_response_body(api_key)
+    finally:
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
+
+
+async def _build_codex_models_response_body(
+    api_key: ApiKeyData | None,
+) -> Response:
 
     allowed_models = _allowed_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
@@ -3372,7 +3382,6 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     }
 
     if not models and not metadata_models and not source_models:
-        await _release_reservation(reservation)
         return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
     entries: list[CodexModelEntry] = []
@@ -3427,7 +3436,6 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         seen_slugs.add(model.slug)
         if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(model.slug, model, created=_model_list_created_at(model)))
-    await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
 
@@ -3437,6 +3445,16 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
         request_model=None,
         request_service_tier=None,
     )
+    try:
+        return await _build_models_response_body(api_key)
+    finally:
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
+
+
+async def _build_models_response_body(
+    api_key: ApiKeyData | None,
+) -> Response:
 
     allowed_models = _allowed_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
@@ -3447,7 +3465,6 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     source_models = await _list_enabled_source_catalog_models(api_key)
 
     if not models and not source_models:
-        await _release_reservation(reservation)
         return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
 
     items: list[ModelListItem] = []
@@ -3467,7 +3484,6 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
             continue
         items.append(_to_model_list_item(model.slug, model, created=created))
         seen_slugs.add(model.slug)
-    await _release_reservation(reservation)
     return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
 
 

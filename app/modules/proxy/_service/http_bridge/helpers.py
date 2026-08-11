@@ -707,7 +707,8 @@ def _http_bridge_pending_state_is_stale(
         if request_state.response_create_gate_wait_started_at is not None
         else request_state.started_at
     )
-    if request_state.response_event_count > 0 and request_state.last_upstream_activity_at is not None:
+    has_response_lifecycle_activity = request_state.response_event_count > 0 or request_state.upstream_model_output_seen
+    if has_response_lifecycle_activity and request_state.last_upstream_activity_at is not None:
         wait_started_at = request_state.last_upstream_activity_at
     return max(0.0, now - wait_started_at) >= threshold_seconds
 
@@ -731,16 +732,20 @@ def _http_bridge_eventless_precreated_deadline(
         or sent_at is None
         or request_state.response_id is not None
         or request_state.latency_response_created_ms is not None
-        or request_state.response_event_count != 0
         or request_state.downstream_visible
         or request_state.last_downstream_sequence_number is not None
     ):
         return None
     # Non-response telemetry (for example ``codex.rate_limits``) may update
     # the generic activity marker, but it must not extend the response.create
-    # acknowledgement deadline. The eventless watchdog is intentionally
-    # anchored to the send time until a response-lifecycle event is observed.
-    return sent_at + min(
+    # acknowledgement deadline. Keep the send-time anchor until a matched
+    # response-lifecycle event exists; then use the latest lifecycle activity
+    # so deferred reasoning is not retired from the original send time.
+    deadline_anchor = sent_at
+    has_response_lifecycle_activity = request_state.response_event_count > 0 or request_state.upstream_model_output_seen
+    if has_response_lifecycle_activity and request_state.last_upstream_activity_at is not None:
+        deadline_anchor = request_state.last_upstream_activity_at
+    return deadline_anchor + min(
         float(stuck_gate_retire_after_seconds),
         _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
     )

@@ -29,20 +29,33 @@ Persisted additional-usage rows MUST record one internal canonical `quota_key` e
 - **AND** the historical rows remain visible until refresh rewrites them under the newer canonical key
 
 ### Requirement: Hot-path quota and dashboard aggregate reads avoid window-ranking scans
-Selector and dashboard hot-path reads MUST avoid unbounded SQL window-ranking over `additional_usage_history` and `request_logs`; they MUST preserve existing result semantics while using grouped latest-id or `DISTINCT ON` shapes plus supporting indexes.
+Selector and dashboard hot-path reads MUST avoid unbounded SQL window-ranking over `additional_usage_history` and `request_logs`; they MUST preserve existing result semantics. On PostgreSQL the additional-usage latest-per-account read MUST be served by correlated per-account top-1 index probes whose cost scales with the candidate account count and registry match values, not with the number of history rows stored under the quota key; grouped latest-id shapes remain acceptable for other reads and backends.
 
 #### Scenario: Additional quota latest lookup avoids window ranking
 - **GIVEN** multiple additional quota rows exist for each account under the same quota key and window
 - **WHEN** gated-model selection loads the latest additional quota rows for candidate accounts
 - **THEN** the query MUST NOT use `row_number()` or another full partition window-ranking expression
-- **AND** the hot-path lookup MUST constrain by canonical `quota_key`, `window`, and candidate account ids so the latest-row index remains usable
+- **AND** on PostgreSQL the lookup MUST resolve each account through a top-1 probe ordered by `recorded_at DESC, used_percent DESC, id DESC` under an equality prefix on the match value, `window`, and account id
 - **AND** the selected row per account MUST remain the newest `recorded_at`, then highest `used_percent`, then highest `id`
+
+#### Scenario: Alias matches merge without a second history scan
+- **GIVEN** the additional-quota registry declares `limit_name` or `metered_feature` aliases for a canonical quota key
+- **AND** history rows exist that match only through an alias
+- **WHEN** the latest additional quota rows are loaded for candidate accounts on PostgreSQL
+- **THEN** alias matches MUST be resolved through per-account top-1 probes over expression indexes on the lowercased alias columns
+- **AND** the merged winner per account MUST equal the newest row across canonical and alias matches under the `recorded_at DESC, used_percent DESC, id DESC` ordering
 
 #### Scenario: Account request usage summary avoids request-log window ranking
 - **GIVEN** dashboard account summaries aggregate request log usage per account
 - **WHEN** account request usage summaries are loaded
 - **THEN** the query MUST NOT rank the full `request_logs` set with `row_number()`
 - **AND** duplicate request-log rows for the same account, request id, and requested timestamp MUST still collapse to the latest row id before aggregation
+
+#### Scenario: Unfiltered distinct label listing avoids a full history pass
+- **GIVEN** additional-usage history holds many rows spread over a small set of distinct `(quota_key, limit_name, metered_feature)` labels
+- **WHEN** the distinct label listing is requested on PostgreSQL without a recency bound
+- **THEN** the read MUST iterate distinct `(account_id, quota_key, limit_name, metered_feature)` tuples via ordered index probes instead of scanning every history row
+- **AND** the canonicalized result set MUST equal the plain `DISTINCT` read
 
 #### Scenario: Hot-path indexes are idempotent
 - **GIVEN** a production database may already have manually-created hot-path indexes
@@ -290,7 +303,11 @@ semantics.
 The dashboard conversation trend query MUST group by the configured time bucket
 and count distinct non-empty normalized conversation IDs within each bucket. It
 MUST exclude warmup traffic and MUST NOT use model or service-tier grouping that
-could cause one conversation to be counted more than once in a bucket.
+could cause one conversation to be counted more than once in a bucket. For
+hour-multiple display buckets the count MUST merge the conversation presence
+rollup with the raw live tail through a UNION before the distinct count, so a
+conversation appearing in both the folded segment and the raw tail of one
+display bucket still counts once.
 
 #### Scenario: One conversation across model groups counts once per bucket
 
@@ -298,6 +315,13 @@ could cause one conversation to be counted more than once in a bucket.
   different models and one log for `conv-b`
 - **WHEN** the dashboard conversation trend aggregate is calculated
 - **THEN** that bucket's conversation count is `2`
+
+#### Scenario: One conversation across the fold boundary counts once per bucket
+
+- **GIVEN** a display bucket containing rows for `conv-a` below the
+  conversation watermark (rollup-served) and above it (raw-served)
+- **WHEN** the dashboard conversation trend aggregate is calculated
+- **THEN** that bucket's conversation count counts `conv-a` once
 
 ### Requirement: Additional usage latest reads avoid SQLite window scans
 
@@ -562,3 +586,184 @@ Every process-local cache that serves security, authorization, or routing decisi
 - **GIVEN** a replica's poller cannot read the `cache_invalidation` table
 - **WHEN** three consecutive polls fail
 - **THEN** a WARNING is logged and the poll-failure counter increments
+
+### Requirement: Projection history reads are bounded per account
+The dashboard projections history fetch MUST NOT widen every account's
+lookback to the widest account window. On PostgreSQL the bulk usage-history
+read MUST bound rows per account by that account's own window cutoff; the
+returned per-account histories MUST equal the previous shared-floor fetch
+after the existing per-account trimming.
+
+#### Scenario: One weekly account does not widen the fetch for short-window accounts
+- **GIVEN** one account with a 7-day window and several accounts with 5-hour windows
+- **WHEN** the projections history fetch runs on PostgreSQL
+- **THEN** rows for the 5-hour accounts MUST be bounded by their own cutoff in SQL
+- **AND** each account's resulting history slice MUST equal the slice the shared-floor fetch produced after per-account trimming
+
+#### Scenario: SQLite snapshot cache keeps the shared floor
+- **GIVEN** the SQLite backend serves the projections history fetch through its snapshot cache
+- **WHEN** per-account cutoffs are supplied
+- **THEN** the SQLite read MAY keep the shared floor
+- **AND** per-account trimming in the caller MUST still bound each account's slice
+
+### Requirement: Request-log listing totals are cached and rollup-served
+The request-log listing total MUST be served from a short-TTL per-filter
+cache. On a cache miss, filter signatures whose every active filter maps
+onto a demand-rollup dimension (time bounds, accounts, api keys,
+model/effort pairs, statuses, soft-delete exclusion) MUST be counted as the
+demand rollup's folded `SUM(request_count)` under the hourly watermark plus
+an exact raw count over the un-folded complement windows; the result MUST
+equal the legacy raw `COUNT(*)`. Signatures carrying free-text search or
+error-code splits MUST fall back to the exact raw count.
+
+#### Scenario: Default listing total avoids a full history scan once folded
+- **GIVEN** request logs folded below the hourly watermark and a live raw tail
+- **WHEN** the listing total is computed with default filters
+- **THEN** the folded portion MUST be one aggregated read over the demand rollup bounded by the watermark
+- **AND** only the un-folded complement windows are counted from raw
+- **AND** the total MUST equal the raw `COUNT(*)` over the same filters
+
+#### Scenario: Status splits stay exact through the rollup
+- **GIVEN** history containing success, error, and cancelled requests on both sides of the watermark
+- **WHEN** the listing total is computed for the default success+error split, a single status, or no status filter
+- **THEN** the rollup-served total MUST equal the raw count for the same split
+
+#### Scenario: Non-expressible filters fall back to the raw count
+- **GIVEN** a listing filtered by free-text search or an error-code split
+- **WHEN** the total is computed
+- **THEN** the exact raw `COUNT(*)` path MUST be used
+
+#### Scenario: Retention pruning keeps totals aligned with listable rows
+- **GIVEN** retention has pruned folded raw rows while their demand-rollup counts remain
+- **WHEN** the listing total is computed for an expressible signature
+- **THEN** the rollup window MUST be clamped to the earliest surviving live row
+- **AND** the total MUST equal the raw count over the surviving rows, never advertising pages the listing cannot return
+
+#### Scenario: Offset-aware time bounds are accepted
+- **GIVEN** the dashboard sends ISO-8601 `Z` (offset-aware) `since`/`until` bounds
+- **WHEN** the listing total is computed
+- **THEN** the bounds MUST be normalized to the naive-UTC domain before window arithmetic
+- **AND** the result MUST equal the naive-UTC equivalent request
+
+#### Scenario: No watermark degrades to the legacy count
+- **GIVEN** no hourly fold watermark exists (pre-backfill or after the operator escape hatch)
+- **WHEN** the listing total is computed for an expressible signature
+- **THEN** the folded sum MUST be empty and the raw windows MUST cover the full range
+- **AND** the result MUST be the exact legacy count with no kill switch involved
+
+### Requirement: A conversation presence rollup serves distinct-conversation reads
+
+The system SHALL maintain a permanent conversation presence satellite `request_conversation_hourly_rollups` dimensioned by `(bucket_epoch, conversation_id, account_id, is_deleted)` with an additive `request_count` measure, folded from `request_logs` rows whose normalized conversation id (`NULLIF(TRIM(conversation_id), '')`) is non-null and whose `request_kind` is not a warmup kind. `conversation_id` MUST be stored as the normalized value; `is_deleted` MUST be a dimension (not a fold filter) because dashboard conversation reads exclude soft-deleted rows while reports conversation reads include them; `account_id` MUST be carried (NULL-sentinel encoded) solely so account lifecycle mirrors can re-attribute or remove folded presence exactly as the corresponding raw mutation does. The fold SHALL advance a dedicated hour-aligned `conversation_folded_through` watermark on `account_usage_rollup_state` under the shared fold-state row lock, with the established slice contract (DELETE-then-INSERT over half-open hour-aligned windows committed atomically with the watermark advance, bounded paced backfill, fold lag). Rollup rows MUST NOT be deleted by data retention.
+
+#### Scenario: Conversation straddling the fold boundary counts once
+
+- **GIVEN** one conversation with request rows both below and above `conversation_folded_through`
+- **WHEN** a switched distinct-conversation read spans both sides
+- **THEN** the conversation counts exactly once
+- **AND** the additive conversation-request total equals the folded `request_count` sum plus the raw-tail row count
+
+#### Scenario: Soft delete moves presence to the orphaned-deleted dimension
+
+- **GIVEN** folded conversation presence attributed to an account
+- **WHEN** the account is soft-deleted (raw history detached with `account_id=NULL, deleted_at=now`)
+- **THEN** the folded presence moves to the NULL-sentinel, `is_deleted=true` dimension in the same transaction
+- **AND** dashboard conversation reads stop counting it while reports conversation reads keep counting it
+
+#### Scenario: Hard history delete removes only that account's presence
+
+- **GIVEN** a conversation with folded presence from two accounts
+- **WHEN** one account is deleted with history removal
+- **THEN** only that account's presence rows are removed
+- **AND** the conversation still counts through the surviving account's presence, matching a raw scan of the surviving rows
+
+#### Scenario: Fold is idempotent
+
+- **GIVEN** a completed conversation fold pass
+- **WHEN** the pass re-runs with the same clock
+- **THEN** it commits no slices and the satellite contents are unchanged
+
+### Requirement: Distinct-conversation reads combine the presence rollup with a raw live tail in one statement
+
+The dashboard conversation activity metrics (`conversation_count`, `conversation_request_count`), the dashboard conversation trend buckets, and the UNFILTERED reports summary and per-day conversation counts MUST serve folded history from the presence satellite and the remainder from raw `request_logs`, merged in a single statement per read: the fold watermark joined into both branches of a UNION so the folded segment, its exact raw complement, and the watermark come from one database snapshot, and `COUNT(DISTINCT ...)` deduplicates across the fold boundary. Merged results MUST equal the legacy full-raw aggregation whenever the underlying raw rows still exist. With an epoch or missing watermark the reads MUST degrade to exactly the legacy raw queries (no kill switch). Reports reads carrying account, model, or useragent filters MUST keep the legacy raw statement (the satellite has no such dimensions), and non-hour-multiple dashboard display buckets MUST keep the full-raw path. This reverses the `add-request-log-usage-rollups` non-goal that kept distinct conversation counts raw-bound: conversation statistics over folded history now survive request-log retention pruning, except the documented raw-bound residues (sub-hour window edges, filtered reports reads, and daily-report day-row membership, which stays raw-driven).
+
+#### Scenario: Switched conversation reads equal legacy reads while raw exists
+
+- **GIVEN** a corpus with conversations spanning hours, blank and NULL conversation ids, warmup kinds, and soft-deleted rows
+- **WHEN** each switched conversation read runs with the conversation watermark at epoch, mid-history on an hour boundary, and at the fold target — including states where the hourly and conversation watermarks differ
+- **THEN** every result equals the legacy raw-only implementation exactly
+
+#### Scenario: Conversation statistics survive raw pruning
+
+- **GIVEN** folded conversation presence whose source raw rows have been pruned by retention
+- **WHEN** the dashboard conversation activity metrics, hour-multiple conversation trend buckets, or the unfiltered reports summary conversation count are read over that period
+- **THEN** the distinct-conversation values equal those reported before the pruning (modulo the documented sub-bucket window edges)
+
+#### Scenario: Filtered reports reads stay raw-bound
+
+- **GIVEN** a reports summary or daily read filtered by account, model, or useragent group
+- **WHEN** the read executes
+- **THEN** it uses the legacy raw statement and reaches only as far back as raw retention keeps rows
+
+#### Scenario: Non-hour-multiple conversation buckets degrade to full raw
+
+- **GIVEN** a conversation trend request with a display bucket that is not a whole multiple of the rollup hour
+- **WHEN** the aggregate is calculated
+- **THEN** the legacy full-raw query is used unchanged
+
+### Requirement: Projection history bulk reads are index-covered on PostgreSQL
+The columns selected by the dashboard projections bulk usage-history fetch
+MUST be fully covered by an index matching each of its predicate shapes on
+PostgreSQL — the coalesced-primary window shape and the explicit raw-window
+shape — so the read can be planned as an index-only scan without per-row
+heap fetches. Non-PostgreSQL backends MUST keep the same-named indexes for
+schema parity but MAY omit the covering payload.
+
+#### Scenario: Primary-window bulk fetch plans as an index-only scan
+- **GIVEN** usage history rows exist for multiple accounts with `NULL` and `'primary'` windows
+- **AND** the table's visibility map is populated (`VACUUM ANALYZE` has run since the rows were written; with an empty visibility map the planner MAY prefer a plain Index Scan on a cheaper non-covering index)
+- **WHEN** the bulk history fetch shape for `window="primary"` is EXPLAINed on PostgreSQL with sequential and bitmap scans disabled
+- **THEN** the plan MUST be an Index Only Scan over the covering index whose keys are `(coalesce("window",'primary'), account_id, recorded_at)`
+- **AND** the covering payload MUST carry the raw `"window"` column so the coalesce qual does not disqualify the index-only path
+- **AND** the fetched rows MUST equal the non-covered read (the same fetch executed with index-only scans disabled), up to ordering among rows tied on the query's sort key
+
+#### Scenario: Raw secondary-window bulk fetch plans as an index-only scan
+- **GIVEN** usage history rows exist for multiple accounts with `'secondary'` windows
+- **AND** the table's visibility map is populated (`VACUUM ANALYZE` has run since the rows were written)
+- **WHEN** the bulk history fetch shape for `window="secondary"` is EXPLAINed on PostgreSQL with sequential and bitmap scans disabled
+- **THEN** the plan MUST be an Index Only Scan over the covering index whose keys are `("window", account_id, recorded_at)`
+
+#### Scenario: Covering indexes are created concurrently and repair invalid leftovers
+- **GIVEN** a PostgreSQL database where a previous `CREATE INDEX CONCURRENTLY` for a covering index was interrupted and left an invalid index
+- **WHEN** the covering-index migration is applied
+- **THEN** the invalid leftover MUST be dropped and the index rebuilt concurrently
+- **AND** re-running the migration MUST complete without duplicate-index failure
+
+#### Scenario: Missing covering index fails schema drift checks
+- **GIVEN** a database whose `usage_history` table lacks one of the covering indexes
+- **WHEN** the schema drift check runs
+- **THEN** it MUST report the missing index by name
+
+### Requirement: Append-heavy usage-history visibility is maintained for the covering path
+Covering indexes alone do not keep the bulk read heap-free: `usage_history`
+is append-heavy (high-frequency inserts, no updates or deletes), and with
+PostgreSQL's default insert-driven autovacuum trigger the freshly appended
+pages stay outside the visibility map long enough that "index-only" scans
+degrade into per-row heap fetches. The `usage_history` table on PostgreSQL
+MUST therefore carry per-table insert-driven autovacuum tuning
+(`autovacuum_vacuum_insert_scale_factor = 0.02`,
+`autovacuum_vacuum_insert_threshold = 50000`,
+`autovacuum_analyze_scale_factor = 0.02`, matching the tuning already
+applied to the other insert-heavy tables by `20260717_000000`) so the
+visibility map stays fresh and the covering read path remains index-only.
+Non-PostgreSQL backends MUST NOT be affected (no visibility map).
+
+#### Scenario: Migration sets the insert-driven autovacuum parameters
+- **GIVEN** a PostgreSQL database migrated past the covering-index revision
+- **WHEN** the autovacuum tuning revision is applied
+- **THEN** `usage_history` reloptions MUST include `autovacuum_vacuum_insert_scale_factor=0.02`, `autovacuum_vacuum_insert_threshold=50000`, and `autovacuum_analyze_scale_factor=0.02`
+- **AND** downgrading the revision MUST reset those three parameters
+
+#### Scenario: Re-applying over a manually tuned deployment is harmless
+- **GIVEN** a PostgreSQL deployment where the identical autovacuum settings were already applied manually (the reference deployment's hotfix)
+- **WHEN** the autovacuum tuning revision is applied
+- **THEN** the migration MUST complete without error and leave the same settings in place

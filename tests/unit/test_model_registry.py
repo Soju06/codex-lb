@@ -242,7 +242,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
 
     sol = models["gpt-5.6-sol"]
     assert sol.display_name == "GPT-5.6-Sol"
-    assert sol.context_window == 372_000
+    assert sol.context_window == 272_000
     assert sol.default_reasoning_level == "low"
     assert [level.effort for level in sol.supported_reasoning_levels] == [
         "low",
@@ -271,8 +271,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert luna.default_reasoning_level == "medium"
     assert [level.effort for level in luna.supported_reasoning_levels] == ["low", "medium", "high", "xhigh", "max"]
 
-    # Upstream-exact GPT-5.6 raw metadata (codex-rs/models-manager/models.json
-    # at rust-v0.144.1).
+    # Live upstream catalog evidence recorded on 2026-08-11.
     for gpt56 in (sol, terra, luna):
         assert gpt56.minimal_client_version == "0.144.0"
         assert gpt56.raw["tool_mode"] == "code_mode_only"
@@ -287,7 +286,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
         assert gpt56.raw["include_skills_usage_instructions"] is False
         assert gpt56.raw["experimental_supported_tools"] == []
         assert gpt56.raw["supports_search_tool"] is True
-        assert gpt56.raw["max_context_window"] == 372_000
+        assert gpt56.raw["max_context_window"] == 272_000
         assert gpt56.raw["service_tiers"] == [
             {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
         ]

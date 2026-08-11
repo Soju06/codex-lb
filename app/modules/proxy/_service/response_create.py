@@ -849,7 +849,7 @@ def _summarize_response_create_input(input_value: JsonValue) -> dict[str, JsonVa
             "size_bytes": _json_size_bytes(item),
         }
         if isinstance(item, dict):
-            item_object = cast(dict[str, JsonValue], item)
+            item_object = item
             role = item_object.get("role")
             if isinstance(role, str):
                 item_summary["role"] = role
@@ -864,7 +864,7 @@ def _summarize_response_create_input(input_value: JsonValue) -> dict[str, JsonVa
                 for part in content:
                     if not isinstance(part, dict):
                         continue
-                    part_object = cast(dict[str, JsonValue], part)
+                    part_object = part
                     part_type = part_object.get("type")
                     if isinstance(part_type, str):
                         content_part_type_counts[part_type] = content_part_type_counts.get(part_type, 0) + 1

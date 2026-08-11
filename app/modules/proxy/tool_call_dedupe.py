@@ -107,7 +107,7 @@ def mark_duplicate_tool_call_downstream_event(
         return False
     if item_name == tool_call_safety.PARALLEL_TOOL_CALL_NAME and is_side_effect_tool_call:
         return _mark_duplicate_parallel_tool_call_downstream_event(
-            cast(dict[str, JsonValue], item),
+            item,
             argument_value,
             seen_tool_call_keys=seen_tool_call_keys,
             response_id=response_id,
@@ -213,7 +213,7 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
                 None,
                 recipient_name,
                 None,
-                canonical_parallel_tool_use_key(cast(dict[str, JsonValue], tool_use)),
+                canonical_parallel_tool_use_key(tool_use),
             )
         )
     kept_tool_uses: list[JsonValue] = []
@@ -236,7 +236,7 @@ def _mark_duplicate_parallel_tool_call_downstream_event(
             None,
             recipient_name,
             None,
-            canonical_parallel_tool_use_key(cast(dict[str, JsonValue], tool_use)),
+            canonical_parallel_tool_use_key(tool_use),
         )
         if key in seen_tool_call_keys:
             removed_count += 1
@@ -633,7 +633,7 @@ def canonical_parallel_tool_use_key(tool_use: Mapping[str, JsonValue]) -> str:
             ensure_ascii=False,
         )
     if normalized_recipient_name == "exec_command" and isinstance(parameters, dict):
-        return canonical_parameters_key(normalized_recipient_name, cast(dict[str, JsonValue], parameters))
+        return canonical_parameters_key(normalized_recipient_name, parameters)
     return json.dumps(tool_use, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -707,7 +707,7 @@ def rewrite_parallel_tool_call_payload(
     if not changed:
         return payload, False, 0
 
-    rewritten_item: dict[str, JsonValue] = dict(cast(dict[str, JsonValue], item))
+    rewritten_item: dict[str, JsonValue] = dict(item)
     rewritten_item["arguments"] = rewritten_arguments
     rewritten_payload: dict[str, JsonValue] = dict(payload)
     rewritten_payload["item"] = rewritten_item

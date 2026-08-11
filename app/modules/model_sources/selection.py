@@ -10,11 +10,15 @@ account selection and was rejected upstream.
 
 from __future__ import annotations
 
+import logging
+
 from app.core.openai.model_registry import get_model_registry
 from app.db.models import ModelSource
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.model_sources.repository import ModelSourcesRepository
+
+logger = logging.getLogger(__name__)
 
 
 def allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
@@ -80,16 +84,37 @@ async def responses_model_is_source_owned(model: str | None, api_key: ApiKeyData
     model, matching how the HTTP handlers build their candidate list: an
     enforced model that resolves to a source must not slip through to
     subscription-account selection.
+
+    Resolution failures fail open to ``False``. This helper only gates the
+    WebSocket transport, where the alternative is worse: the lookup runs after
+    the turn's usage reservation is acquired but before it is registered for
+    cleanup, so a propagating database error tears the whole session down and
+    strands the reservation until the stale reaper runs. Failing open degrades
+    to the pre-guard behaviour (the subscription upstream rejects the model),
+    and source forwarding could not have worked anyway — it needs the same
+    database for the source's credentials. The HTTP handlers deliberately do
+    not use this helper: they call ``select_responses_model_source`` directly
+    and must keep surfacing resolution errors rather than silently routing
+    source traffic to a subscription account.
     """
     enforced = effective_model_for_api_key(api_key, model)
     if not model and not enforced:
         return False
-    return (
-        await select_responses_model_source(
-            model or enforced or "",
-            api_key,
-            raw_model=enforced,
-            require_streaming=True,
+    try:
+        return (
+            await select_responses_model_source(
+                model or enforced or "",
+                api_key,
+                raw_model=enforced,
+                require_streaming=True,
+            )
+            is not None
         )
-        is not None
-    )
+    except Exception:
+        logger.warning(
+            "model_source_resolution_failed_open model=%s enforced_model=%s",
+            model,
+            enforced,
+            exc_info=True,
+        )
+        return False

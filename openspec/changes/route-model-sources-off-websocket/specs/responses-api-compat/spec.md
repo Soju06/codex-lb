@@ -19,6 +19,15 @@ where source routing is applied. For a prepared `response.create` on an
 established session the failure MUST be emitted as a terminal error for that
 turn, and any usage reservation held for the turn MUST be released.
 
+When source resolution is unavailable, the WebSocket transport MUST fall back to
+subscription account selection rather than failing the request. The resolution
+runs after a turn's usage reservation is acquired but before it is registered
+for cleanup, so a propagating failure would end the session and strand the
+reservation; the degraded behaviour is the pre-change one, where the
+subscription upstream rejects the model. This applies to the WebSocket transport
+only — the HTTP request path MUST continue to surface resolution failures, since
+silently routing source traffic to a subscription account would be worse there.
+
 #### Scenario: Source-owned model over WebSocket fails the connect
 
 - **GIVEN** an enabled OpenAI-compatible model source exposes model `m` with Responses support
@@ -47,3 +56,10 @@ turn, and any usage reservation held for the turn MUST be released.
 - **GIVEN** a model that is not served by any enabled model source
 - **WHEN** a client opens a WebSocket Responses session requesting that model
 - **THEN** account selection proceeds unchanged
+
+#### Scenario: Source resolution failure falls back to subscription selection
+
+- **GIVEN** the model-source catalog cannot be read
+- **WHEN** a client opens a WebSocket Responses session
+- **THEN** account selection proceeds as it did before the guard existed
+- **AND** the session is not terminated by the resolution failure

@@ -1591,14 +1591,31 @@ class _WebSocketMixin:
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
-                                if await responses_model_is_source_owned(
-                                    request_state.model, request_state.api_key or api_key
+                                if (
+                                    upstream is not None
+                                    and account is not None
+                                    # A reader that has already finished means the upstream is
+                                    # gone but the cleanup that nulls it runs further below, so
+                                    # without this the turn would take the reuse path (terminal
+                                    # error) when it should reconnect and take the connect path
+                                    # (503, which the client transparently falls back from).
+                                    and upstream_reader is not None
+                                    and not upstream_reader.done()
+                                    and await responses_model_is_source_owned(
+                                        request_state.model, request_state.api_key or api_key
+                                    )
                                 ):
                                     # Socket reuse bypasses connect-time selection, so a later
                                     # response.create that switches to a source-owned model
                                     # would otherwise be forwarded to the subscription account
                                     # already attached to the open upstream. Model sources are
                                     # only reachable from the HTTP request path.
+                                    #
+                                    # Gated on an existing upstream on purpose: a first turn has
+                                    # no socket yet and must fall through to the connect guard,
+                                    # which fails with a service-level 503 so the client falls
+                                    # back to HTTP. Emitting a terminal error here would preempt
+                                    # that fallback and make source models unreachable.
                                     source_message = (
                                         f"Model {request_state.model!r} is served by an "
                                         "OpenAI-compatible model source, which is only reachable "
@@ -1611,6 +1628,17 @@ class _WebSocketMixin:
                                         request_state.model,
                                     )
                                     await proxy._release_websocket_request_state_reservation(request_state)
+                                    # The prepared request already owns a request-log row; without
+                                    # this the row is never finalized, so the same logical failure
+                                    # is only visible in request logs when it happens on the first
+                                    # turn (where the connect path writes it).
+                                    await proxy._write_websocket_connect_failure(
+                                        account_id=account.id,
+                                        api_key=request_state.api_key or api_key,
+                                        request_state=request_state,
+                                        error_code="model_source_requires_http_transport",
+                                        error_message=source_message,
+                                    )
                                     await proxy._emit_websocket_terminal_error(
                                         websocket,
                                         client_send_lock=client_send_lock,
@@ -1618,6 +1646,7 @@ class _WebSocketMixin:
                                         error_code="model_source_requires_http_transport",
                                         error_message=source_message,
                                         error_type="invalid_request_error",
+                                        downstream_activity=downstream_activity,
                                     )
                                     continue
                             except ProxyResponseError as exc:
@@ -3068,6 +3097,50 @@ class _WebSocketMixin:
                 request_transport="websocket",
             ),
         )
+        # Model sources are only reachable from the HTTP request path. Fail the
+        # WebSocket connect instead of dispatching a source-owned model to a
+        # subscription account, which the upstream rejects with "The '<model>'
+        # model is not supported when using Codex with a ChatGPT account."
+        # Codex clients fall back to the HTTP transport when a WebSocket
+        # connect fails, and that path routes to the source correctly.
+        #
+        # Evaluated once per connect series rather than inside the failover
+        # loop below: source ownership is a property of the requested model, so
+        # re-resolving it per attempt would only repeat the same lookup. The
+        # per-request api key is used (rather than the session key) so a policy
+        # refresh mid-session cannot make this disagree with the equivalent
+        # check on the prepared-request path.
+        if await responses_model_is_source_owned(model, request_state.api_key or api_key):
+            message = (
+                f"Model {model!r} is served by an OpenAI-compatible model source, which is only "
+                "reachable over the HTTP transport; retry the request over HTTPS."
+            )
+            _facade().logger.info(
+                "Websocket model source requires http transport request_id=%s model=%s api_key_present=%s",
+                request_state.request_log_id or request_state.request_id,
+                model,
+                (request_state.api_key or api_key) is not None,
+            )
+            await proxy._emit_websocket_connect_failure(
+                websocket,
+                client_send_lock=client_send_lock,
+                account_id=None,
+                api_key=request_state.api_key or api_key,
+                request_state=request_state,
+                # 503 (not 4xx) is deliberate: Codex clients only fall back to
+                # the HTTP transport when a WebSocket connect fails at the
+                # service level. A 4xx is treated as terminal and surfaces to
+                # the user instead of retrying over HTTPS.
+                status_code=503,
+                payload=openai_error(
+                    "model_source_requires_http_transport",
+                    message,
+                    error_type="server_error",
+                ),
+                error_code="model_source_requires_http_transport",
+                error_message=message,
+            )
+            return None, None
         max_attempts = _facade()._WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
         last_failover_exc: ProxyResponseError | None = None
@@ -3310,44 +3383,6 @@ class _WebSocketMixin:
     ) -> Account | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        if await responses_model_is_source_owned(model, api_key):
-            # Model sources are only reachable from the HTTP request path. Fail
-            # the WebSocket session instead of dispatching a source-owned model
-            # to a subscription account, which the upstream rejects with
-            # "The '<model>' model is not supported when using Codex with a
-            # ChatGPT account." Codex clients fall back to the HTTP transport
-            # when the WebSocket session fails, and that path routes to the
-            # source correctly.
-            message = (
-                f"Model {model!r} is served by an OpenAI-compatible model source, which is only "
-                "reachable over the HTTP transport; retry the request over HTTPS."
-            )
-            _facade().logger.info(
-                "Websocket model source requires http transport request_id=%s model=%s api_key_present=%s",
-                request_state.request_log_id or request_state.request_id,
-                model,
-                api_key is not None,
-            )
-            await proxy._emit_websocket_connect_failure(
-                websocket,
-                client_send_lock=client_send_lock,
-                account_id=None,
-                api_key=api_key,
-                request_state=request_state,
-                # 503 (not 4xx) is deliberate: Codex clients only fall back to
-                # the HTTP transport when a WebSocket connect fails at the
-                # service level. A 4xx is treated as terminal and surfaces to
-                # the user instead of retrying over HTTPS.
-                status_code=503,
-                payload=openai_error(
-                    "model_source_requires_http_transport",
-                    message,
-                    error_type="server_error",
-                ),
-                error_code="model_source_requires_http_transport",
-                error_message=message,
-            )
-            return None
         while True:
             try:
                 selection = await proxy._select_account_with_budget_compatible(

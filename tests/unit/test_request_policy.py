@@ -586,3 +586,11 @@ def test_source_chat_reasoning_policy_preserves_caller_alias_set() -> None:
     apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="ultra")
 
     assert payload == {"thinking": "max"}
+
+
+def test_source_chat_reasoning_policy_preserves_authorized_enable_thinking() -> None:
+    payload: dict[str, JsonValue] = {"enable_thinking": True}
+
+    apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="medium")
+
+    assert payload == {"enable_thinking": True}

@@ -363,15 +363,6 @@ def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     return normalized
 
 
-def _normalize_responses_request_input(data: JsonValue) -> JsonValue:
-    normalized = _normalize_responses_input_instructions(data)
-    if not is_json_mapping(normalized):
-        return normalized
-    payload: MutableJsonObject = dict(normalized)
-    normalize_reasoning_aliases(payload)
-    return payload
-
-
 def _is_responses_lite_input(input_value: list[JsonValue]) -> bool:
     # Responses Lite requests carry their tool bundle as an input item with
     # type=additional_tools and deliberately place base instructions as a
@@ -626,7 +617,7 @@ class ResponsesRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _move_input_instruction_messages(cls, data: JsonValue) -> JsonValue:
-        return _normalize_responses_request_input(data)
+        return _normalize_responses_input_instructions(data)
 
     model: str = Field(min_length=1)
     instructions: str
@@ -754,7 +745,7 @@ class ResponsesCompactRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _move_input_instruction_messages(cls, data: JsonValue) -> JsonValue:
-        return _normalize_responses_request_input(data)
+        return _normalize_responses_input_instructions(data)
 
     model: str = Field(min_length=1)
     instructions: str

@@ -24,6 +24,8 @@ an already-normalized wire value as though it were the original client choice.
 Before source-routed Responses traffic is forwarded, accepted reasoning
 aliases MUST be aligned with the authorized canonical `reasoning.effort` or
 removed so a conflicting alias cannot select a disallowed effort upstream.
+When no reasoning policy is active, source egress MUST retain existing
+provider-shaped reasoning controls and their source-specific fields.
 
 #### Scenario: Reject max before upstream dispatch
 

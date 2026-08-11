@@ -260,6 +260,12 @@ def apply_api_key_enforcement(
 
     if client_reasoning_effort is not None:
         validate_reasoning_effort_access(api_key, client_reasoning_effort)
+        if api_key.allowed_reasoning_efforts is not None and payload.reasoning is None:
+            # Alias-only requests stay provider-shaped until a policy actually
+            # authorizes them. Materialize the authorized effort here so the
+            # normal wire fallback/aliasing runs without changing unrestricted
+            # source payloads during request validation.
+            payload.reasoning = ResponsesReasoning(effort=client_reasoning_effort)
     normalize_unsupported_reasoning_effort(payload)
 
     service_tier_was_enforced = False
@@ -399,7 +405,11 @@ def apply_api_key_enforcement_to_chat_payload(
         if "thinking" in payload:
             thinking = payload["thinking"]
             payload["thinking"] = {**thinking, "effort": wire_effort} if isinstance(thinking, dict) else wire_effort
-        payload.pop("enable_thinking", None)
+        if "enable_thinking" in payload:
+            if wire_effort == "medium":
+                payload["enable_thinking"] = True
+            else:
+                payload.pop("enable_thinking", None)
         reasoning = payload.get("reasoning")
         if isinstance(reasoning, dict):
             payload["reasoning"] = {**reasoning, "effort": wire_effort}

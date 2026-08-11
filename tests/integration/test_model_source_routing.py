@@ -1576,6 +1576,92 @@ async def test_source_chat_reasoning_allowlist_preserves_client_plane_effort(asy
 
 
 @pytest.mark.asyncio
+async def test_source_chat_reasoning_allowlist_preserves_enable_thinking(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def completion(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("source-enable-thinking"))
+
+    base_url = await source_upstream(completion)
+    model = "source-enable-thinking"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-enable-thinking",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-enable-thinking-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["medium"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "enable_thinking": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["enable_thinking"] is True
+    assert "reasoning" not in captured
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
+async def test_source_responses_without_policy_preserves_provider_thinking_object(async_client, source_upstream):
+    captured: dict[str, object] = {}
+
+    async def responses(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(
+            {
+                "id": "resp_provider_thinking",
+                "object": "response",
+                "status": "completed",
+                "model": "source-provider-thinking",
+                "output": [],
+            }
+        )
+
+    base_url = await source_upstream(responses)
+    model = "source-provider-thinking"
+    await _create_model_source(
+        async_client,
+        name="source-provider-thinking",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    thinking = {"type": "enabled", "budget": 4096, "budget_tokens": 2048, "vendor_hint": "keep"}
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "thinking": thinking,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["thinking"] == thinking
+    assert "reasoning" not in captured
+
+
+@pytest.mark.asyncio
 async def test_source_responses_reasoning_allowlist_strips_conflicting_aliases(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}

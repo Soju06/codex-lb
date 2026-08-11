@@ -407,7 +407,7 @@ def test_openai_compatible_reasoning_aliases_are_normalized():
 
 @pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
 @pytest.mark.parametrize("alias", ["reasoningEffort", "reasoning_effort", "thinking"])
-def test_reasoning_aliases_are_canonicalized_during_request_validation(request_type, alias):
+def test_reasoning_aliases_are_preserved_until_wire_serialization(request_type, alias):
     request = request_type.model_validate(
         {
             "model": "gpt-5.6-sol",
@@ -417,9 +417,27 @@ def test_reasoning_aliases_are_canonicalized_during_request_validation(request_t
         }
     )
 
-    assert request.reasoning is not None
-    assert request.reasoning.effort == "ultra"
-    assert alias not in (request.model_extra or {})
+    assert request.reasoning is None
+    assert (request.model_extra or {})[alias] == "ultra"
+    dumped = request.to_payload()
+    assert dumped["reasoning"] == {"effort": "ultra"}
+    assert alias not in dumped
+
+
+def test_source_forwarding_preserves_provider_thinking_object():
+    thinking = {"type": "enabled", "budget": 4096, "budget_tokens": 2048, "vendor_hint": "keep"}
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "source-model",
+            "instructions": "hi",
+            "input": [],
+            "thinking": thinking,
+        }
+    )
+
+    forwarded = request.model_dump_for_forwarding()
+    assert forwarded["thinking"] == thinking
+    assert "reasoning" not in forwarded
 
 
 def test_provider_thinking_aliases_are_normalized():

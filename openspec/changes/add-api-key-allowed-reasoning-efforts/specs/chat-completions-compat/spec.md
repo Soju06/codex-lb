@@ -15,7 +15,8 @@ client expressed it through `reasoning_effort`, `reasoningEffort`,
 `reasoning.effort`, or `thinking`. If several reasoning spellings conflict,
 every retained outbound spelling MUST be aligned to the authorized client-plane
 effort. Other allowed client-plane efforts MUST remain unchanged for the
-external source.
+external source. A sole `enable_thinking: true` control authorized as `medium`
+MUST remain enabled on source egress.
 
 #### Scenario: Source-routed chat request is rejected before forwarding
 
@@ -36,3 +37,9 @@ external source.
 - **GIVEN** a source-routed chat model and an API key that allows `minimal`
 - **WHEN** a Chat Completions client supplies `reasoning_effort: "minimal"`
 - **THEN** the source receives `reasoning_effort: "minimal"`
+
+#### Scenario: Source-routed chat preserves an authorized thinking toggle
+
+- **GIVEN** a source-routed chat model and an API key that allows `medium`
+- **WHEN** a Chat Completions client supplies only `enable_thinking: true`
+- **THEN** the source receives `enable_thinking: true`

@@ -14600,7 +14600,7 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
     hydration restored ``last_completed_response_id`` and the session-level
     injection re-added the same anchor and trimmed the prefix — rebuilding the
     wedge despite the ``fresh_reattach_anchor_skipped_quarantined`` log."""
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_quarantine_unsafe_suffix",

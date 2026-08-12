@@ -1496,14 +1496,17 @@ async def test_allowlisted_source_model_routes_through(async_client, source_upst
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("reasoning_field", "reasoning_value"),
-    [("reasoning_effort", "max"), ("thinking", "minimal")],
+    "reasoning_controls",
+    [
+        {"reasoning_effort": "max"},
+        {"thinking": "minimal"},
+        {"reasoning_effort": "max", "reasoning": {"summary": "auto"}},
+    ],
 )
 async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(
     async_client,
     source_upstream,
-    reasoning_field,
-    reasoning_value,
+    reasoning_controls,
 ):
     await _enable_api_key_auth(async_client)
     source_hits = 0
@@ -1532,7 +1535,7 @@ async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(
         json={
             "model": model,
             "messages": [{"role": "user", "content": "hi"}],
-            reasoning_field: reasoning_value,
+            **reasoning_controls,
         },
     )
 

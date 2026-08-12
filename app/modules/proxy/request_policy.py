@@ -443,7 +443,19 @@ def apply_api_key_enforcement_to_chat_payload(
             payload["reasoningEffort"] = wire_effort
         if "thinking" in payload:
             thinking = payload["thinking"]
-            payload["thinking"] = {**thinking, "effort": wire_effort} if isinstance(thinking, dict) else wire_effort
+            if isinstance(thinking, dict):
+                thinking_effort = thinking.get("effort")
+                if isinstance(thinking_effort, str) and thinking_effort.strip():
+                    payload["thinking"] = {**thinking, "effort": wire_effort}
+                else:
+                    thinking_type = thinking.get("type")
+                    selects_implicit_medium = thinking.get("enabled") is True or (
+                        isinstance(thinking_type, str) and thinking_type.strip().lower() == "enabled"
+                    )
+                    if selects_implicit_medium and wire_effort != "medium":
+                        payload.pop("thinking")
+            else:
+                payload["thinking"] = wire_effort
         if "enable_thinking" in payload:
             if wire_effort == "medium":
                 payload["enable_thinking"] = True

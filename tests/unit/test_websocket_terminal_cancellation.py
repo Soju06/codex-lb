@@ -1241,7 +1241,7 @@ async def test_terminal_message_cancellation_without_drain_leaves_owned_task_run
 
 
 @pytest.mark.asyncio
-async def test_stuck_upstream_close_is_detached_from_scope_cleanup() -> None:
+async def test_stuck_upstream_close_is_cancelled_after_scope_cleanup_timeout() -> None:
     @asynccontextmanager
     async def repo_factory() -> AsyncIterator[SimpleNamespace]:
         yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
@@ -1249,10 +1249,16 @@ async def test_stuck_upstream_close_is_detached_from_scope_cleanup() -> None:
     service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
     close_started = asyncio.Event()
     release_close = asyncio.Event()
+    close_cancelled = False
 
     async def close() -> None:
+        nonlocal close_cancelled
         close_started.set()
-        await release_close.wait()
+        try:
+            await release_close.wait()
+        except asyncio.CancelledError:
+            close_cancelled = True
+            raise
 
     upstream = cast(UpstreamWebSocket, SimpleNamespace(close=close))
 
@@ -1266,13 +1272,9 @@ async def test_stuck_upstream_close_is_detached_from_scope_cleanup() -> None:
     await asyncio.wait_for(close_started.wait(), timeout=1)
     await asyncio.wait_for(cleanup, timeout=1)
 
-    assert service._background_cleanup_tasks
-    release_close.set()
-    for _ in range(20):
-        if not service._background_cleanup_tasks:
-            break
-        await asyncio.sleep(0)
+    assert close_cancelled is True
     assert service._background_cleanup_tasks == set()
+    release_close.set()
 
 
 @pytest.mark.asyncio

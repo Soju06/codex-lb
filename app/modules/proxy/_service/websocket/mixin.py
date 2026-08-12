@@ -822,6 +822,15 @@ async def _close_websocket_upstream_for_cleanup(
             "Upstream websocket close continued after cleanup budget timeout_seconds=%.3f",
             effective_timeout,
         )
+        try:
+            await _facade()._await_cancelled_task(
+                close_task,
+                timeout_seconds=effective_timeout,
+                label="proxy websocket upstream close",
+                cleanup_tasks=proxy._background_cleanup_tasks,
+            )
+        except Exception:
+            _facade().logger.debug("Failed to cancel upstream websocket close task", exc_info=True)
     except Exception:
         _facade().logger.debug("Failed to close upstream websocket during scope cleanup", exc_info=True)
 

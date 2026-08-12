@@ -417,6 +417,37 @@ def test_reasoning_effort_allowlist_ignores_blank_alias_before_thinking_effort()
         apply_api_key_enforcement(request, api_key)
 
 
+@pytest.mark.parametrize(
+    "disabled_thinking",
+    [False, "disabled", "false", "off", {"type": "disabled"}, {"enabled": False}],
+)
+def test_reasoning_effort_allowlist_checks_enabled_alias_after_disabled_thinking(
+    disabled_thinking: JsonValue,
+) -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "thinking": disabled_thinking,
+            "enable_thinking": True,
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-conflicting-thinking-alias-policy",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["low"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    with pytest.raises(ProxyReasoningEffortNotAllowed, match="medium"):
+        apply_api_key_enforcement(request, api_key)
+
+
 @pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
 @pytest.mark.parametrize(("alias_effort", "wire_effort"), [("minimal", "low"), ("ultra", "max")])
 def test_reasoning_aliases_receive_wire_normalization_after_allowlist(

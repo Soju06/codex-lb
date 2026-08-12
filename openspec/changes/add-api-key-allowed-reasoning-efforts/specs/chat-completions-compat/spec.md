@@ -12,6 +12,8 @@ The `thinking` string alias MUST recognize every selectable effort, including
 `minimal`, before allowlist evaluation.
 A snake-case `reasoning_effort` MUST still participate in authorization when a
 separate `reasoning` object contains only metadata such as `summary`.
+An inactive `thinking` control MUST NOT mask a separate enabled reasoning
+alias during authorization.
 
 After a source-routed Chat Completions request passes the policy, any accepted
 `ultra` value MUST use the upstream wire value `max` regardless of whether the
@@ -46,6 +48,15 @@ service MUST materialize that authorized effort as `reasoning_effort`.
 - **WHEN** a Chat Completions client supplies `reasoning_effort: "max"` and
   `reasoning: {"summary": "auto"}`
 - **THEN** the service returns `403` with code `reasoning_effort_not_allowed`
+- **AND** the source receives no request
+
+#### Scenario: Disabled thinking does not mask an enabled alias
+
+- **GIVEN** a source-routed chat model and an API key that allows only `low`
+- **WHEN** a Chat Completions client supplies `thinking: false` and
+  `enable_thinking: true`
+- **THEN** the service evaluates the enabled alias as `medium`
+- **AND** returns `403` with code `reasoning_effort_not_allowed`
 - **AND** the source receives no request
 
 #### Scenario: Source-routed chat aliases use the ultra wire value

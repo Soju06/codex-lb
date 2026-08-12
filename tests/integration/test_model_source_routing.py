@@ -1501,6 +1501,8 @@ async def test_allowlisted_source_model_routes_through(async_client, source_upst
         {"reasoning_effort": "max"},
         {"thinking": "minimal"},
         {"reasoning_effort": "max", "reasoning": {"summary": "auto"}},
+        {"thinking": False, "enable_thinking": True},
+        {"thinking": "disabled", "enable_thinking": True},
     ],
 )
 async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(
@@ -1800,9 +1802,18 @@ async def test_source_responses_reasoning_allowlist_strips_conflicting_aliases(a
 
 
 @pytest.mark.asyncio
-async def test_source_responses_reasoning_allowlist_rejects_thinking_hidden_by_blank_alias(
+@pytest.mark.parametrize(
+    "reasoning_controls",
+    [
+        {"reasoningEffort": " ", "thinking": "max"},
+        {"thinking": False, "enable_thinking": True},
+        {"thinking": "disabled", "enable_thinking": True},
+    ],
+)
+async def test_source_responses_reasoning_allowlist_rejects_effort_hidden_by_inactive_alias(
     async_client,
     source_upstream,
+    reasoning_controls,
 ):
     await _enable_api_key_auth(async_client)
     source_hits = 0
@@ -1846,8 +1857,7 @@ async def test_source_responses_reasoning_allowlist_rejects_thinking_hidden_by_b
             "model": model,
             "instructions": "hi",
             "input": [],
-            "reasoningEffort": " ",
-            "thinking": "max",
+            **reasoning_controls,
         },
     )
 

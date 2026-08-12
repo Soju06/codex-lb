@@ -26,6 +26,8 @@ aliases MUST be aligned with the authorized canonical `reasoning.effort` or
 removed so a conflicting alias cannot select a disallowed effort upstream.
 Blank alias strings MUST be treated as absent and MUST NOT mask a later
 effort-bearing alias during authorization.
+Disabled aliases MUST likewise be treated as inactive rather than masking a
+separate enabled reasoning alias.
 When no reasoning policy is active, source egress MUST retain existing
 provider-shaped reasoning controls and their source-specific fields.
 An allowlist MUST also preserve provider-shaped controls that select no effort;
@@ -77,6 +79,16 @@ their unrelated fields do not participate in effort authorization.
 - **WHEN** a Responses request supplies `reasoningEffort: " "` and
   `thinking: "max"`
 - **THEN** the service returns `403` with code `reasoning_effort_not_allowed`
+- **AND** the source receives no request
+
+#### Scenario: Disabled alias cannot hide an enabled effort
+
+- **GIVEN** a source-routed model and an API key with
+  `allowedReasoningEfforts: ["low"]`
+- **WHEN** a Responses request supplies `thinking: "disabled"` and
+  `enable_thinking: true`
+- **THEN** the service evaluates the enabled alias as `medium`
+- **AND** returns `403` with code `reasoning_effort_not_allowed`
 - **AND** the source receives no request
 
 #### Scenario: Effort-less provider control survives beside an allowed effort

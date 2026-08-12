@@ -1789,15 +1789,14 @@ def _normalize_thinking_alias(
     enable_thinking: JsonValue,
 ) -> MutableJsonObject | None:
     if isinstance(thinking, bool):
-        return {"effort": "medium"} if thinking else None
+        if thinking:
+            return {"effort": "medium"}
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
         if normalized in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
             return {"effort": normalized}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}
-        if normalized in {"disabled", "false", "off"}:
-            return None
     thinking_mapping = _json_mapping_or_none(thinking)
     if thinking_mapping is not None:
         normalized: MutableJsonObject = {}
@@ -1814,12 +1813,12 @@ def _normalize_thinking_alias(
             normalized_type = thinking_type.strip().lower()
             if normalized_type == "enabled":
                 return {"effort": "medium"}
-            if normalized_type == "disabled":
-                return None
         enabled = thinking_mapping.get("enabled")
-        if isinstance(enabled, bool):
-            return {"effort": "medium"} if enabled else None
+        if enabled is True:
+            return {"effort": "medium"}
 
+    # Disabled `thinking` spellings are inactive, not authoritative: a
+    # separate enabled alias must still participate in policy evaluation.
     if isinstance(enable_thinking, bool):
         return {"effort": "medium"} if enable_thinking else None
     return None

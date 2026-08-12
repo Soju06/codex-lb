@@ -308,18 +308,42 @@ def test_source_model_reasoning_levels_ignore_non_list_metadata() -> None:
     assert model.supported_reasoning_levels == ()
 
 
-def test_source_model_reasoning_levels_are_normalized_and_clamped() -> None:
-    """Declared efforts are advertised verbatim in a catalog clients parse as a
-    whole, so an unknown effort must be dropped rather than forwarded."""
+def test_source_model_reasoning_levels_are_normalized_and_deduplicated() -> None:
+    """Efforts are normalized and deduplicated, but not filtered by vocabulary.
+
+    Backends disagree on which efforts exist, so an effort this proxy has
+    never heard of is still the operator's to declare; only shape is checked.
+    """
     raw = json.dumps(
         {
-            "supported_reasoning_levels": [" Low ", "HIGH", "turbo", "midium", "low"],
+            "supported_reasoning_levels": [" Low ", "HIGH", "  ", "low", "provider-specific"],
             "default_reasoning_level": " HIGH ",
         }
     )
     [model] = source_models_to_upstream_models([_reasoning_source(raw)])
-    assert [level.effort for level in model.supported_reasoning_levels] == ["low", "high"]
+    assert [level.effort for level in model.supported_reasoning_levels] == [
+        "low",
+        "high",
+        "provider-specific",
+    ]
     assert model.default_reasoning_level == "high"
+
+
+def test_source_model_can_declare_none_as_a_reasoning_level() -> None:
+    """``none`` is a real effort on GLM and Model Studio (see #1660).
+
+    It is also already first-class for API-key enforced efforts, so dropping
+    it from source catalogs would have made the two vocabularies disagree.
+    """
+    raw = json.dumps(
+        {
+            "supported_reasoning_levels": ["none", "high", "max"],
+            "default_reasoning_level": "none",
+        }
+    )
+    [model] = source_models_to_upstream_models([_reasoning_source(raw)])
+    assert [level.effort for level in model.supported_reasoning_levels] == ["none", "high", "max"]
+    assert model.default_reasoning_level == "none"
 
 
 def test_source_model_default_level_outside_declared_set_is_dropped() -> None:

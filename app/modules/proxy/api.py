@@ -3724,8 +3724,8 @@ def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
 def _v1_supports_reasoning(model: UpstreamModel) -> bool:
     if bool(model.supported_reasoning_levels) or model.supports_reasoning_summaries:
         return True
-    # OpenAI-compatible source models advertise no reasoning levels; their
-    # catalog entries opt in via raw metadata so /v1/models reflects reality.
+    # Source models whose operator declared no levels and no summary support
+    # opt in via raw metadata instead, so /v1/models reflects reality.
     return model.raw.get("supports_reasoning") is True
 
 

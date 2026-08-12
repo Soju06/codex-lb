@@ -15,10 +15,11 @@ which makes the capability undiscoverable in the client UI.
 Backends differ in the efforts they accept — for example Alibaba Model Studio
 exposes `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`, while DeepSeek and
 Kimi expose `low`/`high`/`max` — so the advertised set has to be operator
-declared rather than inferred. `none` is the one exception: it is outside the
-advertised vocabulary here, matching the subscription catalog, which never
-advertises it either. Clients can still send it; it is simply not offered in the
-effort picker.
+declared rather than inferred, and validated by shape rather than against a
+fixed enum. That includes `none`, which the #1660 backend survey shows is a
+real value (GLM `max`/`high`/`none`), and which is already first-class for
+API-key enforced efforts in `app/modules/api_keys/service.py`; filtering it out
+of source catalogs alone would have left the two vocabularies disagreeing.
 
 ## What Changes
 
@@ -28,8 +29,8 @@ effort picker.
 - Accept both effort slugs (`["low", "high"]`) and objects
   (`[{"effort": "low", "description": "..."}]`), ignoring malformed entries.
 - Keep the existing no-reasoning behavior for models that do not opt in.
-- Normalize declared efforts and clamp them to the set the client surfaces
-  understand, so one operator typo cannot affect other catalog entries.
+- Normalize and deduplicate declared efforts, validating shape rather than
+  membership of a fixed vocabulary.
 - Undo the unsupported-effort rewrite for requests that are actually routed to
   a model source and that declared the effort, instead of inferring the route
   from registry membership. This covers only the `minimal` workaround; the
@@ -59,7 +60,8 @@ declare neither, so the sanitizer keeps protecting backends that reject unknown
 fields.
 
 The dashboard side of this — a single `Reasoning` toggle that only affects the
-chat path, and no UI for the levels at all — is tracked separately in #1672.
+chat path, and no UI for the levels at all — is left to the UI-only rebase of
+#1675 on top of this parser.
 
 ## Capabilities
 

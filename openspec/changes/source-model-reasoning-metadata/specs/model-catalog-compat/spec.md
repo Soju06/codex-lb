@@ -15,11 +15,13 @@ be reported only when it matches one of the advertised efforts. A source model
 without reasoning metadata MUST continue to advertise no efforts, no default,
 and no summary support.
 
-Declared efforts MUST be normalized (trimmed and lowercased) and MUST be
-restricted to the efforts the client surfaces understand: `minimal`, `low`,
-`medium`, `high`, `xhigh`, `max`, `ultra`. An effort outside that set MUST be
-dropped. Codex clients deserialize the model catalog as a whole, so an
-operator typo must not be able to affect entries other than its own.
+Declared efforts MUST be normalized (trimmed and lowercased) and
+deduplicated. They MUST NOT be filtered against a fixed vocabulary: backends
+disagree on which efforts exist -- `none` is real on GLM and Alibaba Model
+Studio, while others stop at `low`/`high`/`max` -- so an enum would drop
+efforts a provider genuinely accepts. Only shape is validated; an entry that
+is not a string, a mapping without a string `effort`, or an empty slug MUST be
+dropped.
 
 #### Scenario: Effort slugs are advertised in declaration order
 
@@ -48,14 +50,23 @@ operator typo must not be able to affect entries other than its own.
 - **THEN** the entry advertises exactly `low` and `high`
 - **AND** `default_reasoning_level` is absent
 
-#### Scenario: Unknown efforts and casing variants are normalized away
+#### Scenario: Casing variants are normalized, unknown efforts are kept
 
 - **GIVEN** a source model whose `raw_metadata_json` sets
-  `"supported_reasoning_levels": [" Low ", "HIGH", "turbo"]` and
+  `"supported_reasoning_levels": [" Low ", "HIGH", "provider-specific"]` and
   `"default_reasoning_level": " HIGH "`
 - **WHEN** a client fetches the Codex model catalog
-- **THEN** the entry advertises exactly `low` and `high`
+- **THEN** the entry advertises `low`, `high`, and `provider-specific`
 - **AND** `default_reasoning_level` is `high`
+
+#### Scenario: An operator-declared `none` survives
+
+- **GIVEN** a source model whose `raw_metadata_json` sets
+  `"supported_reasoning_levels": ["none", "high", "max"]` and
+  `"default_reasoning_level": "none"`
+- **WHEN** a client fetches the Codex model catalog
+- **THEN** the entry advertises `none`, `high`, and `max`
+- **AND** `default_reasoning_level` is `none`
 
 #### Scenario: Models without reasoning metadata keep the previous behavior
 

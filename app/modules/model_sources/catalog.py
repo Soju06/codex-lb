@@ -13,13 +13,6 @@ from app.db.models import ModelSource, ModelSourceModel
 
 DEFAULT_SOURCE_CONTEXT_WINDOW = 128_000
 
-# Reasoning efforts the client surfaces understand. Operator-declared levels are
-# clamped to this set: they are advertised verbatim in the Codex model catalog,
-# which clients deserialize as a whole, so one typo must not be able to affect
-# entries beyond its own. The dashboard applies the same clamp when it exposes
-# efforts, and the frontend schema carries the matching enum.
-SUPPORTED_REASONING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
-
 # ``web_search_preview`` is the legacy alias for ``web_search``; request
 # validation normalizes it, but accept both here so operator opt-in covers
 # payloads regardless of normalization order.
@@ -101,10 +94,14 @@ def _reasoning_levels_from_metadata(raw: dict[str, JsonValue]) -> tuple[Reasonin
         ["low", "high", "max"]
         [{"effort": "low", "description": "Low reasoning effort"}]
 
-    Efforts are normalized (trimmed and lowercased) and clamped to
-    ``SUPPORTED_REASONING_EFFORTS``. Anything else -- a malformed entry, an
-    unknown effort -- is ignored, keeping the previous no-reasoning default for
-    models that never opted in.
+    Efforts are normalized (trimmed and lowercased) and deduplicated.
+    Validation is on shape, not on membership of a fixed vocabulary: backends
+    disagree on which efforts exist (GLM exposes ``none``, Model Studio
+    includes it, others stop at ``low``/``high``/``max``), so an enum here
+    would silently drop efforts a provider really accepts. Malformed entries --
+    a non-string, a mapping without a string ``effort``, an empty slug -- are
+    ignored, keeping the previous no-reasoning default for models that never
+    opted in.
     """
     declared = raw.get("supported_reasoning_levels")
     if not is_json_list(declared):
@@ -129,7 +126,7 @@ def _reasoning_levels_from_metadata(raw: dict[str, JsonValue]) -> tuple[Reasonin
         else:
             continue
         effort = effort.strip().lower()
-        if effort not in SUPPORTED_REASONING_EFFORTS or effort in seen:
+        if not effort or effort in seen:
             continue
         seen.add(effort)
         levels.append(ReasoningLevel(effort=effort, description=description))

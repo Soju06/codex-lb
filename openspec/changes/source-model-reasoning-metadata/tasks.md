@@ -17,7 +17,9 @@
       the workaround still applies there.
 - [x] 2.3 Report only fallback rewrites, so the `ultra` -> `max` wire alias
       survives source routing, and restore the normalized effort form.
-- [x] 2.4 Normalize and clamp declared efforts to the supported vocabulary.
+- [x] 2.4 Normalize and deduplicate declared efforts, validating shape rather
+      than membership of a fixed vocabulary, so operator-declared `none` and
+      other provider-specific efforts survive.
 - [x] 2.5 Treat declared levels or `supports_reasoning_summaries` as the
       chat-path reasoning opt-in.
 

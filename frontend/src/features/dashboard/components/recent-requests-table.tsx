@@ -82,6 +82,7 @@ export type RecentRequestsTableProps = {
   limit: number;
   offset: number;
   hasMore: boolean;
+  filtersApplied?: boolean;
   onLimitChange: (limit: number) => void;
   onOffsetChange: (offset: number) => void;
   onConversationClick?: (conversationId: string) => void;
@@ -170,6 +171,7 @@ export function RecentRequestsTable({
   limit,
   offset,
   hasMore,
+  filtersApplied = false,
   onLimitChange,
   onOffsetChange,
   onConversationClick,
@@ -202,11 +204,20 @@ export function RecentRequestsTable({
   }, [accounts]);
 
   if (requests.length === 0) {
+    const emptyFromExistingLogs = filtersApplied || total > 0;
     return (
       <EmptyState
         icon={Inbox}
-        title={t("dashboard.requests.emptyTitle")}
-        description={t("dashboard.requests.emptyDescription")}
+        title={
+          emptyFromExistingLogs
+            ? t("dashboard.requests.emptyFilteredTitle")
+            : t("dashboard.requests.emptyTitle")
+        }
+        description={
+          emptyFromExistingLogs
+            ? t("dashboard.requests.emptyFilteredDescription")
+            : t("dashboard.requests.emptyDescription")
+        }
       />
     );
   }

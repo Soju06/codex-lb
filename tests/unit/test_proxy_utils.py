@@ -34,6 +34,7 @@ import app.core.clients.proxy as proxy_module
 import app.core.resilience.network_recovery as network_recovery_module
 import app.modules.proxy.load_balancer as load_balancer_module
 from app.core import shutdown as shutdown_state
+from app.core.auth.refresh import RefreshError
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
 from app.core.clients.proxy_websocket import (
@@ -168,6 +169,10 @@ class _QueuedTestUpstreamWebSocket:
 
 def test_compact_wire_budget_rejection_is_account_neutral() -> None:
     assert proxy_service._is_account_neutral_error_code("responses_compact_input_too_large") is True
+
+
+def test_stream_idle_timeout_is_account_neutral() -> None:
+    assert proxy_service._is_account_neutral_error_code("stream_idle_timeout") is True
 
 
 @pytest.mark.asyncio
@@ -347,6 +352,30 @@ async def test_account_scoped_invalid_request_error_still_penalizes_account() ->
     )
 
     load_balancer.record_error.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_idle_timeout_does_not_penalize_account() -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-idle")),
+        {"message": "idle"},
+        "stream_idle_timeout",
+    )
+
+    assert classified["failure_class"] == "non_retryable"
+    load_balancer.record_error.assert_not_awaited()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
+    load_balancer.mark_permanent_failure.assert_not_awaited()
 
 
 def test_websocket_archive_request_context_clears_unmatched_frame_request_id():
@@ -2479,6 +2508,156 @@ async def test_resolve_websocket_previous_response_owner_cache_hit_keeps_owner_s
     assert request_state.previous_response_owner_requested_at is None
     assert request_state.previous_response_owner_session_id is None
     assert websocket_helpers_module._websocket_stale_anchor_diagnostics(request_state).same_session is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_websocket_previous_response_owner_suppresses_confirmed_stale_anchor(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_stale_anchor_cache",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_stale_anchor_cache",
+        session_id="sid-stale-anchor-cache",
+    )
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id=request_state.previous_response_id,
+        api_key_id=None,
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._resolve_websocket_previous_response_owner(
+            previous_response_id=request_state.previous_response_id,
+            api_key=None,
+            session_id=request_state.session_id,
+            surface="websocket_stream",
+            request_state=request_state,
+        )
+
+    assert request_logs.lookup_calls == [("resp_stale_anchor_cache", None, "sid-stale-anchor-cache")]
+    assert request_state.previous_response_owner_lookup_source == "stale_response_cache"
+    assert request_state.previous_response_owner_lookup_outcome == "hit"
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_resolve_websocket_previous_response_owner_revalidates_shared_owner_after_stale_cache(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    request_logs.response_owner_by_id[("resp_stale_anchor_shared_owner", None, "sid-shared-owner")] = "acc-shared"
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_stale_anchor_shared_owner",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_stale_anchor_shared_owner",
+        session_id="sid-shared-owner",
+    )
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id=request_state.previous_response_id,
+        api_key_id=None,
+    )
+
+    owner = await service._resolve_websocket_previous_response_owner(
+        previous_response_id=request_state.previous_response_id,
+        api_key=None,
+        session_id=request_state.session_id,
+        surface="websocket_stream",
+        request_state=request_state,
+    )
+
+    assert owner == "acc-shared"
+    assert request_logs.lookup_calls == [("resp_stale_anchor_shared_owner", None, "sid-shared-owner")]
+    assert request_state.previous_response_owner_lookup_source == "request_logs"
+    assert request_state.previous_response_owner_lookup_outcome == "hit"
+    assert not websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id=request_state.previous_response_id,
+        api_key_id=None,
+    )
+
+
+def test_remember_websocket_previous_response_owner_invalidates_stale_anchor_cache(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_invalidate",
+        api_key_id="key-stale-anchor",
+    )
+
+    service._remember_websocket_previous_response_owner(
+        previous_response_id="resp_stale_anchor_invalidate",
+        api_key_id="key-stale-anchor",
+        account_id="acc-new-owner",
+    )
+
+    assert not websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_invalidate",
+        api_key_id="key-stale-anchor",
+    )
+
+
+def test_websocket_stale_previous_response_cache_expires(monkeypatch):
+    clock = {"value": 100.0}
+    monkeypatch.setattr(websocket_helpers_module.time, "monotonic", lambda: clock["value"])
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
+    websocket_helpers_module._remember_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_expiry",
+        api_key_id=None,
+    )
+
+    assert websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_expiry",
+        api_key_id=None,
+    )
+    clock["value"] += websocket_helpers_module._WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_TTL_SECONDS
+    assert not websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id="resp_stale_anchor_expiry",
+        api_key_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_websocket_previous_response_owner_force_refresh_replaces_stale_cache():
+    request_logs = _RequestLogsRecorder()
+    request_logs.response_owner_by_id[("resp_force_refresh", None, "sid-force-refresh")] = "acc_authoritative"
+    # Avoid constructing the full service here: its unrelated background
+    # event-spool settings are intentionally omitted by several lightweight
+    # test settings fixtures. The owner lookup only needs the repository
+    # factory and the in-process owner index.
+    service = object.__new__(proxy_service.ProxyService)
+    service._repo_factory = _repo_factory(request_logs)
+    service._websocket_previous_response_account_index = {}
+    service._remember_websocket_previous_response_owner(
+        previous_response_id="resp_force_refresh",
+        api_key_id=None,
+        account_id="acc_stale_cache",
+        session_id="sid-force-refresh",
+    )
+
+    owner = await service._resolve_websocket_previous_response_owner(
+        previous_response_id="resp_force_refresh",
+        api_key=None,
+        session_id="sid-force-refresh",
+        surface="http_bridge",
+        force_request_log_lookup=True,
+    )
+
+    assert owner == "acc_authoritative"
+    assert request_logs.lookup_calls == [("resp_force_refresh", None, "sid-force-refresh")]
+    assert (
+        service._websocket_previous_response_account_index[("resp_force_refresh", None, "sid-force-refresh")]
+        == "acc_authoritative"
+    )
 
 
 @pytest.mark.asyncio
@@ -14579,7 +14758,7 @@ async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(mo
     assert event["type"] == "response.completed"
     assert event["response"]["id"] == "resp_ok"
     assert seen_excluded_account_ids == [set(), {account_a.id}]
-    record_error.assert_awaited_once_with(account_a)
+    record_error.assert_not_awaited()
     record_success.assert_awaited_once_with(account_b)
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["status"] for call in request_logs.calls] == ["error", "success"]
@@ -14628,7 +14807,7 @@ async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_fail
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert event["response"]["error"]["message"] == "idle"
     assert seen_excluded_account_ids == [set(), {account.id}]
-    record_error.assert_awaited_once_with(account)
+    record_error.assert_not_awaited()
     record_success.assert_not_awaited()
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["error_code"] == "stream_idle_timeout"
@@ -32452,6 +32631,28 @@ def test_http_bridge_should_attempt_local_previous_response_recovery_invalid_req
     assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(non_recoverable_error) is False
 
 
+def test_http_bridge_server_recovery_mode_retries_ambiguous_transport_once(monkeypatch: pytest.MonkeyPatch):
+    ambiguous_error = proxy_module.ProxyResponseError(
+        502,
+        {
+            "error": {
+                "type": "server_error",
+                "code": "upstream_request_timeout",
+                "message": "Upstream did not acknowledge response.create",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once"
+        ),
+    )
+
+    assert proxy_service._http_bridge_should_attempt_local_previous_response_recovery(ambiguous_error) is True
+
+
 def test_http_bridge_should_rollover_after_context_overflow():
     context_overflow_error = proxy_module.ProxyResponseError(
         400,
@@ -32536,6 +32737,7 @@ def test_maybe_rewrite_websocket_previous_response_not_found_masks_lost_local_an
 
 def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found(monkeypatch, caplog):
     fixed_now = utcnow()
+    monkeypatch.setattr(websocket_helpers_module, "_websocket_stale_previous_response_index", {})
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_connect_failure",
         model="gpt-5.1",
@@ -32607,6 +32809,10 @@ def test_sanitize_websocket_connect_failure_rewrites_previous_response_not_found
             "value": 1.0,
         }
     ]
+    assert not websocket_helpers_module._is_websocket_stale_previous_response(
+        previous_response_id="resp_prev_anchor",
+        api_key_id=None,
+    )
 
 
 def test_sanitize_websocket_terminal_stale_error_marks_missing_anchor_source_unknown():
@@ -34599,6 +34805,7 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
     assert _proxy_error_code(exc) == "usage_settlement_failed"
     assert exc.failure_phase == "usage_settlement"
     assert exc.failure_detail == "compact_api_key_usage_persistence_failed"
+    assert exc.reservation_released is False
     assert exc.failure_exception_type == "RuntimeError"
     assert isinstance(exc.__cause__, RuntimeError)
     assert str(exc.__cause__) == "compact finalize failed"
@@ -34613,6 +34820,53 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
     )
     primary_service.release_usage_reservation.assert_not_awaited()
     fail_safe_service.finalize_usage_reservation.assert_not_awaited()
+    fail_safe_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
+
+
+@pytest.mark.asyncio
+async def test_compact_usage_settlement_marks_released_when_fail_safe_succeeds(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_fail_safe_release_succeeds")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_fail_safe_release_succeeds",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    response = CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "model": "gpt-5.1",
+            "output": [],
+            "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        }
+    )
+    primary_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(side_effect=RuntimeError("compact finalize failed")),
+        release_usage_reservation=AsyncMock(),
+    )
+    fail_safe_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(),
+        release_usage_reservation=AsyncMock(),
+    )
+    service_factory = MagicMock(side_effect=[primary_service, fail_safe_service])
+    monkeypatch.setattr(proxy_service, "ApiKeysService", service_factory)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._settle_compact_api_key_usage(
+            api_key=api_key,
+            api_key_reservation=reservation,
+            response=response,
+            request_service_tier=None,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "usage_settlement_failed"
+    assert exc.failure_phase == "usage_settlement"
+    assert exc.reservation_released is True
+    assert isinstance(exc.__cause__, RuntimeError)
+    primary_service.finalize_usage_reservation.assert_awaited_once()
+    primary_service.release_usage_reservation.assert_not_awaited()
     fail_safe_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
 
 
@@ -35374,6 +35628,901 @@ async def test_compact_responses_surfaces_upstream_timeout_without_account_failo
     assert request_logs.calls[0]["status"] == "error"
     assert request_logs.calls[0]["account_id"] == account_a.id
     assert request_logs.calls[0]["error_code"] == "upstream_request_timeout"
+
+
+@pytest.mark.asyncio
+async def test_compact_failover_next_settles_before_account_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_failover_settle_a")
+    account_b = _make_account("acc_compact_failover_settle_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_failover_settle")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_failover_settle",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-failover-settle"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert account_a.id in seen_excluded_account_ids[-1]
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
+async def test_compact_http_500_failover_settles_before_account_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_500_settle_a")
+    account_b = _make_account("acc_compact_500_settle_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_500_settle")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_500_settle",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_proxy_error(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("handle_proxy_error")
+
+    async def record_errors(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("record_errors")
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                500,
+                openai_error("server_error", "server error"),
+                failure_phase="status",
+                retryable_same_contract=True,
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_compact_service, "_max_transient_same_account_retries", lambda: 1)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock(side_effect=handle_proxy_error))
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock(side_effect=record_errors))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-500-settle"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert call_order[0] == "settle_compact_api_key_usage"
+    assert "handle_proxy_error" in call_order
+    assert call_order.index("settle_compact_api_key_usage") < call_order.index("handle_proxy_error")
+
+
+@pytest.mark.asyncio
+async def test_compact_route_error_after_failover_flushes_deferred_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_route_flush_a")
+    account_b = _make_account("acc_compact_route_flush_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_route_flush")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_route_flush",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        raise AssertionError("account B should fail at route resolution")
+
+    async def resolve_route(account: Account, *, operation: str) -> None:
+        del operation
+        if account.id == account_b.id:
+            raise proxy_service.UpstreamProxyRouteError("pool_unavailable", account_id=account.id)
+        return None
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(service, "_resolve_upstream_route_for_account", resolve_route)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-route-flush"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "upstream_proxy_unavailable"
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
+async def test_compact_refresh_connect_failover_settles_before_account_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_refresh_settle_a")
+    account_b = _make_account("acc_compact_refresh_settle_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_refresh_settle")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_refresh_settle",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "retryable_transient"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise AssertionError("account A should fail during freshness")
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-refresh-settle"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
+async def test_compact_post_401_refresh_failover_settles_before_account_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_401_refresh_a")
+    account_b = _make_account("acc_compact_401_refresh_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_401_refresh")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_401_refresh",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "retryable_transient"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        if account.id == account_a.id and kwargs.get("force"):
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                401,
+                openai_error("invalid_api_key", "token expired"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-401-refresh"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
+async def test_compact_second_401_failover_settles_before_account_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_second_401_a")
+    account_b = _make_account("acc_compact_second_401_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_second_401")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_second_401",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_proxy_error(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("handle_proxy_error")
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                401,
+                openai_error("invalid_api_key", "token expired"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_proxy_error", AsyncMock(side_effect=handle_proxy_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-second-401"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert call_order[0] == "settle_compact_api_key_usage"
+    assert "handle_proxy_error" in call_order
+    assert call_order.index("settle_compact_api_key_usage") < call_order.index("handle_proxy_error")
+
+
+@pytest.mark.asyncio
+async def test_compact_permanent_refresh_settles_before_mark_permanent(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_compact_permanent_refresh")
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_permanent_refresh")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_permanent_refresh",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def mark_permanent_failure(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("mark_permanent_failure")
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def ensure_fresh(target: Account, **kwargs: object) -> Account:
+        if kwargs.get("force"):
+            raise RefreshError("invalid_grant", "refresh rejected", True)
+        return target
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        raise proxy_module.ProxyResponseError(
+            401,
+            openai_error("invalid_api_key", "token expired"),
+            failure_phase="status",
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service._load_balancer, "mark_permanent_failure", AsyncMock(side_effect=mark_permanent_failure))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-permanent-refresh"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert exc_info.value.status_code == 401
+    assert call_order == ["settle_compact_api_key_usage", "mark_permanent_failure"]
+
+
+@pytest.mark.asyncio
+async def test_compact_fallback_release_flushes_deferred_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_fallback_flush_a")
+    account_b = _make_account("acc_compact_fallback_flush_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_fallback_flush")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_fallback_flush",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def finalize_usage_reservation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("finalize_usage_reservation")
+        raise RuntimeError("compact finalize failed")
+
+    async def release_usage_reservation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("release_usage_reservation")
+
+    primary_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(side_effect=finalize_usage_reservation),
+        release_usage_reservation=AsyncMock(),
+    )
+    fail_safe_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(),
+        release_usage_reservation=AsyncMock(side_effect=release_usage_reservation),
+    )
+    monkeypatch.setattr(proxy_service, "ApiKeysService", MagicMock(side_effect=[primary_service, fail_safe_service]))
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": "gpt-5.1",
+                "output": [],
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            }
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-fallback-flush"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert _proxy_error_code(exc) == "usage_settlement_failed"
+    assert exc.reservation_released is True
+    assert call_order == [
+        "finalize_usage_reservation",
+        "release_usage_reservation",
+        "handle_stream_error",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_unreleased_settlement_keeps_deferred_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_unreleased_health_a")
+    account_b = _make_account("acc_compact_unreleased_health_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_unreleased_health")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_unreleased_health",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def finalize_usage_reservation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("finalize_usage_reservation")
+        raise RuntimeError("compact finalize failed")
+
+    async def release_usage_reservation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("release_usage_reservation")
+        raise OSError("compact fail-safe release failed")
+
+    primary_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(side_effect=finalize_usage_reservation),
+        release_usage_reservation=AsyncMock(),
+    )
+    fail_safe_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(),
+        release_usage_reservation=AsyncMock(side_effect=release_usage_reservation),
+    )
+    monkeypatch.setattr(proxy_service, "ApiKeysService", MagicMock(side_effect=[primary_service, fail_safe_service]))
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": "gpt-5.1",
+                "output": [],
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            }
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    handle_stream_error_mock = AsyncMock(side_effect=handle_stream_error)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error_mock)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-unreleased-health"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert _proxy_error_code(exc) == "usage_settlement_failed"
+    assert exc.reservation_released is False
+    assert call_order == ["finalize_usage_reservation", "release_usage_reservation"]
+    handle_stream_error_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_success_survives_deferred_health_persistence_failure(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_health_persist_a")
+    account_b = _make_account("acc_compact_health_persist_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_health_persist")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_health_persist",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        raise RuntimeError("deferred compact health persist failed")
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-health-persist"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exit_error",
+    [RuntimeError("compact account B exploded"), asyncio.CancelledError()],
+    ids=["runtime-error", "cancelled"],
+)
+async def test_compact_unexpected_exit_flushes_deferred_health(monkeypatch, exit_error: BaseException):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_unexpected_exit_a")
+    account_b = _make_account("acc_compact_unexpected_exit_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_unexpected_exit")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_unexpected_exit",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        raise exit_error
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(type(exit_error)):
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-unexpected-exit"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
+async def test_compact_flush_completes_when_cancelled_during_health_write(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_flush_cancel_a")
+    account_b = _make_account("acc_compact_flush_cancel_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    flush_started = asyncio.Event()
+    release_flush = asyncio.Event()
+    api_key = _make_api_key_data("key_compact_flush_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_flush_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        flush_started.set()
+        await release_flush.wait()
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    task = asyncio.create_task(
+        service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-flush-cancel"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+    )
+    await asyncio.wait_for(flush_started.wait(), timeout=1)
+    task.cancel()
+    await asyncio.sleep(0)
+    release_flush.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
+async def test_compact_flush_continues_after_one_deferred_health_failure(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_flush_partial_a")
+    account_b = _make_account("acc_compact_flush_partial_b")
+    account_c = _make_account("acc_compact_flush_partial_c")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_flush_partial")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_flush_partial",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(failed_account: Account, *args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append(f"handle_stream_error:{failed_account.id}")
+        if failed_account.id == account_a.id:
+            raise RuntimeError("first deferred health persist failed")
+        return {"failure_class": "quota"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id in {account_a.chatgpt_account_id, account_b.chatgpt_account_id}:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    async def select_account(**kwargs: object) -> AccountSelection:
+        excluded_account_ids = set(cast(set[str] | None, kwargs.get("exclude_account_ids")) or set())
+        seen_excluded_account_ids.append(excluded_account_ids)
+        for account in (account_a, account_b, account_c):
+            if account.id not in excluded_account_ids:
+                return AccountSelection(account=account, error_message=None)
+        return AccountSelection(account=None, error_message="no accounts")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_compact_service, "_compact_max_account_attempts", lambda: 3)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b, account_c]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-flush-partial"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert call_order == [
+        "settle_compact_api_key_usage",
+        f"handle_stream_error:{account_a.id}",
+        f"handle_stream_error:{account_b.id}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_selection_timeout_after_failover_flushes_deferred_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_select_timeout_a")
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_select_timeout")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_select_timeout",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    select_calls = 0
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token, account_id
+        raise proxy_module.ProxyResponseError(
+            429,
+            openai_error("quota_exceeded", "quota exceeded"),
+            failure_phase="status",
+        )
+
+    async def select_with_budget(*args: object, **kwargs: object) -> AccountSelection:
+        del args, kwargs
+        nonlocal select_calls
+        select_calls += 1
+        if select_calls == 1:
+            return AccountSelection(account=account_a, error_message=None)
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("upstream_request_timeout", "Proxy request budget exhausted"),
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account_a))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_with_budget)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-select-timeout"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert _proxy_error_code(exc_info.value) == "upstream_request_timeout"
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
 
 
 @pytest.mark.asyncio
@@ -42487,6 +43636,7 @@ def test_maybe_dump_oversized_response_create_dedups_via_product_path(monkeypatc
 @pytest.mark.asyncio
 async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     original_text = json.dumps(
         {
@@ -42575,6 +43725,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
 @pytest.mark.asyncio
 async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replayed(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_submit_network_failure",
@@ -42647,8 +43798,146 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
 
 
 @pytest.mark.asyncio
+async def test_submit_http_bridge_marks_ambiguous_operation_before_releasing_owner(monkeypatch):
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    events: list[str] = []
+    service._durable_bridge = SimpleNamespace(
+        mark_operation_unknown=AsyncMock(side_effect=lambda **_kwargs: events.append("mark") or True),
+    )
+    proxy_service._initialize_http_bridge_retry_circuit(service)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-owner-fence-order",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5"}',
+        operation_id="operation-owner-fence-order",
+        operation_registered=True,
+    )
+    send_error = UpstreamWebSocketTransportError(
+        "upstream websocket closed after dispatch",
+        error_code="proxy_network_unavailable",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-owner-fence-order", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="sid-owner-fence-order"),
+        request_model="gpt-5.5",
+        account=_make_account("acc-owner-fence-order"),
+        upstream=cast(
+            proxy_service.UpstreamWebSocket,
+            SimpleNamespace(send_text=AsyncMock(side_effect=send_error), close=AsyncMock()),
+        ),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+        durable_session_id="durable-owner-fence-order",
+        durable_owner_epoch=4,
+    )
+
+    async def cleanup(*_args: object, **_kwargs: object) -> None:
+        events.append("cleanup")
+
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(return_value=request_state.request_text))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_cleanup_http_bridge_submit_interruption", cleanup)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
+
+    with pytest.raises(proxy_module.ProxyResponseError):
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=1,
+        )
+
+    assert events == ["mark", "cleanup"]
+    service._durable_bridge.mark_operation_unknown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_preflight_failure_keeps_operation_pre_dispatch(monkeypatch):
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    service._durable_bridge = None
+    proxy_service._initialize_http_bridge_retry_circuit(service)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-preflight",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5"}',
+        operation_id="operation-preflight",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-submit-preflight", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="sid-submit-preflight"),
+        request_model="gpt-5.5",
+        account=_make_account("acc_submit_preflight"),
+        upstream=cast(
+            proxy_service.UpstreamWebSocket,
+            SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()),
+        ),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+    )
+    send_frame = AsyncMock(
+        side_effect=proxy_module.ProxyResponseError(
+            400,
+            {"error": {"code": "payload_too_large", "message": "response.create is too large"}},
+        )
+    )
+    cleanup_dispatched: list[bool] = []
+
+    async def cleanup(*_args: object, **_kwargs: object) -> None:
+        cleanup_dispatched.append(request_state.operation_dispatched)
+
+    monkeypatch.setattr(proxy_http_bridge_request_submit, "_send_http_bridge_request_text_with_archive_id", send_frame)
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(return_value=request_state.request_text))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "_cleanup_http_bridge_submit_interruption", cleanup)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", AsyncMock())
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "",
+            queue_limit=1,
+        )
+
+    assert exc_info.value.status_code == 400
+    send_frame.assert_awaited_once()
+    assert cleanup_dispatched == [False]
+    assert request_state.recovery_attempt_dispatched is False
+    assert request_state.operation_dispatched is False
+
+
+@pytest.mark.asyncio
 async def test_submit_http_bridge_request_checks_queue_before_inlining(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_submit_queue_full_inline",

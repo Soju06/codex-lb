@@ -93,7 +93,7 @@ export function DashboardPage() {
     enabled: isAdmin && dashboardView === "conversations",
   });
   const { conversationsQuery } = conversationsState;
-  const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
+  const { filters, emptyStateFiltersApplied, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
     enabled: dashboardView === "request-logs",
   });
   const { resumeMutation, limitWarmupMutation } = useAccountMutations();
@@ -505,6 +505,7 @@ export function DashboardPage() {
                 limit={filters.limit}
                 offset={filters.offset}
                 hasMore={logPage?.hasMore ?? false}
+                filtersApplied={emptyStateFiltersApplied}
                 onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
                 onOffsetChange={(offset) => updateFilters({ offset })}
                 onConversationClick={handleConversationClick}

@@ -31,6 +31,7 @@ from app.core.exceptions import (
     ProxyModelNotAllowed,
     ProxyRateLimitError,
     ProxyReasoningEffortNotAllowed,
+    ProxyRequiredCapabilityTransportError,
     ProxyUpstreamError,
 )
 from app.core.middleware.multipart_content_encoding import (
@@ -59,6 +60,7 @@ _OPENAI_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     ProxyModelNotAllowed,
     ProxyReasoningEffortNotAllowed,
     ProxyRateLimitError,
+    ProxyRequiredCapabilityTransportError,
     ProxyUpstreamError,
 )
 
@@ -235,6 +237,12 @@ def add_exception_handlers(app: FastAPI) -> None:
                     request,
                     status=exc.status_code,
                     outcome="auth_error",
+                )
+            elif isinstance(exc, ProxyRequiredCapabilityTransportError):
+                await _record_image_route_exception_observability(
+                    request,
+                    status=exc.status_code,
+                    outcome="invalid_request",
                 )
             error = openai_error(exc.code, exc.message, error_type=error_type)
             if exc.param is not None:

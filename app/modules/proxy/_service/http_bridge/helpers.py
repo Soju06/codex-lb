@@ -69,7 +69,6 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     AccountStatus,
     DashboardSettings,
-    HttpBridgeSessionState,
     StickySessionKind,
 )
 from app.modules.api_keys.service import (
@@ -181,6 +180,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
 )
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
@@ -760,6 +760,99 @@ def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> 
     return session.queued_request_count > 0 or any(
         _http_bridge_request_counts_against_queue(request_state) for request_state in session.pending_requests
     )
+
+
+async def _raise_if_http_bridge_creation_superseded(
+    service: Any,
+    key: "_HTTPBridgeSessionKey",
+    *,
+    inflight_future: Any,
+) -> None:
+    """Abort a creation whose inflight slot another creator already took.
+
+    An evicted creator has lost the registry slot, so claiming would only
+    advance the durable epoch past the session that won — fencing that
+    winner's own renewals out of a row it legitimately owns (issue #1695).
+    Failing here leaves the row untouched; the caller's failure path then
+    closes this session without releasing the winner's row.
+    """
+    async with service._http_bridge_lock:
+        superseded = service._http_bridge_inflight_sessions.get(key) is not inflight_future
+    if superseded:
+        raise _http_bridge_startup_wait_timeout_error(
+            "http_bridge_session_registration",
+            code="capacity_exhausted_active_sessions",
+        )
+
+
+async def _settle_failed_http_bridge_creation(
+    service: Any,
+    key: "_HTTPBridgeSessionKey",
+    *,
+    inflight_future: Any,
+    created_session: "_HTTPBridgeSession | None",
+    exc: BaseException,
+) -> bool:
+    """Retire a failed creation and report whether another session replaced it.
+
+    A rejected creator claimed the durable row last, so its epoch is the
+    current one and its fenced release WOULD succeed — closing the row out
+    from under the session that actually won the registry slot (issue #1695).
+    The caller uses the return value to skip the durable release in that case.
+    """
+    async with service._http_bridge_lock:
+        current_future = service._http_bridge_inflight_sessions.get(key)
+        replacement_in_flight = current_future is not None and current_future is not inflight_future
+        if current_future is inflight_future:
+            service._http_bridge_inflight_sessions.pop(key, None)
+            if inflight_future is not None and not inflight_future.done():
+                if isinstance(exc, asyncio.CancelledError):
+                    inflight_future.cancel()
+                else:
+                    inflight_future.set_exception(exc)
+                    inflight_future.exception()
+        registered_session = service._http_bridge_sessions.get(key)
+        # A replacement that has claimed but not yet published its session is
+        # just as much the winner as a registered one: releasing here would
+        # close the row beneath it, and it would then register with an older
+        # epoch and be fenced out on its first renewal (issue #1695).
+        registered_winner = (
+            registered_session if registered_session is not None and registered_session is not created_session else None
+        )
+        # A registered winner on a DIFFERENT account no longer shares this row:
+        # our claim already rewrote its account binding and cleared its
+        # continuity aliases, so preserving the row would leave it bound to our
+        # account while that session keeps dispatching. Release it instead —
+        # the winner is then fenced promptly and retries cleanly.
+        winner_shares_row = registered_winner is not None and (
+            created_session is None or registered_winner.account.id == created_session.account.id
+        )
+        superseded = replacement_in_flight or winner_shares_row
+        if superseded and registered_session is not None and created_session is not None:
+            # Eviction can still land DURING the claim, so this creator may
+            # have advanced the shared row's epoch past the session that won
+            # the slot, fencing the winner's own renewals. Both sessions are
+            # this instance's and point at the same row, so hand the epoch we
+            # won over to the winner rather than leaving it stranded.
+            assert registered_session is not None
+            claimed_id = created_session.durable_session_id
+            claimed_epoch = created_session.durable_owner_epoch
+            registered_epoch = registered_session.durable_owner_epoch
+            if (
+                claimed_id is not None
+                and claimed_epoch is not None
+                and registered_session.durable_session_id == claimed_id
+                and (registered_epoch is None or claimed_epoch > registered_epoch)
+                # Only when both sessions selected the same account: a claim
+                # rewrites the row's account_id and clears continuity aliases,
+                # so handing the epoch across an account change would leave the
+                # winner renewing and dispatching on a row bound to a different
+                # account. Fail closed there instead — the winner's renewal is
+                # fenced, it is evicted, and the request retries cleanly.
+                and created_session.account.id == registered_session.account.id
+            ):
+                registered_session.durable_owner_epoch = claimed_epoch
+        return superseded
 
 
 async def _close_http_bridge_session(
@@ -1575,15 +1668,19 @@ def _durable_bridge_lookup_allows_local_reuse(
 
 
 def _http_bridge_allow_durable_takeover(lookup: DurableBridgeLookup | None) -> bool:
-    owner_instance = _durable_bridge_lookup_active_owner(lookup)
-    if owner_instance is None:
+    return _http_bridge_durable_lookup_allows_turn_state_takeover(lookup)
+
+
+def _http_bridge_claim_allows_takeover(
+    lookup: DurableBridgeLookup | None,
+    *,
+    force: bool,
+) -> bool:
+    if _http_bridge_allow_durable_takeover(lookup):
         return True
-    if lookup is None:
+    if not force:
         return False
-    return lookup.state in {
-        HttpBridgeSessionState.DRAINING,
-        HttpBridgeSessionState.CLOSED,
-    }
+    return lookup is None or lookup.state != "draining"
 
 
 def _http_bridge_has_durable_recovery_anchor(
@@ -2106,6 +2203,27 @@ async def _renew_durable_http_bridge_lease(
         return
     if lookup.owner_instance_id == current_instance and lookup.owner_epoch == session.durable_owner_epoch:
         return
+    if (
+        lookup.owner_instance_id == current_instance
+        and lookup.owner_process_epoch == http_bridge_owner_process_epoch()
+        and lookup.owner_epoch > session.durable_owner_epoch
+        # A claim rewrites the row's account_id, so an advance that moved the
+        # row to another account is a real ownership change for this session,
+        # not a superseded creator: never adopt across it.
+        and lookup.account_id == session.account.id
+        and service._http_bridge_sessions.get(session.key) is session
+    ):
+        # THIS process advanced the epoch while this session still holds the
+        # registry slot for its key — a creator that was superseded mid claim,
+        # not a real ownership loss (issue #1695). Evicting here would 409 the
+        # session that legitimately owns the key, so adopt the epoch and keep
+        # renewing. The process-epoch check matters because two incarnations
+        # can share a configured instance ID across a graceful restart: the
+        # successor's claim must still fence the predecessor out. A DIFFERENT
+        # local session holding the slot also falls through: that one won, and
+        # this session must be evicted.
+        session.durable_owner_epoch = lookup.owner_epoch
+        return
     # Fenced out: another instance/epoch owns the durable session. Never adopt
     # the foreign epoch — evict the local session so its upstream websocket and
     # account lease are released, and fail the request with the retryable
@@ -2399,6 +2517,14 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
         "bridge_instance_mismatch",
     }:
         return True
+    if code in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout"}:
+        # Recovery-first server mode permits exactly one anchored retry on a
+        # fresh upstream socket. This keeps Codex unchanged; delivery remains
+        # at-least-once because upstream acceptance is ambiguous.
+        return _service_get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode in {
+            "server_anchored_replay_once",
+            "server_indefinite_recovery",
+        }
     param_value = error.get("param")
     param = param_value.strip() if isinstance(param_value, str) and param_value.strip() else None
     message_value = error.get("message")
@@ -2698,6 +2824,7 @@ for _helper_name in (
     "_durable_bridge_lookup_active_owner",
     "_durable_bridge_lookup_allows_local_reuse",
     "_http_bridge_allow_durable_takeover",
+    "_http_bridge_claim_allows_takeover",
     "_http_bridge_has_durable_recovery_anchor",
     "_http_bridge_can_local_recover_without_ring",
     "_http_bridge_can_single_instance_owner_takeover_without_anchor",

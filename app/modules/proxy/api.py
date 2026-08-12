@@ -30,12 +30,13 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.convertors import Convertor, register_url_convertor
+from starlette.datastructures import Headers
 from starlette.websockets import WebSocketState
 
 from app.core import usage as usage_core
 from app.core.auth.dependencies import (
     set_openai_error_format,
-    validate_codex_usage_identity,
+    validate_codex_provider_usage_identity,
     validate_proxy_api_key,
     validate_proxy_api_key_authorization,
     validate_required_proxy_api_key,
@@ -222,6 +223,7 @@ from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_MODEL_STATE,
+    IMAGE_ROUTE_STARTED_AT_STATE,
     IMAGE_ROUTE_STREAM_STATE,
     record_images_route_observability,
 )
@@ -711,6 +713,9 @@ async def _thread_goal_proxy(
     context: ProxyContext,
     api_key: ApiKeyData | None,
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     payload = await _thread_goal_payload_from_request(request)
     try:
         response = await context.service.thread_goal_request(
@@ -876,7 +881,12 @@ async def _codex_control_proxy(
     api_key: ApiKeyData | None,
     *,
     adapter: _CodexControlAdapter = _PASSTHROUGH_CODEX_CONTROL_ADAPTER,
+    enforce_required_capability_transport: bool = True,
 ) -> Response:
+    if enforce_required_capability_transport:
+        capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+        if capability_transport_denial is not None:
+            return capability_transport_denial
     try:
         response = await context.service.codex_control_request(
             path,
@@ -998,10 +1008,19 @@ async def wham_agent_identities_jwks(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _codex_control_proxy(request, "wham/agent-identities/jwks", context, api_key)
+    return await _codex_control_proxy(
+        request,
+        "wham/agent-identities/jwks",
+        context,
+        api_key,
+        enforce_required_capability_transport=False,
+    )
 
 
-@router.post("/responses/", include_in_schema=False)
+@router.post(
+    "/responses/",
+    include_in_schema=False,
+)
 @router.post(
     "/responses",
     responses={
@@ -1020,6 +1039,9 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     explicit_openai_sdk_marker = _has_explicit_openai_sdk_marker(request)
     openai_sdk_request = _is_openai_sdk_request(request, payload)
     native_codex_heartbeat = _is_native_codex_request(request.headers) and not explicit_openai_sdk_marker
@@ -1104,6 +1126,9 @@ async def opportunistic_admission(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     denial = await _opportunistic_admission_denial(request, context, api_key, model=model)
     if denial is not None:
         return denial
@@ -1115,7 +1140,12 @@ async def responses_websocket(
     websocket: WebSocket,
     context: ProxyContext = Depends(get_proxy_websocket_context),
 ) -> None:
-    api_key, denial = await _validate_proxy_websocket_request(websocket)
+    capability_header_values = _required_capability_values(websocket.headers)
+    api_key, denial = await _validate_proxy_websocket_request(
+        websocket,
+        allow_required_capability=True,
+        require_api_key=bool(capability_header_values),
+    )
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
@@ -1133,11 +1163,15 @@ async def responses_websocket(
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
         synthesized_turn_state=turn_state if client_turn_state is None else None,
-        capability_header_values=tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER)),
+        capability_header_values=capability_header_values,
     )
 
 
-@v1_router.post("/responses/", response_model=OpenAIResponseResult, include_in_schema=False)
+@v1_router.post(
+    "/responses/",
+    response_model=OpenAIResponseResult,
+    include_in_schema=False,
+)
 @v1_router.post(
     "/responses",
     response_model=OpenAIResponseResult,
@@ -1157,6 +1191,9 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
@@ -1262,6 +1299,9 @@ async def internal_bridge_responses(
     api_key, auth_error = await _validate_internal_bridge_api_key(request)
     if auth_error is not None:
         return auth_error
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     if forwarded_request_context.context.signature_version is None:
         try:
             await context.service.validate_http_bridge_legacy_forward_anchor(
@@ -1425,7 +1465,12 @@ async def v1_responses_websocket(
     websocket: WebSocket,
     context: ProxyContext = Depends(get_proxy_websocket_context),
 ) -> None:
-    api_key, denial = await _validate_proxy_websocket_request(websocket)
+    capability_header_values = _required_capability_values(websocket.headers)
+    api_key, denial = await _validate_proxy_websocket_request(
+        websocket,
+        allow_required_capability=True,
+        require_api_key=bool(capability_header_values),
+    )
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
@@ -1443,7 +1488,7 @@ async def v1_responses_websocket(
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
         synthesized_turn_state=turn_state if client_turn_state is None else None,
-        capability_header_values=tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER)),
+        capability_header_values=capability_header_values,
     )
 
 
@@ -1678,11 +1723,18 @@ async def v1_reset_credit(
     return response
 
 
-@usage_router.post("/v1/reset-credit", response_model=V1ResetCreditRedeemResponse)
+@usage_router.post(
+    "/v1/reset-credit",
+    response_model=V1ResetCreditRedeemResponse,
+)
 async def v1_redeem_reset_credit(
+    request: Request,
     payload: V1ResetCreditRedeemRequest,
     api_key: ApiKeyData = Security(validate_usage_api_key),
-) -> V1ResetCreditRedeemResponse:
+) -> V1ResetCreditRedeemResponse | JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     async with get_background_session() as session:
         account = await AccountsRepository(session).get_by_id(payload.account_id)
         if not _is_reset_credit_account_in_api_key_pool(account, api_key):
@@ -1787,6 +1839,9 @@ async def _run_v1_warmup(
     *,
     mode: str,
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     if mode not in _WARMUP_MODES:
         return _logged_error_json_response(
             request,
@@ -2165,6 +2220,9 @@ async def backend_transcribe(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     multipart = await _parse_transcription_multipart(request, require_model=False)
     return await _transcribe_request(
         request=request,
@@ -2197,6 +2255,9 @@ async def backend_files_create(
     apply here -- upstream caps file size at 512 MiB which we enforce in
     ``FileCreateRequest``.
     """
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=_FILES_CREATE_LIMIT_MODEL,
@@ -2241,6 +2302,9 @@ async def backend_files_finalize(
     polls upstream for up to 30 s while ``status == "retry"``; we return
     the final payload verbatim so the caller sees what upstream saw.
     """
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=_FILES_FINALIZE_LIMIT_MODEL,
@@ -2280,6 +2344,9 @@ async def v1_audio_transcriptions(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     multipart = await _parse_transcription_multipart(request, require_model=True)
     assert multipart.model is not None
     model = multipart.model
@@ -2309,14 +2376,30 @@ async def v1_audio_transcriptions(
     )
 
 
-@router.post("/images/generations", response_model=None, include_in_schema=False)
-@v1_router.post("/images/generations", response_model=None)
+@router.post(
+    "/images/generations",
+    response_model=None,
+    include_in_schema=False,
+)
+@v1_router.post(
+    "/images/generations",
+    response_model=None,
+)
 async def v1_images_generations(
     request: Request,
     payload: V1ImagesGenerationsRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        _record_required_capability_image_transport_denial(
+            request,
+            route="generations",
+            model=payload.model,
+            stream=bool(payload.stream),
+        )
+        return capability_transport_denial
     return await _proxy_images_generation_request(
         request=request,
         payload=payload,
@@ -2339,6 +2422,26 @@ def _record_images_edit_early_rejection(
 ) -> None:
     record_images_route_observability(
         route="edits",
+        model=model,
+        stream=stream,
+        status=400,
+        outcome="invalid_request",
+        started_at=started_at,
+    )
+
+
+def _record_required_capability_image_transport_denial(
+    request: Request,
+    *,
+    route: Literal["generations", "edits"],
+    model: str | None,
+    stream: bool,
+) -> None:
+    started_at = getattr(request.state, IMAGE_ROUTE_STARTED_AT_STATE, None)
+    if not isinstance(started_at, float):
+        started_at = time.perf_counter()
+    record_images_route_observability(
+        route=route,
         model=model,
         stream=stream,
         status=400,
@@ -2378,6 +2481,15 @@ async def v1_images_edits(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        _record_required_capability_image_transport_denial(
+            request,
+            route="edits",
+            model=None,
+            stream=False,
+        )
+        return capability_transport_denial
     started_at = time.perf_counter()
     raise_for_unsupported_multipart_content_encoding(request)
 
@@ -2547,6 +2659,15 @@ async def codex_images_edits(
     then delegate to the shared edit pipeline so validation and upstream
     behavior remain identical.
     """
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        _record_required_capability_image_transport_denial(
+            request,
+            route="edits",
+            model=None,
+            stream=False,
+        )
+        return capability_transport_denial
     started_at = time.perf_counter()
     try:
         raw_payload = await request.json()
@@ -3816,6 +3937,9 @@ async def v1_chat_completions(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     cursor_compat_client = _is_cursor_compat_client(request, api_key)
     effective_model = _effective_model_for_api_key(api_key, payload.model)
 
@@ -3963,22 +4087,25 @@ async def v1_chat_completions(
         )
 
     try:
-        first = await stream.__anext__()
-    except StopAsyncIteration:
-        first = None
-    except ProxyResponseError as exc:
-        return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        try:
+            first = await stream.__anext__()
+        except StopAsyncIteration:
+            first = None
+        except ProxyResponseError as exc:
+            return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
 
-    stream_with_first = _prepend_first(first, stream)
-    result = await collect_chat_completion(stream_with_first, model=responses_payload.model)
+        result = await collect_chat_completion(
+            _prepend_first(first, stream),
+            model=responses_payload.model,
+        )
+    finally:
+        await _aclose_stream(stream)
     if isinstance(result, OpenAIErrorEnvelopeModel):
-        error = result.error
-        code = error.code if error else None
-        status_code = 503 if code in _UNAVAILABLE_SELECTION_ERROR_CODES else 502
+        status_code, envelope = _mask_previous_response_not_found_error(result)
         return _logged_error_json_response(
             request,
             status_code,
-            content=result.model_dump(mode="json", exclude_none=True),
+            content=envelope.model_dump(mode="json", exclude_none=True),
             headers=rate_limit_headers,
         )
     if cursor_compat_client and isinstance(result, ChatCompletion):
@@ -5020,6 +5147,11 @@ async def _stream_responses(
     )
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     effective_headers = forwarded_headers or request.headers
+    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
+        payload,
+        bridge_active=bridge_active,
+        headers=effective_headers,
+    )
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
     downstream_turn_state = (
         forwarded_downstream_turn_state
@@ -5095,30 +5227,31 @@ async def _stream_responses(
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = _CapacityStartupReadyEvent()
     payload.stream = True
-    if prefer_http_bridge:
-        stream = context.service.stream_http_responses(
-            payload,
-            effective_headers,
-            codex_session_affinity=codex_session_affinity,
-            propagate_http_errors=True,
-            openai_cache_affinity=openai_cache_affinity,
-            api_key=api_key,
-            api_key_reservation=reservation,
-            suppress_text_done_events=suppress_text_done_events,
-            downstream_turn_state=downstream_turn_state,
-            forwarded_request=forwarded_request,
-            forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-            forwarded_legacy_signature=forwarded_legacy_signature,
-            forwarded_affinity_kind=forwarded_affinity_kind,
-            forwarded_affinity_key=forwarded_affinity_key,
-            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
-            client_ip=client_ip,
-            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-            capacity_startup_wait_event=capacity_wait_event,
-            capacity_startup_ready_event=capacity_ready_event,
-        )
-    else:
-        stream = context.service.stream_responses(
+
+    def build_response_stream() -> AsyncIterator[str]:
+        if prefer_http_bridge:
+            return context.service.stream_http_responses(
+                payload,
+                effective_headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=True,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                downstream_turn_state=downstream_turn_state,
+                forwarded_request=forwarded_request,
+                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+                forwarded_legacy_signature=forwarded_legacy_signature,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                capacity_startup_wait_event=capacity_wait_event,
+                capacity_startup_ready_event=capacity_ready_event,
+            )
+        return context.service.stream_responses(
             payload,
             request.headers,
             codex_session_affinity=codex_session_affinity,
@@ -5130,6 +5263,56 @@ async def _stream_responses(
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
+
+    def build_recovery_response_stream() -> AsyncIterator[str]:
+        """Build a server-owned retry with a fresh API-key reservation.
+
+        The first bridge generator owns and settles the admission reservation
+        when it terminates.  Indefinite recovery must not reuse that object:
+        each retry gets a new reservation and therefore remains accounted and
+        bounded even when the client connection stays open for a long time.
+        """
+
+        async def _retry() -> AsyncIterator[str]:
+            retry_reservation = reservation
+            if prefer_http_bridge and api_key is not None and reservation is not None:
+                retry_reservation = await _enforce_request_limits(
+                    api_key,
+                    request_model=payload.model,
+                    request_service_tier=(
+                        dict(payload.to_payload()).get("service_tier")
+                        if isinstance(dict(payload.to_payload()).get("service_tier"), str)
+                        else None
+                    ),
+                    request_usage_budget=estimate_api_key_request_usage(payload),
+                )
+            retry_stream = context.service.stream_http_responses(
+                payload,
+                effective_headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=True,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=retry_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                downstream_turn_state=downstream_turn_state,
+                forwarded_request=forwarded_request,
+                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+                forwarded_legacy_signature=forwarded_legacy_signature,
+                forwarded_affinity_kind=forwarded_affinity_kind,
+                forwarded_affinity_key=forwarded_affinity_key,
+                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                capacity_startup_wait_event=capacity_wait_event,
+                capacity_startup_ready_event=capacity_ready_event,
+            )
+            async for line in retry_stream:
+                yield line
+
+        return _retry()
+
+    stream = build_response_stream()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
@@ -5146,18 +5329,52 @@ async def _stream_responses(
         _reset_propagated_capacity_startup_ready(capacity_ready_token)
         _reset_propagated_capacity_startup_wait(capacity_wait_token)
     if startup_error is not None:
-        if owns_reservation:
-            await _release_reservation(reservation)
-        return _stream_startup_error_response(
-            request,
-            startup_error,
-            headers=rate_limit_headers,
+        startup_error_code = (
+            _startup_error_details(startup_error)[0] if isinstance(startup_error, ProxyResponseError) else None
         )
+        startup_recovery_allowed = (
+            isinstance(startup_error, ProxyResponseError)
+            and bridge_recovery_eligible
+            and get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
+            == "server_indefinite_recovery"
+            and getattr(startup_error, "http_bridge_durable_recovery_eligible", False)
+            and startup_error_code
+            in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+        )
+        if startup_recovery_allowed:
+            assert isinstance(startup_error, ProxyResponseError)
+
+            # A durable bridge can fail before the startup probe observes the
+            # first response.created event. Feed that error through the same
+            # server-owned recovery loop used for failures after the probe;
+            # returning JSON here would hand a recoverable disconnect back to
+            # the client before recovery is even installed.
+            async def _raise_startup_error() -> AsyncIterator[str]:
+                raise startup_error
+                yield ""  # pragma: no cover
+
+            stream = _raise_startup_error()
+        else:
+            if owns_reservation:
+                await _release_reservation(reservation)
+            return _stream_startup_error_response(
+                request,
+                startup_error,
+                headers=rate_limit_headers,
+                allow_client_full_history_once=bridge_recovery_eligible,
+            )
+    # Server-indefinite recovery is only safe for an explicitly anchored
+    # continuation. Fresh first-turn requests have no durable parent
+    # operation to fence, so do not install the recovery loop for them.
+    recovery_stream_factory = build_recovery_response_stream if bridge_recovery_eligible else None
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
             stream,
             owns_reservation=owns_reservation,
             reservation=reservation,
+            recovery_stream_factory=recovery_stream_factory,
+            allow_client_full_history_once=bridge_recovery_eligible,
+            require_durable_recovery_fence=bridge_recovery_eligible,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
@@ -5228,6 +5445,11 @@ async def _collect_responses(
 
     rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
+    bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
+        payload,
+        bridge_active=bridge_active,
+        headers=request.headers,
+    )
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
     )
@@ -5272,7 +5494,13 @@ async def _collect_responses(
     except ProxyResponseError as exc:
         await _release_reservation(reservation)
         error = _parse_error_envelope(exc.payload)
-        status_code, error = _mask_previous_response_not_found_error(error, default_status=exc.status_code)
+        status_code, error = _mask_previous_response_not_found_error(
+            error,
+            default_status=exc.status_code,
+            allow_client_full_history_once=(
+                bridge_recovery_eligible and getattr(exc, "http_bridge_durable_recovery_eligible", False)
+            ),
+        )
         return _logged_error_json_response(
             request,
             status_code,
@@ -5282,7 +5510,10 @@ async def _collect_responses(
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
-            status_code, error_payload = _mask_previous_response_not_found_error(error_payload)
+            status_code, error_payload = _mask_previous_response_not_found_error(
+                error_payload,
+                allow_client_full_history_once=False,
+            )
             return _logged_error_json_response(
                 request,
                 status_code,
@@ -5293,7 +5524,10 @@ async def _collect_responses(
             content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **captured_turn_state_headers, **rate_limit_headers},
         )
-    status_code, response_payload = _mask_previous_response_not_found_error(response_payload)
+    status_code, response_payload = _mask_previous_response_not_found_error(
+        response_payload,
+        allow_client_full_history_once=False,
+    )
     return _logged_error_json_response(
         request,
         status_code,
@@ -5302,13 +5536,19 @@ async def _collect_responses(
     )
 
 
-@router.post("/responses/compact", response_model=CompactResponseResult)
+@router.post(
+    "/responses/compact",
+    response_model=CompactResponseResult,
+)
 async def responses_compact(
     request: Request,
     payload: ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     return await _compact_responses(
         request,
         payload,
@@ -5320,13 +5560,19 @@ async def responses_compact(
     )
 
 
-@v1_router.post("/responses/compact", response_model=CompactResponseResult)
+@v1_router.post(
+    "/responses/compact",
+    response_model=CompactResponseResult,
+)
 async def v1_responses_compact(
     request: Request,
     payload: V1ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     try:
         compact_payload = payload.to_compact_request()
     except ClientPayloadError as exc:
@@ -5603,7 +5849,7 @@ async def _transcribe_request(
 async def codex_usage(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
+    api_key: ApiKeyData | None = Depends(validate_codex_provider_usage_identity),
 ) -> RateLimitStatusPayload:
     payload = (
         await _build_codex_usage_payload_for_api_key(api_key)
@@ -5625,8 +5871,11 @@ async def codex_usage(
 async def codex_consume_rate_limit_reset_credit(
     request: Request,
     payload: ConsumeRateLimitResetCreditRequest = Body(...),
-    api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
+    api_key: ApiKeyData | None = Depends(validate_codex_provider_usage_identity),
 ) -> ConsumeRateLimitResetCreditResponse | JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     if api_key is not None:
         raise ProxyAuthError("ChatGPT authentication required for usage limit reset credits")
     redeem_request_id = payload.redeem_request_id.strip()
@@ -6277,18 +6526,112 @@ async def _stream_response_error_events(
     *,
     owns_reservation: bool,
     reservation: ApiKeyUsageReservationData | None,
+    recovery_stream_factory: Callable[[], AsyncIterator[str]] | None = None,
+    allow_client_full_history_once: bool = False,
+    require_durable_recovery_fence: bool = False,
 ) -> AsyncIterator[str]:
+    saw_downstream_event = False
     try:
         async for line in stream:
+            if line.startswith("data:") or line.startswith("event:"):
+                saw_downstream_event = True
             yield line
     except ProxyResponseError as exc:
+        error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
+        indefinite_recovery = (
+            get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
+            == "server_indefinite_recovery"
+        )
+        if (
+            recovery_stream_factory is not None
+            and indefinite_recovery
+            and (not require_durable_recovery_fence or getattr(exc, "http_bridge_durable_recovery_eligible", False))
+            and not saw_downstream_event
+            and error_code
+            in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+        ):
+            # Keep the client stream alive while the server owns recovery.
+            # The operation remains serialized by the durable operation
+            # fingerprint; each new upstream attempt is still at-least-once.
+            retry_delay = max(1.0, min(30.0, float(exc.retry_after_seconds or 5.0)))
+            while True:
+                yield ": codex-lb recovery in progress\n\n"
+                await asyncio.sleep(retry_delay)
+                try:
+                    retry_stream = recovery_stream_factory()
+                    retry_saw_downstream_event = False
+                    async for line in retry_stream:
+                        if line.startswith("data:") or line.startswith("event:"):
+                            retry_saw_downstream_event = True
+                            saw_downstream_event = True
+                        yield line
+                    return
+                except ProxyResponseError as retry_exc:
+                    retry_code = (
+                        retry_exc.payload.get("error", {}).get("code") if isinstance(retry_exc.payload, dict) else None
+                    )
+                    if (
+                        retry_code
+                        not in {
+                            "stream_incomplete",
+                            "stream_idle_timeout",
+                            "upstream_request_timeout",
+                            "upstream_unavailable",
+                        }
+                        or retry_saw_downstream_event
+                        or (
+                            require_durable_recovery_fence
+                            and not getattr(retry_exc, "http_bridge_durable_recovery_eligible", False)
+                        )
+                    ):
+                        exc = retry_exc
+                        break
+                    retry_delay = max(1.0, min(30.0, float(retry_exc.retry_after_seconds or retry_delay)))
+                except (ProxyRateLimitError, ProxyAuthError) as retry_limit_exc:
+                    # A quota revocation or limit can happen between recovery
+                    # attempts. Convert it into the same terminal SSE shape
+                    # as other proxy failures instead of aborting an already
+                    # started response stream without a response.failed event.
+                    exc = ProxyResponseError(
+                        retry_limit_exc.status_code,
+                        openai_error(
+                            retry_limit_exc.code,
+                            retry_limit_exc.message,
+                            error_type=getattr(retry_limit_exc, "error_type", "server_error"),
+                        ),
+                    )
+                    break
+                except Exception:
+                    # Recovery admission can also fail before a replacement
+                    # stream is created (for example, a transient database
+                    # failure while reserving usage). Do not let that
+                    # unexpected exception truncate an already-started SSE
+                    # response; the outer cleanup still settles the original
+                    # reservation and emits one terminal response.failed event.
+                    logger.warning("HTTP bridge recovery admission failed", exc_info=True)
+                    exc = ProxyResponseError(
+                        503,
+                        openai_error(
+                            "bridge_recovery_admission_failed",
+                            "Recovery admission failed; retry shortly.",
+                            error_type="server_error",
+                        ),
+                        retry_after_seconds=5,
+                    )
+                    break
         if owns_reservation:
             try:
                 await _release_reservation(reservation)
             except Exception:
                 logger.warning("Failed to release stream reservation after upstream proxy error", exc_info=True)
         envelope = _parse_error_envelope(exc.payload)
-        _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
+        _, envelope = _mask_previous_response_not_found_error(
+            envelope,
+            default_status=exc.status_code,
+            allow_client_full_history_once=(
+                allow_client_full_history_once and getattr(exc, "http_bridge_durable_recovery_eligible", False)
+            ),
+        )
         error = envelope.error
         retry_hint = ""
         if exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
@@ -6313,10 +6656,17 @@ def _stream_startup_error_response(
     error: ProxyResponseError | OpenAIErrorEnvelopeModel,
     *,
     headers: Mapping[str, str],
+    allow_client_full_history_once: bool = False,
 ) -> JSONResponse:
     if isinstance(error, ProxyResponseError):
         envelope = _parse_error_envelope(error.payload)
-        status_code, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+        status_code, envelope = _mask_previous_response_not_found_error(
+            envelope,
+            default_status=error.status_code,
+            allow_client_full_history_once=(
+                allow_client_full_history_once and getattr(error, "http_bridge_durable_recovery_eligible", False)
+            ),
+        )
         startup_headers = dict(headers)
         if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
             startup_headers.setdefault("Retry-After", str(error.retry_after_seconds))
@@ -6326,7 +6676,10 @@ def _stream_startup_error_response(
             envelope.model_dump(mode="json", exclude_none=True),
             headers=startup_headers,
         )
-    status_code, envelope = _mask_previous_response_not_found_error(error)
+    status_code, envelope = _mask_previous_response_not_found_error(
+        error,
+        allow_client_full_history_once=False,
+    )
     return _logged_error_json_response(
         request,
         status_code,
@@ -6435,16 +6788,25 @@ def _is_legacy_proxy_auth_override_type_error(exc: TypeError) -> bool:
     return "unexpected keyword argument 'request'" in message
 
 
+def _required_capability_values(headers: Mapping[str, str]) -> tuple[str, ...]:
+    if isinstance(headers, Headers):
+        return tuple(headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER))
+    normalized_name = CODEX_LB_REQUIRED_CAPABILITY_HEADER.lower()
+    return tuple(value for name, value in headers.items() if name.lower() == normalized_name)
+
+
 async def _validate_proxy_websocket_request(
     websocket: WebSocket,
     *,
+    allow_required_capability: bool = False,
     require_api_key: bool = False,
 ) -> tuple[ApiKeyData | None, JSONResponse | None]:
     denial = await _websocket_firewall_denial_response(websocket)
     if denial is not None:
         return None, denial
+    capability_header_values = _required_capability_values(websocket.headers)
     try:
-        if require_api_key:
+        if require_api_key or capability_header_values:
             api_key = await validate_required_proxy_api_key_authorization(websocket.headers.get("authorization"))
         else:
             api_key = await _validate_proxy_api_key_authorization_for_connection(
@@ -6456,7 +6818,37 @@ async def _validate_proxy_websocket_request(
             status_code=exc.status_code,
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),
         )
+    if capability_header_values and not allow_required_capability:
+        return api_key, JSONResponse(
+            status_code=400,
+            content=openai_error(
+                "required_capability_transport_unsupported",
+                "Required capability routing is only supported over the Responses WebSocket transport.",
+                error_type="invalid_request_error",
+            ),
+        )
     return api_key, None
+
+
+async def _required_capability_http_transport_denial(
+    request: Request,
+    api_key: ApiKeyData | None,
+) -> JSONResponse | None:
+    """Authenticate capability intent and reject unsupported HTTP routing."""
+
+    if not _required_capability_values(request.headers):
+        return None
+    if api_key is None:
+        await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))
+    return _logged_error_json_response(
+        request,
+        400,
+        openai_error(
+            "required_capability_transport_unsupported",
+            "Required capability routing is only supported over the Responses WebSocket transport.",
+            error_type="invalid_request_error",
+        ),
+    )
 
 
 def _redact_realtime_live_websocket_scope(websocket: WebSocket, *, path: str) -> None:
@@ -6741,7 +7133,7 @@ async def _log_source_chat_completion(
         )
 
 
-async def _aclose_stream(stream: AsyncIterator[bytes]) -> None:
+async def _aclose_stream(stream: AsyncIterator[object]) -> None:
     aclose = getattr(stream, "aclose", None)
     if aclose is not None:
         await aclose()
@@ -7940,13 +8332,48 @@ def _is_previous_response_not_found_public_error(error_value: OpenAIError | None
     )
 
 
+def _http_bridge_recovery_request_eligible(
+    payload: ResponsesRequest,
+    *,
+    bridge_active: bool,
+    headers: Mapping[str, str] | None = None,
+) -> bool:
+    turn_state_anchor = proxy_affinity_module._sticky_key_from_turn_state_header(headers or {})
+    if not bridge_active or (payload.previous_response_id is None and turn_state_anchor is None):
+        return False
+    settings = proxy_service_module.get_settings()
+    if not getattr(settings, "http_responses_session_bridge_operation_ledger_enabled", True):
+        return False
+    # Turn-state-only requests are admitted to the recovery-capable stream so
+    # the submit path can first prove a durable predecessor by advancing its
+    # operation anchor. The streaming layer marks an exception recovery-safe
+    # only after that proof; fresh first turns remain fail-closed there.
+    if proxy_service_module._responses_request_contains_input_image(
+        payload
+    ) or proxy_service_module._responses_request_uses_image_generation(payload):
+        return False
+    payload_bytes = len(json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8"))
+    return payload_bytes <= proxy_service_module._ws_transport_payload_budget_bytes(settings)
+
+
 def _mask_previous_response_not_found_error(
     envelope: OpenAIErrorEnvelopeModel,
     *,
     default_status: int | None = None,
+    allow_client_full_history_once: bool = False,
 ) -> tuple[int, OpenAIErrorEnvelopeModel]:
     if not _is_previous_response_not_found_public_error(envelope.error):
         return default_status if default_status is not None else _status_for_error(envelope.error), envelope
+    # In recovery-first mode, preserve the upstream-shaped 400 so Codex can
+    # drop the ambiguous previous_response_id anchor and resend full local
+    # history. This is intentionally opt-in because the resend is at-least-once
+    # and may duplicate an upstream response that was accepted but not observed.
+    if (
+        allow_client_full_history_once
+        and get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
+        == "client_full_history_once"
+    ):
+        return default_status if default_status is not None else 400, envelope
     return (
         502,
         OpenAIErrorEnvelopeModel(

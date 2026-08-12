@@ -7,16 +7,20 @@ import json
 import logging
 import threading
 import time
+import tomllib
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from httpx import Headers
 from sqlalchemy import select
+from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 from websockets.asyncio.client import connect as websocket_connect
 
@@ -28,6 +32,7 @@ from app.core.clients.proxy_websocket import (
     UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
     WebsocketsUpstreamWebSocket,
 )
+from app.core.config.settings_cache import get_settings_cache
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
@@ -43,6 +48,8 @@ from app.modules.proxy.capability_routing import (
 pytestmark = pytest.mark.integration
 
 _REAL_WRITE_REQUEST_LOG = proxy_module.ProxyService._write_request_log
+_CODEX_CLIENT_CONFIG = Path(__file__).resolve().parents[2] / "docs/examples/codex/config.toml"
+_CODEX_DAYBREAK_PROFILE = Path(__file__).resolve().parents[2] / "docs/examples/codex/daybreak-blue.config.toml"
 
 
 @pytest.mark.asyncio
@@ -674,6 +681,344 @@ def _websocket_response_create(text: str) -> dict[str, object]:
         "input": text,
         "stream": True,
     }
+
+
+def _codex_profile_provider(profile_name: str | None) -> tuple[str, str, dict[str, Any]]:
+    base_config = tomllib.loads(_CODEX_CLIENT_CONFIG.read_text(encoding="utf-8"))
+    profile_config = (
+        tomllib.loads(_CODEX_DAYBREAK_PROFILE.read_text(encoding="utf-8")) if profile_name is not None else {}
+    )
+    provider_id = profile_config.get("model_provider", base_config["model_provider"])
+    model = profile_config.get("model", base_config["model"])
+    provider = base_config["model_providers"][provider_id]
+    return provider_id, model, provider
+
+
+async def _create_profile_authorization(name: str) -> str:
+    settings = await get_settings_cache().get()
+    assert settings.api_key_auth_enabled is False
+    async with SessionLocal() as session:
+        created_key = await ApiKeysService(ApiKeysRepository(session)).create_key(
+            ApiKeyCreateData(
+                name=name,
+                allowed_models=None,
+            )
+        )
+    return f"Bearer {created_key.key}"
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "expected_provider_id", "expected_security_requirement"),
+    [
+        (None, "codex-lb", False),
+        ("daybreak-blue", "codex-lb-daybreak-blue", True),
+    ],
+    ids=["ordinary", "daybreak-blue"],
+)
+@pytest.mark.parametrize(
+    "path",
+    [
+        "ws://localhost/backend-api/codex/responses",
+        "ws://localhost/backend-api/codex/v1/responses",
+    ],
+    ids=["native", "native-v1-alias"],
+)
+def test_codex_provider_profiles_route_before_first_account_attempt(
+    app_instance,
+    monkeypatch,
+    path,
+    profile_name,
+    expected_provider_id,
+    expected_security_requirement,
+):
+    provider_id, model, provider = _codex_profile_provider(profile_name)
+    provider_headers = cast(dict[str, str], provider.get("http_headers", {}))
+    normalized_provider_headers = {name.lower(): value for name, value in provider_headers.items()}
+
+    assert provider_id == expected_provider_id
+    assert model == "gpt-5.6-sol"
+    assert provider["name"] == "openai"
+    assert provider["base_url"].endswith("/backend-api/codex")
+    assert provider["wire_api"] == "responses"
+    assert provider["supports_websockets"] is True
+    assert provider["requires_openai_auth"] is True
+    if expected_security_requirement:
+        assert provider["env_key"] == "CODEX_LB_API_KEY"
+        assert normalized_provider_headers == {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}
+    else:
+        assert "env_key" not in provider
+        assert REQUIRED_CAPABILITY_HEADER not in normalized_provider_headers
+
+    upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[_websocket_response_batch(f"resp_profile_{profile_name or 'ordinary'}")],
+    )
+    selection_requirements: list[bool] = []
+    opened_account_ids: list[str] = []
+    forwarded_capability_headers: list[bool] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def prepare_profile_authorization() -> str | None:
+        if not expected_security_requirement:
+            return None
+        return await _create_profile_authorization("Inert Daybreak profile")
+
+    async def keep_authenticated_api_key_policy(self, current_api_key):
+        del self
+        if expected_security_requirement:
+            assert current_api_key is not None
+            assert current_api_key.name == "Inert Daybreak profile"
+        else:
+            assert current_api_key is None
+        return current_api_key
+
+    async def bypass_api_key_usage_reservation(self, current_api_key, **_kwargs):
+        del self, _kwargs
+        if expected_security_requirement:
+            assert current_api_key is not None
+            assert current_api_key.name == "Inert Daybreak profile"
+        else:
+            assert current_api_key is None
+        return None
+
+    async def fake_select_websocket_connect_account(
+        self,
+        deadline,
+        *,
+        request_state,
+        require_security_work_authorized,
+        **_kwargs,
+    ):
+        del self, deadline, request_state, _kwargs
+        selection_requirements.append(require_security_work_authorized)
+        account_kind = "cyber" if require_security_work_authorized else "ordinary"
+        return SimpleNamespace(
+            id=f"acct_profile_{account_kind}",
+            security_work_authorized=require_security_work_authorized,
+        )
+
+    async def fake_try_open_websocket_connect_attempt(self, account, headers, **_kwargs):
+        del self, _kwargs
+        opened_account_ids.append(account.id)
+        forwarded_capability_headers.append(any(name.lower() == REQUIRED_CAPABILITY_HEADER for name in headers))
+        return account, upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_refresh_websocket_api_key_policy",
+        keep_authenticated_api_key_policy,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_reserve_websocket_api_key_usage",
+        bypass_api_key_usage_reservation,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_try_open_websocket_connect_attempt",
+        fake_try_open_websocket_connect_attempt,
+    )
+
+    response_create = _websocket_response_create("inert profile routing check")
+    response_create["model"] = model
+
+    with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+        assert client.portal is not None
+        websocket_headers = dict(provider_headers)
+        authorization = client.portal.call(prepare_profile_authorization)
+        if authorization is not None:
+            websocket_headers["Authorization"] = authorization
+        with client.websocket_connect(
+            path,
+            headers=websocket_headers,
+        ) as websocket:
+            websocket.send_text(json.dumps(response_create))
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["response"]["id"] == f"resp_profile_{profile_name or 'ordinary'}"
+    assert completed["type"] == "response.completed"
+    assert selection_requirements == [expected_security_requirement]
+    expected_account_kind = "cyber" if expected_security_requirement else "ordinary"
+    assert opened_account_ids == [f"acct_profile_{expected_account_kind}"]
+    assert forwarded_capability_headers == [False]
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/backend-api/codex/responses",
+            {"model": "gpt-5.6-sol", "input": "inert fallback check", "stream": True},
+        ),
+        (
+            "/backend-api/codex/v1/responses",
+            {"model": "gpt-5.6-sol", "input": "inert fallback check", "stream": True},
+        ),
+        (
+            "/v1/responses",
+            {"model": "gpt-5.6-sol", "input": "inert fallback check", "stream": True},
+        ),
+        (
+            "/backend-api/codex/responses/compact",
+            {"model": "gpt-5.6-sol", "instructions": "", "input": "inert fallback check"},
+        ),
+        (
+            "/v1/responses/compact",
+            {"model": "gpt-5.6-sol", "instructions": "", "input": "inert fallback check"},
+        ),
+    ],
+    ids=["backend", "backend-v1-alias", "v1", "backend-compact", "v1-compact"],
+)
+def test_daybreak_profile_http_fallback_fails_closed_before_routing(
+    app_instance,
+    monkeypatch,
+    path,
+    payload,
+):
+    _provider_id, _model, provider = _codex_profile_provider("daybreak-blue")
+    provider_headers = cast(dict[str, str], provider["http_headers"])
+
+    async def fail_before_routing(*_args, **_kwargs):
+        pytest.fail("capability-bearing HTTP fallback must fail before routing")
+
+    monkeypatch.setattr(proxy_api_module, "_select_responses_model_source", fail_before_routing)
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", fail_before_routing)
+    monkeypatch.setattr(proxy_api_module, "_compact_responses", fail_before_routing)
+
+    with TestClient(
+        app_instance,
+        base_url="http://lb.example",
+        client=("203.0.113.10", 50000),
+    ) as client:
+        assert client.portal is not None
+        authorization = client.portal.call(_create_profile_authorization, "Inert Daybreak HTTP fallback")
+        response = client.post(
+            path,
+            json=payload,
+            headers={"Authorization": authorization, **provider_headers},
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "code": "required_capability_transport_unsupported",
+            "message": "Required capability routing is only supported over the Responses WebSocket transport.",
+            "type": "invalid_request_error",
+        }
+    }
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer invalid-profile-key"], ids=["missing", "invalid"])
+def test_daybreak_profile_http_fallback_requires_valid_api_key_before_transport_denial(
+    app_instance,
+    monkeypatch,
+    authorization,
+):
+    _provider_id, _model, provider = _codex_profile_provider("daybreak-blue")
+    provider_headers = cast(dict[str, str], provider["http_headers"])
+
+    async def fail_before_routing(*_args, **_kwargs):
+        pytest.fail("unauthenticated capability-bearing HTTP fallback must not route")
+
+    monkeypatch.setattr(proxy_api_module, "_select_responses_model_source", fail_before_routing)
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", fail_before_routing)
+    headers = dict(provider_headers)
+    if authorization is not None:
+        headers["Authorization"] = authorization
+
+    with TestClient(
+        app_instance,
+        base_url="http://lb.example",
+        client=("203.0.113.10", 50000),
+    ) as client:
+        response = client.post(
+            "/backend-api/codex/responses",
+            json={"model": "gpt-5.6-sol", "input": "inert fallback auth check", "stream": True},
+            headers=headers,
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer invalid-profile-key"], ids=["missing", "invalid"])
+def test_daybreak_profile_websocket_requires_valid_api_key_before_selection(
+    app_instance,
+    monkeypatch,
+    authorization,
+):
+    _provider_id, _model, provider = _codex_profile_provider("daybreak-blue")
+    provider_headers = cast(dict[str, str], provider["http_headers"])
+
+    async def fail_before_selection(*_args, **_kwargs):
+        pytest.fail("unauthenticated Daybreak WebSocket must not select an account")
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fail_before_selection,
+    )
+    headers = dict(provider_headers)
+    if authorization is not None:
+        headers["Authorization"] = authorization
+
+    with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+        with pytest.raises(WebSocketDenialResponse) as denial:
+            with client.websocket_connect(
+                "ws://localhost/backend-api/codex/responses",
+                headers=headers,
+            ):
+                pytest.fail("unauthenticated Daybreak WebSocket must not connect")
+
+    assert denial.value.status_code == 401
+    assert denial.value.json()["error"]["code"] == "invalid_api_key"
+
+
+def test_ordinary_profile_http_path_remains_unauthenticated_and_unconstrained(
+    app_instance,
+    monkeypatch,
+):
+    _provider_id, _model, provider = _codex_profile_provider(None)
+    provider_headers = cast(dict[str, str], provider.get("http_headers", {}))
+    normalized_headers = {name.lower(): value for name, value in provider_headers.items()}
+    assert REQUIRED_CAPABILITY_HEADER not in normalized_headers
+
+    async def no_source(*_args, **_kwargs):
+        return None
+
+    async def ordinary_stream(_request, _payload, _context, api_key, **_kwargs):
+        assert api_key is None
+        return JSONResponse({"ordinary": True})
+
+    monkeypatch.setattr(proxy_api_module, "_select_responses_model_source", no_source)
+    monkeypatch.setattr(proxy_api_module, "_stream_responses", ordinary_stream)
+
+    with TestClient(
+        app_instance,
+        base_url="http://localhost",
+        client=("127.0.0.1", 50000),
+    ) as client:
+        response = client.post(
+            "/backend-api/codex/responses",
+            json={"model": "gpt-5.6-sol", "input": "ordinary path check", "stream": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ordinary": True}
 
 
 def test_backend_responses_websocket_fails_over_confirmed_proxy_connect_before_dispatch(
@@ -8795,7 +9140,10 @@ def test_backend_responses_websocket_does_not_expire_downstream_while_request_pe
 
     runtime_settings = _websocket_settings(
         proxy_downstream_websocket_idle_timeout_seconds=0.1,
-        stream_idle_timeout_seconds=0.2,
+        # Keep the upstream stream budget above both delayed messages. The
+        # assertion targets the downstream idle guard, not an upstream idle
+        # timeout; a slower CI runner must not turn the fixture into a race.
+        stream_idle_timeout_seconds=0.5,
     )
 
     async def allow_firewall(_websocket):
@@ -10945,6 +11293,7 @@ def test_backend_responses_websocket_trusted_capability_routes_before_first_acco
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_api_module, "validate_required_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(
         proxy_module.ProxyService,
@@ -11658,6 +12007,7 @@ def test_direct_responses_websocket_ambiguous_or_misplaced_capability_carriers_f
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_api_module, "validate_required_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(
         proxy_module.ProxyService,
@@ -12365,6 +12715,7 @@ def test_backend_responses_websocket_trusted_capability_pending_conflict_keeps_o
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_api_module, "validate_required_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(
         proxy_module.ProxyService,

@@ -287,6 +287,7 @@ class Settings(BaseSettings):
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     live_usage_ingestion_enabled: bool = True
+    rate_limit_reset_credits_refresh_enabled: bool = True
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     warmup_model: str = "gpt-5.4-mini"
@@ -306,6 +307,39 @@ class Settings(BaseSettings):
         le=30.0,
     )
     http_responses_session_bridge_gateway_safe_mode: bool = False
+    # Attach the durable operation identity to response.create client metadata.
+    # The upstream must explicitly support/deduplicate this value before any
+    # automatic replay is enabled; metadata-only propagation is safe by default.
+    http_responses_session_bridge_operation_ledger_enabled: bool = True
+    # Bound durable replay storage per operation so a long response cannot
+    # exhaust the database. An incomplete spool is never replayed.
+    http_responses_session_bridge_operation_event_spool_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    http_responses_session_bridge_operation_event_spool_batch_size: int = Field(default=32, gt=0, le=256)
+    http_responses_session_bridge_operation_event_spool_flush_interval_seconds: float = Field(
+        default=0.1,
+        ge=0.01,
+        le=5.0,
+    )
+    http_responses_session_bridge_operation_event_spool_max_pending_events: int = Field(default=2048, gt=0)
+    http_responses_session_bridge_operation_event_spool_max_pending_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        gt=0,
+    )
+    # Keep durable transcript material short-lived by default. The transcript
+    # is sensitive prompt/output data and is only a recovery aid.
+    http_responses_session_bridge_operation_spool_retention_seconds: float = Field(
+        default=7 * 24 * 60 * 60,
+        gt=0,
+    )
+    # Recovery-first mode can either ask the client to drop an ambiguous anchor
+    # or let the bridge retry that anchored request once on a fresh upstream
+    # socket. Both are at-least-once strategies; fail-closed remains default.
+    http_responses_session_bridge_ambiguous_continuation_recovery_mode: Literal[
+        "fail_closed",
+        "client_full_history_once",
+        "server_anchored_replay_once",
+        "server_indefinite_recovery",
+    ] = "fail_closed"
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
@@ -325,6 +359,8 @@ class Settings(BaseSettings):
     usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
     automations_scheduler_enabled: bool = True
+    telemetry_enabled: bool | None = None
+    telemetry_endpoint: str = "https://telemetry.tokmaxxing.com"
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     # Startup cross-replica encryption-key consistency check against the shared
     # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an

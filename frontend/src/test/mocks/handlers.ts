@@ -37,6 +37,8 @@ import {
   createQuotaPlannerSettings,
   createQuotaPlannerWarmupActionResponse,
   createRequestLogFilterOptions,
+  createTelemetryConsent,
+  createTelemetrySnapshotEnvelope,
   createUpstreamProxyAdmin,
   createRequestLogsResponse,
   type DashboardAuthSession,
@@ -46,6 +48,7 @@ import {
   type QuotaPlannerForecast,
   type QuotaPlannerSettings,
   type RequestLogEntry,
+  type TelemetryConsent,
   type UpstreamProxyAdmin,
 } from "@/test/mocks/factories";
 
@@ -93,6 +96,10 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
 
 const AccountAliasPayloadSchema = z.object({
   alias: z.string().max(255).nullable(),
+});
+
+const TelemetryConsentPayloadSchema = z.object({
+  enabled: z.boolean(),
 });
 
 const AccountRoutingPolicyPayloadSchema = z.object({
@@ -248,6 +255,7 @@ type MockState = {
   conversationDetails: ConversationDetails[];
   authSession: DashboardAuthSession;
   settings: DashboardSettings;
+  telemetryConsent: TelemetryConsent;
   quotaPlannerSettings: QuotaPlannerSettings;
   quotaPlannerDecisions: QuotaPlannerDecision[];
   upstreamProxyAdmin: UpstreamProxyAdmin;
@@ -340,6 +348,7 @@ function createInitialState(): MockState {
     ],
     authSession: createDashboardAuthSession(),
     settings: createDashboardSettings(),
+    telemetryConsent: createTelemetryConsent(),
     quotaPlannerSettings: createQuotaPlannerSettings(),
     quotaPlannerDecisions: [createQuotaPlannerDecision()],
     upstreamProxyAdmin: createUpstreamProxyAdmin(),
@@ -1198,7 +1207,31 @@ export const handlers = [
     return HttpResponse.json(state.settings);
   }),
 
+  http.get("/api/settings/telemetry", ({ request }) => {
+    // include_preview=true is the on-demand path: the envelope is attached
+    // regardless of consent state.
+    if (new URL(request.url).searchParams.get("include_preview") === "true") {
+      return HttpResponse.json({
+        ...state.telemetryConsent,
+        preview: createTelemetrySnapshotEnvelope(),
+      });
+    }
+    return HttpResponse.json(state.telemetryConsent);
+  }),
 
+  http.put("/api/settings/telemetry", async ({ request }) => {
+    const payload = await parseJsonBody(request, TelemetryConsentPayloadSchema);
+    if (!payload) {
+      return HttpResponse.json(state.telemetryConsent);
+    }
+    state.telemetryConsent = createTelemetryConsent({
+      state: payload.enabled ? "enabled" : "disabled",
+      source: "persisted",
+      active: payload.enabled,
+      preview: null,
+    });
+    return HttpResponse.json(state.telemetryConsent);
+  }),
 
   http.get("/api/settings/upstream-proxy", () => {
     return HttpResponse.json(state.upstreamProxyAdmin);

@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   DashboardSettingsSchema,
   SettingsUpdateRequestSchema,
+  TelemetryConsentSchema,
+  TelemetrySnapshotEnvelopeSchema,
   UpstreamProxyAdminSchema,
 } from "@/features/settings/schemas";
+import { createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 
 describe("DashboardSettingsSchema", () => {
   it("parses settings payload", () => {
@@ -455,6 +458,93 @@ describe("UpstreamProxyAdminSchema", () => {
     expect(parsed.endpoints[0]?.host).toBe("proxy.test");
     expect(parsed.pools[0]?.endpointIds).toEqual(["ep_1"]);
     expect(parsed.bindings[0]?.accountId).toBe("acc_1");
+  });
+});
+
+describe("TelemetrySnapshotEnvelopeSchema", () => {
+  it("parses the exact transmitted envelope", () => {
+    const parsed = TelemetrySnapshotEnvelopeSchema.parse(createTelemetrySnapshotEnvelope());
+
+    expect(parsed.instance_id).toBe("00000000-0000-4000-8000-000000000000");
+    expect(parsed.timestamp).toBe("2026-08-06T00:00:00Z");
+    expect(parsed.metrics.schema_version).toBe(1);
+    expect(parsed.metrics.deploy.method).toBe("docker");
+    expect(parsed.metrics.usage_7d.request_kinds.unknown).toBe(0);
+    expect(parsed.metrics.usage_7d.models[0]?.reasoning).toEqual({ high: 0.5, medium: 0.5 });
+    expect(parsed.metrics.features.dashboard_auth).toBe(true);
+  });
+
+  it("rejects unknown extra fields at every object layer so backend drift fails parsing", () => {
+    // One path per strict object in the envelope tree; loosening any single
+    // layer back to a non-strict schema fails this test.
+    const layers: string[][] = [
+      [],
+      ["metrics"],
+      ["metrics", "deploy"],
+      ["metrics", "accounts"],
+      ["metrics", "accounts", "plan_mix"],
+      ["metrics", "usage_7d"],
+      ["metrics", "usage_7d", "request_kinds"],
+      ["metrics", "usage_7d", "transport_mix"],
+      ["metrics", "usage_7d", "service_tier_mix"],
+      ["metrics", "usage_7d", "models", "0"],
+      ["metrics", "features"],
+    ];
+    for (const path of layers) {
+      const envelope = structuredClone(createTelemetrySnapshotEnvelope());
+      let target = envelope as unknown as Record<string, unknown>;
+      for (const key of path) {
+        target = target[key] as Record<string, unknown>;
+      }
+      target.drifted_field = true;
+      expect(
+        TelemetrySnapshotEnvelopeSchema.safeParse(envelope).success,
+        `extra field at ${path.join(".") || "envelope root"} must fail parsing`,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects missing required fields so backend drift fails parsing", () => {
+    const missingTimestamp = structuredClone(createTelemetrySnapshotEnvelope()) as Record<
+      string,
+      unknown
+    >;
+    delete missingTimestamp.timestamp;
+    expect(TelemetrySnapshotEnvelopeSchema.safeParse(missingTimestamp).success).toBe(false);
+
+    const missingNested = structuredClone(createTelemetrySnapshotEnvelope());
+    delete (missingNested.metrics.usage_7d.request_kinds as Record<string, unknown>).unknown;
+    expect(TelemetrySnapshotEnvelopeSchema.safeParse(missingNested).success).toBe(false);
+  });
+});
+
+describe("TelemetryConsentSchema", () => {
+  it("parses consent with and without a preview envelope", () => {
+    const withPreview = TelemetryConsentSchema.parse({
+      state: "undecided",
+      source: "default",
+      active: true,
+      preview: createTelemetrySnapshotEnvelope(),
+    });
+    expect(withPreview.preview?.metrics.schema_version).toBe(1);
+
+    const withoutPreview = TelemetryConsentSchema.parse({
+      state: "enabled",
+      source: "persisted",
+      active: true,
+      preview: null,
+    });
+    expect(withoutPreview.preview).toBeNull();
+  });
+
+  it("rejects consent responses that omit the preview field", () => {
+    expect(
+      TelemetryConsentSchema.safeParse({
+        state: "enabled",
+        source: "persisted",
+        active: true,
+      }).success,
+    ).toBe(false);
   });
 });
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -821,3 +823,105 @@ async def test_run_loop_stops_cleanly_during_startup_delay(monkeypatch: pytest.M
     await scheduler.stop()
 
     assert refreshed is False
+
+
+def _patch_dashboard_settings(monkeypatch: pytest.MonkeyPatch, *, auto_redeem: bool) -> None:
+    class _FakeSession:
+        def expunge_all(self) -> None:
+            return None
+
+    @asynccontextmanager
+    async def _fake_background_session():
+        yield _FakeSession()
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
+    monkeypatch.setattr(
+        scheduler_module,
+        "SettingsRepository",
+        lambda session: _FakeSettingsRepository(auto_redeem_reset_credits_before_expiry=auto_redeem),
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduler_start_is_noop_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_dashboard_settings(monkeypatch, auto_redeem=False)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=False)
+
+    await scheduler.start()
+
+    assert scheduler._task is None
+
+
+@pytest.mark.asyncio
+async def test_disabled_start_warns_on_persisted_auto_redeem_conflict(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch_dashboard_settings(monkeypatch, auto_redeem=True)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=False)
+
+    with caplog.at_level(logging.WARNING):
+        await scheduler.start()
+
+    assert scheduler._task is None
+    conflict_warnings = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "auto_redeem_reset_credits_before_expiry" in record.getMessage()
+        and "rate_limit_reset_credits_refresh_enabled" in record.getMessage()
+    ]
+    assert conflict_warnings
+
+
+@pytest.mark.asyncio
+async def test_disabled_start_stays_silent_without_auto_redeem_opt_in(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch_dashboard_settings(monkeypatch, auto_redeem=False)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=False)
+
+    with caplog.at_level(logging.WARNING):
+        await scheduler.start()
+
+    assert scheduler._task is None
+    assert not [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and "auto_redeem_reset_credits_before_expiry" in record.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_start_creates_task_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = asyncio.Event()
+
+    async def _fake_run_loop(self: RateLimitResetCreditsRefreshScheduler) -> None:
+        started.set()
+        await self._stop.wait()
+
+    monkeypatch.setattr(RateLimitResetCreditsRefreshScheduler, "_run_loop", _fake_run_loop)
+    scheduler = RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=True)
+
+    await scheduler.start()
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    assert scheduler._task is not None
+    assert not scheduler._task.done()
+    await scheduler.stop()
+    assert scheduler._task is None
+
+
+def test_build_scheduler_wires_enabled_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            rate_limit_reset_credits_refresh_enabled=False,
+            rate_limit_reset_credits_refresh_interval_seconds=123,
+        ),
+    )
+
+    scheduler = scheduler_module.build_rate_limit_reset_credits_scheduler()
+
+    assert scheduler.enabled is False
+    assert scheduler.interval_seconds == 123

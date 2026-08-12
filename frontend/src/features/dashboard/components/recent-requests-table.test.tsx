@@ -281,8 +281,41 @@ describe("RecentRequestsTable", () => {
     expect(within(row as HTMLElement).queryByText("250.0")).not.toBeInTheDocument();
   });
 
-  it("renders empty state", () => {
+  it("renders first-run empty copy when no filters are applied", () => {
     render(<RecentRequestsTable {...PAGINATION_PROPS} total={0} accounts={[]} requests={[]} />);
+    expect(screen.getByText("No requests yet")).toBeInTheDocument();
+    expect(
+      screen.getByText("Requests will appear here after clients start using the proxy."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No request logs match the current filters.")).not.toBeInTheDocument();
+  });
+
+  it("renders filter-empty copy when a later page has no rows but logs exist", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={40}
+        offset={25}
+        accounts={[]}
+        requests={[]}
+      />,
+    );
+    expect(screen.getByText("No matching requests")).toBeInTheDocument();
+    expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
+    expect(screen.queryByText("No requests yet")).not.toBeInTheDocument();
+  });
+
+  it("renders filter-empty copy when filters are applied", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={0}
+        accounts={[]}
+        requests={[]}
+        filtersApplied
+      />,
+    );
+    expect(screen.getByText("No matching requests")).toBeInTheDocument();
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 

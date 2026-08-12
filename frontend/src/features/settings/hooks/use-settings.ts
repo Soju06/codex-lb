@@ -8,14 +8,17 @@ import {
   createUpstreamProxyEndpoint,
   createUpstreamProxyPool,
   getSettings,
+  getTelemetryConsent,
   getUpstreamProxyAdmin,
   putAccountProxyBinding,
   testUpstreamProxyEndpoint,
   updateSettings,
+  updateTelemetryConsent,
 } from "@/features/settings/api";
 import type { SettingsUpdateRequest } from "@/features/settings/schemas";
 import type {
   AccountProxyBindingRequest,
+  TelemetryConsentUpdateRequest,
   UpstreamProxyEndpointCreateRequest,
   UpstreamProxyPoolCreateRequest,
   UpstreamProxyPoolMemberRequest,
@@ -51,6 +54,49 @@ export function useSettings() {
   return {
     settingsQuery,
     updateSettingsMutation,
+  };
+}
+
+export function useTelemetryConsent(options?: { enabled?: boolean }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
+    queryKey: ["settings", "telemetry"],
+    queryFn: () => getTelemetryConsent(),
+    enabled: options?.enabled ?? true,
+  });
+  const telemetryConsentQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
+
+  const updateTelemetryConsentMutation = useMutation({
+    mutationFn: (payload: TelemetryConsentUpdateRequest) => updateTelemetryConsent(payload),
+    onSuccess: () => {
+      toast.success(t("settings.telemetry.toasts.saved"));
+      void queryClient.invalidateQueries({ queryKey: ["settings", "telemetry"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("settings.telemetry.toasts.saveFailed"));
+    },
+  });
+
+  return {
+    telemetryConsentQuery,
+    updateTelemetryConsentMutation,
+  };
+}
+
+// On-demand snapshot preview for the settings "View collected data" dialog.
+// The snapshot build is expensive, so the query stays idle until `enabled`
+// flips true (the dialog opens); consent mutations invalidate it via the
+// ["settings", "telemetry"] key prefix.
+export function useTelemetryPreview(enabled: boolean) {
+  const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
+    queryKey: ["settings", "telemetry", "preview"],
+    queryFn: () => getTelemetryConsent({ includePreview: true }),
+    enabled,
+  });
+  return {
+    telemetryPreviewQuery: { data, error, isFetching, isLoading, isPending, isSuccess, refetch },
   };
 }
 

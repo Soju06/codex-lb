@@ -19,6 +19,7 @@ from app.core.auth.dashboard_access import (
     guest_principal,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
+from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -63,7 +64,11 @@ async def validate_proxy_api_key(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
 ) -> ApiKeyData | None:
+    """A required-capability header authenticates even when global proxy API-key auth is disabled."""
+
     authorization = None if credentials is None else f"Bearer {credentials.credentials}"
+    if request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
+        return await validate_required_proxy_api_key_authorization(authorization)
     return await validate_proxy_api_key_authorization(authorization, request=request)
 
 
@@ -364,6 +369,14 @@ async def validate_codex_usage_identity(request: Request) -> ApiKeyData | None:
     request.state.codex_usage_identity_route = route
     request.state.codex_usage_identity_payload = usage_payload
     return None
+
+
+async def validate_codex_provider_usage_identity(request: Request) -> ApiKeyData | None:
+    """Bind provider capability intent to a proxy API-key principal before usage I/O."""
+
+    if request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
+        return await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))
+    return await validate_codex_usage_identity(request)
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

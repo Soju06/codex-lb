@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
+from hashlib import sha256
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
@@ -20,6 +22,7 @@ _HTTP_BRIDGE_SESSION_AFFINITY_HEADERS = frozenset(
         "x-codex-turn-state",
     }
 )
+logger = logging.getLogger("app.modules.proxy.continuity")
 
 
 def make_http_bridge_account_neutral_replay_key(nonce: str) -> tuple[str, str]:
@@ -63,6 +66,15 @@ def resolve_required_account_id(*owners: tuple[str, str | None]) -> str | None:
         # side would silently abandon the other, so conflicts are never ordered
         # by caller precedence or softened into ordinary affinity fallback.
         sources = ", ".join(source for source, _account_id in resolved)
+        owner_hashes = ", ".join(
+            f"{source}={sha256(account_id.encode()).hexdigest()[:12]}" for source, account_id in resolved
+        )
+        logger.warning(
+            "continuity_owner_conflict sources=%s conflicting_sources=%s owner_hashes=%s",
+            sources,
+            ", ".join(conflicting_sources),
+            owner_hashes,
+        )
         raise ProxyResponseError(
             502,
             openai_error(

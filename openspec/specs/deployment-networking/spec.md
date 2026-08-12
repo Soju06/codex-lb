@@ -98,3 +98,79 @@ The default responses-ingress sticky mechanism MUST NOT rely on `nginx.ingress.k
 
 - **WHEN** the operator sets a non-empty `ingress.responses.nginx.configurationSnippet`
 - **THEN** the `configuration-snippet` annotation renders with the configured content
+
+### Requirement: Helm Gateway API routes support rule-level matches and filters
+
+The Helm chart MUST allow operators to configure an ordered list of HTTPRoute
+rules containing Gateway API `matches` and `filters`. The chart MUST attach the
+codex-lb Service backend to every configured rule. The feature MUST be optional
+and preserve the existing backend-only catch-all rule when no rules are set.
+
+#### Scenario: Paths use different Gateway filters
+
+- **GIVEN** `gatewayApi.enabled=true`
+- **AND** `gatewayApi.rules` contains an unfiltered API rule matching `/v1`,
+  `/backend-api/codex`, `/backend-api/wham`, `/backend-api/transcribe`,
+  `/backend-api/files`, and `/api/codex`, followed by a filtered `/` catch-all
+  rule
+- **WHEN** the chart renders its HTTPRoute
+- **THEN** both rules retain their configured matches in order
+- **AND** only the catch-all rule contains the configured filter
+- **AND** both rules target the chart-managed codex-lb Service and port
+- **AND** WHAM identity discovery, file-upload, and Codex usage/reset-credit
+  paths retain their own caller-authentication contracts instead of traversing
+  the dashboard filter
+
+#### Scenario: Empty rule configuration preserves the default route
+
+- **GIVEN** `gatewayApi.enabled=true`
+- **AND** `gatewayApi.rules` is empty
+- **WHEN** the chart renders its HTTPRoute
+- **THEN** it contains one backend-only rule targeting the chart-managed
+  codex-lb Service and port
+
+### Requirement: Helm chart can create an application-specific Gateway
+
+The Helm chart MUST allow operators to render a Gateway API `Gateway`
+dedicated to the release in the release namespace instead of attaching to a
+pre-existing shared Gateway. The mode MUST be optional and default off,
+preserving the existing `gatewayApi.parentRefs` attachment. When enabled, the
+chart MUST require an operator-supplied GatewayClass name, MUST default the
+Gateway to a single HTTP listener on port 80 while honoring operator-defined
+listeners verbatim, and MUST attach the chart-managed HTTPRoute to the
+chart-managed Gateway while ignoring `gatewayApi.parentRefs`.
+
+#### Scenario: Chart-managed Gateway with default listener
+
+- **GIVEN** `gatewayApi.enabled=true`
+- **AND** `gatewayApi.gateway.create=true` with a GatewayClass name
+- **WHEN** the chart renders its Gateway API resources
+- **THEN** a Gateway named after the release renders in the release namespace
+  with the configured GatewayClass and one HTTP listener on port 80
+- **AND** the HTTPRoute's only parent reference is the chart-managed Gateway
+
+#### Scenario: Operator-defined listeners
+
+- **GIVEN** `gatewayApi.gateway.create=true` with a GatewayClass name
+- **AND** `gatewayApi.gateway.listeners` contains an HTTPS listener with TLS
+  configuration
+- **WHEN** the chart renders the Gateway
+- **THEN** the configured listeners replace the default HTTP listener verbatim
+
+#### Scenario: Missing GatewayClass name fails rendering
+
+- **GIVEN** `gatewayApi.gateway.create=true`
+- **AND** `gatewayApi.gateway.gatewayClassName` is empty
+- **WHEN** the chart renders
+- **THEN** rendering fails with an error naming
+  `gatewayApi.gateway.gatewayClassName`
+
+#### Scenario: Default configuration keeps existing Gateway attachment
+
+- **GIVEN** `gatewayApi.enabled=true`
+- **AND** `gatewayApi.gateway.create` is unset
+- **WHEN** the chart renders its Gateway API resources
+- **THEN** no Gateway resource renders
+- **AND** the HTTPRoute attaches to the operator-supplied
+  `gatewayApi.parentRefs`
+

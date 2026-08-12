@@ -1,6 +1,7 @@
 import { Suspense, lazy } from "react";
 import { Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useLocation } from "react-router-dom";
 
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
@@ -10,6 +11,7 @@ import { FirewallSection } from "@/features/firewall/components/firewall-section
 import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
+import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
 import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
@@ -20,6 +22,7 @@ import { ResetCreditSettings } from "@/features/settings/components/reset-credit
 import { RoutingSettings } from "@/features/settings/components/routing-settings";
 import { SessionSettings } from "@/features/settings/components/session-settings";
 import { SettingsSkeleton } from "@/features/settings/components/settings-skeleton";
+import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
 import { UpstreamProxySettings } from "@/features/settings/components/upstream-proxy-settings";
 import { StickySessionsSection } from "@/features/sticky-sessions/components/sticky-sessions-section";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
@@ -31,8 +34,17 @@ const TotpSettings = lazy(() =>
   import("@/features/settings/components/totp-settings").then((m) => ({ default: m.TotpSettings })),
 );
 
+const FIREWALL_LAYOUT_QUERY_KEYS = [
+  ["accounts", "list"],
+  ["settings", "upstream-proxy"],
+  ["model-sources", "list"],
+] as const;
+
 export function SettingsPage() {
   const { t } = useTranslation();
+  const location = useLocation();
+  const expandAdvanced = shouldExpandAdvancedSettings(location.search, location.hash);
+  const advancedScrollToId = location.hash.replace(/^#/, "") || undefined;
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const { accountsQuery } = useAccounts();
   const {
@@ -136,7 +148,14 @@ export function SettingsPage() {
               }
             />
 
-            <AdvancedSettingsGroup>
+            <TelemetrySettings disabled={controlsDisabled} />
+
+            <AdvancedSettingsGroup
+              key={expandAdvanced ? `open:${advancedScrollToId ?? ""}` : "closed"}
+              defaultOpen={expandAdvanced}
+              scrollToId={advancedScrollToId}
+              waitForQueryKeys={FIREWALL_LAYOUT_QUERY_KEYS}
+            >
               <RoutingSettings
                 key={[
                   settings.openaiCacheAffinityMaxAgeSeconds,

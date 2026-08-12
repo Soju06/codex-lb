@@ -491,7 +491,6 @@ def test_hard_continuity_operation_fence_requires_server_recovery_mode(
         http_bridge_request_submit_module._http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
         is False
     )
-
     monkeypatch.setattr(
         proxy_service,
         "get_settings",
@@ -521,6 +520,26 @@ def test_hard_continuity_operation_fence_requires_server_recovery_mode(
         http_bridge_request_submit_module._http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
         is False
     )
+
+
+def test_http_bridge_durable_recovery_requires_predecessor_anchor() -> None:
+    fresh_turn = proxy_service._WebSocketRequestState(
+        request_id="req-fresh-recovery-proof",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        operation_registered=True,
+        operation_id="op-fresh",
+    )
+    anchored_turn = replace(
+        fresh_turn,
+        operation_parent_response_id="resp-parent",
+    )
+
+    assert http_bridge_streaming_module._http_bridge_durable_recovery_predecessor_proven(fresh_turn) is False
+    assert http_bridge_streaming_module._http_bridge_durable_recovery_predecessor_proven(anchored_turn) is True
 
 
 @pytest.mark.asyncio

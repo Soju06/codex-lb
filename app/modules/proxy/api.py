@@ -8109,22 +8109,10 @@ def _http_bridge_recovery_request_eligible(
     settings = proxy_service_module.get_settings()
     if not getattr(settings, "http_responses_session_bridge_operation_ledger_enabled", True):
         return False
-    # A turn-state header identifies the durable bridge lane, but it is not
-    # itself proof that a predecessor response was accepted upstream. The
-    # indefinite server-owned recovery loop may resend an ambiguous
-    # response.create, so require the explicit previous-response anchor there;
-    # otherwise a fresh first turn could be replayed indefinitely.
-    if (
-        payload.previous_response_id is None
-        and turn_state_anchor is not None
-        and getattr(
-            settings,
-            "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
-            "fail_closed",
-        )
-        == "server_indefinite_recovery"
-    ):
-        return False
+    # Turn-state-only requests are admitted to the recovery-capable stream so
+    # the submit path can first prove a durable predecessor by advancing its
+    # operation anchor. The streaming layer marks an exception recovery-safe
+    # only after that proof; fresh first turns remain fail-closed there.
     if proxy_service_module._responses_request_contains_input_image(
         payload
     ) or proxy_service_module._responses_request_uses_image_generation(payload):

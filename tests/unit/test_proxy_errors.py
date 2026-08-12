@@ -44,7 +44,7 @@ def test_http_bridge_recovery_eligibility_accepts_turn_state_anchor_without_prev
     )
 
 
-def test_http_bridge_indefinite_recovery_requires_explicit_predecessor(
+def test_http_bridge_indefinite_recovery_defers_predecessor_proof_to_submit_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -69,7 +69,7 @@ def test_http_bridge_indefinite_recovery_requires_explicit_predecessor(
             bridge_active=True,
             headers={"x-codex-turn-state": "turn-1"},
         )
-        is False
+        is True
     )
     assert (
         proxy_api._http_bridge_recovery_request_eligible(

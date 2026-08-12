@@ -246,6 +246,11 @@ def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketR
     )
 
 
+def _http_bridge_durable_recovery_predecessor_proven(request_state: _WebSocketRequestState) -> bool:
+    """Return whether the operation has a durable predecessor anchor."""
+    return request_state.previous_response_id is not None or request_state.operation_parent_response_id is not None
+
+
 class _VerifiedDurableFullResend:
     """Immutable proof that one payload contains a durable turn's complete context."""
 
@@ -2871,6 +2876,7 @@ class _HTTPBridgeStreamingMixin:
                 and request_state.operation_id is not None
                 and session.durable_session_id is not None
                 and session.durable_owner_epoch is not None
+                and _http_bridge_durable_recovery_predecessor_proven(request_state)
             ):
                 # The API-level recovery loop must only run when this request
                 # has an actual durable operation fence. Settings alone are

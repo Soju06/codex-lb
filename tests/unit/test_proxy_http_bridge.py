@@ -4594,11 +4594,17 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
     register_previous = AsyncMock(return_value=False)
     finalize = AsyncMock()
     operation_updates = AsyncMock()
+    persist_operation_event = AsyncMock()
     close_session = AsyncMock()
     monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_previous)
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
     monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
     monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", operation_updates)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_persist_http_bridge_operation_event",
+        persist_operation_event,
+    )
 
     await service._process_http_bridge_upstream_text(
         session,
@@ -4637,6 +4643,9 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
     operation_updates.assert_awaited_once()
     assert operation_updates.await_args is not None
     assert operation_updates.await_args.kwargs["state"] == "acknowledged"
+    persist_operation_event.assert_awaited_once()
+    assert persist_operation_event.await_args is not None
+    assert persist_operation_event.await_args.kwargs["terminal_state"] == "acknowledged"
 
     assert await service._retire_http_bridge_after_drain_if_ready(session) is True
     close_session.assert_awaited_once_with(session)

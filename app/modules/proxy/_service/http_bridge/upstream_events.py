@@ -2635,6 +2635,13 @@ class _HTTPBridgeUpstreamEventsMixin:
             if matched_request_state is not None and not suppress_downstream_event
             else []
         )
+        matched_terminal_state = _http_bridge_operation_state_for_event(event_type)
+        if continuity_persistence_failed_after_ack and matched_request_state is not None:
+            # The upstream response was already accepted. The downstream
+            # failure only reports that its durable alias could not be
+            # persisted, so keep the operation fenced as acknowledged while
+            # retaining the failure SSE for the client.
+            matched_terminal_state = "acknowledged"
         if matched_request_state is not None and not suppress_downstream_event:
             for deferred_text in matched_deferred_texts:
                 await _persist_http_bridge_operation_event(
@@ -2651,7 +2658,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 matched_request_state,
                 event_block,
                 terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
-                terminal_state=_http_bridge_operation_state_for_event(event_type),
+                terminal_state=matched_terminal_state,
             )
         if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
             for deferred_text in matched_deferred_texts:
@@ -2684,7 +2691,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                     terminal_request_state,
                     event_block,
                     terminal=True,
-                    terminal_state=_http_bridge_operation_state_for_event(event_type),
+                    terminal_state=(
+                        "acknowledged"
+                        if continuity_persistence_failed_after_ack and terminal_request_state is matched_request_state
+                        else _http_bridge_operation_state_for_event(event_type)
+                    ),
                 )
             if terminal_event_queue is not None:
                 await terminal_event_queue.put(event_block)

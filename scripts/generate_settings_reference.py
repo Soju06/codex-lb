@@ -260,6 +260,8 @@ def render_settings_reference() -> str:
             "",
             "*Specs: [user-documentation]"
             "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation) · "
+            "[responses-api-compat]"
+            "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · "
             "[deployment-installation]"
             "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation)*",
             "",

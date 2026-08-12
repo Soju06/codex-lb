@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import socket
 import time
 from collections import deque
 from collections.abc import AsyncGenerator
@@ -37,6 +38,7 @@ from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge.helpers import (
+    _make_http_bridge_session_header_fallback_key,
     _release_http_bridge_unanchored_handoff,
     _reserve_http_bridge_unanchored_handoff,
 )
@@ -7061,7 +7063,11 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
 
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(async_client, monkeypatch):
-    _install_bridge_settings(monkeypatch, enabled=True)
+    # The app lifespan registers the process hostname in the durable bridge
+    # ring before this test installs its settings. Keep the test on that same
+    # instance so the startup heartbeat cannot make the reconnect path look
+    # like a cross-replica ownership conflict.
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(async_client, "acc_http_bridge_reconnect", "http-bridge-reconnect@example.com")
     account = await _get_account(account_id)
     first_upstream = _ClosingBridgeUpstreamWebSocket()
@@ -7137,7 +7143,10 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         "model": "gpt-5.1",
         "instructions": "Return exactly OK.",
         "input": "hello",
-        "prompt_cache_key": "http-bridge-reconnect-thread-1",
+        # Scope the soft-affinity key to this test's account so a parallel or
+        # ordered integration run cannot inherit another instance's durable
+        # owner and turn the reconnect assertion into a 409 race.
+        "prompt_cache_key": f"http-bridge-reconnect-thread-{account_id}",
     }
     first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
     second = await asyncio.wait_for(
@@ -12661,6 +12670,89 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_idle_retirement_does_not_open_retry_circuit_on_next_failure(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_idle_retirement_circuit",
+        "backend-idle-retirement-circuit@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _FakeBridgeUpstreamWebSocket("resp_idle_retirement_circuit")
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    session_id = "backend-idle-retirement-circuit-session"
+    prompt_cache_key = "backend-idle-retirement-circuit-thread"
+    headers = {"session_id": session_id}
+    bridge_key = _make_http_bridge_session_header_fallback_key(
+        headers=headers,
+        api_key=None,
+        explicit_prompt_cache_key=prompt_cache_key,
+    )
+    assert bridge_key is not None
+    service = get_proxy_service_for_app(app_instance)
+
+    # Reproduce the live ordering without waiting for production-scale
+    # watchdogs: an idle no-pending retirement, then one genuine pre-response
+    # request failure on the same hard key. Only the latter may be a strike.
+    idle_session = _make_dummy_bridge_session(bridge_key)
+    await service._retire_stale_pending_http_bridge_session(
+        idle_session,
+        detail="stream_incomplete",
+        response_events_seen=0,
+    )
+    failed_request_session = _make_dummy_bridge_session(bridge_key)
+    failures = await service._record_http_bridge_retry_circuit_failure(
+        failed_request_session,
+        detail="missing_response_created_timeout",
+    )
+    assert failures == 1
+    assert await service._http_bridge_precreated_retry_allowed(failed_request_session) is True
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue after one real timeout",
+            "prompt_cache_key": prompt_cache_key,
+            "stream": True,
+        },
+        headers=headers,
+    )
+
+    _assert_created_text_delta_completed(events)
+    assert events[-1]["response"]["id"] == "resp_idle_retirement_circuit_1"
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_precreated_request_releases_pending_lock_before_reconnect(app_instance, monkeypatch):
     service = get_proxy_service_for_app(app_instance)
     session = proxy_module._HTTPBridgeSession(
@@ -12906,7 +12998,12 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
     )
 
     assert second.status_code == 502
-    assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete", "bridge_owner_unreachable")
+    assert second.json()["error"]["code"] in (
+        "upstream_unavailable",
+        "stream_incomplete",
+        "bridge_owner_unreachable",
+        "bridge_continuity_persistence_failed",
+    )
     assert "previous_response_not_found" not in second.json()["error"].get("code", "")
     assert connect_count == 1
 
@@ -14418,7 +14515,7 @@ async def test_v1_responses_http_bridge_quarantines_reattach_that_streams_withou
     ``response.created`` must quarantine the session so the next request does
     not rebuild the identical anchored reattach and instead completes on the
     fresh no-anchor path."""
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_quarantine_silent",
@@ -14587,7 +14684,7 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
     hydration restored ``last_completed_response_id`` and the session-level
     injection re-added the same anchor and trimmed the prefix — rebuilding the
     wedge despite the ``fresh_reattach_anchor_skipped_quarantined`` log."""
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_quarantine_unsafe_suffix",

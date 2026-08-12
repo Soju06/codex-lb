@@ -9,7 +9,7 @@ from enum import StrEnum
 from hashlib import sha256
 from typing import Any
 
-from sqlalchemy import Row, and_, case, delete, func, or_, select, text, true, update
+from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
+    HttpBridgeOperationEvent,
+    HttpBridgeOperationRecord,
     HttpBridgeRecoveryAttemptRecord,
     HttpBridgeRecoveryAttemptState,
     HttpBridgeRetryCircuit,
@@ -38,6 +40,8 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
     "http_bridge_session_aliases",
     "http_bridge_retry_circuits",
     "http_bridge_recovery_attempts",
+    "http_bridge_operations",
+    "http_bridge_operation_events",
 )
 DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _PURGE_CLOSED_BATCH_SIZE = 500
@@ -76,6 +80,16 @@ def durable_bridge_api_key_scope(api_key_id: str | None) -> str:
 
 def durable_bridge_hash(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
+
+
+def durable_bridge_operation_fingerprint(*, api_key_scope: str, request_text: str) -> str:
+    """Hash the logical turn together with its authorization namespace."""
+    return durable_bridge_hash(f"{api_key_scope}:{request_text}")
+
+
+def durable_bridge_operation_id(session_id: str, request_fingerprint: str) -> str:
+    """Derive a stable, non-secret operation key for a continuity-bound turn."""
+    return f"op_{durable_bridge_hash(f'{session_id}:{request_fingerprint}')[:64]}"
 
 
 def _encode_pending_tool_calls(response_id: str, value: Mapping[str, str] | None) -> str | None:
@@ -154,6 +168,37 @@ class DurableBridgeRecoveryAttemptSnapshot:
     replay_safe: bool
     state: HttpBridgeRecoveryAttemptState
     response_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeOperationSnapshot:
+    operation_id: str
+    session_id: str
+    request_fingerprint: str
+    account_id: str | None
+    model: str | None
+    parent_response_id: str | None
+    state: str
+    response_id: str | None
+    recovery_dispatch_count: int = 0
+    request_text: str | None = None
+    event_spool_complete: bool = True
+    created: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeTranscriptTurn:
+    operation: DurableBridgeOperationSnapshot
+    events: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeOperationEventInput:
+    operation_id: str
+    session_id: str
+    instance_id: str
+    owner_epoch: int
+    event_text: str
 
 
 class DurableBridgeRepository:
@@ -998,6 +1043,907 @@ class DurableBridgeRepository:
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
 
+    async def rollback_recovery_attempt_before_dispatch(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+    ) -> bool:
+        """Delete an UNKNOWN checkpoint proven not to have reached upstream."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            result = await self._session.execute(
+                delete(HttpBridgeRecoveryAttemptRecord).where(
+                    HttpBridgeRecoveryAttemptRecord.session_id == session_id,
+                    HttpBridgeRecoveryAttemptRecord.request_fingerprint == request_fingerprint,
+                    HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.UNKNOWN,
+                )
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
+    async def record_operation(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        account_id: str | None,
+        model: str | None,
+        parent_response_id: str | None,
+        api_key_scope: str | None = None,
+        request_text: str | None = None,
+        recovery_attempt_session_id: str | None = None,
+        recovery_attempt_owner_epoch: int | None = None,
+        recovery_attempt_fingerprint: str | None = None,
+        recovery_attempt_consumed: bool = False,
+    ) -> DurableBridgeOperationSnapshot | None:
+        """Create a fenced operation identity, or return the existing one."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return None
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(HttpBridgeOperationRecord.operation_id == operation_id)
+                .with_for_update()
+            )
+            if operation is None:
+                fingerprint_statement = select(HttpBridgeOperationRecord).where(
+                    HttpBridgeOperationRecord.request_fingerprint == request_fingerprint
+                )
+                if api_key_scope is not None:
+                    fingerprint_statement = fingerprint_statement.join(
+                        HttpBridgeSessionRecord,
+                        HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                    ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+                operation = await self._session.scalar(fingerprint_statement.with_for_update())
+            if operation is not None:
+                if recovery_attempt_consumed:
+                    # A REPLAYED recovery checkpoint is immutable. Return the
+                    # existing row for safe transcript replay or fail-closed
+                    # handling; never rebind a failed row and clear its spool.
+                    snapshot = _to_operation_snapshot(operation)
+                    await self._session.rollback()
+                    return snapshot
+                rebound = False
+                handoff_allowed = True
+                if operation.session_id != session_id and operation.state not in {"completed", "incomplete"}:
+                    # A global fingerprint can outlive the durable session
+                    # that first recorded it. Do not steal an operation from
+                    # a still-live owner: its stream may still be dispatching
+                    # the turn, and rebinding would fence its writes while a
+                    # second owner sends a duplicate upstream request.
+                    previous_session = await self._session.scalar(
+                        select(HttpBridgeSessionRecord)
+                        .where(HttpBridgeSessionRecord.id == operation.session_id)
+                        .with_for_update()
+                    )
+                    now = utcnow()
+                    recovery_handoff_allowed = False
+                    if (
+                        previous_session is not None
+                        and recovery_attempt_session_id == operation.session_id
+                        and recovery_attempt_owner_epoch is not None
+                        and recovery_attempt_fingerprint is not None
+                        and previous_session.owner_instance_id == instance_id
+                        and previous_session.owner_epoch == recovery_attempt_owner_epoch
+                    ):
+                        # A fresh account-neutral replay has already fenced
+                        # the one-shot journal on the origin session. That
+                        # journal owner must remain fenced until settlement,
+                        # but the operation itself must move to the
+                        # replacement owner so its transcript and outcome
+                        # writes are accepted there. This is the only
+                        # cross-session handoff allowed while the origin
+                        # lease is still active.
+                        recovery_attempt = await self._session.scalar(
+                            select(HttpBridgeRecoveryAttemptRecord)
+                            .where(
+                                HttpBridgeRecoveryAttemptRecord.session_id == recovery_attempt_session_id,
+                                HttpBridgeRecoveryAttemptRecord.request_fingerprint == recovery_attempt_fingerprint,
+                                HttpBridgeRecoveryAttemptRecord.state == HttpBridgeRecoveryAttemptState.REPLAYED,
+                                HttpBridgeRecoveryAttemptRecord.response_id.is_(None),
+                            )
+                            .with_for_update()
+                        )
+                        recovery_handoff_allowed = recovery_attempt is not None
+                    handoff_allowed = (
+                        recovery_handoff_allowed
+                        or previous_session is None
+                        or not (
+                            previous_session.owner_instance_id is not None
+                            and previous_session.lease_expires_at is not None
+                            # PostgreSQL returns timestamptz values with an
+                            # attached UTC offset, while ``utcnow`` is a
+                            # naive UTC value used by the durable layer.
+                            # Normalize before comparing so cross-session
+                            # recovery remains database-backend agnostic.
+                            and to_utc_naive(previous_session.lease_expires_at) > now
+                        )
+                    )
+                    if handoff_allowed:
+                        # Transfer only nonterminal operations to the currently
+                        # fenced owner before the caller resets the attempt
+                        # spool; completed transcripts remain attached to
+                        # their original session for replay.
+                        operation.session_id = session_id
+                        operation.account_id = account_id
+                        operation.model = model
+                        operation.parent_response_id = parent_response_id
+                        if request_text is not None and operation.request_text is None:
+                            operation.request_text = request_text
+                        operation.updated_at = now
+                if operation.state == "failed" and handoff_allowed:
+                    # An explicit upstream failure is retryable. Rebind the
+                    # durable operation to the current owner while preserving
+                    # its global identity; concurrent reconnects will see the
+                    # submitted state and remain fenced.
+                    operation.session_id = session_id
+                    operation.account_id = account_id
+                    operation.model = model
+                    operation.parent_response_id = parent_response_id
+                    if request_text is not None and operation.request_text is None:
+                        operation.request_text = request_text
+                    operation.state = "submitted"
+                    operation.response_id = None
+                    # A failed attempt is a new replay attempt.  Remove the
+                    # previous attempt's SSE spool atomically so a later
+                    # successful retry cannot replay a stale response.failed
+                    # event before its fresh response.created sequence.
+                    await self._session.execute(
+                        delete(HttpBridgeOperationEvent).where(
+                            HttpBridgeOperationEvent.operation_id == operation.operation_id
+                        )
+                    )
+                    operation.event_bytes = 0
+                    operation.event_spool_complete = False
+                    operation.updated_at = utcnow()
+                    rebound = True
+                if request_text is not None and operation.request_text is None:
+                    operation.request_text = request_text
+                    operation.updated_at = utcnow()
+                snapshot = _to_operation_snapshot(operation, created=rebound)
+                await self._session.commit()
+                return snapshot
+            operation = HttpBridgeOperationRecord(
+                operation_id=operation_id,
+                session_id=session_id,
+                request_fingerprint=request_fingerprint,
+                account_id=account_id,
+                model=model,
+                parent_response_id=parent_response_id,
+                request_text=request_text,
+                state="submitted",
+                # A transcript is replayable only after the event batcher has
+                # drained and finalized it.  Set this explicitly rather than
+                # relying on a backend-specific schema default (notably the
+                # pre-existing SQLite default on migrated databases).
+                event_spool_complete=False,
+            )
+            self._session.add(operation)
+            try:
+                await self._session.commit()
+            except IntegrityError:
+                await self._session.rollback()
+                operation = await self._session.scalar(
+                    select(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.operation_id == operation_id)
+                )
+                if operation is None:
+                    # A reconnect may derive a different session-scoped
+                    # operation ID for the same anchored request. The global
+                    # fingerprint fence makes that race resolve to the
+                    # already-recorded operation instead of dispatching a
+                    # duplicate.
+                    fingerprint_statement = select(HttpBridgeOperationRecord).where(
+                        HttpBridgeOperationRecord.request_fingerprint == request_fingerprint
+                    )
+                    if api_key_scope is not None:
+                        fingerprint_statement = fingerprint_statement.join(
+                            HttpBridgeSessionRecord,
+                            HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                        ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+                    operation = await self._session.scalar(fingerprint_statement)
+                if operation is None:
+                    raise
+                return _to_operation_snapshot(operation)
+            await self._session.refresh(operation)
+            return _to_operation_snapshot(operation, created=True)
+
+    async def get_operation(self, *, operation_id: str) -> DurableBridgeOperationSnapshot | None:
+        operation = await self._session.scalar(
+            select(HttpBridgeOperationRecord).where(HttpBridgeOperationRecord.operation_id == operation_id)
+        )
+        return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def reset_operation_event_spool(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        """Start a fresh transcript for a server-owned ambiguous retry."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state.not_in(("completed", "incomplete")),
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            await self._session.execute(
+                delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id == operation_id)
+            )
+            operation.event_bytes = 0
+            operation.event_spool_complete = False
+            operation.updated_at = utcnow()
+            await self._session.commit()
+        return True
+
+    async def claim_unknown_operation_for_recovery(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        max_recovery_dispatches: int | None = None,
+    ) -> bool:
+        """Atomically claim an UNKNOWN operation for one recovery attempt.
+
+        Recovery admission can be reached by multiple reconnects at once. A
+        reset followed by a later state transition leaves a window where each
+        reconnect can observe UNKNOWN and submit the same operation. Keep the
+        owner fence, state transition, and transcript reset in one serialized
+        write so exactly one caller can move UNKNOWN back to SUBMITTED.
+        """
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state == "unknown",
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            if max_recovery_dispatches is not None and operation.recovery_dispatch_count >= max_recovery_dispatches:
+                await self._session.rollback()
+                return False
+            await self._session.execute(
+                delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id == operation_id)
+            )
+            operation.state = "submitted"
+            operation.response_id = None
+            operation.recovery_dispatch_count += 1
+            operation.event_bytes = 0
+            operation.event_spool_complete = False
+            operation.updated_at = utcnow()
+            await self._session.commit()
+        return True
+
+    async def mark_operation_unknown(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        restore_recovery_dispatch_claim: bool = False,
+    ) -> bool:
+        """Fence an ambiguously dispatched SUBMITTED operation as UNKNOWN.
+
+        The operation event reader can race the send-failure cleanup. Lock the
+        row before changing it and leave an already acknowledged or terminal
+        operation untouched; those states carry stronger evidence than the
+        transport exception and must never be downgraded to UNKNOWN.
+        """
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            if operation.state == "submitted":
+                operation.state = "unknown"
+                if restore_recovery_dispatch_claim and operation.recovery_dispatch_count > 0:
+                    operation.recovery_dispatch_count -= 1
+                operation.updated_at = utcnow()
+            elif (
+                restore_recovery_dispatch_claim
+                and operation.state == "unknown"
+                and operation.recovery_dispatch_count > 0
+            ):
+                # A concurrent cleanup may have fenced the row first. The
+                # caller still owns a proven pre-dispatch recovery claim, so
+                # refund exactly that claim while retaining UNKNOWN.
+                operation.recovery_dispatch_count -= 1
+                operation.updated_at = utcnow()
+            await self._session.commit()
+        return True
+
+    async def rollback_operation_before_dispatch(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        """Remove a newly-created operation that never reached upstream."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state == "submitted",
+                    HttpBridgeOperationRecord.response_id.is_(None),
+                    HttpBridgeOperationRecord.event_bytes == 0,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            has_events = await self._session.scalar(
+                select(HttpBridgeOperationEvent.event_id)
+                .where(HttpBridgeOperationEvent.operation_id == operation_id)
+                .limit(1)
+            )
+            if has_events is not None:
+                await self._session.rollback()
+                return False
+            await self._session.delete(operation)
+            await self._session.commit()
+        return True
+
+    async def get_operation_by_fingerprint(
+        self,
+        *,
+        request_fingerprint: str,
+        api_key_scope: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        statement = select(HttpBridgeOperationRecord).where(
+            HttpBridgeOperationRecord.request_fingerprint == request_fingerprint
+        )
+        if api_key_scope is not None:
+            statement = statement.join(
+                HttpBridgeSessionRecord,
+                HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+            ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+        operation = await self._session.scalar(statement)
+        return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def get_operation_events(self, *, operation_id: str) -> list[str]:
+        result = await self._session.execute(
+            select(HttpBridgeOperationEvent.event_text)
+            .where(HttpBridgeOperationEvent.operation_id == operation_id)
+            .order_by(HttpBridgeOperationEvent.sequence_number.asc())
+        )
+        return [str(value) for value in result.scalars().all()]
+
+    async def get_operation_by_response_id(self, *, response_id: str) -> DurableBridgeOperationSnapshot | None:
+        operation = await self._session.scalar(
+            select(HttpBridgeOperationRecord).where(
+                HttpBridgeOperationRecord.response_id == response_id,
+                HttpBridgeOperationRecord.state.in_(("completed", "incomplete")),
+            )
+        )
+        return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def get_replayable_transcript(
+        self,
+        *,
+        response_id: str,
+        max_turns: int = 128,
+        max_bytes: int = 8 * 1024 * 1024,
+    ) -> list[DurableBridgeTranscriptTurn] | None:
+        """Return a complete parent-response chain, newest turn last.
+
+        Missing request bodies, truncated event spools, or a broken parent
+        chain make the transcript ineligible for reconstruction.
+        """
+        turns: list[DurableBridgeTranscriptTurn] = []
+        visited: set[str] = set()
+        total_bytes = 0
+        current_response_id: str | None = response_id
+        while current_response_id is not None:
+            if current_response_id in visited or len(turns) >= max_turns:
+                return None
+            visited.add(current_response_id)
+            operation = await self.get_operation_by_response_id(response_id=current_response_id)
+            if operation is None or operation.request_text is None or not operation.event_spool_complete:
+                return None
+            events = await self.get_operation_events(operation_id=operation.operation_id)
+            if not events or not any(
+                "response.completed" in event or "response.incomplete" in event for event in events
+            ):
+                return None
+            turn_bytes = len(operation.request_text.encode("utf-8")) + sum(
+                len(event.encode("utf-8")) for event in events
+            )
+            total_bytes += turn_bytes
+            if total_bytes > max_bytes:
+                return None
+            turns.append(DurableBridgeTranscriptTurn(operation=operation, events=tuple(events)))
+            current_response_id = operation.parent_response_id
+        turns.reverse()
+        return turns
+
+    async def purge_operation_spool(self, *, cutoff: datetime, batch_size: int = 500) -> int:
+        """Delete eligible transcript material past retention.
+
+        Nonterminal rows are purgeable only after their owning session is
+        ownerless or its lease has expired. Recheck that predicate in the
+        delete transaction so an in-flight operation cannot lose its
+        duplicate-suppression ledger between selection and deletion.
+        """
+        terminal_states = ("completed", "incomplete", "failed")
+        # UNKNOWN is an ambiguous, still-live operation while its owner lease
+        # is active. Treat it like the other nonterminal states so retention
+        # cannot delete the duplicate-suppression fence during a long-running
+        # server-indefinite recovery attempt.
+        nonterminal_states = ("submitted", "acknowledged", "unknown")
+        stale_owner = or_(
+            HttpBridgeSessionRecord.owner_instance_id.is_(None),
+            HttpBridgeSessionRecord.lease_expires_at.is_(None),
+            HttpBridgeSessionRecord.lease_expires_at < utcnow(),
+        )
+        stale_nonterminal = and_(
+            HttpBridgeOperationRecord.state.in_(nonterminal_states),
+            exists(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                    stale_owner,
+                )
+                .correlate(HttpBridgeOperationRecord)
+            ),
+        )
+        purgeable = or_(HttpBridgeOperationRecord.state.in_(terminal_states), stale_nonterminal)
+        async with sqlite_writer_section():
+            selected = await self._session.execute(
+                select(HttpBridgeOperationRecord)
+                .join(
+                    HttpBridgeSessionRecord,
+                    HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                )
+                .where(HttpBridgeOperationRecord.updated_at < cutoff, purgeable)
+                .order_by(HttpBridgeOperationRecord.updated_at.asc())
+                .limit(batch_size)
+                .with_for_update()
+            )
+            # The joined FOR UPDATE locks both the operation and owning
+            # session on PostgreSQL, serializing retention deletion with
+            # claim_session() on the same continuity row.
+            operation_ids = [str(operation.operation_id) for operation in selected.scalars().all()]
+            if not operation_ids:
+                await self._session.commit()
+                return 0
+            deleted = await self._session.execute(
+                delete(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id.in_(operation_ids),
+                    HttpBridgeOperationRecord.updated_at < cutoff,
+                    purgeable,
+                )
+                .returning(HttpBridgeOperationRecord.operation_id)
+            )
+            deleted_ids = [str(value) for value in deleted.scalars().all()]
+            if deleted_ids:
+                await self._session.execute(
+                    delete(HttpBridgeOperationEvent).where(HttpBridgeOperationEvent.operation_id.in_(deleted_ids))
+                )
+            await self._session.commit()
+        return len(deleted_ids)
+
+    async def append_operation_event(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        event_text: str,
+        max_bytes: int,
+    ) -> bool:
+        """Append one replayable SSE block under the durable owner fence."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            event_size = len(event_text.encode("utf-8"))
+            if event_size > max_bytes or int(operation.event_bytes or 0) + event_size > max_bytes:
+                operation.event_spool_complete = False
+                await self._session.commit()
+                return False
+            next_sequence = await self._session.scalar(
+                select(func.coalesce(func.max(HttpBridgeOperationEvent.sequence_number), 0) + 1).where(
+                    HttpBridgeOperationEvent.operation_id == operation_id,
+                )
+            )
+            sequence = int(next_sequence or 1)
+            self._session.add(
+                HttpBridgeOperationEvent(
+                    operation_id=operation_id,
+                    sequence_number=sequence,
+                    # Include occurrence position so identical downstream
+                    # blocks remain distinct in replay transcripts.
+                    event_fingerprint=durable_bridge_hash(f"{sequence}:{event_text}"),
+                    event_text=event_text,
+                )
+            )
+            operation.event_bytes = int(operation.event_bytes or 0) + event_size
+            await self._session.commit()
+        return True
+
+    async def append_terminal_operation_event(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        event_text: str,
+        max_bytes: int,
+        state: str,
+        response_id: str | None = None,
+    ) -> bool:
+        """Append a terminal event and expose its operation state atomically."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            event_size = len(event_text.encode("utf-8"))
+            persisted = event_size <= max_bytes and int(operation.event_bytes or 0) + event_size <= max_bytes
+            if persisted:
+                next_sequence = await self._session.scalar(
+                    select(func.coalesce(func.max(HttpBridgeOperationEvent.sequence_number), 0) + 1).where(
+                        HttpBridgeOperationEvent.operation_id == operation_id,
+                    )
+                )
+                sequence = int(next_sequence or 1)
+                self._session.add(
+                    HttpBridgeOperationEvent(
+                        operation_id=operation_id,
+                        sequence_number=sequence,
+                        event_fingerprint=durable_bridge_hash(f"{sequence}:{event_text}"),
+                        event_text=event_text,
+                    )
+                )
+                operation.event_bytes = int(operation.event_bytes or 0) + event_size
+            else:
+                operation.event_spool_complete = False
+                # The terminal outcome is still authoritative even when the
+                # transcript block cannot fit in the bounded spool. Expose
+                # the failed state so an identical retry does not remain
+                # fenced as an in-flight operation until retention expires.
+                operation.state = state
+                if response_id is not None:
+                    operation.response_id = response_id
+                operation.updated_at = utcnow()
+                await self._session.commit()
+                return False
+            operation.state = state
+            if response_id is not None:
+                operation.response_id = response_id
+            operation.event_spool_complete = True
+            operation.updated_at = utcnow()
+            await self._session.commit()
+        return persisted
+
+    async def append_operation_events(
+        self,
+        *,
+        events: Sequence[DurableBridgeOperationEventInput],
+        max_bytes: int,
+    ) -> bool:
+        """Append a batch of SSE blocks with one fenced transaction."""
+        if not events:
+            return True
+        first = events[0]
+        if any(
+            event.operation_id != first.operation_id
+            or event.session_id != first.session_id
+            or event.instance_id != first.instance_id
+            or event.owner_epoch != first.owner_epoch
+            for event in events
+        ):
+            return False
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == first.session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == first.instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == first.owner_epoch,
+                )
+                .with_for_update()
+            )
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == first.operation_id,
+                    HttpBridgeOperationRecord.session_id == first.session_id,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None or operation is None:
+                await self._session.rollback()
+                return False
+            next_sequence = await self._session.scalar(
+                select(func.coalesce(func.max(HttpBridgeOperationEvent.sequence_number), 0) + 1).where(
+                    HttpBridgeOperationEvent.operation_id == first.operation_id,
+                )
+            )
+            sequence = int(next_sequence or 1)
+            pending: list[tuple[str, int, str, int]] = []
+            total_bytes = int(operation.event_bytes or 0)
+            for event in events:
+                event_size = len(event.event_text.encode("utf-8"))
+                if total_bytes + event_size > max_bytes:
+                    operation.event_spool_complete = False
+                    await self._session.commit()
+                    return False
+                total_bytes += event_size
+                pending.append(
+                    (
+                        event.event_text,
+                        sequence,
+                        durable_bridge_hash(f"{sequence}:{event.event_text}"),
+                        event_size,
+                    )
+                )
+                sequence += 1
+            if pending:
+                for event_text, sequence_number, fingerprint, event_size in pending:
+                    self._session.add(
+                        HttpBridgeOperationEvent(
+                            operation_id=first.operation_id,
+                            sequence_number=sequence_number,
+                            event_fingerprint=fingerprint,
+                            event_text=event_text,
+                        )
+                    )
+                operation.event_bytes = total_bytes
+            await self._session.commit()
+        return True
+
+    async def finalize_operation_event_spool(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> bool:
+        """Mark a terminal operation replay-complete after its queue drained."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            result = await self._session.execute(
+                update(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state.in_(("completed", "incomplete")),
+                    HttpBridgeOperationRecord.event_spool_complete.is_(False),
+                )
+                .values(event_spool_complete=True, updated_at=utcnow())
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
+    async def get_latest_completed_operation(
+        self,
+        *,
+        session_id: str,
+        parent_response_id: str,
+        request_fingerprint: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        predicates = [
+            HttpBridgeOperationRecord.session_id == session_id,
+            HttpBridgeOperationRecord.parent_response_id == parent_response_id,
+            HttpBridgeOperationRecord.state == "completed",
+            HttpBridgeOperationRecord.response_id.is_not(None),
+        ]
+        if request_fingerprint is not None:
+            predicates.append(HttpBridgeOperationRecord.request_fingerprint == request_fingerprint)
+        operation = await self._session.scalar(
+            select(HttpBridgeOperationRecord)
+            .where(*predicates)
+            .order_by(HttpBridgeOperationRecord.updated_at.desc())
+            .limit(1)
+        )
+        return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def get_latest_completed_operation_any_session(
+        self,
+        *,
+        parent_response_id: str,
+        api_key_scope: str | None = None,
+        request_fingerprint: str | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        statement = select(HttpBridgeOperationRecord)
+        if api_key_scope is not None:
+            statement = statement.join(
+                HttpBridgeSessionRecord,
+                HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+            ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
+        operation = await self._session.scalar(
+            statement.where(
+                HttpBridgeOperationRecord.parent_response_id == parent_response_id,
+                HttpBridgeOperationRecord.state == "completed",
+                HttpBridgeOperationRecord.response_id.is_not(None),
+                *(
+                    [HttpBridgeOperationRecord.request_fingerprint == request_fingerprint]
+                    if request_fingerprint is not None
+                    else []
+                ),
+            )
+            .order_by(HttpBridgeOperationRecord.updated_at.desc())
+            .limit(1)
+        )
+        return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def update_operation(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        state: str,
+        response_id: str | None = None,
+    ) -> bool:
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            values: dict[str, object] = {"state": state, "updated_at": utcnow()}
+            if response_id is not None:
+                values["response_id"] = response_id
+            result = await self._session.execute(
+                update(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                )
+                .values(**values)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
     async def _execute_fenced_session_update(
         self,
         *,
@@ -1120,25 +2066,90 @@ class DurableBridgeRepository:
             session_ids = [candidate.id for candidate in candidates]
             if not session_ids:
                 return deleted_count
+            # Operation rows are the durable recovery ledger. Never cascade
+            # delete a session that still owns a retained operation, including
+            # completed replayable transcripts; detach it so the next instance
+            # can inspect and take over without losing continuity history.
+            operation_session_ids = set(
+                await self._session.scalars(
+                    select(HttpBridgeOperationRecord.session_id).where(
+                        HttpBridgeOperationRecord.session_id.in_(session_ids),
+                    )
+                )
+            )
             retained_recovery_ids = {
                 candidate.id
                 for candidate in candidates
-                if candidate.owner_instance_id == instance_id
-                and getattr(candidate, "owner_process_epoch", None) == owner_process_epoch
-                and (ownerless_cutoff is None or to_utc_naive(candidate.last_seen_at) >= to_utc_naive(ownerless_cutoff))
-                and is_http_bridge_account_neutral_replay(
-                    kind=candidate.session_key_kind,
-                    key=candidate.session_key_value,
+                if candidate.id in operation_session_ids
+                or (
+                    candidate.owner_instance_id == instance_id
+                    and getattr(candidate, "owner_process_epoch", None) == owner_process_epoch
+                    and (
+                        ownerless_cutoff is None
+                        or to_utc_naive(candidate.last_seen_at) >= to_utc_naive(ownerless_cutoff)
+                    )
+                    and is_http_bridge_account_neutral_replay(
+                        kind=candidate.session_key_kind,
+                        key=candidate.session_key_value,
+                    )
                 )
             }
             async with sqlite_writer_section():
+                ownerless_operation_ids = {
+                    candidate.id
+                    for candidate in candidates
+                    if candidate.id in retained_recovery_ids
+                    and candidate.id in operation_session_ids
+                    and candidate.owner_instance_id is None
+                }
+                if ownerless_operation_ids:
+                    # The ownerless-cutoff predicate is part of the same
+                    # startup query. Refresh retained rows so the bounded
+                    # loop cannot select them forever while their operation
+                    # transcript is awaiting normal retention cleanup.
+                    await self._session.execute(
+                        update(HttpBridgeSessionRecord)
+                        .where(
+                            HttpBridgeSessionRecord.id.in_(ownerless_operation_ids),
+                            HttpBridgeSessionRecord.owner_instance_id.is_(None),
+                        )
+                        .values(last_seen_at=now, lease_expires_at=now)
+                    )
                 if retained_recovery_ids:
+                    # A process can die after recording a submitted
+                    # operation but before upstream acknowledges it. Once
+                    # startup has fenced and detached that owner's session,
+                    # classify those rows as UNKNOWN so the replacement can
+                    # enter the normal proof-gated recovery path.
+                    operation_retained_session_ids = retained_recovery_ids & operation_session_ids
+                    if operation_retained_session_ids:
+                        eligible_operation_sessions = set(
+                            await self._session.scalars(
+                                select(HttpBridgeSessionRecord.id)
+                                .where(
+                                    HttpBridgeSessionRecord.id.in_(operation_retained_session_ids),
+                                    startup_purge_filter,
+                                )
+                                .with_for_update()
+                            )
+                        )
+                        await self._session.execute(
+                            update(HttpBridgeOperationRecord)
+                            .where(
+                                HttpBridgeOperationRecord.session_id.in_(eligible_operation_sessions),
+                                HttpBridgeOperationRecord.state == "submitted",
+                            )
+                            .values(state="unknown", updated_at=now)
+                        )
                     await self._session.execute(
                         update(HttpBridgeSessionRecord)
                         .where(
                             HttpBridgeSessionRecord.id.in_(retained_recovery_ids),
-                            HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                            HttpBridgeSessionRecord.owner_process_epoch == owner_process_epoch,
+                            # Detach the rows selected as belonging to the
+                            # previous process.  With an explicit new epoch,
+                            # matching the new epoch here would leave old
+                            # retained rows selected forever on every loop.
+                            startup_purge_filter,
                         )
                         .values(
                             owner_instance_id=None,
@@ -1232,6 +2243,11 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
                     HttpBridgeSessionRecord.last_seen_at < cutoff,
+                    ~exists(
+                        select(HttpBridgeOperationRecord.operation_id).where(
+                            HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                        )
+                    ),
                 )
                 .order_by(HttpBridgeSessionRecord.last_seen_at.asc())
                 .limit(batch_size)
@@ -1247,6 +2263,11 @@ class DurableBridgeRepository:
                                 HttpBridgeSessionRecord.id.in_(session_ids),
                                 HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED,
                                 HttpBridgeSessionRecord.last_seen_at < cutoff,
+                                ~exists(
+                                    select(HttpBridgeOperationRecord.operation_id).where(
+                                        HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                                    )
+                                ),
                             )
                         )
                     )
@@ -1256,6 +2277,13 @@ class DurableBridgeRepository:
                     .where(HttpBridgeSessionRecord.id.in_(session_ids))
                     .where(HttpBridgeSessionRecord.state == HttpBridgeSessionState.CLOSED)
                     .where(HttpBridgeSessionRecord.last_seen_at < cutoff)
+                    .where(
+                        ~exists(
+                            select(HttpBridgeOperationRecord.operation_id).where(
+                                HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                            )
+                        )
+                    )
                     .returning(HttpBridgeSessionRecord.id)
                 )
                 await self._session.commit()
@@ -1274,6 +2302,11 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.lease_expires_at < now,
                 ),
                 HttpBridgeSessionRecord.last_seen_at < cutoff,
+                ~exists(
+                    select(HttpBridgeOperationRecord.operation_id).where(
+                        HttpBridgeOperationRecord.session_id == HttpBridgeSessionRecord.id,
+                    )
+                ),
             )
             result = await self._session.execute(
                 select(HttpBridgeSessionRecord.id)
@@ -1779,7 +2812,7 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
                 "SELECT name FROM sqlite_master "
                 "WHERE type = 'table' "
                 "AND name IN ('http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
-                "'http_bridge_recovery_attempts')"
+                "'http_bridge_recovery_attempts', 'http_bridge_operations', 'http_bridge_operation_events')"
             )
         )
     else:
@@ -1789,7 +2822,7 @@ async def missing_durable_bridge_tables(session: AsyncSession) -> tuple[str, ...
                 "WHERE table_schema = 'public' "
                 "AND table_name IN ("
                 "'http_bridge_sessions', 'http_bridge_session_aliases', 'http_bridge_retry_circuits', "
-                "'http_bridge_recovery_attempts'"
+                "'http_bridge_recovery_attempts', 'http_bridge_operations', 'http_bridge_operation_events'"
                 ")"
             )
         )
@@ -1899,6 +2932,27 @@ def _to_recovery_attempt_snapshot(
         replay_safe=bool(row.replay_safe),
         state=row.state,
         response_id=row.response_id,
+    )
+
+
+def _to_operation_snapshot(
+    row: HttpBridgeOperationRecord,
+    *,
+    created: bool = False,
+) -> DurableBridgeOperationSnapshot:
+    return DurableBridgeOperationSnapshot(
+        operation_id=row.operation_id,
+        session_id=row.session_id,
+        request_fingerprint=row.request_fingerprint,
+        account_id=row.account_id,
+        model=row.model,
+        parent_response_id=row.parent_response_id,
+        state=row.state,
+        response_id=row.response_id,
+        recovery_dispatch_count=row.recovery_dispatch_count,
+        request_text=row.request_text,
+        event_spool_complete=bool(row.event_spool_complete),
+        created=created,
     )
 
 

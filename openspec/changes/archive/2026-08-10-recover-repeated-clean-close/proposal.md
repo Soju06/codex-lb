@@ -9,6 +9,11 @@ upstream failure and retires work already moved to the replacement socket.
 Together these behaviors make a transient handoff issue visible as a reconnect
 loop and require the Codex client to be restarted.
 
+Post-deploy evidence exposed a related accounting gap: retiring an idle bridge
+with no pending request still records a retry-circuit failure. The next real
+pre-response timeout can therefore open the repeated-failure cooldown after
+only one client-affecting failure.
+
 ## What Changes
 
 - Permit one additional pre-visible replay when the replacement upstream
@@ -31,6 +36,9 @@ loop and require the Codex client to be restarted.
   response creation, rather than admission flags alone. Give requests with a
   prior continuity anchor a bounded two-threshold grace period, and emit
   diagnostic state when the watchdog skips a candidate.
+- Count retirement failures only when the bridge still owns a pending request
+  that has not emitted a response event; idle no-pending closes remain visible
+  in lifecycle diagnostics but do not consume retry-circuit strikes.
 
 ## Impact
 
@@ -39,6 +47,8 @@ loop and require the Codex client to be restarted.
 - The retry remains bounded and does not create an unbounded replay loop.
 - Reader ownership follows the active socket across idle recovery, preventing
   locally generated close frames from being counted as upstream instability.
+- Idle upstream connection churn no longer turns one later request timeout into
+  an immediate sixty-second hard-key cooldown.
 - Adds the `http_bridge_retry_circuits` durable table and migration so retry
   cooldown state survives cross-replica clean-close and incomplete-stream
   failures.

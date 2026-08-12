@@ -22,6 +22,7 @@ from app.db.models import (
     AccountStatus,
     Base,
     BridgeRingMember,
+    HttpBridgeOperationRecord,
     HttpBridgeRetryCircuit,
     HttpBridgeSessionAlias,
     HttpBridgeSessionRecord,
@@ -36,6 +37,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
     durable_bridge_hash,
+    durable_bridge_operation_id,
 )
 from app.modules.proxy.ring_membership import RingMembershipService
 
@@ -565,6 +567,844 @@ async def test_recovery_attempt_pre_dispatch_claim_can_be_rolled_back(
         )
         assert restored is not None
         assert restored.state.value == "unknown"
+        assert await repository.rollback_recovery_attempt_before_dispatch(
+            session_id=claim.id,
+            instance_id="inst-recovery-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint="fingerprint-recovery-rollback",
+        )
+        assert (
+            await repository.lookup_recovery_attempt(
+                session_id=claim.id,
+                request_fingerprint="fingerprint-recovery-rollback",
+            )
+            is None
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_ledger_is_fenced_and_idempotent(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-operation-ledger", session_key_value="sid-operation")
+        fingerprint = durable_bridge_hash("continuation-body")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        created = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            request_text='{"model":"gpt-5.6","input":"turn"}',
+        )
+        assert created is not None
+        assert created.created is True
+        assert created.state == "submitted"
+        assert created.request_text == '{"model":"gpt-5.6","input":"turn"}'
+        assert created.event_spool_complete is False
+
+        existing = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert existing is not None
+        assert existing.created is False
+        assert existing.operation_id == operation_id
+
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            state="completed",
+            response_id="resp-completed",
+        )
+        completed = await repository.get_latest_completed_operation(
+            session_id=claim.id,
+            parent_response_id="resp-parent",
+        )
+        assert completed is not None
+        assert completed.response_id == "resp-completed"
+        by_fingerprint = await repository.get_operation_by_fingerprint(request_fingerprint=fingerprint)
+        assert by_fingerprint is not None
+        assert by_fingerprint.operation_id == operation_id
+        cross_session_completed = await repository.get_latest_completed_operation_any_session(
+            parent_response_id="resp-parent",
+        )
+        assert cross_session_completed is not None
+        assert cross_session_completed.response_id == "resp-completed"
+
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.completed"}\n\n',
+            max_bytes=1024,
+        )
+        # Repeated identical SSE blocks are distinct downstream occurrences,
+        # so replay must preserve both copies rather than hash-deduplicating.
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-ledger",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.completed"}\n\n',
+            max_bytes=1024,
+        )
+        assert await repository.get_operation_events(operation_id=operation_id) == [
+            'data: {"type":"response.completed"}\n\n',
+            'data: {"type":"response.completed"}\n\n',
+        ]
+        # A missing parent turn makes the chain ineligible rather than
+        # silently constructing an incomplete conversation.
+        assert await repository.get_replayable_transcript(response_id="resp-completed") is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_retry_reset_clears_partial_spool(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-operation-reset", session_key_value="sid-operation-reset")
+        fingerprint = durable_bridge_hash("continuation-reset")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-reset",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-reset",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.output_text.delta"}\n\n',
+            max_bytes=1024,
+        )
+        assert await repository.reset_operation_event_spool(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-reset",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.get_operation_events(operation_id=operation_id) == []
+        reset = await repository.get_operation(operation_id=operation_id)
+        assert reset is not None
+        assert reset.event_spool_complete is False
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_operation_event_exposes_failure_after_spooling(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-terminal-event", session_key_value="sid-terminal-event")
+        fingerprint = durable_bridge_hash("terminal-event")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-event",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-terminal-event",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        event_text = 'data: {"type":"response.failed"}\n\n'
+
+        assert await repository.append_terminal_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-event",
+            owner_epoch=claim.owner_epoch,
+            event_text=event_text,
+            max_bytes=1024,
+            state="failed",
+        )
+        failed = await repository.get_operation(operation_id=operation_id)
+        assert failed is not None
+        assert failed.state == "failed"
+        assert await repository.get_operation_events(operation_id=operation_id) == [event_text]
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_exposes_state_when_spool_overflows(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-terminal-overflow",
+            session_key_value="sid-terminal-overflow",
+        )
+        fingerprint = durable_bridge_hash("terminal-overflow")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-overflow",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-terminal-overflow",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+
+        persisted = await repository.append_terminal_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-overflow",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1,
+            state="failed",
+        )
+
+        assert persisted is False
+        failed = await repository.get_operation(operation_id=operation_id)
+        assert failed is not None
+        assert failed.state == "failed"
+        assert failed.event_spool_complete is False
+        assert await repository.get_operation_events(operation_id=operation_id) == []
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_consumed_recovery_checkpoint_does_not_rebind_failed_operation(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        original = await _claim(
+            repository,
+            instance_id="inst-consumed-original",
+            session_key_value="sid-consumed-original",
+        )
+        replacement = await _claim(
+            repository,
+            instance_id="inst-consumed-replacement",
+            session_key_value="sid-consumed-replacement",
+        )
+        fingerprint = durable_bridge_hash("consumed-failed-operation")
+        operation_id = durable_bridge_operation_id(original.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=original.id,
+            instance_id="inst-consumed-original",
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-consumed",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_terminal_operation_event(
+            operation_id=operation_id,
+            session_id=original.id,
+            instance_id="inst-consumed-original",
+            owner_epoch=original.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+        )
+
+        existing = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=replacement.id,
+            instance_id="inst-consumed-replacement",
+            owner_epoch=replacement.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-replacement",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            recovery_attempt_consumed=True,
+        )
+
+        assert existing is not None
+        assert existing.created is False
+        assert existing.session_id == original.id
+        assert existing.state == "failed"
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.session_id == original.id
+        assert persisted.state == "failed"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_operation_recovery_claim_is_atomic_and_single_use(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-operation-claim", session_key_value="sid-operation-claim")
+        fingerprint = durable_bridge_hash("continuation-claim")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.output_text.delta"}\n\n',
+            max_bytes=1024,
+        )
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+        )
+
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+        )
+        claimed = await repository.get_operation(operation_id=operation_id)
+        assert claimed is not None
+        assert claimed.state == "submitted"
+        assert claimed.response_id is None
+        assert claimed.event_spool_complete is False
+        assert await repository.get_operation_events(operation_id=operation_id) == []
+
+        # The state transition is the claim: a concurrent reconnect that gets
+        # the write lock later cannot reset and submit the same operation.
+        assert not await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-claim",
+            owner_epoch=claim.owner_epoch,
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_one_shot_recovery_budget_survives_unknown_reset(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-one-shot",
+            session_key_value="sid-operation-one-shot",
+        )
+        fingerprint = durable_bridge_hash("continuation-one-shot")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-one-shot",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-one-shot",
+            owner_epoch=claim.owner_epoch,
+        )
+
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-one-shot",
+            owner_epoch=claim.owner_epoch,
+            max_recovery_dispatches=1,
+        )
+        # A failed or ambiguous dispatch may return the operation to UNKNOWN,
+        # but that must not refund the durable one-shot recovery budget.
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-one-shot",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert not await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-one-shot",
+            owner_epoch=claim.owner_epoch,
+            max_recovery_dispatches=1,
+        )
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.state == "unknown"
+        assert persisted.recovery_dispatch_count == 1
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_pre_dispatch_recovery_claim_restores_one_shot_budget(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-refund",
+            session_key_value="sid-operation-refund",
+        )
+        fingerprint = durable_bridge_hash("continuation-refund")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+            max_recovery_dispatches=1,
+        )
+
+        # A cancellation before send_text() is proven pre-dispatch and must
+        # refund the claim so the next reconnect can make the one safe retry.
+        assert await repository.mark_operation_unknown(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+            restore_recovery_dispatch_claim=True,
+        )
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-refund",
+            owner_epoch=claim.owner_epoch,
+            max_recovery_dispatches=1,
+        )
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.recovery_dispatch_count == 1
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_pre_dispatch_operation_rollback_removes_only_empty_new_row(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-rollback",
+            session_key_value="sid-operation-rollback",
+        )
+        fingerprint = durable_bridge_hash("operation-rollback")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None and operation.created is True
+        assert await repository.rollback_operation_before_dispatch(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-rollback",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.get_operation(operation_id=operation_id) is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_spool_purge_expires_stale_nonterminal_rows(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-stale-operation", session_key_value="sid-stale-operation")
+        fingerprint = durable_bridge_hash("stale-operation")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-stale-operation",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id=None,
+            request_text='{"input":"stale"}',
+        )
+        stale_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=8)
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-stale-operation",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(updated_at=stale_at)
+        )
+        await session.commit()
+
+        # A stale timestamp alone must not delete an UNKNOWN operation whose
+        # session is still owned and leased; it may be a long-running recovery
+        # request whose duplicate-suppression fence must remain intact.
+        assert await repository.purge_operation_spool(cutoff=datetime.now(timezone.utc).replace(tzinfo=None)) == 0
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(owner_instance_id=None, lease_expires_at=None)
+        )
+        await session.commit()
+        assert await repository.purge_operation_spool(cutoff=datetime.now(timezone.utc).replace(tzinfo=None)) == 1
+        assert await repository.get_operation(operation_id=operation_id) is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_operation_rebinds_before_cross_session_recovery_reset(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        original = await _claim(
+            repository,
+            instance_id="inst-original-operation",
+            session_key_value="sid-original-operation",
+        )
+        replacement = await _claim(
+            repository,
+            instance_id="inst-replacement-operation",
+            session_key_value="sid-replacement-operation",
+        )
+        fingerprint = durable_bridge_hash("cross-session-operation")
+        operation_id = durable_bridge_operation_id(original.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=original.id,
+            instance_id="inst-original-operation",
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            request_text='{"input":"cross-session"}',
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == original.id)
+            .values(owner_instance_id=None, lease_expires_at=None)
+        )
+        await session.commit()
+        rebound = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=replacement.id,
+            instance_id="inst-replacement-operation",
+            owner_epoch=replacement.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-replacement",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert rebound is not None
+        assert rebound.session_id == replacement.id
+        assert await repository.reset_operation_event_spool(
+            operation_id=operation_id,
+            session_id=replacement.id,
+            instance_id="inst-replacement-operation",
+            owner_epoch=replacement.owner_epoch,
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_operation_does_not_rebind_from_live_prior_owner(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        original = await _claim(
+            repository,
+            instance_id="inst-live-original-operation",
+            session_key_value="sid-live-original-operation",
+        )
+        replacement = await _claim(
+            repository,
+            instance_id="inst-live-replacement-operation",
+            session_key_value="sid-live-replacement-operation",
+        )
+        fingerprint = durable_bridge_hash("live-cross-session-operation")
+        operation_id = durable_bridge_operation_id(original.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=original.id,
+            instance_id="inst-live-original-operation",
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+
+        existing = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=replacement.id,
+            instance_id="inst-live-replacement-operation",
+            owner_epoch=replacement.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-replacement",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+
+        assert existing is not None
+        assert existing.session_id == original.id
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.session_id == original.id
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_handoff_rebinds_operation_while_origin_journal_stays_fenced(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        instance_id = "inst-recovery-handoff"
+        original = await _claim(
+            repository,
+            instance_id=instance_id,
+            session_key_value="sid-recovery-origin",
+        )
+        replacement = await _claim(
+            repository,
+            instance_id=instance_id,
+            session_key_value="sid-recovery-replacement",
+        )
+        operation_fingerprint = durable_bridge_hash("recovery-handoff-operation")
+        operation_id = durable_bridge_operation_id(original.id, operation_fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=original.id,
+            instance_id=instance_id,
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=operation_fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        recovery_fingerprint = durable_bridge_hash("recovery-handoff-request")
+        attempt = await repository.record_recovery_attempt(
+            session_id=original.id,
+            instance_id=instance_id,
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=recovery_fingerprint,
+            request_id="request-recovery-handoff",
+            account_id="account-operation",
+            model="gpt-5.6",
+            replay_safe=True,
+        )
+        assert attempt is not None
+        assert await repository.mark_recovery_attempt_replayed(
+            session_id=original.id,
+            instance_id=instance_id,
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=recovery_fingerprint,
+        )
+
+        rebound = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=replacement.id,
+            instance_id=instance_id,
+            owner_epoch=replacement.owner_epoch,
+            request_fingerprint=operation_fingerprint,
+            account_id="account-replacement",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+            recovery_attempt_session_id=original.id,
+            recovery_attempt_owner_epoch=original.owner_epoch,
+            recovery_attempt_fingerprint=recovery_fingerprint,
+        )
+        assert rebound is not None
+        assert rebound.session_id == replacement.id
+        origin = await repository.get_session_by_id(original.id)
+        assert origin is not None
+        assert origin.owner_instance_id == instance_id
+        assert await repository.rollback_recovery_attempt_replayed(
+            session_id=original.id,
+            instance_id=instance_id,
+            owner_epoch=original.owner_epoch,
+            request_fingerprint=recovery_fingerprint,
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_retains_completed_operation_session(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-completed-retain", session_key_value="sid-completed-retain")
+        fingerprint = durable_bridge_hash("completed-retain")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-completed-retain",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-completed-retain",
+            owner_epoch=claim.owner_epoch,
+            state="completed",
+            response_id="resp-completed",
+        )
+        assert await repository.purge_owned_sessions_on_startup(instance_id="inst-completed-retain") == 0
+        retained = await repository.get_operation(operation_id=operation_id)
+        assert retained is not None
+        owner = await repository.get_session_by_id(claim.id)
+        assert owner is not None
+        assert owner.owner_instance_id is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_retains_completed_operation_session_across_process_epoch(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-epoch-retain", session_key_value="sid-epoch-retain")
+        fingerprint = durable_bridge_hash("epoch-retain")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-epoch-retain",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-epoch-retain",
+            owner_epoch=claim.owner_epoch,
+            state="completed",
+            response_id="resp-completed",
+        )
+        assert (
+            await repository.purge_owned_sessions_on_startup(
+                instance_id="inst-epoch-retain",
+                owner_process_epoch="new-process",
+            )
+            == 0
+        )
+        owner = await repository.get_session_by_id(claim.id)
+        assert owner is not None
+        assert owner.owner_instance_id is None
+        assert owner.owner_process_epoch == "test-process"
     finally:
         await session.close()
 

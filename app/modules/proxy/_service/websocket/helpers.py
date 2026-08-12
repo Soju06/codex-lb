@@ -345,6 +345,87 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+# A confirmed stale previous-response anchor can otherwise cause every client
+# reconnect to repeat the same owner lookup and doomed upstream connection.
+# Keep this local and short-lived: an owner record may still be committed by a
+# concurrent request, so discovery always invalidates the negative entry.
+_WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_TTL_SECONDS = 60.0
+_WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_LIMIT = 4096
+_websocket_stale_previous_response_index: dict[tuple[str, str | None], float] = {}
+
+
+def _clear_websocket_stale_previous_response_cache() -> None:
+    """Drop process-local negative entries when a proxy service is created.
+
+    The cache intentionally is not durable: it only suppresses repeated
+    lookups during a short recovery window. Clearing it with the service
+    lifecycle prevents entries from one app/test instance from affecting a
+    later instance that happens to receive the same synthetic response id.
+    """
+    _websocket_stale_previous_response_index.clear()
+
+
+def _prune_websocket_stale_previous_response_cache(now: float | None = None) -> None:
+    current_time = time.monotonic() if now is None else now
+    for cache_key, expires_at in tuple(_websocket_stale_previous_response_index.items()):
+        if expires_at <= current_time:
+            _websocket_stale_previous_response_index.pop(cache_key, None)
+    while len(_websocket_stale_previous_response_index) > _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_LIMIT:
+        _websocket_stale_previous_response_index.pop(next(iter(_websocket_stale_previous_response_index)))
+
+
+def _remember_websocket_stale_previous_response(
+    *,
+    previous_response_id: str | None,
+    api_key_id: str | None,
+) -> None:
+    if previous_response_id is None:
+        return
+    response_id = previous_response_id.strip()
+    if not response_id:
+        return
+    now = time.monotonic()
+    _prune_websocket_stale_previous_response_cache(now)
+    cache_key = (response_id, api_key_id)
+    _websocket_stale_previous_response_index.pop(cache_key, None)
+    _websocket_stale_previous_response_index[cache_key] = now + _WEBSOCKET_STALE_PREVIOUS_RESPONSE_CACHE_TTL_SECONDS
+    _prune_websocket_stale_previous_response_cache(now)
+
+
+def _forget_websocket_stale_previous_response(
+    *,
+    previous_response_id: str | None,
+    api_key_id: str | None,
+) -> None:
+    if previous_response_id is None:
+        return
+    response_id = previous_response_id.strip()
+    if not response_id:
+        return
+    _websocket_stale_previous_response_index.pop((response_id, api_key_id), None)
+
+
+def _is_websocket_stale_previous_response(
+    *,
+    previous_response_id: str | None,
+    api_key_id: str | None,
+) -> bool:
+    if previous_response_id is None:
+        return False
+    response_id = previous_response_id.strip()
+    if not response_id:
+        return False
+    now = time.monotonic()
+    _prune_websocket_stale_previous_response_cache(now)
+    expires_at = _websocket_stale_previous_response_index.get((response_id, api_key_id))
+    if expires_at is None:
+        return False
+    if expires_at <= now:
+        _websocket_stale_previous_response_index.pop((response_id, api_key_id), None)
+        return False
+    return True
+
+
 def _prepare_websocket_request_state_for_visible_output_replay(
     request_state: "_WebSocketRequestState",
 ) -> str | None:
@@ -1154,6 +1235,11 @@ def _record_websocket_stale_anchor_failure(
     request_state.failure_phase_override = "upstream"
     request_state.failure_detail_override = _websocket_stale_anchor_failure_detail(diagnostics)
     request_state.upstream_error_code_override = upstream_error_code
+    if not diagnostics.fresh_replay_available:
+        _remember_websocket_stale_previous_response(
+            previous_response_id=request_state.previous_response_id,
+            api_key_id=request_state.api_key.id if request_state.api_key is not None else None,
+        )
     _record_continuity_fail_closed(
         surface=surface,
         reason="previous_response_not_found",

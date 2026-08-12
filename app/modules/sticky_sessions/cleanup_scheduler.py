@@ -78,12 +78,15 @@ def _abandoned_bridge_retention_seconds(
 class StickySessionCleanupScheduler:
     interval_seconds: int
     enabled: bool
+    # Durable bridge transcript retention is a data-safety obligation and must
+    # continue even when operators disable sticky-session mapping cleanup.
+    operation_retention_enabled: bool = True
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def start(self) -> None:
-        if not self.enabled:
+        if not self.enabled and not self.operation_retention_enabled:
             return
         if self._task and not self._task.done():
             return
@@ -117,49 +120,74 @@ class StickySessionCleanupScheduler:
                     settings_repo = SettingsRepository(session)
                     bridge_repo = DurableBridgeRepository(session)
                     sticky_repo = StickySessionsRepository(session)
-                    settings = await settings_repo.get_or_create()
+                    settings = await settings_repo.get_or_create() if self.enabled else None
 
-                    cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
-                    deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
-                    if deleted_count > 0:
-                        logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
-                    cleanup_now = utcnow()
-                    stale_hard_codex_session_cutoff = cleanup_now - timedelta(
-                        seconds=_STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS
-                    )
-                    stale_hard_codex_session_deleted_count = await sticky_repo.purge_stale_hard_codex_session_mappings(
-                        stale_hard_codex_session_cutoff, now=cleanup_now
-                    )
-                    if stale_hard_codex_session_deleted_count > 0:
-                        logger.info(
-                            "Purged stale hard codex_session sticky mappings pinned to a durably unavailable "
-                            "owner deleted_count=%s",
-                            stale_hard_codex_session_deleted_count,
+                    if self.enabled:
+                        assert settings is not None
+                        cutoff = utcnow() - timedelta(seconds=settings.openai_cache_affinity_max_age_seconds)
+                        deleted_count = await sticky_repo.purge_prompt_cache_before(cutoff)
+                        if deleted_count > 0:
+                            logger.info("Purged stale prompt-cache sticky sessions deleted_count=%s", deleted_count)
+                        cleanup_now = utcnow()
+                        stale_hard_codex_session_cutoff = cleanup_now - timedelta(
+                            seconds=_STALE_HARD_CODEX_SESSION_UNAVAILABLE_SECONDS
                         )
+                        stale_hard_codex_session_deleted_count = (
+                            await sticky_repo.purge_stale_hard_codex_session_mappings(
+                                stale_hard_codex_session_cutoff, now=cleanup_now
+                            )
+                        )
+                        if stale_hard_codex_session_deleted_count > 0:
+                            logger.info(
+                                "Purged stale hard codex_session sticky mappings pinned to a durably unavailable "
+                                "owner deleted_count=%s",
+                                stale_hard_codex_session_deleted_count,
+                            )
                     if startup_module._bridge_durable_schema_ready or not await missing_durable_bridge_tables(session):
-                        bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
-                        if bridge_deleted_count > 0:
-                            logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
-                        abandoned_cutoff = utcnow() - timedelta(
-                            seconds=_abandoned_bridge_retention_seconds(settings, get_settings())
-                        )
-                        abandoned_deleted_count = await bridge_repo.purge_abandoned_before(abandoned_cutoff)
-                        if abandoned_deleted_count > 0:
-                            logger.info(
-                                "Purged abandoned HTTP bridge sessions deleted_count=%s", abandoned_deleted_count
+                        if self.enabled:
+                            assert settings is not None
+                            bridge_deleted_count = await bridge_repo.purge_closed_before(cutoff)
+                            if bridge_deleted_count > 0:
+                                logger.info("Purged closed HTTP bridge sessions deleted_count=%s", bridge_deleted_count)
+                            abandoned_cutoff = utcnow() - timedelta(
+                                seconds=_abandoned_bridge_retention_seconds(settings, get_settings())
                             )
-                        retry_circuit_deleted_count = await bridge_repo.purge_retry_circuits_before(
-                            time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
-                        )
-                        if retry_circuit_deleted_count > 0:
-                            logger.info(
-                                "Purged expired HTTP bridge retry circuits deleted_count=%s",
-                                retry_circuit_deleted_count,
+                            abandoned_deleted_count = await bridge_repo.purge_abandoned_before(abandoned_cutoff)
+                            if abandoned_deleted_count > 0:
+                                logger.info(
+                                    "Purged abandoned HTTP bridge sessions deleted_count=%s", abandoned_deleted_count
+                                )
+                            retry_circuit_deleted_count = await bridge_repo.purge_retry_circuits_before(
+                                time.time() - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
                             )
-                ring_cutoff = utcnow() - timedelta(seconds=RING_MEMBER_RETENTION_SECONDS)
-                ring_deleted_count = await RingMembershipService(SessionLocal).purge_stale_before(ring_cutoff)
-                if ring_deleted_count > 0:
-                    logger.info("Purged stale bridge ring members deleted_count=%s", ring_deleted_count)
+                            if retry_circuit_deleted_count > 0:
+                                logger.info(
+                                    "Purged expired HTTP bridge retry circuits deleted_count=%s",
+                                    retry_circuit_deleted_count,
+                                )
+                        if self.operation_retention_enabled:
+                            operation_cutoff = utcnow() - timedelta(
+                                seconds=get_settings().http_responses_session_bridge_operation_spool_retention_seconds
+                            )
+                            operation_deleted_count = 0
+                            # Drain all eligible batches. A single startup pass is
+                            # bounded to protect latency, but a long-lived process
+                            # must continue pruning old prompt/output transcripts.
+                            while True:
+                                deleted_batch = await bridge_repo.purge_operation_spool(cutoff=operation_cutoff)
+                                operation_deleted_count += deleted_batch
+                                if deleted_batch < 500:
+                                    break
+                            if operation_deleted_count > 0:
+                                logger.info(
+                                    "Purged expired HTTP bridge operation transcript rows deleted_count=%s",
+                                    operation_deleted_count,
+                                )
+                if self.enabled:
+                    ring_cutoff = utcnow() - timedelta(seconds=RING_MEMBER_RETENTION_SECONDS)
+                    ring_deleted_count = await RingMembershipService(SessionLocal).purge_stale_before(ring_cutoff)
+                    if ring_deleted_count > 0:
+                        logger.info("Purged stale bridge ring members deleted_count=%s", ring_deleted_count)
             except Exception:
                 logger.exception("Sticky session cleanup loop failed")
 

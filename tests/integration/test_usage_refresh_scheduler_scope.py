@@ -300,10 +300,16 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("existing_attempt", [False, True], ids=["warmup-new", "warmup-deduped"])
-async def test_scheduler_restart_uses_post_block_baseline_after_equal_timestamp_match(
+@pytest.mark.parametrize(
+    "current_pair_confirms_unanchored",
+    [False, True],
+    ids=["persisted-only", "unanchored-current"],
+)
+async def test_scheduler_restart_uses_anchored_persisted_evidence(
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
     existing_attempt: bool,
+    current_pair_confirms_unanchored: bool,
 ) -> None:
     del db_setup
     now = int(time.time())
@@ -311,8 +317,11 @@ async def test_scheduler_restart_uses_post_block_baseline_after_equal_timestamp_
     legacy_reset_at = now + 8 * 24 * 60 * 60
     transition_recorded_at = now - 60 * 60
     transition_reset_at = transition_recorded_at + 43_200 * 60
+    current_before_recorded_at = now - 120
+    current_before_reset_at = now - 90
     latest_recorded_at = now - 60
     latest_reset_at = latest_recorded_at + 43_200 * 60
+    expected_attempt_reset_at = latest_reset_at if current_pair_confirms_unanchored else transition_reset_at
     account = _account(
         "acc_free_restart",
         status=AccountStatus.RATE_LIMITED,
@@ -360,6 +369,15 @@ async def test_scheduler_restart_uses_post_block_baseline_after_equal_timestamp_
             reset_at=transition_reset_at,
             window_minutes=43_200,
         )
+        if current_pair_confirms_unanchored:
+            await usage_repo.add_entry(
+                account.id,
+                40.0,
+                window="monthly",
+                recorded_at=datetime.fromtimestamp(current_before_recorded_at, timezone.utc).replace(tzinfo=None),
+                reset_at=current_before_reset_at,
+                window_minutes=43_200,
+            )
         await SettingsRepository(session).update(
             limit_warmup_enabled=True,
             limit_warmup_windows="secondary",
@@ -369,7 +387,7 @@ async def test_scheduler_restart_uses_post_block_baseline_after_equal_timestamp_
             attempt = await LimitWarmupRepository(session).try_create_attempt(
                 account_id=account.id,
                 window="monthly",
-                reset_at=transition_reset_at,
+                reset_at=expected_attempt_reset_at,
                 model="gpt-5.1-codex-mini",
                 attempted_at=utcnow(),
                 status="succeeded",
@@ -428,6 +446,6 @@ async def test_scheduler_restart_uses_post_block_baseline_after_equal_timestamp_
     assert (persisted.status, persisted.reset_at, persisted.blocked_at) == (AccountStatus.ACTIVE, None, None)
     assert (attempt.window, attempt.reset_at, attempt.status) == (
         "monthly",
-        transition_reset_at,
+        expected_attempt_reset_at,
         "succeeded",
     )

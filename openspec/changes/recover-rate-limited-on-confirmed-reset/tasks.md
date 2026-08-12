@@ -1,7 +1,7 @@
 ## 1. Reset Evidence
 
 - [x] 1.1 Use the account/window/time-scoped usage-history lookup to require a monthly baseline recorded strictly after the block and matching the blocked deadline within tolerance.
-- [x] 1.2 Resolve one canonical monthly reset-evidence tuple from the current refresh pair or by scanning only adjacent persisted pairs at or after the matching baseline with the existing temporal reset predicate.
+- [x] 1.2 Resolve one canonical monthly reset-evidence tuple from an anchored current refresh pair or by scanning only adjacent persisted pairs at or after the matching baseline with the existing temporal reset predicate, including fallback from an unanchored current transition.
 - [x] 1.3 Feed the resolved tuple to both blocked-status recovery and selected-window warm-up without widening the scheduler's selected-account scope.
 
 ## 2. Safe Status Recovery
@@ -20,7 +20,7 @@
 ## 4. Regression Coverage
 
 - [x] 4.1 Add a scheduler regression for a Free account stuck behind a future legacy deadline that recovers and warms after a confirmed monthly reset.
-- [x] 4.2 Cover recovery from persisted transition history after restart, including an ineligible matching row exactly at `blocked_at` before a later valid baseline, and prove the same monthly reset tuple is deduplicated.
+- [x] 4.2 Cover recovery from persisted transition history after restart, including an ineligible matching row exactly at `blocked_at` and an unanchored current transition before fallback to a later valid baseline, and prove the same monthly reset tuple is deduplicated.
 - [x] 4.3 Cover the 30-second floor, missing or mismatched markers, stale/pre-block evidence, timestamp jitter, exhausted after/latest usage, generic Retry-After cooldown, and a Plus account with primary usage at `100%`.
 - [x] 4.4 Cover compare-and-set contention and re-block-after-candidate races, proving neither stale recovery nor warm-up traffic occurs.
 - [x] 4.5 Cover active-only warm-up plus a non-exhausted-to-available real reset to prove prior exhaustion is no longer required.

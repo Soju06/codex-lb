@@ -85,6 +85,13 @@ Every recovery write MUST compare the current status, deactivation reason, `rese
 - **THEN** it MUST ignore the row recorded exactly at `blocked_at`
 - **AND** it MUST use the later matching baseline to evaluate the qualifying transition
 
+#### Scenario: An unanchored current transition cannot mask persisted recovery evidence
+- **GIVEN** the current monthly before/after pair confirms a reset whose baseline does not match the blocked Free account's persisted reset marker
+- **AND** persisted monthly history contains an eligible post-block baseline plus a qualifying adjacent reset transition
+- **WHEN** the scheduler resolves monthly reset evidence
+- **THEN** it MUST scan persisted history instead of short-circuiting on the unanchored current pair
+- **AND** it MUST use evidence anchored to the persisted block marker for recovery and warm-up
+
 #### Scenario: Minimum post-block floor prevents immediate recovery
 - **GIVEN** a Free account was marked `rate_limited` less than 30 seconds ago
 - **AND** monthly samples otherwise appear to prove a reset with available quota

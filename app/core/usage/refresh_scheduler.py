@@ -476,7 +476,6 @@ async def _resolve_monthly_reset_evidence(
                 before=before,
                 after=after,
             )
-            continue
         if (
             account.status != AccountStatus.RATE_LIMITED
             or normalize_account_plan_type(account.plan_type) != "free"

@@ -3767,6 +3767,12 @@ class _HTTPBridgeStreamingMixin:
                     raise
                 if gate_contention and session.closed:
                     raise
+                # Durable hard-turn admission may rewrite the request state
+                # with a completed predecessor before a pre-dispatch capacity
+                # failure.  Retry the exact rewritten body rather than the
+                # stale outer-loop payload, or the next attempt could lose the
+                # injected previous_response_id and its continuity anchor.
+                text_data = request_state.request_text or text_data
                 continue
             break
         event_queue = request_state.event_queue

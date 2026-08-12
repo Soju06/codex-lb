@@ -3677,6 +3677,71 @@ async def test_http_bridge_submit_capacity_wait_uses_original_request_deadline(
     assert submit.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_submit_capacity_retry_uses_advanced_request_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-submit-advanced-body")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-submit-advanced-body",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=99.5,
+        transport="http",
+        event_queue=asyncio.Queue(),
+        previous_response_id="resp-parent",
+        proxy_injected_previous_response_id=True,
+        request_text='{"type":"response.create","previous_response_id":"resp-parent","input":"same"}',
+    )
+    stale_text_data = '{"type":"response.create","input":"same"}'
+    capacity_error = ProxyResponseError(
+        429,
+        openai_error(
+            "account_response_create_cap",
+            "Account response-create concurrency limit reached",
+            error_type="rate_limit_error",
+        ),
+    )
+    submitted_texts: list[str] = []
+    clock = [100.0]
+
+    async def submit(_session: Any, *, request_state: Any, text_data: str, **_kwargs: Any) -> None:
+        submitted_texts.append(text_data)
+        if len(submitted_texts) == 1:
+            raise capacity_error
+        await request_state.event_queue.put(None)
+
+    async def fake_capacity_wait(**kwargs: object):
+        clock[0] += cast(float, kwargs["sleep_seconds"])
+        if False:
+            yield ""
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", fake_capacity_wait)
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_time",
+        lambda: SimpleNamespace(monotonic=lambda: clock[0]),
+    )
+
+    async for _ in service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data=stale_text_data,
+        queue_limit=4,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
+        request_deadline=101.0,
+    ):
+        pass
+
+    assert submitted_texts == [stale_text_data, request_state.request_text]
+
+
 def _make_api_key(
     *,
     key_id: str,

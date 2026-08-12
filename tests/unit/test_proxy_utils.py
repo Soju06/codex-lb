@@ -17746,7 +17746,21 @@ async def test_http_bridge_security_retry_clears_codex_affinity_and_turn_aliases
     sticky_source: str,
 ) -> None:
     sticky_sessions = AsyncMock()
-    sticky_sessions.get_account_id.return_value = None
+
+    async def legacy_owner_for_source(
+        _key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+        continuity_source: str | None = None,
+    ) -> str | None:
+        assert kind is StickySessionKind.CODEX_SESSION
+        assert max_age_seconds is None
+        # Model a session-header-scoped tombstone: unknown callers still see
+        # the retained raw owner because it may belong to explicit turn state.
+        return "acc_bridge_security_rejected" if continuity_source is None else None
+
+    sticky_sessions.get_account_id.side_effect = legacy_owner_for_source
 
     class _TrackingRepoContext:
         def __init__(self) -> None:
@@ -17894,12 +17908,19 @@ async def test_http_bridge_security_retry_clears_codex_affinity_and_turn_aliases
     assert ("turn-security-rejected", None) not in service._http_bridge_turn_state_index
     assert "x-codex-turn-state" not in session.headers
     if sticky_source == "session_header":
+        sticky_sessions.get_account_id.assert_awaited_once_with(
+            original_affinity.legacy_selection_key,
+            kind=StickySessionKind.CODEX_SESSION,
+            max_age_seconds=None,
+            continuity_source="session_header",
+        )
         sticky_sessions.upsert.assert_awaited_once_with(
             original_affinity.selection_key,
             authorized_account.id,
             kind=StickySessionKind.CODEX_SESSION,
         )
     else:
+        sticky_sessions.get_account_id.assert_not_awaited()
         sticky_sessions.upsert.assert_not_awaited()
 
 

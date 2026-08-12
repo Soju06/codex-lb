@@ -939,9 +939,7 @@ class ProxyService(
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
         self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher.from_settings(self._durable_bridge)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
-        self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
-        # Detached draining generations still own sockets and leases until close completes.
-        self._http_bridge_detached_sessions: dict[int, _HTTPBridgeSession] = {}
+        self._initialize_http_bridge_session_registry()
         _initialize_http_bridge_retry_circuit(self, _clear_websocket_stale_previous_response_cache)
         self._http_bridge_account_timeout_failures, self._http_bridge_account_timeout_lock = {}, asyncio.Lock()
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}

@@ -3587,6 +3587,10 @@ class _HTTPBridgeRequestSubmitMixin:
         try:
             if owner_rebind_affinity.legacy_selection_key is not None:
                 async with self._repo_factory() as repos:
+                    # A goal restart abandons only session-header interpretation
+                    # of the legacy raw row. Preserve that typed capability here:
+                    # omitting it would resurrect the retained turn-state owner
+                    # during a later security-authorized replacement.
                     legacy_owner_id = await repos.sticky_sessions.get_account_id(
                         owner_rebind_affinity.legacy_selection_key,
                         # The new thread row may be PROMPT_CACHE, but the raw
@@ -3594,6 +3598,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         # remains durable hard ownership.
                         kind=StickySessionKind.CODEX_SESSION,
                         max_age_seconds=None,
+                        continuity_source=owner_rebind_affinity.codex_session_source,
                     )
                 if legacy_owner_id is not None and legacy_owner_id != account_id:
                     raise ProxyResponseError(

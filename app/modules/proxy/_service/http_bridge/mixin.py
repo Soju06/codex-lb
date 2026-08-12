@@ -1371,6 +1371,13 @@ class _HTTPBridgeMixin(
                 if owns_creation:
                     await self._fail_http_bridge_inflight_session_creation(key, inflight_future, exc)
                 raise
+            if owns_creation and sessions_to_close_before_create:
+                await self._enforce_http_bridge_capacity_after_planned_closes(
+                    key=key,
+                    inflight_future=inflight_future,
+                    max_sessions=max_sessions,
+                    request_model=request_model,
+                )
             if session_to_return_after_close is not None:
                 return session_to_return_after_close
             if owner_forward is not None:

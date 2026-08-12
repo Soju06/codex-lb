@@ -16,6 +16,8 @@ Canonical replacement changes which generation accepts new work; it does not rev
 
 Resource close is single-flight across reader retirement, account invalidation, and shutdown. Direct close cancellation is deferred until common resource finalization completes, and shutdown starts all snapshotted closes before it can propagate cancellation. Durable replica ownership is also generation-fenced: when a new local socket replaces a durable row that still names the same configured replica, its claim advances the owner epoch before serving work, including across model-transition routing isolation. For example, if generation A clean-closes while generation B reconnects on another model, A's delayed epoch-1 release cannot close B's epoch-2 lease.
 
+Capacity is released by completed resource finalization, not by detachment or expiration of a bounded close wait. Likewise, shutdown removes canonical routing but keeps each generation in detached lifecycle ownership until close succeeds; a failed close remains available to a later shutdown pass. Security-authorized replacement preserves the original typed continuity source when it rechecks a legacy row, so session-header abandonment cannot accidentally be interpreted as a live explicit-turn-state owner.
+
 ## Failure Modes
 
 - A normal same-session request still returns the existing hard-affinity error while its owner is unavailable.

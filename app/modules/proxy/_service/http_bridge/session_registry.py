@@ -91,6 +91,12 @@ class _HTTPBridgeSessionRegistryMixin:
         self._schedule_http_bridge_session_closes(pruned_sessions, reason="idle_sweep")
         return len(pruned_sessions)
 
+    def _initialize_http_bridge_session_registry(self: _HTTPBridgeServiceProtocol) -> None:
+        # Canonical and detached registries both own live generations until
+        # common resource finalization removes the latter entry.
+        self._http_bridge_sessions = {}
+        self._http_bridge_detached_sessions = {}
+
     async def close_all_http_bridge_sessions(self: _HTTPBridgeServiceProtocol) -> None:
         async with self._http_bridge_lock:
             sessions_to_close, inflight_futures = self._take_all_http_bridge_sessions_locked()
@@ -440,8 +446,13 @@ class _HTTPBridgeSessionRegistryMixin:
     ) -> tuple[list[_HTTPBridgeSession], list[asyncio.Future[_HTTPBridgeSession]]]:
         sessions = [*self._http_bridge_sessions.values(), *self._http_bridge_detached_sessions.values()]
         inflight_futures = list(self._http_bridge_inflight_sessions.values())
+        # Shutdown removes canonical routing immediately, but resource ownership
+        # remains discoverable until each close succeeds. A failed close can
+        # then be retried by a later shutdown pass instead of orphaning its
+        # socket, durable lease, account lease, or unsettled requests.
+        for session in self._http_bridge_sessions.values():
+            self._http_bridge_detached_sessions[id(session)] = session
         self._http_bridge_sessions.clear()
-        self._http_bridge_detached_sessions.clear()
         self._http_bridge_inflight_sessions.clear()
         self._http_bridge_previous_response_index.clear()
         return sessions, inflight_futures

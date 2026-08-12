@@ -344,6 +344,7 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
             text_data=request_state.request_text or "{}",
             queue_limit=8,
             request_scope_id="scope-hard-turn-chain",
+            owned_unanchored_handoff=False,
         )
 
     assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
@@ -428,6 +429,7 @@ async def test_submit_hard_turn_walks_race_path_chain_before_recording(
             text_data=request_state.request_text or "{}",
             queue_limit=8,
             request_scope_id="scope-hard-turn-race-chain",
+            owned_unanchored_handoff=False,
         )
 
     assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
@@ -677,6 +679,7 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
             text_data=text_data,
             queue_limit=queue_limit,
             request_scope_id=request_state.request_id,
+            owned_unanchored_handoff=False,
         )
         yield ""
 
@@ -16740,6 +16743,7 @@ async def test_get_or_create_http_bridge_session_preserves_model_transition_pare
     async def track_close(session: proxy_service._HTTPBridgeSession, *, reason: str) -> None:
         assert reason == "registry_detach"
         closed_sessions.append(session)
+        service._http_bridge_detached_sessions.pop(id(session), None)
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", fake_create_http_bridge_session)
@@ -16806,6 +16810,7 @@ async def test_get_or_create_http_bridge_session_preserves_inflight_model_transi
     async def track_close(session: proxy_service._HTTPBridgeSession, *, reason: str) -> None:
         assert reason == "registry_detach"
         closed_sessions.append(session)
+        service._http_bridge_detached_sessions.pop(id(session), None)
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", fake_create_http_bridge_session)
@@ -18146,6 +18151,30 @@ async def test_close_all_http_bridge_sessions_closes_detached_generations(
 
 
 @pytest.mark.asyncio
+async def test_close_all_http_bridge_sessions_retains_failed_generation_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="shutdown-close-retry")
+    service._http_bridge_sessions[session.key] = session
+    fail_pending = AsyncMock(side_effect=[RuntimeError("pending settlement failed"), None])
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+
+    with pytest.raises(RuntimeError, match="pending settlement failed"):
+        await service.close_all_http_bridge_sessions()
+
+    assert service._http_bridge_sessions == {}
+    assert service._http_bridge_detached_sessions[id(session)] is session
+
+    await service.close_all_http_bridge_sessions()
+
+    assert fail_pending.await_count == 2
+    assert service._http_bridge_sessions == {}
+    assert service._http_bridge_detached_sessions == {}
+
+
+@pytest.mark.asyncio
 async def test_close_all_http_bridge_sessions_schedules_every_close_before_propagating_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -18391,6 +18420,7 @@ async def test_get_or_create_http_bridge_session_closes_lru_before_replacement_c
         assert reason == "registry_detach"
         events.append("close")
         session.closed = True
+        service._http_bridge_detached_sessions.pop(id(session), None)
 
     async def create_http_bridge_session(
         key: proxy_service._HTTPBridgeSessionKey,
@@ -18430,6 +18460,68 @@ async def test_get_or_create_http_bridge_session_closes_lru_before_replacement_c
     assert result.key == new_key
     assert existing_key not in service._http_bridge_sessions
     assert service._http_bridge_sessions[new_key] is result
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_rechecks_capacity_after_timed_out_lru_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    existing_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-lru-timeout-existing", None)
+    existing = _make_bridge_session(key=existing_key, key_value=existing_key.affinity_key)
+    service._http_bridge_sessions[existing_key] = existing
+    new_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-lru-timeout-new", None)
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def slow_close(session: proxy_service._HTTPBridgeSession) -> None:
+        assert session is existing
+        close_started.set()
+        await release_close.wait()
+        async with service._http_bridge_lock:
+            service._http_bridge_detached_sessions.pop(id(session), None)
+
+    create_http_bridge_session = AsyncMock()
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_close_http_bridge_session", slow_close)
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(http_bridge_helpers_module, "_HTTP_BRIDGE_BACKGROUND_CLOSE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ("instance-a",))),
+    )
+
+    try:
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await service._get_or_create_http_bridge_session(
+                new_key,
+                headers={"x-codex-session-id": new_key.affinity_key},
+                affinity=proxy_service._AffinityPolicy(
+                    key=new_key.affinity_key,
+                    kind=proxy_service.StickySessionKind.CODEX_SESSION,
+                ),
+                api_key=None,
+                request_model="gpt-5.4",
+                idle_ttl_seconds=120.0,
+                max_sessions=1,
+            )
+
+        await asyncio.wait_for(close_started.wait(), timeout=1.0)
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
+        assert service._http_bridge_detached_sessions[id(existing)] is existing
+        assert new_key not in service._http_bridge_inflight_sessions
+        create_http_bridge_session.assert_not_awaited()
+    finally:
+        release_close.set()
+        await service._drain_http_bridge_background_cleanup_tasks(reason="test")
+
+    assert service._http_bridge_detached_sessions == {}
 
 
 @pytest.mark.asyncio
@@ -20461,6 +20553,7 @@ async def test_submit_hard_turn_rolls_back_new_operation_before_retiring_session
             text_data=request_state.request_text or "{}",
             queue_limit=8,
             request_scope_id="scope-hard-turn-unsent-operation",
+            owned_unanchored_handoff=False,
         )
 
     assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"

@@ -68,7 +68,7 @@ describe("apis page integration", () => {
 		await user.click(await screen.findByRole("button", { name: "Create API Key" }));
 		const createDialog = await screen.findByRole("dialog", { name: "Create API key" });
 		await user.type(within(createDialog).getByLabelText("Name"), "Selectable effort key");
-		await user.click(within(createDialog).getByRole("button", { name: "All efforts" }));
+		await user.click(within(createDialog).getByRole("button", { name: "Allowed efforts: All efforts" }));
 		await user.click(screen.getByRole("menuitemcheckbox", { name: /^Low$/ }));
 		await user.keyboard("{Escape}");
 

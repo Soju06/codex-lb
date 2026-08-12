@@ -773,6 +773,17 @@ def test_source_chat_reasoning_policy_strips_blank_effort_from_implicit_thinking
     assert payload == {"thinking": {"enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"}}
 
 
+@pytest.mark.parametrize("thinking", [{"enabled": False}, {"type": "disabled"}])
+def test_source_chat_reasoning_policy_drops_inactive_thinking_object_beside_enable_alias(
+    thinking: dict[str, JsonValue],
+) -> None:
+    payload: dict[str, JsonValue] = {"thinking": thinking, "enable_thinking": True}
+
+    apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="medium")
+
+    assert payload == {"enable_thinking": True}
+
+
 def test_source_chat_reasoning_policy_drops_conflicting_implicit_thinking_object() -> None:
     payload: dict[str, JsonValue] = {
         "reasoning_effort": "low",

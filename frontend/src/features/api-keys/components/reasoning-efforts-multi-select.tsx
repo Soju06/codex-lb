@@ -45,6 +45,7 @@ export function ReasoningEffortsMultiSelect({
     value.length === 0
       ? t("apiKeys.reasoningEfforts.all")
       : t("apiKeys.reasoningEfforts.selected", { count: value.length });
+  const fieldLabel = t("apiKeys.form.allowedReasoningEfforts");
 
   return (
     <DropdownMenu>
@@ -53,6 +54,7 @@ export function ReasoningEffortsMultiSelect({
           type="button"
           variant="outline"
           className="w-full justify-between font-normal"
+          aria-label={`${fieldLabel}: ${label}`}
           disabled={disabled}
         >
           <span className="truncate text-left">{label}</span>

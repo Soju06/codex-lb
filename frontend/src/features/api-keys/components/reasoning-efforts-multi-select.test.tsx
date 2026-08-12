@@ -15,7 +15,11 @@ describe("ReasoningEffortsMultiSelect", () => {
       <ReasoningEffortsMultiSelect value={["xhigh"]} onChange={onChange} />,
     );
 
-    await user.click(screen.getByRole("button", { name: /1 effort selected/i }));
+    await user.click(
+      screen.getByRole("button", {
+        name: "Allowed efforts: 1 effort selected",
+      }),
+    );
     await user.click(screen.getByRole("menuitemcheckbox", { name: "Low" }));
 
     expect(onChange).toHaveBeenCalledWith(["low", "xhigh"]);

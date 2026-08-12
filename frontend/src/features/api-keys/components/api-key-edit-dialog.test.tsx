@@ -30,6 +30,22 @@ describe("ApiKeyEditDialog", () => {
     );
   }
 
+  it("labels the reasoning effort trigger with its field and state", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ allowedReasoningEfforts: ["low"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Allowed efforts: 1 effort selected" }),
+    ).toBeInTheDocument();
+  });
+
   it("omits limits from payload when only name changes", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

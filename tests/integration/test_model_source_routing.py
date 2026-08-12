@@ -1710,26 +1710,32 @@ async def test_source_chat_reasoning_allowlist_preserves_enable_thinking(async_c
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("thinking", "expected_thinking"),
+    ("thinking", "enable_thinking", "expected_thinking"),
     [
         (
             {"type": "enabled", "budget_tokens": 2048},
+            False,
             {"type": "enabled", "budget_tokens": 2048},
         ),
         (
             {"enabled": True, "summary": "auto", "vendor_hint": "keep"},
+            False,
             {"enabled": True, "summary": "auto", "vendor_hint": "keep"},
         ),
         (
             {"effort": " ", "enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"},
+            False,
             {"enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"},
         ),
+        ({"enabled": False}, True, None),
+        ({"type": "disabled"}, True, None),
     ],
 )
 async def test_source_chat_reasoning_allowlist_preserves_implicit_thinking_object(
     async_client,
     source_upstream,
     thinking,
+    enable_thinking,
     expected_thinking,
 ):
     await _enable_api_key_auth(async_client)
@@ -1758,18 +1764,26 @@ async def test_source_chat_reasoning_allowlist_preserves_implicit_thinking_objec
     )
     assert created.status_code == 200
 
+    request_payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": thinking,
+    }
+    if enable_thinking:
+        request_payload["enable_thinking"] = True
     response = await async_client.post(
         "/v1/chat/completions",
         headers={"Authorization": f"Bearer {created.json()['key']}"},
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": "hi"}],
-            "thinking": thinking,
-        },
+        json=request_payload,
     )
 
     assert response.status_code == 200
-    assert captured["thinking"] == expected_thinking
+    if expected_thinking is None:
+        assert "thinking" not in captured
+    else:
+        assert captured["thinking"] == expected_thinking
+    if enable_thinking:
+        assert captured["enable_thinking"] is True
     assert "reasoning" not in captured
     assert "reasoning_effort" not in captured
 

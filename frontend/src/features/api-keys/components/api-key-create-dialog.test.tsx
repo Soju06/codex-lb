@@ -11,6 +11,14 @@ import { renderWithProviders } from "@/test/utils";
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
 
 describe("ApiKeyCreateDialog", () => {
+  it("labels the reasoning effort trigger with its field and state", () => {
+    renderWithProviders(
+      <ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("button", { name: "Allowed efforts: All efforts" })).toBeInTheDocument();
+  });
+
   it("shows the codex /model checkbox unchecked by default", () => {
     renderWithProviders(
       <ApiKeyCreateDialog

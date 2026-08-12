@@ -23,4 +23,8 @@
       between turns reconnects into the 503 fallback instead of receiving a
       terminal error.
 - [x] Finalize the request-log row on the reuse-guard path.
+- [x] Carry the client's raw model (pre alias normalization) through request
+      preparation and feed it to the source-ownership check on both the
+      connect and reuse paths, so an alias-only source behind an alias
+      allowlist matches like it does over HTTP (Codex P2).
 

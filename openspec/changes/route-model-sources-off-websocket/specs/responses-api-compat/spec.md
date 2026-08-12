@@ -12,6 +12,15 @@ SHALL also be applied to every prepared `response.create`, so that a turn which
 switches to a source-owned model on an already-open subscription upstream is
 also rejected instead of being forwarded.
 
+Both checks SHALL evaluate the client's raw requested model, captured before
+API-key enforcement normalizes model aliases (for example `gpt-5-high` to
+`gpt-5`), alongside the normalized model — the same candidate list the HTTP
+handlers build from `raw_source_model`, including substituting the API key's
+`enforced_model` and, when fast mode is prohibited and the raw model is a
+fast-mode alias, replacing the raw candidate with the normalized model. A
+source that exposes an alias-named model MUST be matched on the WebSocket
+transport whenever the HTTP path would route to it.
+
 Both failures MUST use error code `model_source_requires_http_transport`. On the
 connect path the failure MUST be emitted as a service-level connect failure
 (HTTP status `503`), so that Codex clients fall back to the HTTP transport,
@@ -43,6 +52,14 @@ silently routing source traffic to a subscription account would be worse there.
 - **THEN** the system emits a terminal error with code `model_source_requires_http_transport`
 - **AND** the frame is not forwarded to the subscription account on the open upstream
 - **AND** the turn's usage reservation is released
+
+#### Scenario: An alias-named source model is rejected despite normalization
+
+- **GIVEN** an enabled OpenAI-compatible model source exposes model `gpt-5-high` with Responses support
+- **AND** an API key whose `allowed_models` contains exactly `gpt-5-high`
+- **WHEN** the key sends a WebSocket `response.create` for `gpt-5-high`, which enforcement normalizes to `gpt-5`
+- **THEN** the source-ownership check also considers the raw `gpt-5-high` candidate
+- **AND** the request is rejected with `model_source_requires_http_transport` on the connect path and on socket reuse alike
 
 #### Scenario: An API key that enforces a source-owned model is rejected
 

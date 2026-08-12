@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
@@ -111,7 +112,7 @@ async def _run_connect_guard(
     selection_calls = 0
     seen_api_keys: list[ApiKeyData | None] = []
 
-    async def fake_is_source_owned(model, key):  # noqa: ANN001
+    async def fake_is_source_owned(model, key, *, raw_model=None):  # noqa: ANN001
         seen_api_keys.append(key)
         return is_source_owned
 
@@ -340,7 +341,7 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
         return account, upstream
 
     # Only the second turn's model is source-owned.
-    async def source_owned_for_qwen(model, _api_key):  # noqa: ANN001
+    async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
         return model == "qwen3.8-max"
 
     released = AsyncMock()
@@ -366,3 +367,246 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
     )
     assert len(upstream.sent_text) == 1, "the rejected turn must not be forwarded upstream"
     assert released.await_count >= 1, "the rejected turn must release its usage reservation"
+
+
+def _alias_allowlist_api_key() -> ApiKeyData:
+    """A key that allowlists exactly the alias an alias-named source exposes.
+
+    ``validate_model_access`` resolves aliases on both sides, so this key also
+    admits plain ``gpt-5`` requests — but ``select_responses_model_source``
+    filters candidates against the allowlist *exactly*, which keeps the
+    normalized ``gpt-5`` candidate away from source lookup. That makes the raw
+    alias the only candidate that can match the source, in the unit fake, the
+    integration database, and production alike.
+    """
+    from datetime import datetime
+
+    return ApiKeyData(
+        id="key_ws_guard_alias",
+        name="ws guard alias",
+        key_prefix="sk-test-ws-alias",
+        allowed_models=["gpt-5-high"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=datetime(2026, 1, 1),
+        last_used_at=None,
+    )
+
+
+class _AliasSourceCatalog:
+    """Fake only the I/O seams underneath ``select_responses_model_source``.
+
+    The candidate construction in ``responses_model_is_source_owned`` and the
+    allowlist/registry filtering in ``select_responses_model_source`` stay
+    real; this stands in for the database session/repository and records which
+    candidates were actually offered to the catalog, so tests can assert the
+    raw client alias physically reached source selection (monkeypatching
+    ``responses_model_is_source_owned`` itself would test the stub instead).
+    """
+
+    def __init__(self, source_models: set[str]) -> None:
+        self.source_models = source_models
+        self.seen_candidates: list[str] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        catalog = self
+
+        class _FakeRepository:
+            def __init__(self, _session: object) -> None:
+                pass
+
+            async def find_responses_source_for_model(
+                self,
+                candidate: str,
+                *,
+                allowed_source_ids=None,  # noqa: ANN001
+                require_streaming: bool = False,
+            ):  # noqa: ANN202
+                catalog.seen_candidates.append(candidate)
+                if candidate in catalog.source_models:
+                    return SimpleNamespace(id="src_alias", name="alias-source", enabled=True)
+                return None
+
+        @asynccontextmanager
+        async def fake_session():  # noqa: ANN202
+            yield object()
+
+        monkeypatch.setattr(source_selection, "ModelSourcesRepository", _FakeRepository)
+        monkeypatch.setattr(source_selection, "get_background_session", fake_session)
+        monkeypatch.setattr(source_selection, "detach_session_objects", lambda _session: None)
+
+
+class _TurnDrivenUpstream:
+    """An upstream that releases each scripted turn only after its request.
+
+    ``_QueuedTestUpstreamWebSocket`` queues every frame up front, which would
+    let a second turn's events race ahead of the second ``response.create``.
+    Here turn N's events become readable only after the Nth upstream send, so
+    a turn that is (correctly) rejected before forwarding leaves its events
+    unread, and a (buggy) forwarded turn completes cleanly instead of hanging
+    the session — the pre-fix failure stays a crisp assertion failure.
+    """
+
+    def __init__(self, turns: list[list[SimpleNamespace]]) -> None:
+        self._turns = list(turns)
+        self._messages: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
+        self.close_seen = asyncio.Event()
+        self.sent_text: list[str] = []
+
+    def response_header(self, name: str) -> str | None:
+        del name
+        return None
+
+    async def receive(self) -> SimpleNamespace:
+        message = await self._messages.get()
+        if message.kind == "close":
+            self.close_seen.set()
+        return message
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        if self._turns:
+            for event in self._turns.pop(0):
+                self._messages.put_nowait(event)
+
+    async def send_bytes(self, _data: bytes) -> None:
+        return None
+
+    async def close(self) -> None:
+        self.close_seen.set()
+
+
+@pytest.mark.asyncio
+async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later turn asking for an alias-only source model must be rejected.
+
+    ``apply_api_key_enforcement`` normalizes ``gpt-5-high`` to ``gpt-5``
+    during request preparation, so a guard that judges only
+    ``request_state.model`` misses a source that exposes exactly
+    ``gpt-5-high`` — while the HTTP path routes the identical request to the
+    source via its pre-enforcement ``raw_source_model``. The real
+    ``responses_model_is_source_owned`` and ``select_responses_model_source``
+    run here; only the catalog I/O is faked (regression for the raw-alias P2).
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    catalog = _AliasSourceCatalog({"gpt-5-high"})
+    catalog.install(monkeypatch)
+
+    api_key = _alias_allowlist_api_key()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_source_guard_alias")
+    upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
+
+    async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        return account, upstream
+
+    async def fake_refresh(key):  # noqa: ANN001, ANN202
+        return api_key
+
+    released = AsyncMock()
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", fake_refresh)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_service.ProxyService, "_release_websocket_request_state_reservation", released)
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+
+    downstream = _Downstream([_create_frame("gpt-5"), _create_frame("gpt-5-high")])
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=api_key,
+    )
+
+    assert any("resp_turn_one" in text for text in downstream.sent_text), "the subscription turn must complete"
+    assert "gpt-5-high" in catalog.seen_candidates, (
+        "the client's raw alias must reach source selection; the normalized "
+        "'gpt-5' is filtered out by the key's exact allowlist"
+    )
+    assert any("model_source_requires_http_transport" in text for text in downstream.sent_text), (
+        "the alias-owned turn must be rejected by the reuse guard"
+    )
+    assert len(upstream.sent_text) == 1, "the alias turn must not be forwarded to the subscription upstream"
+    assert released.await_count >= 1, "the rejected turn must release its usage reservation"
+
+
+@pytest.mark.asyncio
+async def test_connect_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect guard must judge the pre-enforcement alias too.
+
+    The session loop hands ``_connect_proxy_websocket`` the post-enforcement
+    ``request_state.model``, so the raw alias must ride on the prepared
+    request state itself for the connect-time check to see it. This drives the
+    real ``_prepare_websocket_response_create_request`` (where enforcement
+    normalizes the alias) into the real connect guard.
+    """
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    catalog = _AliasSourceCatalog({"gpt-5-high"})
+    catalog.install(monkeypatch)
+
+    api_key = _alias_allowlist_api_key()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+
+    emitted: dict[str, object] = {}
+    selection_calls = 0
+
+    async def fake_refresh(key):  # noqa: ANN001, ANN202
+        return api_key
+
+    async def fake_emit(self, websocket, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        emitted.update(kwargs)
+
+    async def fake_select(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        selection_calls += 1
+        return None
+
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", fake_refresh)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_service.ProxyService, "_emit_websocket_connect_failure", fake_emit)
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select)
+
+    prepared = await service._prepare_websocket_response_create_request(
+        json.loads(_create_frame("gpt-5-high")),
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=0,
+        api_key=api_key,
+    )
+    assert prepared.request_state.model == "gpt-5", "enforcement is expected to normalize the alias"
+
+    account, upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="capacity_weighted",
+        # Exactly what the session loop passes: the normalized model.
+        model=prepared.request_state.model,
+        request_state=prepared.request_state,
+        api_key=api_key,
+        client_send_lock=anyio.Lock(),
+        websocket=AsyncMock(),
+    )
+
+    assert account is None
+    assert upstream is None
+    assert selection_calls == 0, "the connect guard must short-circuit before account selection"
+    assert emitted.get("error_code") == "model_source_requires_http_transport"
+    assert emitted.get("status_code") == 503
+    assert "gpt-5-high" in catalog.seen_candidates, "the raw alias must reach source selection on the connect path"

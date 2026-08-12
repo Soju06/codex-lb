@@ -659,6 +659,47 @@ async def test_responses_source_raw_alias_lookup_requires_exact_allowlist(async_
 
 
 @pytest.mark.asyncio
+async def test_responses_model_is_source_owned_prefers_the_raw_alias(async_client):
+    """WebSocket parity for the raw-alias candidate (see the HTTP test above).
+
+    Request preparation normalizes ``gpt-5-high`` to ``gpt-5`` before the
+    WebSocket guards run, so the guard helper must accept the client's raw
+    model and offer it to source selection ahead of the normalized one — the
+    HTTP path routes the identical request via ``raw_source_model``.
+    """
+    from app.modules.model_sources.selection import responses_model_is_source_owned
+
+    model = "gpt-5-high"
+    await _create_model_source(
+        async_client,
+        name="ws-guard-raw-alias",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+        supports_responses=True,
+        supports_streaming=True,
+    )
+    exact_key = ApiKeyData(
+        id="key_ws_raw_alias",
+        name="ws raw alias",
+        key_prefix="sk-test-ws-raw-alias",
+        allowed_models=[model],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    assert await responses_model_is_source_owned("gpt-5", exact_key, raw_model=model) is True
+    # Without the raw candidate the exact allowlist hides the source. This is
+    # the pre-fix WebSocket behaviour; keeping it false proves the assertion
+    # above matched through the raw candidate, not some other fallback.
+    assert await responses_model_is_source_owned("gpt-5", exact_key) is False
+
+
+@pytest.mark.asyncio
 async def test_chat_source_selector_can_require_streaming(async_client):
     from app.modules.model_sources.repository import ModelSourcesRepository
 

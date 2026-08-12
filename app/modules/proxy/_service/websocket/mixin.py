@@ -96,7 +96,10 @@ from app.modules.api_keys.service import (
     ApiKeyInvalidError,
     ApiKeysService,
 )
-from app.modules.model_sources.selection import responses_model_is_source_owned
+from app.modules.model_sources.selection import (
+    effective_model_for_api_key,
+    responses_model_is_source_owned,
+)
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -468,6 +471,7 @@ from app.modules.proxy.load_balancer import AccountLease, effective_account_conc
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
+    model_alias_requests_fast_mode,
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_invalid_payload_error,
@@ -1602,7 +1606,13 @@ class _WebSocketMixin:
                                     and upstream_reader is not None
                                     and not upstream_reader.done()
                                     and await responses_model_is_source_owned(
-                                        request_state.model, request_state.api_key or api_key
+                                        request_state.model,
+                                        request_state.api_key or api_key,
+                                        # The raw client model, before enforcement
+                                        # normalized aliases: an alias-only source
+                                        # (``gpt-5-high``) is invisible in the
+                                        # normalized ``request_state.model``.
+                                        raw_model=request_state.raw_source_model,
                                     )
                                 ):
                                     # Socket reuse bypasses connect-time selection, so a later
@@ -1616,16 +1626,18 @@ class _WebSocketMixin:
                                     # which fails with a service-level 503 so the client falls
                                     # back to HTTP. Emitting a terminal error here would preempt
                                     # that fallback and make source models unreachable.
+                                    source_model = request_state.raw_source_model or request_state.model
                                     source_message = (
-                                        f"Model {request_state.model!r} is served by an "
+                                        f"Model {source_model!r} is served by an "
                                         "OpenAI-compatible model source, which is only reachable "
                                         "over the HTTP transport; retry the request over HTTPS."
                                     )
                                     _facade().logger.info(
                                         "Websocket model source requires http transport "
-                                        "request_id=%s model=%s stage=response_create",
+                                        "request_id=%s model=%s raw_model=%s stage=response_create",
                                         request_state.request_log_id or request_state.request_id,
                                         request_state.model,
+                                        request_state.raw_source_model,
                                     )
                                     await proxy._release_websocket_request_state_reservation(request_state)
                                     # The prepared request already owns a request-log row; without
@@ -2704,11 +2716,21 @@ class _WebSocketMixin:
             payload,
             openai_compat=openai_cache_affinity,
         )
+        # The client's raw model, captured before enforcement normalizes
+        # aliases (``gpt-5-high`` -> ``gpt-5``). The source-ownership guards
+        # must judge the raw alias too, or an alias-only model source is
+        # missed on the WebSocket paths while the HTTP path routes the same
+        # request via ``raw_source_model``. Mirrors ``api.py::responses``
+        # exactly, including the enforced-model substitution here and the
+        # fast-mode correction after enforcement below.
+        raw_source_model = effective_model_for_api_key(refreshed_api_key, responses_payload.model)
         service_tier_was_enforced = apply_api_key_enforcement(
             responses_payload,
             refreshed_api_key,
             prohibit_fast_mode=prohibit_fast_mode,
         )
+        if prohibit_fast_mode and model_alias_requests_fast_mode(raw_source_model):
+            raw_source_model = responses_payload.model
         apply_enforced_service_tier_model_fallback(
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
@@ -2868,6 +2890,7 @@ class _WebSocketMixin:
         request_state.useragent_group = useragent_group
         request_state.conversation_id = conversation_id
         request_state.client_ip = client_ip
+        request_state.raw_source_model = raw_source_model
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         request_state.require_security_work_authorized = capability_route.require_security_work_authorized
@@ -3110,15 +3133,24 @@ class _WebSocketMixin:
         # per-request api key is used (rather than the session key) so a policy
         # refresh mid-session cannot make this disagree with the equivalent
         # check on the prepared-request path.
-        if await responses_model_is_source_owned(model, request_state.api_key or api_key):
+        if await responses_model_is_source_owned(
+            model,
+            request_state.api_key or api_key,
+            # ``model`` is the session loop's post-enforcement
+            # ``request_state.model``; the raw client alias captured at
+            # preparation is what an alias-only source is registered under.
+            raw_model=request_state.raw_source_model,
+        ):
+            source_model = request_state.raw_source_model or model
             message = (
-                f"Model {model!r} is served by an OpenAI-compatible model source, which is only "
+                f"Model {source_model!r} is served by an OpenAI-compatible model source, which is only "
                 "reachable over the HTTP transport; retry the request over HTTPS."
             )
             _facade().logger.info(
-                "Websocket model source requires http transport request_id=%s model=%s api_key_present=%s",
+                "Websocket model source requires http transport request_id=%s model=%s raw_model=%s api_key_present=%s",
                 request_state.request_log_id or request_state.request_id,
                 model,
+                request_state.raw_source_model,
                 (request_state.api_key or api_key) is not None,
             )
             await proxy._emit_websocket_connect_failure(

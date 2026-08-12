@@ -74,7 +74,12 @@ def effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: str
     return api_key.enforced_model
 
 
-async def responses_model_is_source_owned(model: str | None, api_key: ApiKeyData | None) -> bool:
+async def responses_model_is_source_owned(
+    model: str | None,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+) -> bool:
     """True when ``model`` is served by an enabled Responses-capable source.
 
     Used by the WebSocket path, which cannot forward to a model source and must
@@ -84,6 +89,14 @@ async def responses_model_is_source_owned(model: str | None, api_key: ApiKeyData
     model, matching how the HTTP handlers build their candidate list: an
     enforced model that resolves to a source must not slip through to
     subscription-account selection.
+
+    ``raw_model`` is the client's requested model captured before request
+    preparation normalized aliases (``gpt-5-high`` -> ``gpt-5``), mirroring the
+    HTTP path's ``raw_source_model``: the caller has already substituted the
+    API key's ``enforced_model`` and applied the fast-mode correction, so it is
+    used verbatim as the leading source candidate. When omitted (request states
+    that predate preparation, e.g. replayed turns), the raw candidate is
+    derived from ``enforced_model``/``model`` as before.
 
     Resolution failures fail open to ``False``. This helper only gates the
     WebSocket transport, where the alternative is worse: the lookup runs after
@@ -97,24 +110,24 @@ async def responses_model_is_source_owned(model: str | None, api_key: ApiKeyData
     and must keep surfacing resolution errors rather than silently routing
     source traffic to a subscription account.
     """
-    enforced = effective_model_for_api_key(api_key, model)
-    if not model and not enforced:
+    raw = raw_model if raw_model is not None else effective_model_for_api_key(api_key, model)
+    if not model and not raw:
         return False
     try:
         return (
             await select_responses_model_source(
-                model or enforced or "",
+                model or raw or "",
                 api_key,
-                raw_model=enforced,
+                raw_model=raw,
                 require_streaming=True,
             )
             is not None
         )
     except Exception:
         logger.warning(
-            "model_source_resolution_failed_open model=%s enforced_model=%s",
+            "model_source_resolution_failed_open model=%s raw_model=%s",
             model,
-            enforced,
+            raw,
             exc_info=True,
         )
         return False

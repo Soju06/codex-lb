@@ -15,17 +15,19 @@ export type CopyButtonProps = {
 export function CopyButton({ value, label, iconOnly = false }: CopyButtonProps) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
+  const mountedRef = useRef(false);
   const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const labelText = label ?? t("components.copyButton.copy");
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
       if (resetTimerRef.current !== null) {
         clearTimeout(resetTimerRef.current);
       }
-    },
-    [],
-  );
+    };
+  }, []);
 
   const handleCopy = async (event: MouseEvent<HTMLButtonElement>) => {
     const trigger = event.currentTarget;
@@ -35,6 +37,9 @@ export function CopyButton({ value, label, iconOnly = false }: CopyButtonProps) 
       const copiedToClipboard = await copyToClipboard(value, {
         container: dialogContainer instanceof HTMLElement ? dialogContainer : undefined,
       });
+      if (!mountedRef.current) {
+        return;
+      }
       if (copiedToClipboard) {
         setCopied(true);
         toast.success(t("components.copyButton.toasts.copied"));
@@ -50,7 +55,9 @@ export function CopyButton({ value, label, iconOnly = false }: CopyButtonProps) 
 
       toast.error(t("components.copyButton.toasts.failed"));
     } catch {
-      toast.error(t("components.copyButton.toasts.failed"));
+      if (mountedRef.current) {
+        toast.error(t("components.copyButton.toasts.failed"));
+      }
     }
   };
   const copiedLabel = t("components.copyButton.copied");

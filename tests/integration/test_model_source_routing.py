@@ -1813,14 +1813,20 @@ async def test_source_chat_reasoning_allowlist_materializes_canonicalized_model_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("with_allowlist", "reasoning"),
-    [(False, None), (True, None), (True, {"effort": "low"})],
+    ("with_allowlist", "reasoning", "enable_thinking"),
+    [
+        (False, None, False),
+        (True, None, False),
+        (True, {"effort": "low"}, False),
+        (True, {"effort": "low"}, True),
+    ],
 )
 async def test_source_responses_preserves_effortless_provider_thinking_object(
     async_client,
     source_upstream,
     with_allowlist,
     reasoning,
+    enable_thinking,
 ):
     if with_allowlist:
         await _enable_api_key_auth(async_client)
@@ -1869,6 +1875,8 @@ async def test_source_responses_preserves_effortless_provider_thinking_object(
     }
     if reasoning is not None:
         request_payload["reasoning"] = reasoning
+    if enable_thinking:
+        request_payload["enable_thinking"] = True
 
     response = await async_client.post("/v1/responses", headers=headers, json=request_payload)
 
@@ -1878,6 +1886,8 @@ async def test_source_responses_preserves_effortless_provider_thinking_object(
         assert "reasoning" not in captured
     else:
         assert captured["reasoning"] == reasoning
+    if enable_thinking:
+        assert "enable_thinking" not in captured
 
 
 @pytest.mark.asyncio

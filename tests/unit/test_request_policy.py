@@ -13,6 +13,7 @@ from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
+    normalize_source_reasoning_aliases,
     validate_model_access,
 )
 
@@ -737,6 +738,28 @@ def test_source_chat_reasoning_policy_drops_conflicting_implicit_thinking_object
     apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="low")
 
     assert payload == {"reasoning_effort": "low"}
+
+
+def test_source_reasoning_policy_preserves_effortless_thinking_beside_enable_alias() -> None:
+    thinking: dict[str, JsonValue] = {"type": "adaptive", "budget_tokens": 2048}
+    payload: dict[str, JsonValue] = {
+        "reasoning": {"effort": "low"},
+        "thinking": thinking,
+        "enable_thinking": True,
+    }
+
+    normalize_source_reasoning_aliases(payload)
+
+    assert payload == {"reasoning": {"effort": "low"}, "thinking": thinking}
+
+
+@pytest.mark.parametrize("thinking", [False, {"type": "disabled"}, {"enabled": False}])
+def test_source_reasoning_policy_drops_inactive_thinking_beside_enable_alias(thinking: JsonValue) -> None:
+    payload: dict[str, JsonValue] = {"thinking": thinking, "enable_thinking": True}
+
+    normalize_source_reasoning_aliases(payload)
+
+    assert payload == {"reasoning": {"effort": "medium"}}
 
 
 def test_source_chat_reasoning_policy_materializes_model_alias_effort_for_canonical_source() -> None:

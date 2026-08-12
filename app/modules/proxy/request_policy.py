@@ -220,12 +220,20 @@ def normalize_source_reasoning_aliases(payload: dict[str, JsonValue]) -> None:
     preserve_provider_thinking = False
     if "thinking" in payload:
         probe: dict[str, JsonValue] = {"thinking": provider_thinking}
-        if "enable_thinking" in payload:
-            probe["enable_thinking"] = payload["enable_thinking"]
         normalize_reasoning_aliases(probe)
         normalized_reasoning = probe.get("reasoning")
         normalized_effort = normalized_reasoning.get("effort") if is_json_mapping(normalized_reasoning) else None
-        preserve_provider_thinking = not (isinstance(normalized_effort, str) and bool(normalized_effort.strip()))
+        thinking_mapping = provider_thinking if is_json_mapping(provider_thinking) else None
+        thinking_type = thinking_mapping.get("type") if thinking_mapping is not None else None
+        is_inactive = thinking_mapping is not None and (
+            thinking_mapping.get("enabled") is False
+            or (isinstance(thinking_type, str) and thinking_type.strip().lower() == "disabled")
+        )
+        preserve_provider_thinking = (
+            thinking_mapping is not None
+            and not is_inactive
+            and not (isinstance(normalized_effort, str) and bool(normalized_effort.strip()))
+        )
     if preserve_provider_thinking:
         payload.pop("thinking", None)
     normalize_reasoning_aliases(payload)

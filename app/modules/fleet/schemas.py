@@ -44,6 +44,7 @@ class FleetRefreshResponse(DashboardModel):
 class FleetPressureMetric(DashboardModel):
     request_count: int = 0
     error_count: int = 0
+    cancelled_count: int = 0
     input_tokens: int = 0
     cached_input_tokens: int = 0
     output_tokens: int = 0

@@ -10,6 +10,18 @@ from app.core.usage.pricing import (
     get_pricing_for_model,
 )
 
+# Request-log status classification shared by every error-metric surface
+# (usage builders, time rollups, reports, fleet): `cancelled` is a normal
+# client-side terminal (written when the downstream client disconnects before
+# the final event lands — routing health already treats it as non-penalizing),
+# so only statuses outside this tuple count as errors.
+CANCELLED_STATUS = "cancelled"
+NON_ERROR_STATUSES: tuple[str, ...] = ("success", CANCELLED_STATUS)
+# The error code cancelled rows carry; excluded read-side from historical
+# error-satellite rollup rows that were folded under the legacy
+# `status != 'success'` filter.
+CLIENT_DISCONNECT_ERROR_CODE = "client_disconnected"
+
 
 class RequestLogLike(Protocol):
     @property

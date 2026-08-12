@@ -3,11 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, case, func, literal_column, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.config.settings_cache import get_settings_cache
+from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import Account, RequestKind, RequestLog, StickySession, StickySessionKind
 from app.modules.fleet.schemas import (
@@ -104,6 +105,7 @@ async def _build_pressure_window(
         seconds=seconds,
         request_count=totals.request_count,
         error_count=totals.error_count,
+        cancelled_count=totals.cancelled_count,
         input_tokens=totals.input_tokens,
         cached_input_tokens=totals.cached_input_tokens,
         output_tokens=totals.output_tokens,
@@ -134,9 +136,13 @@ def _metric_columns():
     return (
         func.count(RequestLog.id).label("request_count"),
         func.coalesce(
-            func.sum(case((RequestLog.status != literal_column("'success'"), 1), else_=0)),
+            func.sum(case((RequestLog.status.not_in(NON_ERROR_STATUSES), 1), else_=0)),
             0,
         ).label("error_count"),
+        func.coalesce(
+            func.sum(case((RequestLog.status == CANCELLED_STATUS, 1), else_=0)),
+            0,
+        ).label("cancelled_count"),
         func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
         func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
         func.coalesce(func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)), 0).label(
@@ -150,6 +156,7 @@ def _metric_from_row(row) -> FleetPressureMetric:
     return FleetPressureMetric(
         request_count=int(row.request_count or 0),
         error_count=int(row.error_count or 0),
+        cancelled_count=int(row.cancelled_count or 0),
         input_tokens=int(row.input_tokens or 0),
         cached_input_tokens=int(row.cached_input_tokens or 0),
         output_tokens=int(row.output_tokens or 0),
@@ -168,7 +175,7 @@ async def _top_error_code(session: AsyncSession, conditions: list[ColumnElement[
         .where(
             and_(
                 *conditions,
-                RequestLog.status != "success",
+                RequestLog.status.not_in(NON_ERROR_STATUSES),
                 RequestLog.error_code.is_not(None),
             )
         )

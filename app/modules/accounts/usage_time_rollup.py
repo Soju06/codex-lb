@@ -63,6 +63,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import BigInteger, ColumnElement, Integer, and_, case, cast, delete, func, insert, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.usage.logs import CANCELLED_STATUS, NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import (
     AccountUsageRollupState,
@@ -93,6 +94,39 @@ QUARTER_SLOT_SECONDS = 900
 # occupancy across scheduler ticks instead of one giant catch-up.
 TS_FOLD_SLICE = timedelta(hours=48)
 TS_MAX_SLICES_PER_PASS = 20
+
+# Rolling-upgrade repair (#1552): the cancelled_count migration runs before
+# old replicas drain, so a legacy leader can still fold hours with the old
+# error fold (cancelled terminals counted as errors, cancelled_count 0,
+# client_disconnected folded into the error satellite) and advance the shared
+# watermark — buckets new code would otherwise never revisit. Old writers run
+# old code and cannot be fenced, so the NEW code repairs instead: it refolds
+# the legacy-suspect range `[upgrade_repair_from, hourly_folded_through)`
+# from raw. The marker is stamped by the migration (existing rows get their
+# then-current watermark; a state row bootstrapped by an OLD replica after
+# the migration gets the epoch server default, marking its entire backfill
+# suspect — a legacy leader can advance TS_MAX_SLICES_PER_PASS x
+# TS_FOLD_SLICE per pass, so no fixed trailing window could cover it) and
+# cleared to NULL only by new code once the range is refolded. Repair
+# progress persists chunk-by-chunk through the marker, so a crash resumes
+# instead of restarting.
+#
+# With the marker already NULL, each process's first fold pass still refolds
+# this trailing window as flip-flop defense: an old replica that regains
+# fold leadership AFTER the marker was cleared (mid-rollout) writes legacy
+# buckets the marker no longer tracks. A steady-state legacy interlude
+# advances the watermark by minutes-to-hours — far below this span — and the
+# rollout that makes interludes possible also guarantees another new-code
+# process (the old replica's replacement) starts afterwards and runs this
+# defense. Cost: one backfill-slice-equivalent per process start.
+#
+# Both paths clamp to hours fully covered by surviving raw rows (retention
+# prunes oldest-first with a contiguous frontier, so every row at or above
+# the earliest surviving one is intact) — the repair can never erase folded
+# statistics it cannot recompute; clamped-out buckets keep the disclosed
+# legacy fold. Neither path is a historical backfill.
+UPGRADE_REPAIR_WINDOW = timedelta(hours=48)
+_upgrade_repair_done = False
 
 _EPOCH = datetime(1970, 1, 1)
 
@@ -166,6 +200,7 @@ class HourlyUsageRollupRow:
     is_deleted: bool
     request_count: int = 0
     error_count: int = 0
+    cancelled_count: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     reasoning_tokens: int = 0
@@ -222,6 +257,7 @@ _HOURLY_KEY_COLUMNS = (
 _HOURLY_MEASURE_COLUMNS = (
     "request_count",
     "error_count",
+    "cancelled_count",
     "input_tokens",
     "output_tokens",
     "reasoning_tokens",
@@ -271,8 +307,8 @@ def _merge_rows(rows: Iterable, key_width: int, columns: tuple[str, ...], row_ty
 
 
 # Rows per multi-VALUES upsert statement. asyncpg rejects statements with
-# more than 32,767 bind parameters; at 17 columns (the widest table) 1,000
-# rows binds 17,000 — comfortable margin on both dialects. Lifecycle mirrors
+# more than 32,767 bind parameters; at 18 columns (the widest table) 1,000
+# rows binds 18,000 — comfortable margin on both dialects. Lifecycle mirrors
 # rekey an account's ENTIRE folded history in one call (thousands of rows
 # for a long-lived account), so unchunked upserts would abort the whole
 # lifecycle transaction.
@@ -486,7 +522,8 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
             RequestLog.request_kind,
             is_deleted,
             func.count(RequestLog.id),
-            func.coalesce(func.sum(case((RequestLog.status != "success", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((RequestLog.status.not_in(NON_ERROR_STATUSES), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((RequestLog.status == CANCELLED_STATUS, 1), else_=0)), 0),
             func.coalesce(func.sum(RequestLog.input_tokens), 0),
             func.coalesce(func.sum(RequestLog.output_tokens), 0),
             func.coalesce(func.sum(RequestLog.reasoning_tokens), 0),
@@ -505,14 +542,16 @@ def _hourly_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]
 def _error_fold_insert(session: AsyncSession, window: tuple[ColumnElement, ...]):
     bucket = _requested_at_epoch_bucket_expr(session, HOURLY_BUCKET_SECONDS).label("bucket_epoch")
     account_id = _dimension_expr(RequestLog.account_id).label("account_id")
-    # Exact reproduction of the top-error read filter:
-    # warmup kinds excluded, soft-deleted rows INCLUDED.
+    # Exact reproduction of the top-error read filter: warmup kinds excluded,
+    # soft-deleted rows INCLUDED, cancelled terminals excluded (they are not
+    # errors; buckets folded before that exclusion still carry
+    # client_disconnected counts, which the reads drop by error_code).
     stmt = (
         select(bucket, account_id, RequestLog.error_code, func.count(RequestLog.id))
         .where(
             *window,
             RequestLog.request_kind.not_in(_EXCLUDED_REQUEST_KINDS),
-            RequestLog.status != "success",
+            RequestLog.status.not_in(NON_ERROR_STATUSES),
             RequestLog.error_code.is_not(None),
         )
         .group_by(bucket, account_id, RequestLog.error_code)
@@ -602,7 +641,17 @@ async def run_hourly_fold_pass(*, now: datetime | None = None) -> int:
     rolls the whole slice back and the retry recomputes it from scratch —
     re-folding always converges to the same values (no add-fold double
     counting is possible).
+
+    The first pass of each process additionally repairs the legacy-suspect
+    range `[upgrade_repair_from, watermark)` — buckets a legacy replica may
+    have folded after the cancelled_count migration during a rolling
+    upgrade — falling back to the trailing `UPGRADE_REPAIR_WINDOW` as
+    flip-flop defense once the marker is cleared (see the constant's note).
+    An incomplete (pass-bounded) repair re-arms itself for the next pass.
     """
+    global _upgrade_repair_done
+    if not _upgrade_repair_done:
+        _upgrade_repair_done = await _run_upgrade_repair()
     target = floor_to_hour((now or utcnow()) - FOLD_LAG)
     committed = 0
     while committed < TS_MAX_SLICES_PER_PASS:
@@ -613,6 +662,107 @@ async def run_hourly_fold_pass(*, now: datetime | None = None) -> int:
         if status is _FoldStatus.DONE:
             break
     return committed
+
+
+def _ceil_to_hour(value: datetime) -> datetime:
+    floored = floor_to_hour(value)
+    return floored if floored == value else floored + timedelta(hours=1)
+
+
+async def _run_upgrade_repair() -> bool:
+    """Drive the upgrade repair in pass-bounded chunks; True when complete.
+
+    Same chunk/transaction discipline as the fold backfill: at most
+    `TS_MAX_SLICES_PER_PASS` chunks of `TS_FOLD_SLICE` per pass, each in its
+    own transaction, so repairing a legacy-folded backlog never monopolizes
+    a scheduler tick. An incomplete repair returns False and resumes from
+    the persisted marker on the next pass.
+    """
+    for _ in range(TS_MAX_SLICES_PER_PASS):
+        async with get_background_session() as session:
+            if await _repair_next_upgrade_chunk(session):
+                return True
+    return False
+
+
+async def _repair_next_upgrade_chunk(session: AsyncSession) -> bool:
+    """Refold the next chunk of the legacy-suspect range; True when none left.
+
+    The suspect range is `[upgrade_repair_from, watermark)` while the marker
+    is set (stamped by the migration, or the epoch server default for a
+    state row an old replica bootstrapped after it), and the trailing
+    `UPGRADE_REPAIR_WINDOW` flip-flop defense once it is NULL. Both are
+    clamped to `ceil_hour(earliest surviving raw row)` — an unfiltered min:
+    retention's oldest-first contiguous frontier guarantees every row
+    (soft-deleted included) at or above it survives, so the repair never
+    deletes folded statistics it cannot recompute from raw.
+
+    Runs under the fold-state row lock (the caller already holds the leader
+    gate), so it can never interleave with a fold slice or lifecycle mirror,
+    and never moves the watermark. The same DELETE-then-INSERT statements as
+    the fold make every chunk converge on any input state — repairing a
+    legacy-folded bucket, re-running after a crash (the marker advances only
+    with the chunk's commit), or recomputing an already-correct window are
+    the same recomputation. The conversation satellite is untouched: its
+    fold never involved status.
+    """
+    async with sqlite_writer_section():
+        state = await _locked_state(session)
+        if state is None:
+            # Nothing folded yet, so nothing a legacy writer could have left.
+            return True
+        watermark = state.hourly_folded_through
+        marker = state.upgrade_repair_from
+        suspect_from = marker if marker is not None else watermark - UPGRADE_REPAIR_WINDOW
+        earliest_raw = (await session.execute(select(func.min(RequestLog.requested_at)))).scalar_one_or_none()
+        start = watermark if earliest_raw is None else max(suspect_from, _ceil_to_hour(earliest_raw))
+        if start >= watermark:
+            if marker is not None:
+                await _set_upgrade_repair_marker(session, None)
+                await session.commit()
+            return True
+        chunk_end = min(start + TS_FOLD_SLICE, watermark)
+        start_epoch, end_epoch = epoch_seconds(start), epoch_seconds(chunk_end)
+        await session.execute(
+            delete(RequestUsageHourlyRollup).where(
+                RequestUsageHourlyRollup.bucket_epoch >= start_epoch,
+                RequestUsageHourlyRollup.bucket_epoch < end_epoch,
+            )
+        )
+        await session.execute(
+            delete(RequestUsageHourlyErrorRollup).where(
+                RequestUsageHourlyErrorRollup.bucket_epoch >= start_epoch,
+                RequestUsageHourlyErrorRollup.bucket_epoch < end_epoch,
+            )
+        )
+        await session.execute(
+            delete(RequestDemandQuarterRollup).where(
+                RequestDemandQuarterRollup.slot_epoch >= start_epoch,
+                RequestDemandQuarterRollup.slot_epoch < end_epoch,
+            )
+        )
+        window = (RequestLog.requested_at >= start, RequestLog.requested_at < chunk_end)
+        await session.execute(_hourly_fold_insert(session, window))
+        await session.execute(_error_fold_insert(session, window))
+        await session.execute(_demand_fold_insert(session, window))
+        done = chunk_end >= watermark
+        if marker is not None:
+            await _set_upgrade_repair_marker(session, None if done else chunk_end)
+        await session.commit()
+        logger.info(
+            "Refolded hourly usage rollups in [%s, %s) (post-upgrade repair)",
+            start.isoformat(),
+            chunk_end.isoformat(),
+        )
+        return done
+
+
+async def _set_upgrade_repair_marker(session: AsyncSession, value: datetime | None) -> None:
+    await session.execute(
+        update(AccountUsageRollupState)
+        .where(AccountUsageRollupState.id == _STATE_ROW_ID)
+        .values(upgrade_repair_from=value)
+    )
 
 
 async def _fold_next_hourly_slice(session: AsyncSession, target: datetime) -> tuple[_FoldStatus, bool]:

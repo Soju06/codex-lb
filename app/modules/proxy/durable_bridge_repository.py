@@ -2115,6 +2115,21 @@ class DurableBridgeRepository:
                         .values(last_seen_at=now, lease_expires_at=now)
                     )
                 if retained_recovery_ids:
+                    # A process can die after recording a submitted
+                    # operation but before upstream acknowledges it. Once
+                    # startup has fenced and detached that owner's session,
+                    # classify those rows as UNKNOWN so the replacement can
+                    # enter the normal proof-gated recovery path.
+                    operation_retained_session_ids = retained_recovery_ids & operation_session_ids
+                    if operation_retained_session_ids:
+                        await self._session.execute(
+                            update(HttpBridgeOperationRecord)
+                            .where(
+                                HttpBridgeOperationRecord.session_id.in_(operation_retained_session_ids),
+                                HttpBridgeOperationRecord.state == "submitted",
+                            )
+                            .values(state="unknown", updated_at=now)
+                        )
                     await self._session.execute(
                         update(HttpBridgeSessionRecord)
                         .where(

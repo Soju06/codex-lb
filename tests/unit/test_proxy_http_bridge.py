@@ -4974,12 +4974,17 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
         del args, kwargs
         order.append("state")
 
-    async def enqueue(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        order.append("enqueue")
+    async def append_terminal_event(*args: Any, **kwargs: Any) -> bool:
+        del args
+        assert kwargs["session_id"] == session.durable_session_id
+        order.append("terminal")
+        return True
 
     monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", update_state)
-    service._http_bridge_operation_event_batcher = cast(Any, SimpleNamespace(enqueue=enqueue))
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(append_terminal_event=append_terminal_event),
+    )
 
     await http_bridge_upstream_events_module._persist_http_bridge_operation_event(
         service,
@@ -4990,7 +4995,7 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
         terminal_state="completed",
     )
 
-    assert order == ["state", "enqueue"]
+    assert order == ["terminal"]
 
 
 @pytest.mark.asyncio

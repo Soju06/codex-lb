@@ -336,56 +336,29 @@ async def _persist_http_bridge_operation_event(
     if not operation_id or session_id is None or owner_epoch is None:
         return
     try:
-        if terminal and terminal_state == "failed":
-            # Drain any nonterminal events first, then append the failure and
-            # expose the failed operation in one fenced transaction. This
-            # prevents a concurrent retry from seeing a retryable state before
-            # the terminal block is in the durable spool.
-            flush_operation = getattr(
-                getattr(service, "_http_bridge_operation_event_batcher", None),
-                "flush_operation",
-                None,
+        batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+        append_terminal_batch = getattr(batcher, "append_terminal_event", None)
+        if terminal and terminal_state is not None and callable(append_terminal_batch):
+            persisted = await append_terminal_batch(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=owner_epoch,
+                event_text=event_block,
+                max_bytes=int(
+                    getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_operation_event_spool_max_bytes",
+                        2 * 1024 * 1024,
+                    )
+                ),
+                state=terminal_state,
+                response_id=_websocket_downstream_response_id(request_state),
             )
-            if callable(flush_operation):
-                await flush_operation(operation_id=operation_id)
-            append_terminal = getattr(
-                getattr(service, "_durable_bridge", None),
-                "append_terminal_operation_event",
-                None,
-            )
-            if callable(append_terminal):
-                persisted = await append_terminal(
-                    operation_id=operation_id,
-                    session_id=session_id,
-                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                    owner_epoch=owner_epoch,
-                    event_text=event_block,
-                    max_bytes=int(
-                        getattr(
-                            _service_get_settings(),
-                            "http_responses_session_bridge_operation_event_spool_max_bytes",
-                            2 * 1024 * 1024,
-                        )
-                    ),
-                    state=terminal_state,
-                    response_id=_websocket_downstream_response_id(request_state),
-                )
-                if not persisted:
-                    logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
-                return
+            if not persisted:
+                logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
+            return
         if callable(batcher_enqueue):
-            if terminal and terminal_state is not None:
-                # The batcher's terminal enqueue drains and finalizes the
-                # spool synchronously. Record the terminal operation state
-                # first so finalization can observe a completed/incomplete
-                # operation instead of the still-acknowledged state.
-                await _update_http_bridge_operation_state(
-                    service,
-                    session,
-                    request_state,
-                    state=terminal_state,
-                    response_id=_websocket_downstream_response_id(request_state),
-                )
             await batcher_enqueue(
                 operation_id=operation_id,
                 session_id=session_id,

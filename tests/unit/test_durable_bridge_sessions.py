@@ -32,6 +32,8 @@ from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, Du
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
+    durable_bridge_hash,
+    durable_bridge_operation_id,
 )
 
 pytestmark = pytest.mark.unit
@@ -2450,6 +2452,57 @@ async def test_startup_purges_owned_bridge_rows(
             ("parent-cache", StickySessionKind.PROMPT_CACHE),
         )
         assert sticky is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_reclassifies_submitted_operation_for_recovery(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-submitted-recovery",
+        api_key_id=None,
+        instance_id="instance-submitted-recovery",
+        owner_process_epoch="old-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6",
+        service_tier=None,
+        latest_turn_state="turn-state",
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    fingerprint = durable_bridge_hash("submitted-recovery")
+    operation_id = durable_bridge_operation_id(claimed.session_id, fingerprint)
+    async with async_session_factory() as session:
+        repository = DurableBridgeRepository(session)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claimed.session_id,
+            instance_id="instance-submitted-recovery",
+            owner_epoch=claimed.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="acc-1",
+            model="gpt-5.6",
+            parent_response_id=None,
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claimed.session_id)
+            .values(last_seen_at=utcnow() - timedelta(minutes=5))
+        )
+        await session.commit()
+
+        deleted = await repository.purge_owned_sessions_on_startup(
+            instance_id="instance-submitted-recovery",
+            owner_process_epoch="new-process",
+        )
+
+        assert deleted == 0
+        operation = await repository.get_operation(operation_id=operation_id)
+        assert operation is not None
+        assert operation.state == "unknown"
 
 
 @pytest.mark.asyncio

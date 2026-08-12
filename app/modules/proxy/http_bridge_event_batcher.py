@@ -199,12 +199,7 @@ class HttpBridgeOperationEventBatcher:
                 )
 
     async def flush_operation(self, *, operation_id: str) -> None:
-        while True:
-            await self._flush_one(operation_id)
-            async with self._lock:
-                has_pending = bool(self._pending.get(operation_id))
-            if not has_pending:
-                break
+        await self.flush_pending_operation(operation_id=operation_id)
         async with self._lock:
             dropped = operation_id in self._dropped_operations
             context = self._contexts.get(operation_id)
@@ -234,6 +229,73 @@ class HttpBridgeOperationEventBatcher:
                 operation_id,
                 exc_info=True,
             )
+
+    async def append_terminal_event(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        event_text: str,
+        max_bytes: int,
+        state: str,
+        response_id: str | None = None,
+    ) -> bool:
+        """Drain queued events and atomically append the terminal outcome."""
+        async with self._lock:
+            self._contexts.setdefault(
+                operation_id,
+                _PendingOperationEvent(
+                    operation_id=operation_id,
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    event_text=event_text,
+                ),
+            )
+            self._closing_operations.add(operation_id)
+        await self.flush_pending_operation(operation_id=operation_id)
+        async with self._lock:
+            context = self._contexts.get(operation_id)
+            dropped = operation_id in self._dropped_operations
+        if context is None:
+            return False
+        try:
+            persisted = await self._durable_bridge.append_terminal_operation_event(
+                operation_id=operation_id,
+                session_id=context.session_id,
+                instance_id=context.instance_id,
+                owner_epoch=context.owner_epoch,
+                event_text=event_text,
+                max_bytes=max_bytes,
+                state=state,
+                response_id=response_id,
+            )
+            return bool(persisted and not dropped)
+        except Exception:
+            logger.debug(
+                "Failed to append terminal HTTP bridge event operation_id=%s",
+                operation_id,
+                exc_info=True,
+            )
+            return False
+        finally:
+            async with self._lock:
+                self._closing_operations.discard(operation_id)
+                self._contexts.pop(operation_id, None)
+                self._dropped_operations.discard(operation_id)
+
+    async def flush_pending_operation(self, *, operation_id: str) -> bool:
+        """Drain queued events while retaining the operation context."""
+        while True:
+            await self._flush_one(operation_id)
+            async with self._lock:
+                has_pending = bool(self._pending.get(operation_id))
+            if not has_pending:
+                break
+        async with self._lock:
+            return operation_id not in self._dropped_operations
 
     async def discard_operation(self, *, operation_id: str) -> None:
         """Drop an abandoned nonterminal context without finalizing its spool."""

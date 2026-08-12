@@ -45,7 +45,6 @@ from app.core.metrics.prometheus import (
     bridge_prompt_cache_locality_miss_total,
     bridge_soft_local_rebind_total,
 )
-from app.core.resilience.overload import local_overload_error
 from app.core.utils.request_id import ensure_request_scope_id
 from app.db.models import (
     AccountStatus,
@@ -523,6 +522,7 @@ class _HTTPBridgeMixin(
                     allow_forward_to_owner = False
             inflight_future: asyncio.Future[_HTTPBridgeSession] | None = None
             capacity_wait_future: asyncio.Future[_HTTPBridgeSession] | None = None
+            capacity_error_after_planned_closes: ProxyResponseError | None = None
             owns_creation = False
             continuity_error: ProxyResponseError | None = None
             owner_mismatch_error: ProxyResponseError | None = None
@@ -1339,22 +1339,19 @@ class _HTTPBridgeMixin(
                                     if not getattr(future, "_http_bridge_handoff", False)
                                 )
                             else:
-                                _log_http_bridge_event(
-                                    "capacity_exhausted_active_sessions",
-                                    key,
-                                    account_id=None,
-                                    model=request_model,
-                                    pending_count=_http_bridge_capacity_generation_count(self),
-                                    cache_key_family=key.affinity_kind,
-                                    model_class=_extract_model_class(request_model) if request_model else None,
+                                capacity_error = self._http_bridge_active_capacity_error(
+                                    key=key,
+                                    request_model=request_model,
                                 )
-                                raise ProxyResponseError(
-                                    429,
-                                    local_overload_error(
-                                        "HTTP responses session bridge has no idle capacity",
-                                        code="capacity_exhausted_active_sessions",
-                                    ),
-                                )
+                                if not sessions_to_close_before_create:
+                                    raise capacity_error
+                                # Detachment already transferred these LRU
+                                # generations out of the canonical registry.
+                                # Give each one a bounded-close owner before
+                                # rejecting admission; otherwise this early 429
+                                # leaves its live socket and leases stranded in
+                                # the detached registry until unrelated cleanup.
+                                capacity_error_after_planned_closes = capacity_error
                         else:
                             inflight_future = asyncio.get_running_loop().create_future()
                             setattr(
@@ -1371,6 +1368,8 @@ class _HTTPBridgeMixin(
                 if owns_creation:
                     await self._fail_http_bridge_inflight_session_creation(key, inflight_future, exc)
                 raise
+            if capacity_error_after_planned_closes is not None:
+                raise capacity_error_after_planned_closes
             if owns_creation and sessions_to_close_before_create:
                 await self._enforce_http_bridge_capacity_after_planned_closes(
                     key=key,

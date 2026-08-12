@@ -85,6 +85,29 @@ class _HTTPBridgeActivityMixin:
     ) -> None:
         await _close_http_bridge_session_bounded(self, session, reason=reason)
 
+    def _http_bridge_active_capacity_error(
+        self: _HTTPBridgeServiceProtocol,
+        *,
+        key: _HTTPBridgeSessionKey,
+        request_model: str | None,
+    ) -> ProxyResponseError:
+        _log_http_bridge_event(
+            "capacity_exhausted_active_sessions",
+            key,
+            account_id=None,
+            model=request_model,
+            pending_count=_http_bridge_capacity_generation_count(self),
+            cache_key_family=key.affinity_kind,
+            model_class=_extract_model_class(request_model) if request_model else None,
+        )
+        return ProxyResponseError(
+            429,
+            local_overload_error(
+                "HTTP responses session bridge has no idle capacity",
+                code="capacity_exhausted_active_sessions",
+            ),
+        )
+
     async def _enforce_http_bridge_capacity_after_planned_closes(
         self: _HTTPBridgeServiceProtocol,
         *,

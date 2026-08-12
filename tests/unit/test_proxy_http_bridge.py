@@ -18448,6 +18448,56 @@ async def test_get_or_create_http_bridge_session_immediate_capacity_exhaustion_i
 
 
 @pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_closes_planned_lru_before_capacity_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    first_detached = _make_bridge_session(key_value="sid-capacity-detached-1")
+    second_detached = _make_bridge_session(key_value="sid-capacity-detached-2")
+    service._http_bridge_detached_sessions[id(first_detached)] = first_detached
+    service._http_bridge_detached_sessions[id(second_detached)] = second_detached
+    existing_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-capacity-evictable", None)
+    existing = _make_bridge_session(key=existing_key, key_value=existing_key.affinity_key)
+    service._http_bridge_sessions[existing_key] = existing
+    new_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-capacity-rejected", None)
+    close_http_bridge_session_bounded = AsyncMock()
+    create_http_bridge_session = AsyncMock()
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close_http_bridge_session_bounded)
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ("instance-a",))),
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            new_key,
+            headers={"x-codex-session-id": new_key.affinity_key},
+            affinity=proxy_service._AffinityPolicy(
+                key=new_key.affinity_key,
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=2,
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
+    close_http_bridge_session_bounded.assert_awaited_once_with(existing, reason="registry_detach")
+    assert service._http_bridge_detached_sessions[id(existing)] is existing
+    assert existing_key not in service._http_bridge_sessions
+    create_http_bridge_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_closes_lru_before_replacement_create(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

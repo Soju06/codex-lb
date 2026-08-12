@@ -22,7 +22,9 @@ export function TelemetryConsentDialog() {
   const { t } = useTranslation();
   const canWrite = useAuthStore((state) => state.canWrite);
   const [dismissed, setDismissed] = useState(false);
-  const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent();
+  // Read-only guests can never act on the dialog, so skip the preview
+  // aggregation request entirely instead of fetching and discarding it.
+  const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent({ enabled: canWrite });
 
   const consent = telemetryConsentQuery.data;
   // The dialog exists to show the exact payload before the first send, so it

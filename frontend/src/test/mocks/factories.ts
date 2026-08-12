@@ -580,7 +580,7 @@ export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 				cost_usd_bucket: "<10",
 				request_kinds: { responses: 0.97, chat: 0.02, images: 0.01, unknown: 0.0 },
 				transport_mix: { ws: 0.6, http_bridge: 0.4 },
-				service_tier_mix: { default: 1.0, flex: 0.0 },
+				service_tier_mix: { default: 1.0, flex: 0.0, priority: 0.0 },
 				clients: { "codex-cli": 0.9, other: 0.1 },
 				clients_other_ratio: 0.1,
 				models: [

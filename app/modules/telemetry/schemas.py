@@ -49,6 +49,7 @@ class TransportMixSnapshot(TelemetryModel):
 class ServiceTierMixSnapshot(TelemetryModel):
     default: float
     flex: float
+    priority: float
 
 
 class ModelUsageSnapshot(TelemetryModel):

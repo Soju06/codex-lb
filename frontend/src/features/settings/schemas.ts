@@ -388,6 +388,7 @@ const TelemetryTransportMixSnapshotSchema = z.strictObject({
 const TelemetryServiceTierMixSnapshotSchema = z.strictObject({
   default: z.number(),
   flex: z.number(),
+  priority: z.number(),
 });
 
 const TelemetryModelUsageSnapshotSchema = z.strictObject({

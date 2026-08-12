@@ -166,15 +166,24 @@ describe("TelemetryConsentDialog", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("stays hidden for read-only sessions that cannot persist a decision", async () => {
+  it("stays hidden for read-only sessions and never requests the preview aggregation", async () => {
     useAuthStore.setState({ canWrite: false });
-    server.use(http.get("/api/settings/telemetry", () => HttpResponse.json(undecidedConsent())));
+    let requested = false;
+    server.use(
+      http.get("/api/settings/telemetry", () => {
+        requested = true;
+        return HttpResponse.json(undecidedConsent());
+      }),
+    );
 
     const { queryClient } = renderWithProviders(<TelemetryConsentDialog />);
 
+    // Read-only guests can never act on the dialog, so the consent query is
+    // disabled entirely: no fetch fires and the query stays pending.
     await waitFor(() =>
-      expect(queryClient.getQueryState(["settings", "telemetry"])?.status).toBe("success"),
+      expect(queryClient.getQueryState(["settings", "telemetry"])?.fetchStatus).toBe("idle"),
     );
+    expect(requested).toBe(false);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });

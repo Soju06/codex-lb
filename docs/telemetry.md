@@ -37,7 +37,7 @@ verify signed updates. Activation sends only `{"action": "activate"}`.
 The schema never includes account emails, workspace identifiers, client IP addresses, API keys,
 request or response content, raw user-agent strings, per-account records, custom model names, or
 free-text errors. Exact schemas and privacy constraints live in the
-[telemetry OpenSpec capability](https://github.com/Soju06/codex-lb/tree/main/openspec/changes/add-anonymous-telemetry/specs/telemetry).
+[telemetry OpenSpec capability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/telemetry).
 
 ## Consent and disabling
 
@@ -64,4 +64,4 @@ snapshots remain stored until a published retention policy or explicit deletion.
 Endpoint failures use a bounded timeout, are logged only at debug level, and never interrupt
 proxy traffic.
 
-*Source of truth: [telemetry OpenSpec change](https://github.com/Soju06/codex-lb/tree/main/openspec/changes/add-anonymous-telemetry/specs/telemetry)*
+*Source of truth: [telemetry OpenSpec capability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/telemetry)*

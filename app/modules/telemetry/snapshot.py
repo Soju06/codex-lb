@@ -327,9 +327,18 @@ class TelemetrySnapshotBuilder:
         return TransportMixSnapshot(ws=_ratio(websocket, total), http_bridge=_ratio(total - websocket, total))
 
     async def _service_tier_mix(self, conditions: list[Predicate], total: int) -> ServiceTierMixSnapshot:
+        # "fast" is normalized to "priority" at write time
+        # (_normalize_service_tier_value), so the persisted vocabulary here is
+        # default/flex/priority; lumping priority into default would hide fast
+        # mode traffic from the mix.
         tier = func.coalesce(RequestLog.actual_service_tier, RequestLog.service_tier, "default")
         flex = await self._count_where(conditions, tier == "flex")
-        return ServiceTierMixSnapshot(default=_ratio(total - flex, total), flex=_ratio(flex, total))
+        priority = await self._count_where(conditions, tier == "priority")
+        return ServiceTierMixSnapshot(
+            default=_ratio(total - flex - priority, total),
+            flex=_ratio(flex, total),
+            priority=_ratio(priority, total),
+        )
 
     async def _percentile(
         self,

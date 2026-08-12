@@ -126,7 +126,7 @@ async def test_snapshot_serialized_field_set_matches_documented_schema(async_ses
     }
     assert set(payload["usage_7d"]["request_kinds"]) == {"responses", "chat", "images", "unknown"}
     assert set(payload["usage_7d"]["transport_mix"]) == {"ws", "http_bridge"}
-    assert set(payload["usage_7d"]["service_tier_mix"]) == {"default", "flex"}
+    assert set(payload["usage_7d"]["service_tier_mix"]) == {"default", "flex", "priority"}
     assert set(payload["usage_7d"]["models"][0]) == {
         "name",
         "share",

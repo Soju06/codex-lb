@@ -57,13 +57,14 @@ export function useSettings() {
   };
 }
 
-export function useTelemetryConsent() {
+export function useTelemetryConsent(options?: { enabled?: boolean }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
 
   const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["settings", "telemetry"],
     queryFn: () => getTelemetryConsent(),
+    enabled: options?.enabled ?? true,
   });
   const telemetryConsentQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 

@@ -47,7 +47,7 @@ def _snapshot() -> TelemetrySnapshot:
                 "cost_usd_bucket": "<10",
                 "request_kinds": {"responses": 0, "chat": 0, "images": 0, "unknown": 0},
                 "transport_mix": {"ws": 0, "http_bridge": 0},
-                "service_tier_mix": {"default": 0, "flex": 0},
+                "service_tier_mix": {"default": 0, "flex": 0, "priority": 0},
                 "clients": {},
                 "clients_other_ratio": 0,
                 "models": [],

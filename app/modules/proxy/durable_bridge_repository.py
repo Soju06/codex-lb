@@ -1738,6 +1738,7 @@ class DurableBridgeRepository:
             operation.state = state
             if response_id is not None:
                 operation.response_id = response_id
+            operation.event_spool_complete = True
             operation.updated_at = utcnow()
             await self._session.commit()
         return persisted

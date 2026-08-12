@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -29,7 +30,12 @@ from app.core.clients.proxy import (  # noqa: F401
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
-from app.core.clients.proxy_websocket import UpstreamWebSocketMessage, UpstreamWebSocketTransportError
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+    UpstreamWebSocketMessage,
+    UpstreamWebSocketTransportError,
+    is_account_neutral_websocket_error_code,
+)
 from app.core.errors import response_failed_event
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import parse_sse_event_payload
@@ -56,6 +62,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
     _record_http_bridge_stuck_retire,
+)
+from app.modules.proxy._service.http_bridge.quarantine import (
+    _clear_http_bridge_quarantine,
+    _record_http_bridge_quarantine_eventless_timeout,
+    _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
@@ -199,6 +210,195 @@ _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     120.0,
 )
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS = 10.0
+
+# A single missing response.created is not proof that an account is bad: the
+# upstream may have accepted the request while the transport was silent. Only
+# repeated failures on separate bridge retirements are allowed to influence
+# account routing, and the signal expires quickly so a transient upstream
+# incident does not permanently drain an account.
+_HTTP_BRIDGE_ACCOUNT_TIMEOUT_WINDOW_SECONDS = 300.0
+_HTTP_BRIDGE_ACCOUNT_TIMEOUT_EJECTION_THRESHOLD = 3
+
+
+async def _record_http_bridge_account_timeout_signal(
+    service: Any,
+    session: "_HTTPBridgeSession",
+) -> None:
+    """Drain an account after repeated eventless upstream timeouts.
+
+    This is deliberately separate from the per-session retry circuit. A
+    timeout cannot be replayed safely for a continuity-bound turn, but three
+    independent eventless failures are enough evidence to keep *new* turns
+    away from that account until its normal health probe succeeds.
+    """
+
+    account_id = session.account.id
+    now = time.monotonic()
+    async with service._http_bridge_account_timeout_lock:
+        failures = service._http_bridge_account_timeout_failures.setdefault(account_id, [])
+        failures[:] = [
+            timestamp for timestamp in failures if now - timestamp < _HTTP_BRIDGE_ACCOUNT_TIMEOUT_WINDOW_SECONDS
+        ]
+        failures.append(now)
+        if len(failures) < _HTTP_BRIDGE_ACCOUNT_TIMEOUT_EJECTION_THRESHOLD:
+            return
+        # Start a fresh evidence window after applying one health penalty. A
+        # continuously failing account should be re-evaluated by normal
+        # health-tier logic, not receive an unbounded error-count increase from
+        # every pending request on one broken socket.
+        failures.clear()
+
+    try:
+        # Health-tier draining starts at two transient errors. Apply exactly
+        # that minimum penalty so one threshold event actually removes the
+        # account from normal routing without over-counting the incident.
+        await service._load_balancer.record_errors(session.account, 2)
+    except Exception:
+        logger.warning(
+            "Failed to record repeated HTTP bridge account timeout account_id=%s",
+            account_id,
+            exc_info=True,
+        )
+    else:
+        logger.warning(
+            "HTTP bridge account temporarily drained after repeated eventless upstream timeouts "
+            "account_id=%s threshold=%s window_seconds=%.0f",
+            account_id,
+            _HTTP_BRIDGE_ACCOUNT_TIMEOUT_EJECTION_THRESHOLD,
+            _HTTP_BRIDGE_ACCOUNT_TIMEOUT_WINDOW_SECONDS,
+        )
+
+
+async def _update_http_bridge_operation_state(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    request_state: Any,
+    *,
+    state: str,
+    response_id: str | None = None,
+) -> None:
+    """Persist operation outcome without allowing journaling to break streaming."""
+    operation_id = getattr(request_state, "operation_id", None)
+    session_id = getattr(session, "durable_session_id", None)
+    owner_epoch = getattr(session, "durable_owner_epoch", None)
+    update_operation = getattr(getattr(service, "_durable_bridge", None), "update_operation", None)
+    if not operation_id or session_id is None or owner_epoch is None or not callable(update_operation):
+        return
+    try:
+        marked = await update_operation(
+            operation_id=operation_id,
+            session_id=session_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=owner_epoch,
+            state=state,
+            response_id=response_id,
+        )
+        if not marked:
+            logger.info(
+                "HTTP bridge operation outcome owner fence rejected operation_id=%s state=%s",
+                operation_id,
+                state,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to persist HTTP bridge operation outcome operation_id=%s state=%s",
+            operation_id,
+            state,
+            exc_info=True,
+        )
+
+
+def _http_bridge_operation_state_for_event(event_type: str | None) -> str | None:
+    return {
+        "response.created": "acknowledged",
+        "response.completed": "completed",
+        "response.incomplete": "incomplete",
+        "response.failed": "failed",
+        "error": "failed",
+    }.get(event_type)
+
+
+async def _persist_http_bridge_operation_event(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    request_state: Any,
+    event_block: str,
+    *,
+    terminal: bool = False,
+    terminal_state: str | None = None,
+) -> None:
+    """Spool one downstream-visible SSE block for reconnect replay."""
+    operation_id = getattr(request_state, "operation_id", None)
+    session_id = getattr(session, "durable_session_id", None)
+    owner_epoch = getattr(session, "durable_owner_epoch", None)
+    batcher_enqueue = getattr(getattr(service, "_http_bridge_operation_event_batcher", None), "enqueue", None)
+    append_event = getattr(getattr(service, "_durable_bridge", None), "append_operation_event", None)
+    if not operation_id or session_id is None or owner_epoch is None:
+        return
+    try:
+        batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
+        append_terminal_batch = getattr(batcher, "append_terminal_event", None)
+        if terminal and terminal_state is not None and callable(append_terminal_batch):
+            persisted = await append_terminal_batch(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=owner_epoch,
+                event_text=event_block,
+                max_bytes=int(
+                    getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_operation_event_spool_max_bytes",
+                        2 * 1024 * 1024,
+                    )
+                ),
+                state=terminal_state,
+                response_id=_websocket_downstream_response_id(request_state),
+            )
+            if not persisted:
+                logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
+            return
+        if callable(batcher_enqueue):
+            await batcher_enqueue(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=owner_epoch,
+                event_text=event_block,
+                terminal=terminal,
+            )
+            return
+        if not callable(append_event):
+            return
+        persisted = await append_event(
+            operation_id=operation_id,
+            session_id=session_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=owner_epoch,
+            event_text=event_block,
+            max_bytes=int(
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_operation_event_spool_max_bytes",
+                    2 * 1024 * 1024,
+                )
+            ),
+        )
+        if not persisted:
+            logger.info("HTTP bridge operation event spool became incomplete operation_id=%s", operation_id)
+        if terminal and terminal_state is not None:
+            await _update_http_bridge_operation_state(
+                service,
+                session,
+                request_state,
+                state=terminal_state,
+                response_id=_websocket_downstream_response_id(request_state),
+            )
+    except Exception:
+        # The upstream result is still delivered. A reconnect can only replay
+        # when every event was durably persisted, so never fail a live stream
+        # because the optional spool is unavailable.
+        logger.warning("Failed to persist HTTP bridge operation event operation_id=%s", operation_id, exc_info=True)
 
 
 async def _wait_for_http_bridge_recovery_settlement_retry(
@@ -651,6 +851,52 @@ async def _clear_durable_http_bridge_response_anchor(
     )
 
 
+async def _abandon_durable_http_bridge_continuity(
+    service: Any,
+    session: "_HTTPBridgeSession",
+) -> bool:
+    """Clear durable continuity before retiring a repeatedly poisoned bridge.
+
+    ``rebind_session_account(clear_continuity=True)`` is an existing fenced
+    write that clears the durable response/turn anchor and its alias rows while
+    this worker still owns the session. The ordinary retirement path then
+    closes the row and removes the process-local registrations.
+    """
+    if session.durable_session_id is None or session.durable_owner_epoch is None:
+        return False
+    try:
+        cleared = await service._durable_bridge.rebind_session_account(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+            account_id=session.account.id,
+            clear_continuity=True,
+        )
+    except Exception:
+        logger.warning("Failed to abandon poisoned HTTP bridge continuity", exc_info=True)
+        return False
+    if not cleared:
+        logger.warning(
+            "Durable bridge continuity clear was fenced before poisoned anchor retirement",
+            extra={
+                "session_id": session.durable_session_id,
+                "account_id": session.account.id,
+            },
+        )
+        return False
+    _log_http_bridge_event(
+        "durable_anchor_poisoned",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail="repeated_zero_event_idle_timeout",
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+    return True
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
@@ -677,6 +923,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 (getattr(request_state, "response_event_count", 0) for request_state in session.pending_requests),
                 default=0,
             )
+            pending_request_states = list(session.pending_requests)
+        # The #1534 wedge shape: a reattached stream that streamed response
+        # events whose ``response.created`` was never assigned. The eventless
+        # watchdog and the durable-anchor clear both key on
+        # ``response_event_count == 0`` and never trip on it, so quarantine
+        # the session here so later requests stop re-attaching to it.
+        _record_http_bridge_quarantine_wedged_pending(self, session, pending_request_states)
         observed_close_code = (
             upstream_close_code if upstream_close_code is not None else session.last_upstream_close_code
         )
@@ -707,6 +960,38 @@ class _HTTPBridgeUpstreamEventsMixin:
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
         )
+        # Draining-only requests no longer count against the queue, but their
+        # event-batcher contexts still belong to the disconnected operation
+        # and must be discarded just like ordinary pending requests.
+        operation_states: list[Any] = [
+            request_state for request_state in pending_request_states if getattr(request_state, "operation_id", None)
+        ]
+        # Remove the disconnected attempt's in-memory spool before publishing
+        # UNKNOWN/ACKNOWLEDGED state. A same-replica reconnect may reclaim the
+        # operation as soon as that state is visible; discarding afterward
+        # could then delete the replacement attempt's events.
+        discard_operation = getattr(
+            getattr(self, "_http_bridge_operation_event_batcher", None),
+            "discard_operation",
+            None,
+        )
+        if callable(discard_operation):
+            for request_state in operation_states:
+                operation_id = getattr(request_state, "operation_id", None)
+                if operation_id:
+                    await discard_operation(operation_id=operation_id)
+        for request_state in operation_states:
+            # A shared websocket can carry several logical response.create
+            # requests. Classify each operation from its own event count;
+            # using the session-wide maximum would mark an eventless
+            # sibling as safely retryable after another request streamed.
+            operation_state = "unknown" if getattr(request_state, "response_event_count", 0) == 0 else "acknowledged"
+            await _update_http_bridge_operation_state(
+                self,
+                session,
+                request_state,
+                state=operation_state,
+            )
         if force_retire and retire_detail:
             _log_http_bridge_event(
                 retire_detail,
@@ -719,7 +1004,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
         try:
-            await self._fail_pending_websocket_requests(
+            reservations_settled = await self._fail_pending_websocket_requests(
                 account=session.account,
                 account_id_value=session.account.id,
                 pending_requests=session.pending_requests,
@@ -730,7 +1015,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                 response_create_gate=session.response_create_gate,
                 penalize_account=penalize_account,
             )
+            if (
+                failed_pending_count > 0
+                and reservations_settled is not False
+                and observed_response_events == 0
+                and retire_detail == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+            ):
+                # Only penalize the account after pending-request cleanup has
+                # settled its API-key reservations. A failed release must not
+                # be hidden behind an already-recorded timeout health signal.
+                await _record_http_bridge_account_timeout_signal(self, session)
         finally:
+            poison_after_deferred_failures = False
             if session.admission_waiter_count > 0 and not force_retire:
                 retry_circuit_detail = None
                 if close_classification == "clean":
@@ -745,20 +1041,48 @@ class _HTTPBridgeUpstreamEventsMixin:
                         None,
                     )
                 if failed_pending_count > 0 and retry_circuit_detail is not None:
-                    await self._record_http_bridge_retry_circuit_failure(
+                    consecutive_failures = await self._record_http_bridge_retry_circuit_failure(
                         session,
                         detail=retry_circuit_detail,
                     )
-                _log_http_bridge_event(
-                    "retire_deferred_for_admission_waiter",
-                    session.key,
-                    account_id=session.account.id,
-                    model=session.request_model,
-                    pending_count=session.admission_waiter_count,
-                    detail=retire_detail or error_code,
-                    cache_key_family=session.key.affinity_kind,
-                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
-                )
+                    poison_after_deferred_failures = bool(
+                        retry_circuit_detail == "stream_idle_timeout"
+                        and observed_response_events == 0
+                        and consecutive_failures is not None
+                        and consecutive_failures
+                        >= _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                    )
+                if poison_after_deferred_failures:
+                    durable_cleared = await _abandon_durable_http_bridge_continuity(self, session)
+                    if durable_cleared:
+                        await self._retire_stale_pending_http_bridge_session(
+                            session,
+                            detail="repeated_zero_event_idle_timeout",
+                            response_events_seen=observed_response_events,
+                        )
+                        force_retire = True
+                    else:
+                        _log_http_bridge_event(
+                            "durable_anchor_poison_clear_failed",
+                            session.key,
+                            account_id=session.account.id,
+                            model=session.request_model,
+                            pending_count=session.admission_waiter_count,
+                            detail="repeated_zero_event_idle_timeout",
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                        )
+                else:
+                    _log_http_bridge_event(
+                        "retire_deferred_for_admission_waiter",
+                        session.key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        pending_count=session.admission_waiter_count,
+                        detail=retire_detail or error_code,
+                        cache_key_family=session.key.affinity_kind,
+                        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                    )
             else:
                 if close_classification == "clean" and failed_pending_count > 0:
                     await self._retire_stale_pending_http_bridge_session(
@@ -920,6 +1244,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 # generic reader-crash account penalty path.
                                 if expired_proxy_injected_anchor:
                                     await _clear_durable_http_bridge_response_anchor(self, session)
+                                _record_http_bridge_quarantine_eventless_timeout(self, session)
                                 session.closed = True
                                 await self._fail_http_bridge_reader_and_maybe_retire(
                                     session,
@@ -935,6 +1260,10 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # to persist the durable-anchor invalidation.
                             if expired_proxy_injected_anchor:
                                 await _clear_durable_http_bridge_response_anchor(self, session)
+                            # Count the eventless retire toward the repeated-
+                            # wedge quarantine; the first strike still goes
+                            # through the bounded pre-created recovery below.
+                            _record_http_bridge_quarantine_eventless_timeout(self, session)
                             _record_http_bridge_stuck_retire(
                                 reason=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 session=session,
@@ -1016,13 +1345,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
                 retried = False
-                # A process-network receive failure does not prove that the
-                # upstream rejected response.create. Do not replay ordinary
-                # requests in that ambiguous case: the first request may
-                # still be executing and replay could duplicate work, billing,
-                # or tool side effects. Clean websocket closes remain eligible
-                # for the bounded pre-created retry path below.
-                if message.error_code != "proxy_network_unavailable":
+                # Account-neutral transport failures do not prove that the
+                # upstream rejected response.create. The request may still be
+                # executing, so replay could duplicate work, billing, or tool
+                # side effects. Clean closes remain eligible for the bounded
+                # pre-created retry circuit maintained by the session.
+                account_neutral = is_account_neutral_websocket_error_code(message.error_code)
+                if not account_neutral:
                     retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
@@ -1032,6 +1361,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                     else None
                 )
                 async with session.lifecycle_lock:
+                    if (
+                        session.liveness_settlement_owner == "send"
+                        and message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                    ):
+                        # A submitter publishes this dedicated claim beside the
+                        # failing send while holding lifecycle_lock. ``closed``
+                        # alone is only an admission/retirement state and must
+                        # never suppress settlement of still-pending siblings.
+                        break
                     await self._fail_http_bridge_reader_and_maybe_retire(
                         session,
                         error_code=message.error_code or "stream_incomplete",
@@ -1044,16 +1382,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                             else "websocket_transport_error"
                         ),
                         penalize_account=(
-                            message.error_code != "proxy_network_unavailable"
-                            and message.error_code != "upstream_keepalive_timeout"
-                            and not (
-                                message.kind == "close"
-                                and _classify_upstream_close(
-                                    message.close_code,
-                                    response_events_seen=response_events_seen,
-                                )
-                                == "clean"
-                            )
+                            not account_neutral and not (message.kind == "close" and close_classification == "clean")
+                        ),
+                        **(
+                            # An admission waiter must not inherit a socket whose
+                            # heartbeat already proved it dead. Other failures
+                            # preserve the existing deferred-retirement handoff.
+                            {"force_retire": True}
+                            if message.error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                            else {}
                         ),
                     )
                 break
@@ -1067,18 +1404,27 @@ class _HTTPBridgeUpstreamEventsMixin:
                 exc_info=True,
             )
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
-            account_neutral = error_code in {"proxy_network_unavailable", "upstream_keepalive_timeout"}
+            account_neutral = is_account_neutral_websocket_error_code(error_code)
             async with session.lifecycle_lock:
-                await self._fail_http_bridge_reader_and_maybe_retire(
-                    session,
-                    error_code=error_code,
-                    error_message=(
-                        str(exc)
-                        if isinstance(exc, UpstreamWebSocketTransportError)
-                        else "HTTP bridge upstream reader crashed before response.completed"
-                    ),
-                    penalize_account=not account_neutral,
-                )
+                if not (
+                    session.liveness_settlement_owner == "send"
+                    and error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE
+                ):
+                    # Match the message path above when receive() raises while
+                    # a concurrent send failure already owns settlement.
+                    await self._fail_http_bridge_reader_and_maybe_retire(
+                        session,
+                        error_code=error_code,
+                        error_message=(
+                            str(exc)
+                            if isinstance(exc, UpstreamWebSocketTransportError)
+                            else "HTTP bridge upstream reader crashed before response.completed"
+                        ),
+                        penalize_account=not account_neutral,
+                        # Preserve ordinary crash handoff behavior, but never hand
+                        # a heartbeat-expired socket to an admission waiter.
+                        **({"force_retire": True} if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE else {}),
+                    )
         finally:
             await _cancel_http_bridge_reader_child(
                 wakeup_task,
@@ -1311,11 +1657,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_block = format_sse_event(payload)
                 if _websocket_should_defer_reasoning_prelude(matched_request_state, event_type, payload):
                     matched_request_state.deferred_reasoning_downstream_texts.append(event_block)
+                    matched_request_state.last_upstream_activity_at = now
                     matched_request_state.upstream_model_output_seen = True
                     suppress_downstream_event = True
                     deferred_reasoning_prelude_event = True
                 elif event_type in _MODEL_OUTPUT_EVENT_TYPES:
                     matched_request_state.upstream_model_output_seen = True
+                    if not suppress_downstream_event:
+                        matched_request_state.downstream_visible = True
 
             terminal_request_state = None
             if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -1463,9 +1812,26 @@ class _HTTPBridgeUpstreamEventsMixin:
                         grouped_request_state,
                         reason=grouped_error_reason,
                     )
+                    grouped_operation_state = _http_bridge_operation_state_for_event(grouped_event_type)
+                    await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        grouped_request_state,
+                        grouped_event_block,
+                        terminal=True,
+                        terminal_state=grouped_operation_state,
+                    )
                     if grouped_request_state.event_queue is not None:
                         await grouped_request_state.event_queue.put(grouped_event_block)
                         await grouped_request_state.event_queue.put(None)
+                    if grouped_operation_state is not None and grouped_operation_state != "failed":
+                        await _update_http_bridge_operation_state(
+                            self,
+                            session,
+                            grouped_request_state,
+                            state=grouped_operation_state,
+                            response_id=_websocket_downstream_response_id(grouped_request_state),
+                        )
                     await self._finalize_websocket_request_state(
                         grouped_request_state,
                         account=session.account,
@@ -1528,6 +1894,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 surface="http_bridge",
             )
 
+        continuity_persistence_failed_after_ack = False
         if (
             event_type == "response.completed"
             and terminal_request_state is not None
@@ -1922,8 +2289,36 @@ class _HTTPBridgeUpstreamEventsMixin:
                 event_block = format_sse_event(payload)
                 event = parse_sse_event_payload(payload)
                 event_type = "response.failed"
+                # The upstream response was already acknowledged. The local
+                # alias write failed, so expose a terminal error downstream
+                # but keep the durable operation acknowledged/ambiguous to
+                # prevent an identical retry from dispatching it again.
+                continuity_persistence_failed_after_ack = True
                 completed_usage = None
                 completed_empty_prewarm = False
+
+        operation_state = _http_bridge_operation_state_for_event(event_type)
+        if operation_state is not None:
+            operation_request_states: list[Any] = []
+            for candidate in (matched_request_state, terminal_request_state):
+                if candidate is not None and candidate not in operation_request_states:
+                    operation_request_states.append(candidate)
+            for operation_request_state in operation_request_states:
+                request_operation_state = operation_state
+                if continuity_persistence_failed_after_ack and operation_request_state is matched_request_state:
+                    request_operation_state = "acknowledged"
+                if request_operation_state == "failed":
+                    # Failure rows are exposed only by the terminal-event
+                    # persistence path below, which appends the terminal SSE
+                    # block and flips the operation state atomically.
+                    continue
+                await _update_http_bridge_operation_state(
+                    self,
+                    session,
+                    operation_request_state,
+                    state=request_operation_state,
+                    response_id=response_id,
+                )
 
         recovery_attempt_session_id = (
             matched_request_state.recovery_attempt_session_id
@@ -1938,12 +2333,15 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         if (
             isinstance(event_type, str)
-            and event_type.startswith("response.")
+            and (event_type.startswith("response.") or event_type == "error")
             and matched_request_state is not None
             and matched_request_state.recovery_attempt_fingerprint is not None
             and recovery_attempt_session_id is not None
             and recovery_attempt_owner_epoch is not None
-            and (event_type == "response.completed" or not matched_request_state.recovery_attempt_event_observed)
+            and (
+                event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
+                or not matched_request_state.recovery_attempt_event_observed
+            )
         ):
             settlement_marked = False
             for settlement_attempt in range(3):
@@ -1971,7 +2369,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                             response_id=response_id,
                             release_origin_lease=(
                                 recovery_attempt_session_id != session.durable_session_id
-                                and event_type in {"response.completed", "response.failed"}
+                                and event_type
+                                in {"response.completed", "response.failed", "response.incomplete", "error"}
                             ),
                         )
                 except Exception:
@@ -1988,14 +2387,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                             response_id=response_id,
                             release_origin_lease=(
                                 recovery_attempt_session_id != session.durable_session_id
-                                and event_type in {"response.completed", "response.failed"}
+                                and event_type
+                                in {"response.completed", "response.failed", "response.incomplete", "error"}
                             ),
                         )
                     else:
                         await asyncio.sleep(0.05 * (settlement_attempt + 1))
             if (
                 settlement_marked
-                and event_type in {"response.completed", "response.failed"}
+                and event_type in {"response.completed", "response.failed", "response.incomplete", "error"}
                 and recovery_attempt_session_id != session.durable_session_id
             ):
                 try:
@@ -2016,6 +2416,10 @@ class _HTTPBridgeUpstreamEventsMixin:
             # anchor for continuity lookups.
             if response_id is not None:
                 session.last_completed_response_id = response_id
+                # This response was completed on the session's current account, so
+                # that account owns the anchor. Record it so the anchor is only
+                # replayed on the same account (never after a cross-account failover).
+                session.last_completed_response_account_id = session.account.id
                 # Remember which tool-call items the completed response left
                 # pending so an anchored follow-up that omits their outputs
                 # (interrupted turn) can receive synthetic interrupted
@@ -2035,6 +2439,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             and not terminal_request_state.skip_request_log
         ):
             await self._clear_http_bridge_retry_circuit(session)
+            _clear_http_bridge_quarantine(self, session)
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
@@ -2202,8 +2607,38 @@ class _HTTPBridgeUpstreamEventsMixin:
             if matched_request_state is not None
             else None
         )
+        matched_deferred_texts = (
+            _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state)
+            if matched_request_state is not None and not suppress_downstream_event
+            else []
+        )
+        matched_terminal_state = _http_bridge_operation_state_for_event(event_type)
+        if continuity_persistence_failed_after_ack and matched_request_state is not None:
+            # The upstream response was already accepted. The downstream
+            # failure only reports that its durable alias could not be
+            # persisted, so keep the operation fenced as acknowledged while
+            # retaining the failure SSE for the client.
+            matched_terminal_state = "acknowledged"
+        if matched_request_state is not None and not suppress_downstream_event:
+            for deferred_text in matched_deferred_texts:
+                await _persist_http_bridge_operation_event(
+                    self,
+                    session,
+                    matched_request_state,
+                    deferred_text,
+                    terminal=False,
+                )
+        if matched_request_state is not None and not suppress_downstream_event:
+            await _persist_http_bridge_operation_event(
+                self,
+                session,
+                matched_request_state,
+                event_block,
+                terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
+                terminal_state=matched_terminal_state,
+            )
         if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
-            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(matched_request_state):
+            for deferred_text in matched_deferred_texts:
                 await matched_event_queue.put(deferred_text)
             await matched_event_queue.put(event_block)
 
@@ -2213,10 +2648,34 @@ class _HTTPBridgeUpstreamEventsMixin:
         terminal_event_queue = (
             completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
         )
-        if terminal_request_state is not matched_request_state and terminal_event_queue is not None:
-            for deferred_text in _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state):
-                await terminal_event_queue.put(deferred_text)
-            await terminal_event_queue.put(event_block)
+        if terminal_request_state is not matched_request_state:
+            deferred_texts = _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
+            for deferred_text in deferred_texts:
+                if not suppress_downstream_event:
+                    await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        terminal_request_state,
+                        deferred_text,
+                        terminal=False,
+                    )
+                if terminal_event_queue is not None:
+                    await terminal_event_queue.put(deferred_text)
+            if not suppress_downstream_event:
+                await _persist_http_bridge_operation_event(
+                    self,
+                    session,
+                    terminal_request_state,
+                    event_block,
+                    terminal=True,
+                    terminal_state=(
+                        "acknowledged"
+                        if continuity_persistence_failed_after_ack and terminal_request_state is matched_request_state
+                        else _http_bridge_operation_state_for_event(event_type)
+                    ),
+                )
+            if terminal_event_queue is not None:
+                await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:
             await terminal_event_queue.put(None)
             if completed_event_queue_claimed and completed_delivery_scope is not None:

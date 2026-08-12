@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { StatusBadge } from "@/components/status-badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import type {
@@ -39,6 +40,7 @@ export function AccountListItem({
   const { t } = useTranslation();
   const blurred = usePrivacyStore((s) => s.blurred);
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
+  const dateDisplayFormat = useDateDisplayFormatStore((s) => s.dateDisplayFormat);
   const status = normalizeStatus(account.status);
   const title = account.displayName || account.email;
   const titleIsEmail = isEmailLabel(title, account.email);
@@ -74,7 +76,7 @@ export function AccountListItem({
   const showRoutingPolicy = status !== "reauth" && status !== "deactivated";
   const warmupLabel = account.limitWarmupEnabled ? t("accounts.listItem.warmupOn") : t("accounts.listItem.warmupOff");
   const warmupMeta = account.limitWarmup
-    ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
+    ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt, dateDisplayFormat)}`
     : t("accounts.listItem.noAttempts");
   const availableResetCredits = account.availableResetCredits ?? 0;
   const resetBadgeLabel = availableResetCredits > 99 ? "99+" : String(availableResetCredits);

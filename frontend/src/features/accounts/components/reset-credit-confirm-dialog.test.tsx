@@ -1,12 +1,14 @@
 import { HttpResponse, http } from "msw";
 import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ResetCreditConfirmDialog } from "@/features/accounts/components/reset-credit-confirm-dialog";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { server } from "@/test/mocks/server";
+import { formatDateTimeInline } from "@/utils/formatters";
 
 const { toastSuccess, toastError } = vi.hoisted(() => ({
   toastSuccess: vi.fn(),
@@ -58,6 +60,10 @@ function snapshotResponse() {
 }
 
 describe("ResetCreditConfirmDialog", () => {
+  beforeEach(() => {
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+  });
+
   it("confirms and consumes the soonest reset credit, then invalidates queries", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();
@@ -85,7 +91,19 @@ describe("ResetCreditConfirmDialog", () => {
 
     // Snapshot loads the available count and soonest credit expiry.
     expect(await screen.findByText("1 free rate limit reset")).toBeInTheDocument();
-    expect(screen.getByText(/Reset expires on \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/)).toBeInTheDocument();
+    const expiresAt = "2026-01-08T12:00:00.000Z";
+    const isoExpiry = formatDateTimeInline(expiresAt, "iso8601");
+    const expiryLine = screen.getByText((_, element) =>
+      element?.tagName === "P" && (element.textContent ?? "").includes(`Reset expires on ${isoExpiry}`),
+    );
+    expect(expiryLine).toBeInTheDocument();
+
+    act(() => {
+      useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
+    });
+
+    expect(expiryLine).toHaveTextContent(formatDateTimeInline(expiresAt, "default"));
+    expect(expiryLine).not.toHaveTextContent(isoExpiry);
 
     await user.click(screen.getByRole("button", { name: "Redeem credit" }));
 

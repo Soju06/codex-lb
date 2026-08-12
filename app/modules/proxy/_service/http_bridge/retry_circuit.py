@@ -48,7 +48,9 @@ class _HTTPBridgeRetryCircuitState:
     half_open_until: float = 0.0
 
 
-def _initialize_http_bridge_retry_circuit(service: Any) -> None:
+def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: Any = None) -> None:
+    if reset_transient_cache is not None:
+        reset_transient_cache()
     service._http_bridge_retry_circuits = {}
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()
@@ -259,6 +261,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         allow_fresh_hard_account_switch: bool = False,
         allow_proof_gated_continuity_replay: bool = False,
+        allow_operation_fenced_continuity_replay: bool = False,
     ) -> bool:
         """Avoid replaying a repeatedly failing hard-affinity request in a tight loop."""
         if session.key.strength != "hard":
@@ -311,6 +314,16 @@ class _HTTPBridgeRetryCircuitMixin:
                     retry_after,
                 )
                 return True
+            if allow_operation_fenced_continuity_replay:
+                logger.info(
+                    "http_bridge_retry_circuit event=bypass_operation_fenced_continuity_replay bridge_kind=%s "
+                    "bridge_key=%s failures=%s retry_after_seconds=%.1f",
+                    session.key.affinity_kind,
+                    _hash_identifier(session.key.affinity_key),
+                    state.consecutive_failures,
+                    retry_after,
+                )
+                return True
             if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                 http_bridge_retry_circuit_total.labels(outcome="suppressed").inc()
             logger.info(
@@ -341,10 +354,10 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         *,
         detail: str,
-    ) -> None:
+    ) -> int | None:
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
-            return
+            return None
 
         await self._load_http_bridge_retry_circuit(session)
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
@@ -385,6 +398,7 @@ class _HTTPBridgeRetryCircuitMixin:
         async with self._http_bridge_retry_circuit_lock:
             if self._http_bridge_retry_circuits.get(session.key) is state:
                 self._http_bridge_retry_circuit_loaded_keys.add(session.key)
+            return state.consecutive_failures
 
     async def _clear_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
         if session.key.strength != "hard":

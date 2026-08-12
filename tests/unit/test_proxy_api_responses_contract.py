@@ -367,6 +367,7 @@ def test_compact_response_output_item_preserves_summary_item_id() -> None:
             "object": "response.compaction",
             "compaction_summary": {
                 "id": "cmp_summary_context",
+                "status": "completed",
                 "encrypted_content": "SUMMARY_CONTEXT",
             },
         }
@@ -375,6 +376,7 @@ def test_compact_response_output_item_preserves_summary_item_id() -> None:
     assert proxy_api_module._compact_response_output_item(payload) == {
         "id": "cmp_summary_context",
         "type": "compaction",
+        "status": "completed",
         "encrypted_content": "SUMMARY_CONTEXT",
     }
 
@@ -402,11 +404,67 @@ async def test_synthetic_compaction_stream_preserves_mapping_usage() -> None:
         )
     ]
 
-    completed = proxy_api_module._parse_sse_payload(blocks[1])
+    completed = proxy_api_module._parse_sse_payload(blocks[3])
     assert completed is not None
     response = completed["response"]
     assert isinstance(response, dict)
     assert response["usage"] == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+
+
+@pytest.mark.asyncio
+async def test_synthetic_compaction_stream_emits_complete_lifecycle() -> None:
+    blocks = [
+        block
+        async for block in proxy_api_module._synthetic_compaction_response_stream(
+            {
+                "id": "cmp_authoritative",
+                "type": "compaction",
+                "status": "completed",
+                "encrypted_content": "SUMMARY",
+            },
+            response_id="resp_compaction",
+            usage=None,
+        )
+    ]
+
+    payloads = [proxy_api_module._parse_sse_payload(block) for block in blocks[:-1]]
+    assert all(payload is not None for payload in payloads)
+    assert [payload["type"] for payload in payloads if payload is not None] == [
+        "response.created",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert [payload["sequence_number"] for payload in payloads if payload is not None] == [0, 1, 2, 3]
+
+    created, added, done, completed = payloads
+    assert created is not None
+    assert added is not None
+    assert done is not None
+    assert completed is not None
+    assert created["response"] == {
+        "id": "resp_compaction",
+        "object": "response",
+        "status": "in_progress",
+        "output": [],
+    }
+    assert added["item"] == {
+        "id": "cmp_authoritative",
+        "type": "compaction",
+        "status": "in_progress",
+        "encrypted_content": "SUMMARY",
+    }
+    terminal_item = {
+        "id": "cmp_authoritative",
+        "type": "compaction",
+        "status": "completed",
+        "encrypted_content": "SUMMARY",
+    }
+    assert done["item"] == terminal_item
+    completed_response = completed["response"]
+    assert isinstance(completed_response, dict)
+    assert completed_response["output"] == [terminal_item]
+    assert blocks[-1] == "data: [DONE]\n\n"
 
 
 @pytest.mark.asyncio

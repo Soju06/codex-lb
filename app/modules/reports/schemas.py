@@ -15,6 +15,7 @@ class DailyReportRow(DashboardModel):
     active_accounts: int
     conversations: int = 0
     error_count: int = 0
+    cancelled_count: int = 0
     median_ttft_ms: float = 0.0
     median_tps: float = 0.0
     median_queue_ms: float = 0.0
@@ -48,6 +49,7 @@ class ReportSummary(DashboardModel):
     total_cached_tokens: int
     total_requests: int
     total_errors: int
+    total_cancelled: int = 0
     active_accounts: int
     total_conversations: int = 0
     avg_cost_per_day: float = 0.0

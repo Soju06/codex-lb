@@ -1295,6 +1295,64 @@ async def test_usage_history_covering_index_migration_repairs_invalid_leftover_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only autovacuum reloptions test",
+)
+async def test_usage_history_autovacuum_tuning_migration_sets_and_resets_reloptions_postgresql(db_setup):
+    """The autovacuum tuning revision round-trips and tolerates manual pre-application.
+
+    ``usage_history`` is append-heavy, so a stale visibility map silently
+    degrades the covering indexes' index-only scans into per-row heap
+    fetches. Pins that the migration sets the insert-driven autovacuum
+    parameters, that downgrade resets them, and that re-applying over a
+    deployment that already carries the identical manual ``ALTER TABLE``
+    (the reference deployment's hotfix) is harmless.
+    """
+    from alembic import command
+
+    from app.db.migrate import _build_alembic_config
+
+    parent_revision = "20260806_020000_add_usage_history_bulk_covering_indexes"
+    expected_options = {
+        "autovacuum_vacuum_insert_scale_factor=0.02",
+        "autovacuum_vacuum_insert_threshold=50000",
+        "autovacuum_analyze_scale_factor=0.02",
+    }
+
+    async def _usage_history_reloptions() -> set[str]:
+        async with SessionLocal() as session:
+            options = (
+                await session.execute(text("SELECT reloptions FROM pg_class WHERE relname = 'usage_history'"))
+            ).scalar_one()
+            return set(options or ())
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+    assert expected_options <= await _usage_history_reloptions()
+
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(_DATABASE_URL), parent_revision))
+    assert not (expected_options & await _usage_history_reloptions())
+
+    # Simulate the reference deployment's manual hotfix, then re-apply the
+    # migration on top of it: ALTER TABLE ... SET is idempotent.
+    async with SessionLocal() as session:
+        await session.execute(
+            text(
+                "ALTER TABLE usage_history SET ("
+                "autovacuum_vacuum_insert_scale_factor = 0.02, "
+                "autovacuum_vacuum_insert_threshold = 50000, "
+                "autovacuum_analyze_scale_factor = 0.02)"
+            )
+        )
+        await session.commit()
+
+    rerun = await run_startup_migrations(_DATABASE_URL)
+    assert rerun.current_revision == _HEAD_REVISION
+    assert expected_options <= await _usage_history_reloptions()
+
+
+@pytest.mark.asyncio
 async def test_account_plan_downgrade_observations_migration_upgrade_and_downgrade(tmp_path):
     """Round-trip the plan-downgrade evidence migration through Alembic itself.
 
@@ -1616,6 +1674,7 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
                         session_key_hash VARCHAR(64) NOT NULL,
                         api_key_scope VARCHAR(255) NOT NULL,
                         owner_instance_id VARCHAR(255),
+                        owner_process_epoch VARCHAR(64),
                         owner_epoch INTEGER NOT NULL DEFAULT 0,
                         lease_expires_at DATETIME,
                         state VARCHAR(16) NOT NULL DEFAULT 'active',

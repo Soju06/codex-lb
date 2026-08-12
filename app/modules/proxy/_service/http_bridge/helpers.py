@@ -707,7 +707,8 @@ def _http_bridge_pending_state_is_stale(
         if request_state.response_create_gate_wait_started_at is not None
         else request_state.started_at
     )
-    if request_state.response_event_count > 0 and request_state.last_upstream_activity_at is not None:
+    has_response_lifecycle_activity = request_state.response_event_count > 0 or request_state.upstream_model_output_seen
+    if has_response_lifecycle_activity and request_state.last_upstream_activity_at is not None:
         wait_started_at = request_state.last_upstream_activity_at
     return max(0.0, now - wait_started_at) >= threshold_seconds
 
@@ -731,16 +732,20 @@ def _http_bridge_eventless_precreated_deadline(
         or sent_at is None
         or request_state.response_id is not None
         or request_state.latency_response_created_ms is not None
-        or request_state.response_event_count != 0
         or request_state.downstream_visible
         or request_state.last_downstream_sequence_number is not None
     ):
         return None
     # Non-response telemetry (for example ``codex.rate_limits``) may update
     # the generic activity marker, but it must not extend the response.create
-    # acknowledgement deadline. The eventless watchdog is intentionally
-    # anchored to the send time until a response-lifecycle event is observed.
-    return sent_at + min(
+    # acknowledgement deadline. Keep the send-time anchor until a matched
+    # response-lifecycle event exists; then use the latest lifecycle activity
+    # so deferred reasoning is not retired from the original send time.
+    deadline_anchor = sent_at
+    has_response_lifecycle_activity = request_state.response_event_count > 0 or request_state.upstream_model_output_seen
+    if has_response_lifecycle_activity and request_state.last_upstream_activity_at is not None:
+        deadline_anchor = request_state.last_upstream_activity_at
+    return deadline_anchor + min(
         float(stuck_gate_retire_after_seconds),
         _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
     )
@@ -1297,12 +1302,28 @@ def _http_bridge_session_reusable_for_lookup(
     require_preferred_account: bool,
     service_tier_supported: bool,
     allow_closed_admission_handoff: bool,
+    session_key_quarantined: bool,
 ) -> bool:
+    if session.quarantined and not session_key_quarantined:
+        # The quarantine registry TTL is the source of truth
+        # (``_http_bridge_session_key_quarantined``): pruning drops the
+        # registry entry without touching the per-session flag, so a live
+        # session that outlives its quarantine window must become reusable
+        # again instead of staying rejected forever. Reset the stale flag so
+        # session state agrees with the registry.
+        session.quarantined = False
     live_or_retained = _http_bridge_session_account_active(session) and (
         not session.closed or (allow_closed_admission_handoff and _http_bridge_session_has_admission_waiter(session))
     )
     return (
         live_or_retained
+        # A quarantined key has proven silent/wedged; a new request must take
+        # the fresh session path instead of re-attaching. The registry verdict
+        # is authoritative for the key in both directions: a freshly created
+        # replacement session (flag still False) under a still-quarantined key
+        # is not reusable either, so a concurrent full-resend cannot restore
+        # the suppressed durable anchor through session hydration.
+        and not session_key_quarantined
         and _http_bridge_session_allows_api_key(session, api_key)
         and _http_bridge_session_reusable_for_request(
             session=session,
@@ -2378,6 +2399,14 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
         "bridge_instance_mismatch",
     }:
         return True
+    if code in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout"}:
+        # Recovery-first server mode permits exactly one anchored retry on a
+        # fresh upstream socket. This keeps Codex unchanged; delivery remains
+        # at-least-once because upstream acceptance is ambiguous.
+        return _service_get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode in {
+            "server_anchored_replay_once",
+            "server_indefinite_recovery",
+        }
     param_value = error.get("param")
     param = param_value.strip() if isinstance(param_value, str) and param_value.strip() else None
     message_value = error.get("message")

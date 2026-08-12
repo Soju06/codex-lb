@@ -81,6 +81,7 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy.cap_partitioning import refresh_cap_partition
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import missing_durable_bridge_tables
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.ring_membership import (
     RING_HEARTBEAT_INTERVAL_SECONDS,
@@ -141,6 +142,26 @@ async def _release_leader_lease_within(timeout: float) -> None:
     exc = release_task.exception()
     if exc is not None:
         logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
+
+
+async def _drain_proxy_persistence_tasks(
+    proxy_service: Any,
+    timeout_seconds: float,
+    *,
+    task_name_prefixes: tuple[str, ...] | None = None,
+    failure_message: str,
+) -> bool:
+    """Drain proxy persistence work within the caller's committed deadline."""
+    if proxy_service is None or not hasattr(proxy_service, "drain_persistence_tasks"):
+        return True
+    try:
+        kwargs: dict[str, Any] = {"timeout_seconds": timeout_seconds}
+        if task_name_prefixes is not None:
+            kwargs["task_name_prefixes"] = task_name_prefixes
+        return bool(await proxy_service.drain_persistence_tasks(**kwargs))
+    except Exception:
+        logger.warning(failure_message, exc_info=True)
+        return False
 
 
 async def _drain_detached_control_plane_tasks(timeout_seconds: float) -> None:
@@ -278,6 +299,7 @@ async def lifespan(app: FastAPI):
         )
         deleted_bridge_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_owned_sessions_on_startup(
             instance_id=settings.http_responses_session_bridge_instance_id,
+            owner_process_epoch=http_bridge_owner_process_epoch(),
             ownerless_cutoff=ownerless_cutoff,
         )
         if deleted_bridge_rows > 0:
@@ -287,6 +309,15 @@ async def lifespan(app: FastAPI):
                     "instance_id": settings.http_responses_session_bridge_instance_id,
                     "deleted": deleted_bridge_rows,
                 },
+            )
+        purged_operation_rows = await DurableBridgeSessionCoordinator(SessionLocal).purge_operation_spool(
+            cutoff=utcnow()
+            - timedelta(seconds=settings.http_responses_session_bridge_operation_spool_retention_seconds),
+        )
+        if purged_operation_rows > 0:
+            logger.info(
+                "Purged expired durable HTTP bridge operation transcript rows",
+                extra={"deleted": purged_operation_rows},
             )
     from app.core.auth.api_key_cache import get_api_key_cache
     from app.core.cache.invalidation import (
@@ -539,14 +570,13 @@ async def lifespan(app: FastAPI):
         recovery_settlements_drained = True
         # Settle detached recovery journals while their origin leases are
         # still held; bridge teardown below may release those owner fences.
-        if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
-            try:
-                recovery_settlements_drained = await proxy_service.drain_persistence_tasks(
-                    timeout_seconds=settings.shutdown_drain_timeout_seconds,
-                    task_name_prefixes=("http-bridge-recovery-settlement-",),
-                )
-            except Exception:
-                logger.warning("Failed to pre-drain proxy settlement tasks during shutdown", exc_info=True)
+        remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
+        recovery_settlements_drained = await _drain_proxy_persistence_tasks(
+            proxy_service,
+            remaining_drain_seconds,
+            task_name_prefixes=("http-bridge-recovery-settlement-",),
+            failure_message="Failed to pre-drain proxy settlement tasks during shutdown",
+        )
         if (
             recovery_settlements_drained
             and proxy_service is not None
@@ -564,12 +594,12 @@ async def lifespan(app: FastAPI):
         # Drain AFTER the bridge teardown: failing a bridge's pending
         # requests writes their request logs, which enqueues more
         # persistence tasks that this drain must cover.
-        if proxy_service is not None and hasattr(proxy_service, "drain_persistence_tasks"):
-            try:
-                remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
-                await proxy_service.drain_persistence_tasks(timeout_seconds=remaining_drain_seconds)
-            except Exception:
-                logger.warning("Failed to drain proxy persistence tasks during shutdown", exc_info=True)
+        remaining_drain_seconds = shutdown_state.remaining_drain_timeout_seconds() or 0.0
+        await _drain_proxy_persistence_tasks(
+            proxy_service,
+            remaining_drain_seconds,
+            failure_message="Failed to drain proxy persistence tasks during shutdown",
+        )
 
         # Cancel heartbeat and age the shared ring row near expiry.
         if heartbeat_task is not None:
@@ -630,8 +660,11 @@ async def lifespan(app: FastAPI):
             # A stopped poller must not keep receiving propagation requests.
             set_cache_invalidation_poller(None)
         await api_key_limit_reset_scheduler.stop()
-        # Final last_used_at flush; settlement tasks were drained above, so
-        # every recorded touch is pending by now.
+        # Final last_used_at flush (bounded retries). Settlement tasks were
+        # drained above; if that drain timed out, a surviving task's later
+        # record() write-throughs immediately (stop() switches the coalescer
+        # to shutdown write-through mode before the final flush), so a late
+        # touch is never parked in a pending map with no remaining flusher.
         await api_key_last_used_flush_scheduler.stop()
         await usage_scheduler.stop()
         await stop_live_usage_ingestor()

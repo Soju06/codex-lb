@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/table";
 import { useFirewall } from "@/features/firewall/hooks/use-firewall";
 import { useDialogState } from "@/hooks/use-dialog-state";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
 
@@ -32,6 +33,7 @@ export type FirewallSectionProps = {
 
 export function FirewallSection({ disabled = false }: FirewallSectionProps) {
   const { t } = useTranslation();
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const [ipAddress, setIpAddress] = useState("");
   const { firewallQuery, createMutation, deleteMutation } = useFirewall();
   const deleteDialog = useDialogState<string>();
@@ -129,7 +131,7 @@ export function FirewallSection({ disabled = false }: FirewallSectionProps) {
             </TableHeader>
             <TableBody>
               {entries.map((entry) => {
-                const created = formatTimeLong(entry.createdAt);
+                const created = formatTimeLong(entry.createdAt, dateDisplayFormat);
                 return (
                   <TableRow key={entry.ipAddress}>
                     <TableCell className="font-mono text-xs">{entry.ipAddress}</TableCell>

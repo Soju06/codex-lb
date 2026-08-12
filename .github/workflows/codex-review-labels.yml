@@ -62,6 +62,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
           GH_FALLBACK_TOKEN: ${{ github.token }}
+          # App installation tokens cannot call GET /user; the script derives the
+          # @codex review sender login from this slug as "<slug>[bot]" instead.
+          GH_APP_SLUG: ${{ steps.app-token.outputs.token && steps.app-token.outputs.app-slug || '' }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
@@ -109,6 +112,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.CODEX_LABEL_SYNC_TOKEN || secrets.RELEASE_PLEASE_TOKEN || github.token }}
           GH_FALLBACK_TOKEN: ${{ github.token }}
+          # App installation tokens cannot call GET /user; the script derives the
+          # @codex review sender login from this slug as "<slug>[bot]" instead.
+          GH_APP_SLUG: ${{ steps.app-token.outputs.token && steps.app-token.outputs.app-slug || '' }}
           REPO: ${{ github.repository }}
         run: |
           if [ ! -f .github/scripts/sync_codex_ok_labels.py ]; then

@@ -19,7 +19,15 @@ type DashboardPreferencesState = {
   setAccountListSort: (sort: AccountListSort) => void;
 };
 
-const ACCOUNT_LIST_SORT_KEYS: AccountListSortKey[] = ["account", "status", "plan", "quota", "credits", "warmup"];
+const ACCOUNT_LIST_SORT_KEYS: AccountListSortKey[] = [
+  "account",
+  "status",
+  "plan",
+  "quota",
+  "subscriptionCredits",
+  "purchasedCredits",
+  "warmup",
+];
 
 function isAccountListSortKey(value: unknown): value is AccountListSortKey {
   return typeof value === "string" && ACCOUNT_LIST_SORT_KEYS.includes(value as AccountListSortKey);
@@ -57,6 +65,9 @@ function readStoredAccountListSort(): AccountListSort {
   }
   try {
     const parsed = JSON.parse(stored) as { key?: unknown; direction?: unknown };
+    if (parsed.key === "credits") {
+      parsed.key = "purchasedCredits";
+    }
     if (
       isAccountListSortKey(parsed.key) &&
       (parsed.direction === "asc" || parsed.direction === "desc")

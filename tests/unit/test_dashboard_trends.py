@@ -24,6 +24,7 @@ def _make_row(
     cached_input_tokens: int = 50,
     reasoning_tokens: int = 0,
     cost_usd: float = 0.123,
+    cancelled_count: int = 0,
 ) -> BucketModelAggregate:
     return BucketModelAggregate(
         bucket_epoch=FIRST_SLOT_EPOCH + slot_index * BUCKET_SECONDS,
@@ -36,6 +37,7 @@ def _make_row(
         cached_input_tokens=cached_input_tokens,
         reasoning_tokens=reasoning_tokens,
         cost_usd=cost_usd,
+        cancelled_count=cancelled_count,
     )
 
 
@@ -119,6 +121,7 @@ class TestBuildTrendsFromBuckets:
                 input_tokens=1000,
                 output_tokens=500,
                 cached_input_tokens=100,
+                cancelled_count=4,
             ),
             _make_row(
                 slot_index=5,
@@ -127,6 +130,7 @@ class TestBuildTrendsFromBuckets:
                 input_tokens=2000,
                 output_tokens=1000,
                 cached_input_tokens=200,
+                cancelled_count=6,
             ),
         ]
         _, metrics, _ = build_trends_from_buckets(rows, SINCE)
@@ -134,8 +138,11 @@ class TestBuildTrendsFromBuckets:
         assert metrics.requests == 30
         assert metrics.tokens == 4500  # 1000+500+2000+1000
         assert metrics.cached_input_tokens == 300
+        # Cancelled terminals never join the error numerator (#1552); the
+        # denominator stays the full request total.
         assert metrics.error_rate == pytest.approx(5 / 30)
         assert metrics.error_count == 5
+        assert metrics.cancelled_count == 10
 
     def test_cost_is_computed_from_pricing(self):
         rows = [

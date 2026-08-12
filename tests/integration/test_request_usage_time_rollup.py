@@ -506,6 +506,19 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
             )
         )
         await session.commit()
+        # hour0, own model bucket: cancelled (client-disconnect) terminals —
+        # counted in request_count and cancelled_count, kept OUT of
+        # error_count and the error satellite (#1552).
+        for index in range(2):
+            await _add_log(
+                logs,
+                account_id="acc_f",
+                request_id=f"r_cancelled_{index}",
+                requested_at=hour0 + timedelta(seconds=400 + index * 30),
+                model="gpt-5.6-cx",
+                status="cancelled",
+                error_code="client_disconnected",
+            )
         # hour1: warmup kind is folded verbatim (reads filter by dimension),
         # plus a cached>input clamp case.
         await _add_log(
@@ -582,6 +595,12 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     h0 = by_key[(epoch_seconds(hour0), "acc_f", _S, "gpt-5.1-codex", _S, "normal", False)]
     assert h0.request_count == 2
     assert h0.error_count == 1
+    assert h0.cancelled_count == 0
+
+    cancelled = by_key[(epoch_seconds(hour0), "acc_f", _S, "gpt-5.6-cx", _S, "normal", False)]
+    assert cancelled.request_count == 2
+    assert cancelled.error_count == 0
+    assert cancelled.cancelled_count == 2
     assert h0.input_tokens == 300
     assert h0.output_tokens == 50
     assert h0.reasoning_tokens == 30
@@ -619,6 +638,8 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     tail_bucket = epoch_seconds(floor_to_hour(now))
     assert not any(r.bucket_epoch == tail_bucket for r in hourly)
 
+    # The cancelled rows carry error_code=client_disconnected but never
+    # reach the error satellite: they are not errors.
     error_keys = {(r.bucket_epoch, r.account_id, r.error_code): r.error_count for r in errors}
     assert error_keys == {
         (epoch_seconds(hour0), "acc_f", "upstream_500"): 1,
@@ -657,6 +678,11 @@ async def test_hourly_fold_folds_dimensions_and_measures(db_setup):
     assert (epoch_seconds(hour1), "acc_f", _S, "gpt-5.1-codex", _S, "warmup", "success", False) in demand_keys
     assert (epoch_seconds(hour2), "acc_f", "key_1", "gpt-5.1-codex", _S, "normal", "success", False) in demand_keys
     assert (epoch_seconds(hour4), _S, _S, "gpt-5.1-codex", _S, "normal", "error", True) in demand_keys
+    # The demand grain keeps the full status split, so the cancelled rows
+    # land in their own status bin (the dashboard cancelled breakdown reads
+    # this grain across all folded history).
+    cancelled_slot = demand_keys[(epoch_seconds(hour0), "acc_f", _S, "gpt-5.6-cx", _S, "normal", "cancelled", False)]
+    assert cancelled_slot.request_count == 2
 
 
 @pytest.mark.asyncio
@@ -749,6 +775,243 @@ async def test_top_error_empty_code_winner_coerces_to_none(db_setup):
         assert await logs.top_error_between(folded_hour + timedelta(seconds=25), folded_hour + timedelta(hours=1)) == (
             "boom"
         )
+
+
+@pytest.mark.asyncio
+async def test_activity_and_top_error_exclude_cancelled_terminals(db_setup):
+    """Regression for #1552 at the dashboard-overview read paths: cancelled
+    (client-disconnect) rows on BOTH sides of the fold boundary stay in the
+    request total, leave the error numerator and top_error, and surface as
+    the demand-grain-sourced cancelled count. Historical error-satellite rows
+    folded under the legacy `status != 'success'` filter still carry
+    client_disconnected counts — the read must drop that code."""
+    now = utcnow()
+    folded_hour = floor_to_hour(now - timedelta(days=2))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_cx", "cancelled-ts@example.com"))
+        logs = RequestLogsRepository(session)
+        # Folded side: 1 success, 2 cancelled, 1 genuine error.
+        await _add_log(logs, account_id="acc_cx", request_id="r_cx_ok", requested_at=folded_hour)
+        for index in range(2):
+            await _add_log(
+                logs,
+                account_id="acc_cx",
+                request_id=f"r_cx_folded_{index}",
+                requested_at=folded_hour + timedelta(seconds=30 + index),
+                status="cancelled",
+                error_code="client_disconnected",
+            )
+        await _add_log(
+            logs,
+            account_id="acc_cx",
+            request_id="r_cx_err",
+            requested_at=folded_hour + timedelta(seconds=90),
+            status="error",
+            error_code="upstream_500",
+        )
+        # Raw tail: 1 more cancelled row.
+        await _add_log(
+            logs,
+            account_id="acc_cx",
+            request_id="r_cx_tail",
+            requested_at=now - timedelta(minutes=1),
+            status="cancelled",
+            error_code="client_disconnected",
+        )
+
+    assert await run_hourly_fold_pass(now=now) >= 1
+
+    # Simulate a bucket folded BEFORE this release: the legacy error fold
+    # counted cancelled rows, so old satellite rows carry the code.
+    async with SessionLocal() as session:
+        await RequestUsageTimeRollupRepository(session).add_errors(
+            [
+                HourlyErrorRollupRow(
+                    bucket_epoch=epoch_seconds(folded_hour),
+                    account_id="acc_cx",
+                    error_code="client_disconnected",
+                    error_count=200,
+                )
+            ]
+        )
+        await session.commit()
+
+    since = folded_hour - timedelta(hours=1)
+    async with SessionLocal() as session:
+        logs = RequestLogsRepository(session)
+        activity = await logs.aggregate_activity_between(since, now)
+        assert activity.request_count == 5
+        assert activity.error_count == 1
+        assert activity.cancelled_count == 3
+        assert await logs.top_error_between(since, now) == "upstream_500"
+
+
+@pytest.mark.asyncio
+async def test_first_fold_pass_repairs_legacy_folded_rollout_window(db_setup):
+    """Rolling-upgrade flip-flop defense (#1552): with the persisted
+    `upgrade_repair_from` marker already NULL (new-code bootstrap, or a
+    completed marker repair), a legacy leader that regains fold leadership
+    mid-rollout can still write legacy buckets (cancelled counted in
+    error_count, cancelled_count 0, client_disconnected in the error
+    satellite). Each new-code process's first hourly fold pass must refold
+    the trailing UPGRADE_REPAIR_WINDOW from raw — without touching buckets
+    below the surviving-raw clamp."""
+    now = utcnow()
+    hour = floor_to_hour(now - timedelta(hours=30))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_rw_fix", "rollout-fix@example.com"))
+        logs = RequestLogsRepository(session)
+        await _add_log(logs, account_id="acc_rw_fix", request_id="r_fix_ok", requested_at=hour)
+        for index in range(2):
+            await _add_log(
+                logs,
+                account_id="acc_rw_fix",
+                request_id=f"r_fix_cx_{index}",
+                requested_at=hour + timedelta(seconds=30 + index),
+                status="cancelled",
+                error_code="client_disconnected",
+            )
+        await _add_log(
+            logs,
+            account_id="acc_rw_fix",
+            request_id="r_fix_err",
+            requested_at=hour + timedelta(seconds=90),
+            status="error",
+            error_code="upstream_500",
+        )
+
+    time_rollup_module._upgrade_repair_done = True  # fold without the repair first
+    assert await run_hourly_fold_pass(now=now) >= 1
+
+    # Simulate the bucket having been folded by a LEGACY replica after the
+    # migration: old error fold, no cancelled split, cancelled disconnects
+    # in the error satellite. Also plant an orphaned rollup bucket BELOW the
+    # earliest surviving raw row (retention-pruned history) inside the
+    # repair span — the raw clamp must leave it untouched.
+    orphan_epoch = epoch_seconds(hour - timedelta(hours=2))
+    async with SessionLocal() as session:
+        await session.execute(
+            update(RequestUsageHourlyRollup)
+            .where(RequestUsageHourlyRollup.bucket_epoch == epoch_seconds(hour))
+            .values(error_count=3, cancelled_count=0)
+        )
+        repo = RequestUsageTimeRollupRepository(session)
+        await repo.add_errors(
+            [
+                HourlyErrorRollupRow(
+                    bucket_epoch=epoch_seconds(hour),
+                    account_id="acc_rw_fix",
+                    error_code="client_disconnected",
+                    error_count=2,
+                )
+            ]
+        )
+        await repo.add_hourly([_hourly_row(orphan_epoch, account_id="acc_rw_fix", request_count=5, error_count=5)])
+        await session.commit()
+
+    # New code's first pass (one-shot flag re-armed) repairs the window even
+    # though the watermark is already at target (no forward slice to fold).
+    time_rollup_module._upgrade_repair_done = False
+    await run_hourly_fold_pass(now=now)
+    time_rollup_module._upgrade_repair_done = True
+
+    hourly, errors, _demand, _watermark = await _dump_all_rollups()
+    repaired = next(r for r in hourly if r.bucket_epoch == epoch_seconds(hour))
+    assert repaired.request_count == 4
+    assert repaired.error_count == 1
+    assert repaired.cancelled_count == 2
+    error_keys = {(r.bucket_epoch, r.error_code): r.error_count for r in errors}
+    assert error_keys == {(epoch_seconds(hour), "upstream_500"): 1}
+    orphan = next(r for r in hourly if r.bucket_epoch == orphan_epoch)
+    assert orphan.request_count == 5
+    assert orphan.error_count == 5
+
+
+@pytest.mark.asyncio
+async def test_upgrade_repair_marker_covers_multi_slice_legacy_advance(db_setup):
+    """Rolling-upgrade fence, marker path (#1552): a legacy leader can
+    advance up to TS_MAX_SLICES_PER_PASS x TS_FOLD_SLICE in one pass, so no
+    fixed trailing window covers its damage. The persisted
+    `upgrade_repair_from` marker (stamped by the migration, epoch-defaulted
+    for old-code bootstraps) makes new code refold the exact suspect range
+    `[marker, watermark)` in chunks — persisting progress through the
+    marker — and clear it to NULL when done."""
+    now = utcnow()
+    # Two legacy-corrupted buckets more than one TS_FOLD_SLICE (48h) apart:
+    # the far one is unreachable by the trailing flip-flop window alone.
+    hour_far = floor_to_hour(now - timedelta(hours=70))
+    hour_near = floor_to_hour(now - timedelta(hours=30))
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_mk", "marker-fix@example.com"))
+        logs = RequestLogsRepository(session)
+        for label, hour in (("far", hour_far), ("near", hour_near)):
+            await _add_log(logs, account_id="acc_mk", request_id=f"r_mk_{label}_ok", requested_at=hour)
+            for index in range(2):
+                await _add_log(
+                    logs,
+                    account_id="acc_mk",
+                    request_id=f"r_mk_{label}_cx_{index}",
+                    requested_at=hour + timedelta(seconds=30 + index),
+                    status="cancelled",
+                    error_code="client_disconnected",
+                )
+            await _add_log(
+                logs,
+                account_id="acc_mk",
+                request_id=f"r_mk_{label}_err",
+                requested_at=hour + timedelta(seconds=90),
+                status="error",
+                error_code="upstream_500",
+            )
+
+    time_rollup_module._upgrade_repair_done = True  # fold without the repair first
+    assert await run_hourly_fold_pass(now=now) >= 1
+
+    # Rewrite BOTH buckets to the legacy fold and arm the marker as the
+    # migration would have (stamped at the pre-rollout watermark, before a
+    # legacy leader advanced ~70h of slices past it).
+    marker = floor_to_hour(now - timedelta(hours=72))
+    async with SessionLocal() as session:
+        for hour in (hour_far, hour_near):
+            await session.execute(
+                update(RequestUsageHourlyRollup)
+                .where(RequestUsageHourlyRollup.bucket_epoch == epoch_seconds(hour))
+                .values(error_count=3, cancelled_count=0)
+            )
+        await RequestUsageTimeRollupRepository(session).add_errors(
+            [
+                HourlyErrorRollupRow(
+                    bucket_epoch=epoch_seconds(hour),
+                    account_id="acc_mk",
+                    error_code="client_disconnected",
+                    error_count=2,
+                )
+                for hour in (hour_far, hour_near)
+            ]
+        )
+        await session.execute(update(AccountUsageRollupState).values(upgrade_repair_from=marker))
+        await session.commit()
+
+    time_rollup_module._upgrade_repair_done = False
+    await run_hourly_fold_pass(now=now)
+    time_rollup_module._upgrade_repair_done = True
+
+    hourly, errors, _demand, _watermark = await _dump_all_rollups()
+    for hour in (hour_far, hour_near):
+        repaired = next(r for r in hourly if r.bucket_epoch == epoch_seconds(hour))
+        assert repaired.request_count == 4
+        assert repaired.error_count == 1
+        assert repaired.cancelled_count == 2
+    error_keys = {(r.bucket_epoch, r.error_code): r.error_count for r in errors}
+    assert error_keys == {
+        (epoch_seconds(hour_far), "upstream_500"): 1,
+        (epoch_seconds(hour_near), "upstream_500"): 1,
+    }
+    async with SessionLocal() as session:
+        state = (
+            await session.execute(select(AccountUsageRollupState).where(AccountUsageRollupState.id == 1))
+        ).scalar_one()
+        assert state.upgrade_repair_from is None
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import i18n from "@/i18n";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { useThemeStore } from "@/hooks/use-theme";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 
 function installLocalStorageMock() {
   const storage = new Map<string, string>();
@@ -32,6 +33,7 @@ describe("AppearanceSettings", () => {
     installLocalStorageMock();
     useThemeStore.setState({ preference: "light", theme: "light", initialized: true });
     useTimeFormatStore.setState({ timeFormat: "12h" });
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
     useAccountQuotaDisplayStore.setState({ quotaDisplay: "both" });
   });
 
@@ -51,6 +53,24 @@ describe("AppearanceSettings", () => {
     expect(button12h).toHaveAttribute("aria-pressed", "false");
     expect(button24h).toHaveAttribute("aria-pressed", "true");
     expect(useTimeFormatStore.getState().timeFormat).toBe("24h");
+  });
+
+  it("exposes selected state for the date-format toggle", async () => {
+    const user = userEvent.setup();
+
+    render(<AppearanceSettings />);
+
+    const buttonDefault = screen.getByRole("button", { name: /default/i });
+    const buttonIso = screen.getByRole("button", { name: /iso 8601/i });
+
+    expect(buttonDefault).toHaveAttribute("aria-pressed", "true");
+    expect(buttonIso).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(buttonIso);
+
+    expect(buttonDefault).toHaveAttribute("aria-pressed", "false");
+    expect(buttonIso).toHaveAttribute("aria-pressed", "true");
+    expect(useDateDisplayFormatStore.getState().dateDisplayFormat).toBe("iso8601");
   });
 
   it("exposes selected state for the account quota toggle", async () => {

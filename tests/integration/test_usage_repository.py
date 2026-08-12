@@ -360,20 +360,43 @@ async def test_latest_by_account_primary_query_plan_uses_normalized_window_index
     assert "Seq Scan" not in plan_json
 
 
+# Snapshots per (account, window shape). Sized so the covering indexes win
+# the cost comparison decisively: with only a handful of rows the covering
+# index and its non-covering key twin cost within noise of each other on a
+# fresh PostgreSQL and the EXPLAIN assertions below flake (observed on
+# PostgreSQL 16). Hundreds of rows per account separate the index-only path
+# by a wide margin while keeping the seed fast (single bulk INSERT).
+_BULK_PLAN_FIXTURE_SNAPSHOTS_PER_WINDOW = 150
+
+
 async def _seed_bulk_history_plan_fixture(session: AsyncSession) -> None:
+    from app.db.models import UsageHistory
+
     now = utcnow()
     accounts_repo = AccountsRepository(session)
-    repo = UsageRepository(session)
     await accounts_repo.upsert(_make_account("acc1"))
     await accounts_repo.upsert(_make_account("acc2"))
 
-    for offset in range(4):
-        recorded_at = now - timedelta(minutes=30 * offset)
-        await repo.add_entry("acc1", 10.0 + offset, window=None, recorded_at=recorded_at, window_minutes=300)
-        await repo.add_entry("acc1", 20.0 + offset, window="primary", recorded_at=recorded_at, window_minutes=300)
-        await repo.add_entry("acc1", 30.0 + offset, window="secondary", recorded_at=recorded_at, window_minutes=10080)
-        await repo.add_entry("acc2", 40.0 + offset, window="primary", recorded_at=recorded_at, window_minutes=300)
-        await repo.add_entry("acc2", 50.0 + offset, window="secondary", recorded_at=recorded_at, window_minutes=10080)
+    def _entry(account_id: str, used_percent: float, window: str | None, recorded_at, window_minutes: int):
+        return UsageHistory(
+            account_id=account_id,
+            used_percent=used_percent,
+            window=window,
+            recorded_at=recorded_at,
+            window_minutes=window_minutes,
+        )
+
+    entries: list[UsageHistory] = []
+    for offset in range(_BULK_PLAN_FIXTURE_SNAPSHOTS_PER_WINDOW):
+        # 90-second steps keep every row inside the 5-hour query window.
+        recorded_at = now - timedelta(seconds=90 * offset)
+        entries.append(_entry("acc1", 10.0 + offset, None, recorded_at, 300))
+        entries.append(_entry("acc1", 20.0 + offset, "primary", recorded_at, 300))
+        entries.append(_entry("acc1", 30.0 + offset, "secondary", recorded_at, 10080))
+        entries.append(_entry("acc2", 40.0 + offset, "primary", recorded_at, 300))
+        entries.append(_entry("acc2", 50.0 + offset, "secondary", recorded_at, 10080))
+    session.add_all(entries)
+    await session.commit()
 
     await _vacuum_analyze_usage_history(session)
 
@@ -550,8 +573,9 @@ async def test_bulk_history_since_covered_read_matches_non_covered_read_postgres
 
     assert _sorted_rows(covered) == _sorted_rows(non_covered)
     assert set(covered) == {"acc1", "acc2"}
-    assert len(covered["acc1"]) == 8  # four NULL-window + four 'primary' snapshots
-    assert len(covered["acc2"]) == 4
+    # NULL-window + 'primary' snapshots for acc1, 'primary' only for acc2.
+    assert len(covered["acc1"]) == 2 * _BULK_PLAN_FIXTURE_SNAPSHOTS_PER_WINDOW
+    assert len(covered["acc2"]) == _BULK_PLAN_FIXTURE_SNAPSHOTS_PER_WINDOW
 
 
 def test_bulk_history_since_sqlite_cache_reuses_superset_and_picks_up_appends(tmp_path):

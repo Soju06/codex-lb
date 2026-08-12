@@ -841,6 +841,10 @@ class _WebSocketRequestState:
     # explicit turn-state header guarantees continuity for stale recovery.
     hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
+    # The durable lookup carried an anchor, but its owner was already stale,
+    # ownerless, or lease-expired when this request arrived.  Such a request
+    # must not be presented to the client as a retryable upstream timeout.
+    durable_owner_dead: bool = False
     # True only when the client's own incoming payload (before this anchor was
     # injected or trimmed) already looked like a full conversation resend
     # (``_http_bridge_payload_looks_like_full_resend``). Deliberately weaker
@@ -877,6 +881,25 @@ class _WebSocketRequestState:
     # claimed recovery journal; an attempted send must remain consumed.
     recovery_attempt_dispatched: bool = False
     recovery_attempt_event_observed: bool = False
+    # Durable operation identity for a continuity-bound response.create. It is
+    # stable across client reconnects with the same parent response and body.
+    operation_id: str | None = None
+    operation_fingerprint: str | None = None
+    operation_parent_response_id: str | None = None
+    operation_registered: bool = False
+    # Account-neutral durable recovery keeps the original operation identity
+    # while asking request submission to rebind it to the replacement session.
+    operation_rebind_required: bool = False
+    # True after an existing UNKNOWN operation is claimed for this attempt.
+    # If admission fails before send, cleanup must restore UNKNOWN rather than
+    # treating the pre-existing row like a newly-created operation.
+    operation_recovery_claimed: bool = False
+    # True only when this request created the durable operation row. A
+    # pre-dispatch admission failure may remove that row; an existing row
+    # represents an ambiguous upstream attempt and must remain fenced.
+    operation_created: bool = False
+    operation_replay: bool = False
+    operation_dispatched: bool = False
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto
@@ -1022,6 +1045,12 @@ class _HTTPBridgeSession:
     previous_response_alias_registration_generations: dict[str, int] = field(default_factory=dict)
     last_completed_input_count: int = 0
     last_completed_response_id: str | None = None
+    # Account that owns ``last_completed_response_id``. A previous_response_id
+    # anchor is account-scoped upstream, so it may only be replayed on the same
+    # account; when the session fails over to a different account this diverges
+    # from ``account.id`` and the anchor must NOT be injected. Kept in sync with
+    # ``last_completed_response_id`` at every setter.
+    last_completed_response_account_id: str | None = None
     last_completed_input_prefix_fingerprint: str | None = None
     last_pending_tool_calls: dict[str, str] = field(default_factory=dict)
     durable_session_id: str | None = None
@@ -1030,6 +1059,18 @@ class _HTTPBridgeSession:
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False
+    # ``closed`` rejects new admissions but is written by many unrelated
+    # retirement paths; it never proves that a sender owns pending settlement.
+    # Only the submitter may claim this, while holding ``lifecycle_lock``, when
+    # its own send reports a liveness timeout. The reader remains the default
+    # settlement owner for every other close, including an already-closed
+    # session whose still-running transport later loses heartbeat liveness.
+    liveness_settlement_owner: Literal["send"] | None = None
+    # Set when the session proved silent/wedged (reattached stream with
+    # response events but no ``response.created``, or repeated eventless
+    # timeouts). A quarantined session must never be selected for reuse or
+    # re-attach; later requests take the fresh session/no-anchor path.
+    quarantined: bool = False
     # Set while a reader handoff is replacing the socket. Idle pruning must
     # retain the registered session during this short transition even though
     # ``closed`` is fail-closed for normal request reuse.
@@ -1043,6 +1084,17 @@ class _HTTPBridgeSession:
     upstream_proxy_endpoint_id: str | None = None
     upstream_proxy_fallback_used: bool | None = None
     upstream_proxy_fail_closed_reason: str | None = None
+
+    def claim_liveness_settlement(self) -> bool:
+        """Claim whole-deque settlement for a liveness-failed submitter.
+
+        The caller must hold ``lifecycle_lock`` across the failing send and
+        this synchronous claim so the reader cannot settle the same deque.
+        """
+
+        if self.liveness_settlement_owner is None:
+            self.liveness_settlement_owner = "send"
+        return self.liveness_settlement_owner == "send"
 
 
 def _complete_http_bridge_handoff(

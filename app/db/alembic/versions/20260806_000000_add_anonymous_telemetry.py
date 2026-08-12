@@ -1,7 +1,7 @@
 """add anonymous telemetry identity and consent
 
 Revision ID: 20260806_000000_add_anonymous_telemetry
-Revises: 20260803_000000_merge_http_bridge_recovery_and_capability_lineage_heads
+Revises: 20260812_000000_merge_recovery_dispatch_and_hourly_cancelled_heads
 Create Date: 2026-08-06
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260806_000000_add_anonymous_telemetry"
-down_revision = "20260806_020000_add_usage_history_bulk_covering_indexes"
+down_revision = "20260812_000000_merge_recovery_dispatch_and_hourly_cancelled_heads"
 branch_labels = None
 depends_on = None
 

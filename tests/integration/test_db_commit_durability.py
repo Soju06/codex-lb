@@ -14,6 +14,7 @@ from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKey
 from app.db.session import SessionLocal, engine, relax_commit_durability
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.last_used_coalescer import ApiKeyLastUsedCoalescer
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository, UsageWindowWrite
@@ -56,6 +57,13 @@ def _assert_relaxed_before(statements: list[str], statement_fragment: str) -> No
 
 def _assert_not_relaxed(statements: list[str]) -> None:
     assert all(_SET_LOCAL_FRAGMENT not in statement for statement in statements), statements
+
+
+def _assert_executed_without_relaxation(statements: list[str], statement_fragment: str) -> None:
+    assert any(statement_fragment in statement for statement in statements), (
+        f"no {statement_fragment!r} captured in {statements!r}"
+    )
+    _assert_not_relaxed(statements)
 
 
 def _make_account(account_id: str) -> Account:
@@ -153,7 +161,13 @@ async def test_request_log_insert_transaction_relaxes_commit_durability(db_setup
 
 
 @pytest.mark.asyncio
-async def test_usage_reservation_creation_and_settlement_relax_commit_durability(db_setup) -> None:
+async def test_usage_reservation_creation_and_settlement_keep_full_commit_durability(db_setup) -> None:
+    """Regression: reservation accounting must NOT relax commit durability
+    (adversarial review P1 on PR #1628). On external/HA PostgreSQL a failover
+    does not kill in-flight application requests, so an acked-but-lost
+    settlement commit would strand the reservation as ``reserved`` and the
+    stale release would reverse the counters for a request that completed.
+    """
     _require_postgres()
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
@@ -161,10 +175,13 @@ async def test_usage_reservation_creation_and_settlement_relax_commit_durability
         await repo.create(_make_api_key(key_id))
 
         reservation_id = f"res-{uuid4().hex[:8]}"
+        used_at = utcnow()
+        coalescer = ApiKeyLastUsedCoalescer()
+        await coalescer.record(key_id, used_at)
         with _captured_statements() as statements:
             await repo.create_usage_reservation(reservation_id, key_id=key_id, model="gpt-5", items=[])
             await repo.commit()
-        _assert_relaxed_before(statements, "INSERT INTO api_key_usage_reservations")
+        _assert_executed_without_relaxation(statements, "INSERT INTO api_key_usage_reservations")
 
         with _captured_statements() as statements:
             await repo.settle_usage_reservation(
@@ -175,19 +192,21 @@ async def test_usage_reservation_creation_and_settlement_relax_commit_durability
                 cached_input_tokens=0,
                 cost_microdollars=0,
             )
-            await repo.update_last_used(key_id, commit=False)
             await repo.commit()
-        _assert_relaxed_before(statements, "UPDATE api_key_usage_reservations")
-        # The last_used_at touch rides the same relaxed settlement transaction.
-        assert any("UPDATE api_keys" in statement for statement in statements)
+        _assert_executed_without_relaxation(statements, "UPDATE api_key_usage_reservations")
+        assert coalescer.pending_snapshot() == {key_id: used_at}
+        assert await coalescer.flush() == 1
+        updated = await repo.get_by_id(key_id)
+        assert updated is not None
+        assert updated.last_used_at == used_at
 
 
 @pytest.mark.asyncio
-async def test_stale_usage_reservation_release_relaxes_commit_durability(db_setup) -> None:
+async def test_stale_usage_reservation_release_keeps_full_commit_durability(db_setup) -> None:
     """Regression: the scheduler's stale-reservation release settles the same
     per-request accounting rows as the request-path settlement, so each batch
-    transaction must relax commit durability too — durability of a release
-    must not depend on which path fires (adversarial review P2).
+    must keep the same full durability — durability of a release must not
+    depend on which path fires (adversarial review P1 on PR #1628).
     """
     _require_postgres()
     async with SessionLocal() as session:
@@ -204,7 +223,7 @@ async def test_stale_usage_reservation_release_relaxes_commit_durability(db_setu
             released_count = await repo.release_stale_usage_reservations(cutoff=utcnow() + timedelta(hours=1))
 
         assert released_count == 1
-        _assert_relaxed_before(statements, "UPDATE api_key_usage_reservations")
+        _assert_executed_without_relaxation(statements, "UPDATE api_key_usage_reservations")
 
 
 @pytest.mark.asyncio

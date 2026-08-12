@@ -241,6 +241,18 @@ class AccountUsageRollupState(Base):
         nullable=False,
         server_default=text("'1970-01-01 00:00:00'"),
     )
+    # Start of the hourly range a legacy (pre-cancelled_count) fold pass may
+    # have written after the migration ran (#1552 rolling-upgrade fence).
+    # The migration stamps existing rows with their hourly_folded_through;
+    # the epoch server default covers a state row bootstrapped by an OLD
+    # replica after the migration (its entire backfill is legacy-folded).
+    # Only NEW code writes NULL, after refolding [marker, watermark) from
+    # raw — so NULL always means "no legacy-suspect range outstanding".
+    upgrade_repair_from: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
 
 
 class RequestUsageHourlyRollup(Base):
@@ -272,8 +284,15 @@ class RequestUsageHourlyRollup(Base):
     request_kind: Mapped[str] = mapped_column(String, primary_key=True)
     is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
     request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
-    # sum(status != 'success') — status is folded as a measure, not a dimension.
+    # sum(status NOT IN ('success', 'cancelled')) — status is folded as a
+    # measure, not a dimension. Rows folded before cancelled_count existed
+    # keep the legacy sum(status != 'success') fold (no backfill; a disclosed
+    # step change on error-rate trends).
     error_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    # sum(status = 'cancelled') — client-side disconnect terminals, split out
+    # of error_count so dashboards can show success/cancelled/error distinctly.
+    # 0 (server default) on rows folded before the measure existed.
+    cancelled_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
     reasoning_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
@@ -299,9 +318,12 @@ class RequestUsageHourlyErrorRollup(Base):
 
     ``error_code`` has unbounded cardinality, so it is isolated from the main
     hourly rollup. Fold filter reproduces the top-error read exactly:
-    non-warmup kinds, ``status != 'success'``, ``error_code IS NOT NULL``
-    (soft-deleted rows included). ``account_id`` is carried only so account
-    hard-deletion can mirror raw row removal.
+    non-warmup kinds, ``status NOT IN ('success', 'cancelled')``,
+    ``error_code IS NOT NULL`` (soft-deleted rows included). Rows folded
+    before cancelled rows left the error fold still carry
+    ``client_disconnected`` counts; the top-error reads exclude that code.
+    ``account_id`` is carried only so account hard-deletion can mirror raw
+    row removal.
     """
 
     __tablename__ = "request_usage_hourly_error_rollups"
@@ -1790,6 +1812,14 @@ class HttpBridgeRecoveryAttemptState(str, Enum):
     REPLAYED = "replayed"
 
 
+class HttpBridgeOperationState(str, Enum):
+    SUBMITTED = "submitted"
+    UNKNOWN = "unknown"
+    ACKNOWLEDGED = "acknowledged"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class HttpBridgeSessionRecord(Base):
     __tablename__ = "http_bridge_sessions"
 
@@ -1799,6 +1829,7 @@ class HttpBridgeSessionRecord(Base):
     session_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     api_key_scope: Mapped[str] = mapped_column(String(255), nullable=False)
     owner_instance_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    owner_process_epoch: Mapped[str | None] = mapped_column(String(64), nullable=True)
     owner_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     state: Mapped[HttpBridgeSessionState] = mapped_column(
@@ -1899,6 +1930,79 @@ class HttpBridgeRecoveryAttemptRecord(Base):
             name="uq_http_bridge_recovery_attempts_session_fingerprint",
         ),
         Index("idx_http_bridge_recovery_attempts_state", "state", "updated_at"),
+    )
+
+
+class HttpBridgeOperationRecord(Base):
+    """Durable identity and outcome for a continuity-bound response.create."""
+
+    __tablename__ = "http_bridge_operations"
+
+    operation_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("http_bridge_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    parent_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'submitted'"))
+    response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "request_fingerprint",
+            name="uq_http_bridge_operations_session_fingerprint",
+        ),
+        Index(
+            "uq_http_bridge_operations_request_fingerprint",
+            "request_fingerprint",
+            unique=True,
+        ),
+        Index("idx_http_bridge_operations_session_parent_state", "session_id", "parent_response_id", "state"),
+        Index("idx_http_bridge_operations_parent_state", "parent_response_id", "state", "updated_at"),
+        Index("idx_http_bridge_operations_state_updated", "state", "updated_at"),
+    )
+
+
+class HttpBridgeOperationEvent(Base):
+    """Replayable upstream SSE blocks for a durable bridge operation."""
+
+    __tablename__ = "http_bridge_operation_events"
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    operation_id: Mapped[str] = mapped_column(
+        String(80),
+        ForeignKey("http_bridge_operations.operation_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "event_fingerprint",
+            name="uq_http_bridge_operation_events_operation_fingerprint",
+        ),
+        Index("idx_http_bridge_operation_events_operation_sequence", "operation_id", "sequence_number"),
     )
 
 
@@ -2134,7 +2238,12 @@ Index("idx_automation_runs_job_id_started_at", AutomationRun.job_id, AutomationR
 Index("idx_automation_runs_status_started_at", AutomationRun.status, AutomationRun.started_at)
 Index("idx_automation_runs_scheduled_for", AutomationRun.scheduled_for)
 Index("idx_automation_runs_cycle_key_started_at", AutomationRun.cycle_key, AutomationRun.started_at)
-Index("idx_http_bridge_sessions_owner_state", HttpBridgeSessionRecord.owner_instance_id, HttpBridgeSessionRecord.state)
+Index(
+    "idx_http_bridge_sessions_owner_state",
+    HttpBridgeSessionRecord.owner_instance_id,
+    HttpBridgeSessionRecord.owner_process_epoch,
+    HttpBridgeSessionRecord.state,
+)
 Index("idx_http_bridge_sessions_lease", HttpBridgeSessionRecord.lease_expires_at)
 Index("idx_http_bridge_sessions_last_seen", HttpBridgeSessionRecord.last_seen_at.desc())
 Index(

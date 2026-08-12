@@ -4944,6 +4944,56 @@ async def test_http_bridge_incomplete_event_terminalizes_operation(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-batched-terminal-order",
+        response_id="resp-batched-terminal-order",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-batched-terminal-order"
+    session = _make_bridge_session(
+        key_value="batched-terminal-order",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-batched-terminal-order"
+    session.durable_owner_epoch = 1
+    order: list[str] = []
+
+    async def update_state(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        order.append("state")
+
+    async def enqueue(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        order.append("enqueue")
+
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", update_state)
+    service._http_bridge_operation_event_batcher = cast(Any, SimpleNamespace(enqueue=enqueue))
+
+    await http_bridge_upstream_events_module._persist_http_bridge_operation_event(
+        service,
+        session,
+        request_state,
+        'data: {"type":"response.completed"}\n\n',
+        terminal=True,
+        terminal_state="completed",
+    )
+
+    assert order == ["state", "enqueue"]
+
+
+@pytest.mark.asyncio
 async def test_ordinary_completed_alias_rejection_preserves_successful_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

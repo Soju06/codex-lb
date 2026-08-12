@@ -374,6 +374,18 @@ async def _persist_http_bridge_operation_event(
                     logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
                 return
         if callable(batcher_enqueue):
+            if terminal and terminal_state is not None:
+                # The batcher's terminal enqueue drains and finalizes the
+                # spool synchronously. Record the terminal operation state
+                # first so finalization can observe a completed/incomplete
+                # operation instead of the still-acknowledged state.
+                await _update_http_bridge_operation_state(
+                    service,
+                    session,
+                    request_state,
+                    state=terminal_state,
+                    response_id=_websocket_downstream_response_id(request_state),
+                )
             await batcher_enqueue(
                 operation_id=operation_id,
                 session_id=session_id,
@@ -382,14 +394,6 @@ async def _persist_http_bridge_operation_event(
                 event_text=event_block,
                 terminal=terminal,
             )
-            if terminal and terminal_state is not None:
-                await _update_http_bridge_operation_state(
-                    service,
-                    session,
-                    request_state,
-                    state=terminal_state,
-                    response_id=_websocket_downstream_response_id(request_state),
-                )
             return
         if not callable(append_event):
             return

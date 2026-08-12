@@ -297,6 +297,12 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
         ]
     )
     recorded: dict[str, Any] = {}
+    initial_fingerprint = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id=session.durable_session_id,
+        api_key_scope="api-key-scope",
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+    )
 
     async def get_operation_by_fingerprint(**_kwargs: Any) -> Any:
         return next(completed_operations)
@@ -339,6 +345,7 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
     assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
     assert json.loads(recorded["request_text"])["previous_response_id"] == "resp-3"
     assert recorded["parent_response_id"] == "resp-3"
+    assert recorded["request_fingerprint"] != initial_fingerprint
     assert json.loads(request_state.request_text or "{}")["previous_response_id"] == "resp-3"
 
 

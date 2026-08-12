@@ -761,6 +761,52 @@ async def test_terminal_operation_event_exposes_failure_after_spooling(
 
 
 @pytest.mark.asyncio
+async def test_terminal_failure_exposes_state_when_spool_overflows(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-terminal-overflow",
+            session_key_value="sid-terminal-overflow",
+        )
+        fingerprint = durable_bridge_hash("terminal-overflow")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-overflow",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-terminal-overflow",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+
+        persisted = await repository.append_terminal_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-overflow",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1,
+            state="failed",
+        )
+
+        assert persisted is False
+        failed = await repository.get_operation(operation_id=operation_id)
+        assert failed is not None
+        assert failed.state == "failed"
+        assert failed.event_spool_complete is False
+        assert await repository.get_operation_events(operation_id=operation_id) == []
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_consumed_recovery_checkpoint_does_not_rebind_failed_operation(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

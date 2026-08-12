@@ -1725,6 +1725,14 @@ class DurableBridgeRepository:
                 operation.event_bytes = int(operation.event_bytes or 0) + event_size
             else:
                 operation.event_spool_complete = False
+                # The terminal outcome is still authoritative even when the
+                # transcript block cannot fit in the bounded spool. Expose
+                # the failed state so an identical retry does not remain
+                # fenced as an in-flight operation until retention expires.
+                operation.state = state
+                if response_id is not None:
+                    operation.response_id = response_id
+                operation.updated_at = utcnow()
                 await self._session.commit()
                 return False
             operation.state = state

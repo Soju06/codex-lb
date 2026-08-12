@@ -44,6 +44,43 @@ def test_http_bridge_recovery_eligibility_accepts_turn_state_anchor_without_prev
     )
 
 
+def test_http_bridge_indefinite_recovery_requires_explicit_predecessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        proxy_api.proxy_service_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_operation_ledger_enabled=True,
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    fresh_turn = ResponsesRequest(model="gpt-5.6", instructions="", input="retry")
+    anchored_turn = ResponsesRequest(
+        model="gpt-5.6",
+        instructions="",
+        input="retry",
+        previous_response_id="resp_parent",
+    )
+
+    assert (
+        proxy_api._http_bridge_recovery_request_eligible(
+            fresh_turn,
+            bridge_active=True,
+            headers={"x-codex-turn-state": "turn-1"},
+        )
+        is False
+    )
+    assert (
+        proxy_api._http_bridge_recovery_request_eligible(
+            anchored_turn,
+            bridge_active=True,
+            headers={"x-codex-turn-state": "turn-1"},
+        )
+        is True
+    )
+
+
 def test_logged_error_json_response_preserves_upstream_diagnostic_markers():
     message = "Provider Exception: failed while reading /tmp/upstream-cache"
     request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})

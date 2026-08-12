@@ -8,7 +8,12 @@ from importlib import import_module
 import pytest
 
 from app.core.shutdown import wait_for_tasks_to_drain
-from app.main import InFlightMiddleware, _drain_detached_control_plane_tasks, _release_leader_lease_within
+from app.main import (
+    InFlightMiddleware,
+    _drain_detached_control_plane_tasks,
+    _drain_proxy_persistence_tasks,
+    _release_leader_lease_within,
+)
 
 app_main = import_module("app.main")
 shutdown_state = import_module("app.core.shutdown")
@@ -122,6 +127,30 @@ async def test_control_plane_drains_are_failure_isolated(
 
     assert fleet_drained.is_set()
     assert "Failed to drain audit log tasks during shutdown" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_lifespan_recovery_settlement_pre_drain_uses_remaining_deadline() -> None:
+    calls: list[dict[str, object]] = []
+
+    class _ProxyService:
+        async def drain_persistence_tasks(self, **kwargs: object) -> bool:
+            calls.append(kwargs)
+            return True
+
+    assert await _drain_proxy_persistence_tasks(
+        _ProxyService(),
+        3.25,
+        task_name_prefixes=("http-bridge-recovery-settlement-",),
+        failure_message="unused",
+    )
+
+    assert calls == [
+        {
+            "timeout_seconds": 3.25,
+            "task_name_prefixes": ("http-bridge-recovery-settlement-",),
+        }
+    ]
 
 
 @pytest.mark.asyncio

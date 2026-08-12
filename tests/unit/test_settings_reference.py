@@ -70,6 +70,7 @@ def test_generated_settings_reference_matches_code() -> None:
 def test_settings_reference_page_is_checked_in_under_docs() -> None:
     assert OUTPUT_PATH == REPO_ROOT / "docs" / "reference" / "settings.md"
     assert OUTPUT_PATH.is_file()
+    assert "openspec/specs/responses-api-compat" in render_settings_reference()
 
 
 def test_settings_surface_ratchet() -> None:

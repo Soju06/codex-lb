@@ -13,13 +13,13 @@
   keypair per instance), 5s timeout, ≤1 retry/interval, debug-only failure logs.
 - [x] T5: Scheduler — startup snapshot + 24h interval; undecided-consent startup notice
   (single log line with docs link + disable instructions).
-- [ ] T6: Dashboard consent dialog — one-time while undecided, renders live payload JSON,
+- [x] T6: Dashboard consent dialog — one-time while undecided, renders live payload JSON,
   equal-prominence enable/disable; Settings toggle wired to consent API.
 - [x] T7: Consent API endpoints (get resolved state, set decision).
 
 ## Spec
 
-- [ ] T8: Apply delta `specs/telemetry/spec.md` as new capability; sync payload schema into
+- [x] T8: Apply delta `specs/telemetry/spec.md` as new capability; sync payload schema into
   `openspec/specs/telemetry/context.md`.
 
 ## Validation

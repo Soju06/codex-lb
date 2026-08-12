@@ -11711,6 +11711,46 @@ async def test_stream_via_http_bridge_prefers_durable_account_for_soft_prompt_ca
 
 
 @pytest.mark.asyncio
+async def test_local_terminal_reset_tracks_detached_generation_during_pending_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="local-terminal-reset-detached")
+    settlement_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+
+    async def slow_pending_settlement(*args: object, **kwargs: object) -> bool:
+        del args, kwargs
+        settlement_started.set()
+        await release_settlement.wait()
+        return True
+
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", slow_pending_settlement)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+
+    reset_task = asyncio.create_task(
+        service._reset_http_bridge_session_after_local_terminal_error(
+            session,
+            error_code="stream_incomplete",
+            error_message="local recovery failed",
+        )
+    )
+    try:
+        await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
+        assert service._http_bridge_sessions == {}
+        assert service._http_bridge_detached_sessions[id(session)] is session
+        assert http_bridge_helpers_module._http_bridge_capacity_generation_count(service) == 1
+        assert session.resource_close_task is None
+    finally:
+        release_settlement.set()
+
+    await asyncio.wait_for(reset_task, timeout=1.0)
+
+    assert service._http_bridge_detached_sessions == {}
+
+
+@pytest.mark.asyncio
 async def test_close_http_bridge_session_fails_pending_downstream_requests() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -18158,17 +18198,24 @@ async def test_close_all_http_bridge_sessions_retains_failed_generation_for_retr
     session = _make_bridge_session(key_value="shutdown-close-retry")
     service._http_bridge_sessions[session.key] = session
     fail_pending = AsyncMock(side_effect=[RuntimeError("pending settlement failed"), None])
+    close_event_batcher = AsyncMock()
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(close=close_event_batcher),
+    )
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
 
     with pytest.raises(RuntimeError, match="pending settlement failed"):
         await service.close_all_http_bridge_sessions()
 
+    close_event_batcher.assert_awaited_once()
     assert service._http_bridge_sessions == {}
     assert service._http_bridge_detached_sessions[id(session)] is session
 
     await service.close_all_http_bridge_sessions()
 
+    assert close_event_batcher.await_count == 2
     assert fail_pending.await_count == 2
     assert service._http_bridge_sessions == {}
     assert service._http_bridge_detached_sessions == {}
@@ -25494,6 +25541,43 @@ async def test_retire_stale_pending_http_bridge_session_unregisters_aliases_and_
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
     close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_retirement_tracks_detached_generation_until_bounded_close_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="stale-retirement-detached")
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def slow_close() -> None:
+        close_started.set()
+        await release_close.wait()
+
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(close=slow_close))
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+
+    retirement_task = asyncio.create_task(
+        service._retire_stale_pending_http_bridge_session(
+            session,
+            detail="stream_incomplete",
+            response_events_seen=0,
+        )
+    )
+    try:
+        await asyncio.wait_for(close_started.wait(), timeout=1.0)
+        assert service._http_bridge_sessions == {}
+        assert service._http_bridge_detached_sessions[id(session)] is session
+        assert http_bridge_helpers_module._http_bridge_capacity_generation_count(service) == 1
+    finally:
+        release_close.set()
+
+    await asyncio.wait_for(retirement_task, timeout=1.0)
+
+    assert service._http_bridge_detached_sessions == {}
 
 
 @pytest.mark.asyncio

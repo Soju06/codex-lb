@@ -3516,8 +3516,11 @@ class _HTTPBridgeStreamingMixin:
         preserve_durable_lease: bool = False,
     ) -> None:
         async with self._http_bridge_lock:
-            if self._http_bridge_sessions.get(session.key) is session:
-                self._http_bridge_sessions.pop(session.key, None)
+            # Pending settlement below may block or fail before resource close
+            # starts. Transfer canonical routing into detached lifecycle
+            # ownership first so capacity, invalidation, and shutdown continue
+            # to see the live socket and leases throughout that interval.
+            self._detach_http_bridge_session_locked(session.key, expected_session=session)
         async with session.pending_lock:
             session.queued_request_count = 0
         await self._fail_pending_websocket_requests(

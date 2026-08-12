@@ -123,6 +123,15 @@ class _HTTPBridgeSessionRegistryMixin:
                 return_exceptions=True,
             )
             await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
+            # Session/background cleanup may still enqueue durable operation
+            # events, so the spooler must outlive both. Close it before
+            # propagating an individual session-close failure: the batcher's
+            # flusher is a service-owned task and must not leak merely because
+            # one detached generation remains registered for a later retry.
+            event_batcher = getattr(self, "_http_bridge_operation_event_batcher", None)
+            close_batcher = getattr(event_batcher, "close", None)
+            if callable(close_batcher):
+                await close_batcher()
             for result in close_results:
                 if isinstance(result, BaseException):
                     raise result

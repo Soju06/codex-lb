@@ -2779,10 +2779,11 @@ class _HTTPBridgeRequestSubmitMixin:
             )
         session.closed = True
         async with self._http_bridge_lock:
-            if self._http_bridge_sessions.get(session.key) is session:
-                self._http_bridge_sessions.pop(session.key, None)
-                self._unregister_http_bridge_turn_states_locked(session)
-                self._unregister_http_bridge_previous_response_ids_locked(session)
+            # Bounded close may return while resource finalization is still
+            # running. Detachment transfers ownership instead of freeing the
+            # capacity slot at canonical removal, and leaves a failed close
+            # discoverable by shutdown/account invalidation for a later retry.
+            self._detach_http_bridge_session_locked(session.key, expected_session=session)
         async with session.pending_lock:
             should_close = not session.upstream_close_attempted
             if should_close:

@@ -1,8 +1,8 @@
 """add source scope to sticky continuity abandonment
 
-Revision ID: 20260811_000000_add_sticky_abandonment_scope
-Revises: 20260806_120000_add_http_bridge_owner_process_epoch
-Create Date: 2026-08-11 00:00:00.000000
+Revision ID: 20260812_120000_add_sticky_abandonment_scope
+Revises: 20260812_000000_merge_recovery_dispatch_and_hourly_cancelled_heads
+Create Date: 2026-08-12 12:00:00.000000
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.engine import Connection
 
-revision = "20260811_000000_add_sticky_abandonment_scope"
-down_revision = "20260806_120000_add_http_bridge_owner_process_epoch"
+revision = "20260812_120000_add_sticky_abandonment_scope"
+down_revision = "20260812_000000_merge_recovery_dispatch_and_hourly_cancelled_heads"
 branch_labels = None
 depends_on = None
 

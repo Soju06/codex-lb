@@ -2316,8 +2316,8 @@ def test_http_bridge_operation_migrations_round_trip_existing_rows_and_rebuild_s
 def test_sticky_abandonment_scope_migration_is_additive_and_reversible(tmp_path: Path) -> None:
     db_path = tmp_path / "sticky-abandonment-scope.db"
     url = _db_url(db_path)
-    parent_revision = "20260806_120000_add_http_bridge_owner_process_epoch"
-    target_revision = "20260811_000000_add_sticky_abandonment_scope"
+    parent_revision = "20260812_000000_merge_recovery_dispatch_and_hourly_cancelled_heads"
+    target_revision = "20260812_120000_add_sticky_abandonment_scope"
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
     config = _build_alembic_config(url)

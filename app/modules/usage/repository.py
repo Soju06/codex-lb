@@ -779,7 +779,7 @@ class UsageRepository:
                 _window_clause(window),
                 UsageHistory.recorded_at >= since,
             )
-            .order_by(UsageHistory.recorded_at.asc())
+            .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())

@@ -1503,6 +1503,8 @@ async def test_allowlisted_source_model_routes_through(async_client, source_upst
         {"reasoning_effort": "max", "reasoning": {"summary": "auto"}},
         {"thinking": False, "enable_thinking": True},
         {"thinking": "disabled", "enable_thinking": True},
+        {"thinking": {"summary": "auto", "enabled": True}},
+        {"thinking": {"summary": "auto"}, "enable_thinking": True},
     ],
 )
 async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(
@@ -1810,6 +1812,8 @@ async def test_source_responses_reasoning_allowlist_strips_conflicting_aliases(a
         {"reasoningEffort": " ", "thinking": "max"},
         {"thinking": False, "enable_thinking": True},
         {"thinking": "disabled", "enable_thinking": True},
+        {"thinking": {"summary": "auto", "enabled": True}},
+        {"thinking": {"summary": "auto"}, "enable_thinking": True},
     ],
 )
 async def test_source_responses_reasoning_allowlist_rejects_effort_hidden_by_inactive_alias(

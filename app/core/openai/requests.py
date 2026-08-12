@@ -1806,16 +1806,20 @@ def _normalize_thinking_alias(
             normalized["effort"] = effort.strip().lower()
         if isinstance(summary, str) and summary.strip():
             normalized["summary"] = summary.strip()
+        thinking_type = thinking_mapping.get("type")
+        if (
+            "effort" not in normalized
+            and isinstance(thinking_type, str)
+            and thinking_type.strip().lower() == "enabled"
+        ):
+            normalized["effort"] = "medium"
+        enabled = thinking_mapping.get("enabled")
+        if "effort" not in normalized and enabled is True:
+            normalized["effort"] = "medium"
+        if "effort" not in normalized and enable_thinking is True:
+            normalized["effort"] = "medium"
         if normalized:
             return normalized
-        thinking_type = thinking_mapping.get("type")
-        if isinstance(thinking_type, str):
-            normalized_type = thinking_type.strip().lower()
-            if normalized_type == "enabled":
-                return {"effort": "medium"}
-        enabled = thinking_mapping.get("enabled")
-        if enabled is True:
-            return {"effort": "medium"}
 
     # Disabled `thinking` spellings are inactive, not authoritative: a
     # separate enabled alias must still participate in policy evaluation.

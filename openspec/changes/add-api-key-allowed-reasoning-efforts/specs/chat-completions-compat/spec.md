@@ -14,6 +14,8 @@ A snake-case `reasoning_effort` MUST still participate in authorization when a
 separate `reasoning` object contains only metadata such as `summary`.
 An inactive `thinking` control MUST NOT mask a separate enabled reasoning
 alias during authorization.
+Reasoning metadata inside `thinking` MUST be merged with enabled controls before
+allowlist evaluation and MUST NOT hide their implicit `medium` effort.
 
 After a source-routed Chat Completions request passes the policy, any accepted
 `ultra` value MUST use the upstream wire value `max` regardless of whether the
@@ -58,6 +60,15 @@ model.
 - **WHEN** a Chat Completions client supplies `thinking: false` and
   `enable_thinking: true`
 - **THEN** the service evaluates the enabled alias as `medium`
+- **AND** returns `403` with code `reasoning_effort_not_allowed`
+- **AND** the source receives no request
+
+#### Scenario: Thinking metadata does not mask its enabled state
+
+- **GIVEN** a source-routed chat model and an API key that allows only `low`
+- **WHEN** a Chat Completions client supplies
+  `thinking: {"summary": "auto", "enabled": true}`
+- **THEN** the service evaluates the enabled control as `medium`
 - **AND** returns `403` with code `reasoning_effort_not_allowed`
 - **AND** the source receives no request
 

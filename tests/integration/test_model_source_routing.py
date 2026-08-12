@@ -1902,13 +1902,25 @@ async def test_source_responses_preserves_effortless_provider_thinking_object(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("with_api_key", [False, True])
-async def test_source_responses_preserves_unrestricted_provider_reasoning_alias(
+@pytest.mark.parametrize(
+    ("key_policy", "reasoning_control", "expected_control"),
+    [
+        ("none", {"thinking": "minimal"}, {"thinking": "minimal"}),
+        ("unrestricted", {"thinking": "minimal"}, {"thinking": "minimal"}),
+        ("allowlisted", {"thinking": "minimal"}, {"reasoning": {"effort": "minimal"}}),
+        ("enforced", {"thinking": "low"}, {"reasoning": {"effort": "minimal"}}),
+        ("none", {"reasoning": {"effort": "minimal"}}, {"reasoning": {"effort": "minimal"}}),
+        ("allowlisted", {"reasoning": {"effort": "minimal"}}, {"reasoning": {"effort": "minimal"}}),
+    ],
+)
+async def test_source_responses_preserves_client_plane_reasoning_effort(
     async_client,
     source_upstream,
-    with_api_key,
+    key_policy,
+    reasoning_control,
+    expected_control,
 ):
-    if with_api_key:
+    if key_policy != "none":
         await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}
 
@@ -1934,13 +1946,18 @@ async def test_source_responses_preserves_unrestricted_provider_reasoning_alias(
         supports_responses=True,
     )
     headers: dict[str, str] = {}
-    if with_api_key:
+    if key_policy != "none":
+        key_payload = {
+            "name": "source-provider-reasoning-alias-key",
+            "assignedSourceIds": [source_id],
+        }
+        if key_policy == "allowlisted":
+            key_payload["allowedReasoningEfforts"] = ["minimal"]
+        elif key_policy == "enforced":
+            key_payload["enforcedReasoningEffort"] = "minimal"
         created = await async_client.post(
             "/api/api-keys/",
-            json={
-                "name": "source-provider-reasoning-alias-key",
-                "assignedSourceIds": [source_id],
-            },
+            json=key_payload,
         )
         assert created.status_code == 200
         headers["Authorization"] = f"Bearer {created.json()['key']}"
@@ -1952,13 +1969,16 @@ async def test_source_responses_preserves_unrestricted_provider_reasoning_alias(
             "model": model,
             "instructions": "hi",
             "input": [],
-            "thinking": "minimal",
+            **reasoning_control,
         },
     )
 
     assert response.status_code == 200
-    assert captured["thinking"] == "minimal"
-    assert "reasoning" not in captured
+    for field in ("thinking", "reasoning"):
+        if field in expected_control:
+            assert captured[field] == expected_control[field]
+        else:
+            assert field not in captured
 
 
 @pytest.mark.asyncio

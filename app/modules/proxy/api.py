@@ -237,6 +237,7 @@ from app.modules.proxy.request_policy import (
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
+    resolve_wire_reasoning_effort,
     sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
     validate_model_access,
@@ -4238,9 +4239,10 @@ async def _source_responses_response(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
     source_payload = payload.model_dump_for_forwarding()
-    if payload._codex_lb_provider_reasoning_effort_materialized and (
+    preserve_materialized_provider_alias = payload._codex_lb_provider_reasoning_effort_materialized and (
         api_key is None or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
-    ):
+    )
+    if preserve_materialized_provider_alias:
         reasoning = source_payload.get("reasoning")
         if isinstance(reasoning, dict):
             reasoning = {key: value for key, value in reasoning.items() if key != "effort"}
@@ -4253,6 +4255,21 @@ async def _source_responses_response(
         or (api_key.allowed_reasoning_efforts is not None and payload._codex_lb_client_reasoning_effort is not None)
     ):
         normalize_source_reasoning_aliases(source_payload)
+    source_reasoning_effort = (
+        api_key.enforced_reasoning_effort
+        if api_key is not None and api_key.enforced_reasoning_effort is not None
+        else payload._codex_lb_client_reasoning_effort
+    )
+    if source_reasoning_effort is not None and not preserve_materialized_provider_alias:
+        source_reasoning_effort = resolve_wire_reasoning_effort(source_reasoning_effort)
+        reasoning = source_payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            source_payload["reasoning"] = {
+                **reasoning,
+                "effort": source_reasoning_effort,
+            }
+        else:
+            source_payload["reasoning"] = {"effort": source_reasoning_effort}
     strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))

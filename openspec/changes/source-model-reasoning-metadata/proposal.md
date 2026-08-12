@@ -28,7 +28,9 @@ of source catalogs alone would have left the two vocabularies disagreeing.
   `raw_metadata_json` instead of hardcoding them.
 - Accept both effort slugs (`["low", "high"]`) and objects
   (`[{"effort": "low", "description": "..."}]`), ignoring malformed entries.
-- Keep the existing no-reasoning behavior for models that do not opt in.
+- Gate all of it on the existing `"supports_reasoning"` switch, the only
+  reasoning control the dashboard exposes, so a model with it off advertises
+  nothing and keeps the existing no-reasoning behavior.
 - Normalize and deduplicate declared efforts, validating shape rather than
   membership of a fixed vocabulary.
 - Undo the unsupported-effort rewrite for requests that are actually routed to
@@ -41,27 +43,31 @@ of source catalogs alone would have left the two vocabularies disagreeing.
 
 `raw_metadata_json` carries reasoning keys with different jobs:
 
-- `supported_reasoning_levels` / `default_reasoning_level` drive **catalog
-  advertising**. Codex clients read them to populate the reasoning-effort picker.
-- `supports_reasoning_summaries` advertises reasoning-summary support on the same
-  entries.
-- `supports_reasoning` gates `sanitize_source_chat_payload`, which strips
-  `reasoning`, `reasoning_effort` and related toggles on the **Chat
-  Completions** path only. The Responses path forwards them regardless.
+- `supports_reasoning` is the **switch**. It is written by the dashboard's
+  single `Reasoning` checkbox and gates `sanitize_source_chat_payload`, which
+  strips `reasoning`, `reasoning_effort` and related toggles on the Chat
+  Completions path.
+- `supported_reasoning_levels` / `default_reasoning_level` /
+  `supports_reasoning_summaries` are the **detail**: which efforts an opted-in
+  backend accepts. They are set through the API today; the dashboard UI for
+  them is the UI-only rebase of #1675 on this parser.
 
-Declaring levels or summary support now implies the chat-path opt-in. The earlier
-revision of this change documented the split instead, but that left `/v1/models`
-reporting `supports_reasoning: true` for a model whose chat requests are silently
-stripped — a contradiction visible on the API surface, not merely a documentation
-subtlety. That flag is derived from either declared key, so both have to imply
-the opt-in for the surface to stay consistent. The explicit
-`"supports_reasoning": true` opt-in still works on its own for models that
-declare neither, so the sanitizer keeps protecting backends that reject unknown
-fields.
+Detail is gated on the switch. An earlier revision of this change instead made
+declared levels imply the switch, which inverted the relationship: it turned a
+description of *which* efforts into permission for reasoning at all, and left
+the dashboard checkbox reading `false` for a model the backend treated as
+opted in. Gating the other way keeps every surface consistent — `/v1/models`
+derives `supports_reasoning` from the levels and the summary flag before
+consulting the raw key, so a model advertising levels while the sanitizer
+strips its chat requests would be visible and inert at once. With the gate, that
+state is unreachable.
 
-The dashboard side of this — a single `Reasoning` toggle that only affects the
-chat path, and no UI for the levels at all — is left to the UI-only rebase of
-#1675 on top of this parser.
+The Responses path forwards `reasoning` regardless, as it does today: it is a
+first-class field of the Responses schema that a source opts into with
+`supports_responses`, unlike the chat path where three of the stripped keys are
+vendor extensions that only survive because the request model allows extra
+fields. Making the Responses path strip as well would reverse that existing
+design decision and is out of scope here.
 
 ## Capabilities
 

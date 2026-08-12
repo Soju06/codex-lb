@@ -255,6 +255,7 @@ def test_source_model_without_metadata_advertises_no_reasoning_levels() -> None:
 def test_source_model_reasoning_levels_accept_effort_slugs() -> None:
     raw = json.dumps(
         {
+            "supports_reasoning": True,
             "supported_reasoning_levels": ["low", "medium", "high", "xhigh"],
             "default_reasoning_level": "high",
         }
@@ -272,6 +273,7 @@ def test_source_model_reasoning_levels_accept_effort_slugs() -> None:
 def test_source_model_reasoning_levels_accept_objects_and_summaries() -> None:
     raw = json.dumps(
         {
+            "supports_reasoning": True,
             "supported_reasoning_levels": [
                 {"effort": "low", "description": "Low effort"},
                 {"effort": "max", "description": "Max effort"},
@@ -292,6 +294,7 @@ def test_source_model_reasoning_levels_accept_objects_and_summaries() -> None:
 def test_source_model_reasoning_levels_ignore_invalid_entries_and_defaults() -> None:
     raw = json.dumps(
         {
+            "supports_reasoning": True,
             "supported_reasoning_levels": ["low", "low", {"description": "no effort key"}, 7, {"effort": "high"}],
             # Not one of the advertised efforts, so it must not be surfaced.
             "default_reasoning_level": "ultra",
@@ -303,7 +306,7 @@ def test_source_model_reasoning_levels_ignore_invalid_entries_and_defaults() -> 
 
 
 def test_source_model_reasoning_levels_ignore_non_list_metadata() -> None:
-    raw = json.dumps({"supported_reasoning_levels": "high"})
+    raw = json.dumps({"supports_reasoning": True, "supported_reasoning_levels": "high"})
     [model] = source_models_to_upstream_models([_reasoning_source(raw)])
     assert model.supported_reasoning_levels == ()
 
@@ -316,6 +319,7 @@ def test_source_model_reasoning_levels_are_normalized_and_deduplicated() -> None
     """
     raw = json.dumps(
         {
+            "supports_reasoning": True,
             "supported_reasoning_levels": [" Low ", "HIGH", "  ", "low", "provider-specific"],
             "default_reasoning_level": " HIGH ",
         }
@@ -337,6 +341,7 @@ def test_source_model_can_declare_none_as_a_reasoning_level() -> None:
     """
     raw = json.dumps(
         {
+            "supports_reasoning": True,
             "supported_reasoning_levels": ["none", "high", "max"],
             "default_reasoning_level": "none",
         }
@@ -347,17 +352,57 @@ def test_source_model_can_declare_none_as_a_reasoning_level() -> None:
 
 
 def test_source_model_default_level_outside_declared_set_is_dropped() -> None:
-    raw = json.dumps({"supported_reasoning_levels": ["low"], "default_reasoning_level": "max"})
+    raw = json.dumps(
+        {"supports_reasoning": True, "supported_reasoning_levels": ["low"], "default_reasoning_level": "max"}
+    )
     [model] = source_models_to_upstream_models([_reasoning_source(raw)])
     assert model.default_reasoning_level is None
 
 
-def test_declared_levels_imply_the_chat_path_reasoning_opt_in() -> None:
-    """Advertising efforts on /v1/models while the chat sanitizer strips them
-    would make the capability visible and inert at the same time."""
+def test_declared_levels_do_not_imply_the_reasoning_opt_in() -> None:
+    """Levels describe *which* efforts an opted-in backend takes, not whether
+    reasoning is allowed. The dashboard's Reasoning switch is the only opt-in,
+    and the catalog derivation is gated on it too, so a model with the switch
+    off advertises nothing rather than advertising an inert capability."""
     raw = json.dumps({"supported_reasoning_levels": ["low", "high"]})
     source = _reasoning_source(raw)
-    assert source_model_supports_reasoning(source, "reasoning-model") is True
+    assert source_model_supports_reasoning(source, "reasoning-model") is False
+    [model] = source_models_to_upstream_models([source])
+    assert model.supported_reasoning_levels == ()
+    assert model.default_reasoning_level is None
+    assert source_model_reasoning_levels(source, "reasoning-model") == ()
+
+
+def test_declared_summaries_do_not_imply_the_reasoning_opt_in() -> None:
+    """Summary support is gated by the same switch, for the same reason."""
+    summaries_only = _reasoning_source(json.dumps({"supports_reasoning_summaries": True}))
+    assert source_model_supports_reasoning(summaries_only, "reasoning-model") is False
+    [model] = source_models_to_upstream_models([summaries_only])
+    assert model.supports_reasoning_summaries is False
+
+
+def test_the_reasoning_switch_gates_every_surface() -> None:
+    """The Codex catalog, the chat gate and the restore must never disagree.
+
+    They are read by different call sites, so this pins them together: with
+    the switch off nothing is advertised or restorable, with it on the
+    operator's declared levels reach all three.
+    """
+    declared = {"supported_reasoning_levels": ["low", "high"], "supports_reasoning_summaries": True}
+    off = _reasoning_source(json.dumps(declared))
+    on = _reasoning_source(json.dumps({"supports_reasoning": True, **declared}))
+
+    [off_model] = source_models_to_upstream_models([off])
+    assert off_model.supported_reasoning_levels == ()
+    assert off_model.supports_reasoning_summaries is False
+    assert source_model_supports_reasoning(off, "reasoning-model") is False
+    assert source_model_reasoning_levels(off, "reasoning-model") == ()
+
+    [on_model] = source_models_to_upstream_models([on])
+    assert [level.effort for level in on_model.supported_reasoning_levels] == ["low", "high"]
+    assert on_model.supports_reasoning_summaries is True
+    assert source_model_supports_reasoning(on, "reasoning-model") is True
+    assert [level.effort for level in source_model_reasoning_levels(on, "reasoning-model")] == ["low", "high"]
 
 
 def test_no_declared_levels_keeps_the_explicit_reasoning_opt_in() -> None:
@@ -367,7 +412,7 @@ def test_no_declared_levels_keeps_the_explicit_reasoning_opt_in() -> None:
 
 
 def test_source_model_reasoning_levels_accessor_matches_the_catalog() -> None:
-    raw = json.dumps({"supported_reasoning_levels": ["minimal", "low"]})
+    raw = json.dumps({"supports_reasoning": True, "supported_reasoning_levels": ["minimal", "low"]})
     source = _reasoning_source(raw)
     assert [level.effort for level in source_model_reasoning_levels(source, "reasoning-model")] == [
         "minimal",
@@ -379,20 +424,5 @@ def test_source_model_reasoning_levels_accessor_matches_the_catalog() -> None:
 def test_declared_summaries_imply_the_chat_path_reasoning_opt_in() -> None:
     """``supports_reasoning_summaries`` is surfaced as ``supports_reasoning`` on
     /v1/models, so declaring it alone must not leave the chat path stripping."""
-    summaries_only = _reasoning_source(json.dumps({"supports_reasoning_summaries": True}))
+    summaries_only = _reasoning_source(json.dumps({"supports_reasoning": True, "supports_reasoning_summaries": True}))
     assert source_model_supports_reasoning(summaries_only, "reasoning-model") is True
-
-
-def test_declared_capability_outranks_an_explicit_false() -> None:
-    """A declared capability wins over ``"supports_reasoning": false``.
-
-    /v1/models derives ``supports_reasoning`` from the declared levels and the
-    summary flag before consulting the raw key, so honoring the veto here alone
-    would advertise the capability while the chat path strips it.
-    """
-    vetoed_levels = _reasoning_source(json.dumps({"supported_reasoning_levels": ["low"], "supports_reasoning": False}))
-    assert source_model_supports_reasoning(vetoed_levels, "reasoning-model") is True
-    vetoed_summaries = _reasoning_source(
-        json.dumps({"supports_reasoning_summaries": True, "supports_reasoning": False})
-    )
-    assert source_model_supports_reasoning(vetoed_summaries, "reasoning-model") is True

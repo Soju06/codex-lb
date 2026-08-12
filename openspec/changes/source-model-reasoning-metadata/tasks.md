@@ -20,8 +20,9 @@
 - [x] 2.4 Normalize and deduplicate declared efforts, validating shape rather
       than membership of a fixed vocabulary, so operator-declared `none` and
       other provider-specific efforts survive.
-- [x] 2.5 Treat declared levels or `supports_reasoning_summaries` as the
-      chat-path reasoning opt-in.
+- [x] 2.5 Gate catalog derivation, the declared-levels accessor and the
+      chat-path opt-in on the `supports_reasoning` switch, so the Codex
+      catalog, `/v1/models`, the chat sanitizer and the restore agree.
 
 ## 3. Verification
 

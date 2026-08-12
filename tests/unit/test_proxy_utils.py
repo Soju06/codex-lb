@@ -2130,7 +2130,7 @@ def _reasoning_model_source(levels: list[str]) -> "ModelSource":
                 model="qwen3.8-max",
                 is_enabled=True,
                 supports_streaming=True,
-                raw_metadata_json=_json.dumps({"supported_reasoning_levels": levels}),
+                raw_metadata_json=_json.dumps({"supports_reasoning": True, "supported_reasoning_levels": levels}),
             )
         ],
     )

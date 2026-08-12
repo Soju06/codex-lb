@@ -1733,7 +1733,7 @@ async def test_source_responses_payload_restores_declared_minimal_effort(async_c
         model=model,
         base_url=base_url,
         supports_responses=True,
-        raw_metadata_json='{"supported_reasoning_levels": ["minimal", "low", "high"]}',
+        raw_metadata_json='{"supports_reasoning": true, "supported_reasoning_levels": ["minimal", "low", "high"]}',
     )
 
     response = await async_client.post(
@@ -1778,7 +1778,7 @@ async def test_codex_responses_payload_restores_declared_minimal_effort(async_cl
         model=model,
         base_url=base_url,
         supports_responses=True,
-        raw_metadata_json='{"supported_reasoning_levels": ["minimal", "low", "high"]}',
+        raw_metadata_json='{"supports_reasoning": true, "supported_reasoning_levels": ["minimal", "low", "high"]}',
     )
 
     async with async_client.stream(

@@ -7,6 +7,14 @@ Codex catalog entries built for OpenAI-compatible source models MUST derive
 `supports_reasoning_summaries` from the source model's `raw_metadata_json`
 rather than reporting a fixed no-reasoning capability.
 
+Derivation MUST be gated on `"supports_reasoning": true`. That flag is the only
+reasoning control the dashboard exposes, so a model whose operator left it off
+MUST advertise no efforts, no default, and no summary support regardless of what
+else the metadata declares. Levels say *which* efforts an opted-in backend
+accepts, not *whether* reasoning is permitted, and gating them on the same flag
+that gates the chat-completions sanitizer is what keeps the Codex catalog,
+`/v1/models` and the dashboard checkbox in agreement.
+
 `supported_reasoning_levels` MUST accept a list of effort slugs and a list of
 `{"effort", "description"}` objects. Entries that are neither a string nor a
 mapping with a string `effort`, and duplicate efforts, MUST be ignored. A
@@ -75,51 +83,40 @@ dropped.
 - **THEN** the entry advertises no reasoning efforts, no default effort, and no
   reasoning-summary support
 
-### Requirement: Declared reasoning capabilities imply the chat-path reasoning opt-in
+### Requirement: The reasoning switch is the single opt-in across every surface
 
-A source model that declares `supported_reasoning_levels` or
-`"supports_reasoning_summaries": true` MUST be treated as having opted into
-reasoning for the chat-completions path, as if `"supports_reasoning": true` were
-set. Both keys are surfaced as `supports_reasoning` on `/v1/models`, so
-advertising either while the chat-completions sanitizer strips the client's
-reasoning fields would make the same capability simultaneously visible and
-inert. The explicit `"supports_reasoning": true` opt-in MUST keep working for
-models that declare neither.
+`"supports_reasoning": true` MUST remain the only reasoning opt-in for a source
+model. Declared levels or `supports_reasoning_summaries` MUST NOT imply it.
 
-A declared capability MUST win over an explicit `"supports_reasoning": false`.
-That mirrors the `/v1/models` derivation, which reports `supports_reasoning` from
-the declared levels and summary flag before consulting the raw key, so honoring
-the veto on the chat path alone would reintroduce the same visible-and-inert
-contradiction. An operator whose backend accepts efforts on the Responses path
-but rejects them on the chat path must omit the declarations rather than veto
-them.
+Because catalog derivation is gated on the same flag, the surfaces cannot
+disagree: with the switch off the model advertises no efforts, `/v1/models`
+reports `supports_reasoning: false`, the chat-completions sanitizer strips the
+client's reasoning fields, and the unsupported-effort restore has no declared
+effort to act on. With it on, the operator's declared efforts reach all of them.
 
-#### Scenario: A declared capability outranks an explicit false
+#### Scenario: The switch is off
 
-- **GIVEN** a source model that declares `supported_reasoning_levels` and sets
-  `"supports_reasoning": false`
+- **GIVEN** a source model that declares `supported_reasoning_levels` and
+  `supports_reasoning_summaries` but not `"supports_reasoning": true`
+- **WHEN** its catalog entry is built and a chat-completions request for it
+  carries reasoning fields
+- **THEN** the entry advertises no efforts, no default, and no summary support
+- **AND** `/v1/models` reports `supports_reasoning: false`
+- **AND** the request's reasoning fields are stripped
+
+#### Scenario: The switch is on
+
+- **GIVEN** the same source model with `"supports_reasoning": true` added
+- **WHEN** its catalog entry is built and a chat-completions request for it
+  carries reasoning fields
+- **THEN** the entry advertises the declared efforts and summary support
+- **AND** the request's reasoning fields are forwarded
+
+#### Scenario: The switch alone still opts in
+
+- **GIVEN** a source model that sets only `"supports_reasoning": true`
 - **WHEN** a chat-completions request for that model carries reasoning fields
-- **THEN** the fields are forwarded, matching what `/v1/models` advertises
-
-#### Scenario: Declaring levels enables reasoning on the chat path
-
-- **GIVEN** a source model that declares `supported_reasoning_levels` and does
-  not set `"supports_reasoning"`
-- **WHEN** a chat-completions request for that model carries reasoning fields
-- **THEN** the fields are forwarded rather than stripped
-
-#### Scenario: Declaring summary support enables reasoning on the chat path
-
-- **GIVEN** a source model that sets `"supports_reasoning_summaries": true` and
-  declares neither `supported_reasoning_levels` nor `"supports_reasoning"`
-- **WHEN** a chat-completions request for that model carries reasoning fields
-- **THEN** the fields are forwarded rather than stripped
-
-#### Scenario: Models with neither key keep reasoning stripped
-
-- **GIVEN** a source model with no reasoning metadata
-- **WHEN** a chat-completions request for that model carries reasoning fields
-- **THEN** the fields are stripped as before
+- **THEN** the fields are forwarded, and the entry advertises no specific efforts
 
 ### Requirement: The unsupported-effort rewrite is undone for source-routed requests
 
@@ -132,7 +129,9 @@ selection, which runs after enforcement. The rewrite MUST therefore be applied
 unconditionally at enforcement time, and the replaced effort MUST be reported to
 the caller so it can be restored once a source has actually been selected.
 Restoration MUST occur only when a source was selected and the replaced effort
-is among the efforts that source declares for the model. The reported effort
+is among the efforts that source declares for the model. Declared efforts are
+read through the same `"supports_reasoning"` gate as the catalog, so a model
+whose switch is off has none and is never restored. The reported effort
 MUST be the post-enforcement value, so restoring it cannot resurrect an effort
 an API key overrode, and MUST be the normalized (trimmed, lowercased) form, so
 restoration cannot reintroduce a casing variant the normalizer removed.

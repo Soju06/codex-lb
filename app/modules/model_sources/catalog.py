@@ -59,8 +59,17 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
 
     input_modalities = ("text", "image") if source_model.supports_vision else ("text",)
     display_name = source_model.display_name or source_model.model
-    reasoning_levels = _reasoning_levels_from_metadata(raw)
-    default_reasoning_level = _default_reasoning_level_from_metadata(raw, reasoning_levels)
+    # The dashboard's single Reasoning switch is the master gate: it is the
+    # only reasoning control an operator has in the UI, so a model with it off
+    # must not advertise efforts it will never be allowed to use. Keeping the
+    # switch authoritative is what lets the Codex catalog, /v1/models and the
+    # dashboard checkbox agree; deriving levels regardless would advertise a
+    # capability the chat sanitizer then strips.
+    reasoning_opted_in = raw.get("supports_reasoning") is True
+    reasoning_levels = _reasoning_levels_from_metadata(raw) if reasoning_opted_in else ()
+    default_reasoning_level = (
+        _default_reasoning_level_from_metadata(raw, reasoning_levels) if reasoning_opted_in else None
+    )
     return UpstreamModel(
         slug=source_model.model,
         display_name=display_name,
@@ -69,7 +78,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
         input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,
         default_reasoning_level=default_reasoning_level,
-        supports_reasoning_summaries=raw.get("supports_reasoning_summaries") is True,
+        supports_reasoning_summaries=reasoning_opted_in and raw.get("supports_reasoning_summaries") is True,
         support_verbosity=False,
         default_verbosity=None,
         prefer_websockets=False,
@@ -155,35 +164,36 @@ def _enabled_source_model(source: ModelSource, model: str) -> ModelSourceModel |
 
 
 def source_model_reasoning_levels(source: ModelSource, model: str) -> tuple[ReasoningLevel, ...]:
-    """Reasoning efforts the operator declared for a source model."""
+    """Reasoning efforts an opted-in source model declared.
+
+    Gated on ``supports_reasoning`` like the catalog derivation, so the
+    unsupported-effort restore cannot hand a declared effort to a model whose
+    operator left the Reasoning switch off.
+    """
     entry = _enabled_source_model(source, model)
     if entry is None:
         return ()
-    return _reasoning_levels_from_metadata(_raw_metadata(entry))
+    raw = _raw_metadata(entry)
+    if raw.get("supports_reasoning") is not True:
+        return ()
+    return _reasoning_levels_from_metadata(raw)
 
 
 def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
-    """Whether the source model opted into reasoning via raw catalog metadata.
+    """Whether the operator turned the model's Reasoning switch on.
 
-    Source catalog entries have no first-class reasoning flag; a model that
-    genuinely supports reasoning can opt in with ``"supports_reasoning": true``
-    in ``raw_metadata_json``. Declaring ``supported_reasoning_levels`` or
-    ``supports_reasoning_summaries`` implies the same opt-in: both are surfaced
-    as ``supports_reasoning`` on ``/v1/models``, so advertising either while the
-    chat-completions sanitizer strips the client's reasoning fields would make
-    the capability visible and inert at once. Everything else is treated as
-    non-reasoning so
-    client-sent reasoning toggles are stripped before forwarding.
+    ``"supports_reasoning": true`` in ``raw_metadata_json`` is the single
+    opt-in, written by the dashboard's Reasoning checkbox. Declared levels do
+    not imply it: they describe *which* efforts an opted-in backend accepts,
+    not *whether* reasoning is allowed at all, and the catalog derivation is
+    gated on this same flag so the two can never disagree. Everything else is
+    treated as non-reasoning, so client-sent reasoning toggles are stripped
+    before forwarding on the chat path.
     """
     entry = _enabled_source_model(source, model)
     if entry is None:
         return False
-    raw = _raw_metadata(entry)
-    if raw.get("supports_reasoning") is True:
-        return True
-    if raw.get("supports_reasoning_summaries") is True:
-        return True
-    return bool(_reasoning_levels_from_metadata(raw))
+    return _raw_metadata(entry).get("supports_reasoning") is True
 
 
 def source_model_request_overrides(source: ModelSource, model: str) -> dict[str, JsonValue]:

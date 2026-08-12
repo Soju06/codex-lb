@@ -39,6 +39,7 @@ from app.core.config.settings import Settings
 from app.core.errors import openai_error
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
+from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
@@ -6915,6 +6916,7 @@ async def test_stream_via_http_bridge_stops_session_creation_retry_after_budget_
 def test_http_bridge_session_key_infers_strength_from_affinity_kind() -> None:
     assert proxy_service._HTTPBridgeSessionKey("turn_state_header", "turn", None).strength == "hard"
     assert proxy_service._HTTPBridgeSessionKey("session_header", "session", None).strength == "hard"
+    assert proxy_service._HTTPBridgeSessionKey("thread_header", "thread", None).strength == "hard"
     assert proxy_service._HTTPBridgeSessionKey("prompt_cache", "cache", None).strength == "soft"
     assert proxy_service._HTTPBridgeSessionKey("request", "request", None).strength == "soft"
 
@@ -6973,6 +6975,146 @@ def test_http_bridge_session_header_key_without_prompt_cache_key_stays_legacy_co
     )
 
     assert key == proxy_service._HTTPBridgeSessionKey("session_header", "legacy-session", None)
+
+
+def test_http_bridge_thread_keys_isolate_siblings_with_shared_process_cache_identity() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "prompt_cache_key": "process-shared",
+        }
+    )
+    root_headers = {"session-id": "process-shared", "thread-id": "thread-root"}
+    child_headers = {"session-id": "process-shared", "thread-id": "thread-child"}
+
+    root_key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers=root_headers,
+        affinity=proxy_service._AffinityPolicy(),
+        api_key=None,
+        request_id="request-root",
+        explicit_prompt_cache_key="process-shared",
+    )
+    root_retry_key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers=root_headers,
+        affinity=proxy_service._AffinityPolicy(),
+        api_key=None,
+        request_id="request-root-retry",
+        explicit_prompt_cache_key="process-shared",
+    )
+    child_key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers=child_headers,
+        affinity=proxy_service._AffinityPolicy(),
+        api_key=None,
+        request_id="request-child",
+        explicit_prompt_cache_key="process-shared",
+    )
+
+    assert root_key.affinity_kind == "thread_header"
+    assert root_key.strength == "hard"
+    assert root_key == root_retry_key
+    assert root_key != child_key
+    assert (
+        http_bridge_helpers_module._make_http_bridge_session_header_fallback_key(
+            headers=root_headers,
+            api_key=None,
+            explicit_prompt_cache_key="process-shared",
+        )
+        is None
+    )
+
+
+def test_http_bridge_same_thread_unanchored_concurrency_keeps_request_scoped_fork() -> None:
+    canonical = proxy_service._HTTPBridgeSessionKey("thread_header", "thread-canonical", None)
+
+    fork = http_bridge_helpers_module._http_bridge_parallel_fork_key(
+        key=canonical,
+        session=None,
+        inflight_creation=True,
+        incoming_turn_state=None,
+        previous_response_id=None,
+        request_model="gpt-5.6-sol",
+        request_service_tier=None,
+        request_scope_id="second-request",
+    )
+
+    assert fork is not None
+    assert fork.affinity_kind == "internal_unanchored_parallel"
+    assert fork.affinity_key != canonical.affinity_key
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turn_state", [None, "turn-exact-thread-alias"])
+async def test_thread_bridge_durable_lookup_preserves_exact_response_alias_without_legacy_session_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    turn_state: str | None,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "prompt_cache_key": "process-shared",
+            "previous_response_id": "resp-exact-legacy-alias",
+        }
+    )
+    lookup = AsyncMock(
+        side_effect=ProxyResponseError(
+            409,
+            openai_error("stop_after_lookup", "stop after durable lookup"),
+        )
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", lookup)
+
+    headers = {"session-id": "process-shared", "thread-id": "thread-child"}
+    if turn_state is not None:
+        headers["x-codex-turn-state"] = turn_state
+    stream = service._stream_via_http_bridge(
+        payload,
+        headers=headers,
+        codex_session_affinity=True,
+        propagate_http_errors=False,
+        openai_cache_affinity=True,
+        api_key=None,
+        api_key_reservation=None,
+        suppress_text_done_events=False,
+        idle_ttl_seconds=120.0,
+        codex_idle_ttl_seconds=1800.0,
+        max_sessions=8,
+        queue_limit=4,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await anext(stream)
+
+    assert exc_info.value.payload["error"]["code"] == "stop_after_lookup"
+    assert lookup.await_args is not None
+    lookup_kwargs = lookup.await_args.kwargs
+    assert lookup_kwargs["session_key_kind"] == ("thread_header" if turn_state is None else "turn_state_header")
+    assert lookup_kwargs["previous_response_id"] == "resp-exact-legacy-alias"
+    assert lookup_kwargs["session_header"] is None
 
 
 def test_http_bridge_owner_check_required_keeps_prompt_cache_soft() -> None:
@@ -9176,6 +9318,30 @@ def test_make_http_bridge_session_key_prefers_signed_forwarded_affinity_over_gen
     assert key.affinity_kind == "session_header"
     assert key.affinity_key == "sid-123"
     assert key.strength == "hard"
+
+
+def test_make_http_bridge_session_key_keeps_forwarded_thread_affinity_verbatim() -> None:
+    payload = proxy_service.ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": "hi"})
+
+    key = proxy_service._make_http_bridge_session_key(
+        payload,
+        headers={
+            "session-id": "process-local",
+            "thread-id": "thread-local",
+            "x-codex-bridge-affinity-kind": "thread_header",
+            "x-codex-bridge-affinity-key": "opaque-key-from-owner",
+        },
+        affinity=proxy_service._AffinityPolicy(),
+        api_key=None,
+        request_id="req-forwarded-thread",
+        allow_forwarded_affinity_headers=True,
+    )
+
+    assert key == proxy_service._HTTPBridgeSessionKey(
+        "thread_header",
+        "opaque-key-from-owner",
+        None,
+    )
 
 
 def test_make_http_bridge_session_key_keeps_forwarded_parallel_lane_hard() -> None:
@@ -15362,6 +15528,129 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
 
     assert resolved is created_session
     assert captured["key"] == fallback_key
+
+
+@pytest.mark.asyncio
+async def test_missing_turn_alias_with_thread_uses_thread_canonical_not_legacy_process_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    headers = {
+        "session-id": "process-shared",
+        "thread-id": "thread-current",
+        "x-codex-turn-state": "http_turn_missing_thread_alias",
+    }
+    requested_key = proxy_service._HTTPBridgeSessionKey(
+        "turn_state_header",
+        "http_turn_missing_thread_alias",
+        None,
+    )
+    thread_key_value = proxy_affinity._codex_backend_identity(headers).thread_selection_key
+    assert thread_key_value is not None
+    thread_key = proxy_service._HTTPBridgeSessionKey("thread_header", thread_key_value, None)
+    legacy_process_key = proxy_service._HTTPBridgeSessionKey("session_header", "process-shared", None)
+    service._http_bridge_sessions[legacy_process_key] = _make_bridge_session(
+        key=legacy_process_key,
+        key_value="legacy-sibling",
+    )
+    captured: dict[str, object] = {}
+
+    async def create_session(key: proxy_service._HTTPBridgeSessionKey, **kwargs: object):
+        del kwargs
+        captured["key"] = key
+        return _make_bridge_session(key=key, key_value="current-thread")
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        requested_key,
+        headers=headers,
+        affinity=proxy_service._AffinityPolicy(
+            key=thread_key_value,
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+            codex_session_source="thread_header",
+        ),
+        api_key=None,
+        request_model="gpt-5.6-sol",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        previous_response_id="resp-missing-thread-alias",
+    )
+
+    assert resolved.key == thread_key
+    assert captured["key"] == thread_key
+    assert resolved is not service._http_bridge_sessions[legacy_process_key]
+
+
+@pytest.mark.asyncio
+async def test_legacy_forward_missing_turn_alias_with_thread_avoids_process_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    headers = {
+        "session-id": "process-shared",
+        "thread-id": "thread-forwarded",
+        "x-codex-turn-state": "http_turn_missing_forwarded_alias",
+    }
+    requested_key = proxy_service._HTTPBridgeSessionKey(
+        "turn_state_header",
+        "http_turn_missing_forwarded_alias",
+        None,
+    )
+    thread_key_value = proxy_affinity._codex_backend_identity(headers).thread_selection_key
+    assert thread_key_value is not None
+    thread_key = proxy_service._HTTPBridgeSessionKey("thread_header", thread_key_value, None)
+    legacy_process_key = proxy_service._HTTPBridgeSessionKey("session_header", "process-shared", None)
+    service._http_bridge_sessions[legacy_process_key] = _make_bridge_session(
+        key=legacy_process_key,
+        key_value="legacy-sibling",
+    )
+    captured: dict[str, object] = {}
+
+    async def create_session(key: proxy_service._HTTPBridgeSessionKey, **kwargs: object):
+        del kwargs
+        captured["key"] = key
+        return _make_bridge_session(key=key, key_value="forwarded-thread")
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        requested_key,
+        headers=headers,
+        affinity=proxy_service._AffinityPolicy(
+            key=thread_key_value,
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+            codex_session_source="thread_header",
+        ),
+        api_key=None,
+        request_model="gpt-5.6-sol",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        previous_response_id="resp-missing-forwarded-alias",
+        forwarded_request=True,
+    )
+
+    assert resolved.key == thread_key
+    assert captured["key"] == thread_key
+    assert resolved is not service._http_bridge_sessions[legacy_process_key]
 
 
 @pytest.mark.asyncio

@@ -204,6 +204,7 @@ from app.modules.proxy._service.warmup import (
 )
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
+    _codex_backend_identity,
     _extract_model_class,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
@@ -429,8 +430,19 @@ class _HTTPBridgeMixin(
         request_scope_id = ensure_request_scope_id()
         api_key_id = api_key.id if api_key is not None else None
         incoming_turn_state = _sticky_key_from_turn_state_header(headers)
-        incoming_session_key = _sticky_key_from_session_header(headers)
-        initial_session_key = session_header_fallback_key or (key if key.affinity_kind == "session_header" else None)
+        thread_selection_key = _codex_backend_identity(headers).thread_selection_key
+        thread_fallback_key = None
+        if thread_selection_key is not None:
+            thread_fallback_key = _HTTPBridgeSessionKey("thread_header", thread_selection_key, api_key_id)
+        # Exact aliases may fall back to this thread, never the raw process lane
+        # where mixed-version replicas may have stored a sibling. V2 forwards use
+        # their signed key; this derived fallback protects legacy raw headers.
+        incoming_session_key = None if thread_fallback_key is not None else _sticky_key_from_session_header(headers)
+        initial_session_key = (
+            session_header_fallback_key
+            or thread_fallback_key
+            or (key if key.affinity_kind == "session_header" else None)
+        )
         original_request_unanchored = _http_bridge_request_needs_unanchored_handoff(
             key, incoming_turn_state, previous_response_id, forwarded_request, forwarded_original_request_unanchored
         )
@@ -662,10 +674,11 @@ class _HTTPBridgeMixin(
                                 key=key.affinity_key,
                             ):
                                 key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
+                        elif initial_session_key is not None:
+                            key = initial_session_key
+                            used_session_header_fallback = True
                         elif incoming_session_key is not None:
-                            key = initial_session_key or _HTTPBridgeSessionKey(
-                                "session_header", incoming_session_key, api_key_id
-                            )
+                            key = _HTTPBridgeSessionKey("session_header", incoming_session_key, api_key_id)
                             used_session_header_fallback = True
                         else:
                             key = _HTTPBridgeSessionKey("turn_state_header", incoming_turn_state, api_key_id)
@@ -1975,7 +1988,7 @@ class _HTTPBridgeMixin(
             lifecycle_lock=anyio.Lock(),
             last_used_at=_service_time().monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,
-            codex_session=affinity.kind == StickySessionKind.CODEX_SESSION,
+            codex_session=(affinity.kind == StickySessionKind.CODEX_SESSION or key.affinity_kind == "thread_header"),
             prewarm_lock=anyio.Lock(),
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
@@ -2395,7 +2408,9 @@ class _HTTPBridgeMixin(
                 session.last_completed_input_prefix_fingerprint = None
                 session.last_pending_tool_calls.clear()
                 session.affinity = selection_affinity or session.affinity
-                session.codex_session = False
+                # Clearing stale response/turn aliases makes an account move
+                # safe; it does not make the canonical thread lane soft.
+                session.codex_session = session.key.affinity_kind == "thread_header"
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None
                 session.headers = {

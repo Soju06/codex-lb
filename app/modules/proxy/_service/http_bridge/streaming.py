@@ -204,6 +204,7 @@ from app.modules.proxy._service.warmup import (
 )
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
+    _codex_backend_identity,
     _extract_model_class,
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
@@ -1183,7 +1184,9 @@ class _HTTPBridgeStreamingMixin:
             api_key=api_key,
         )
         sticky_key_source = "none"
-        if affinity.kind == StickySessionKind.CODEX_SESSION:
+        if affinity.codex_session_source == "thread_header":
+            sticky_key_source = "thread_header"
+        elif affinity.kind == StickySessionKind.CODEX_SESSION:
             sticky_key_source = (
                 "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
             )
@@ -1227,6 +1230,13 @@ class _HTTPBridgeStreamingMixin:
             if not forwarded_request
             else None
         )
+        durable_session_header_alias = (
+            None
+            if _codex_backend_identity(headers).thread_id is not None
+            else session_header_fallback_key.affinity_key
+            if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
+            else incoming_session_header
+        )
         legacy_anchor_lookup = await _legacy_forward_anchor_lookup(
             durable_bridge=self._durable_bridge,
             bridge_session_key=bridge_session_key,
@@ -1254,11 +1264,9 @@ class _HTTPBridgeStreamingMixin:
                     session_key_value=bridge_session_key.affinity_key,
                     api_key_id=bridge_session_key.api_key_id,
                     turn_state=durable_lookup_turn_state,
-                    session_header=(
-                        session_header_fallback_key.affinity_key
-                        if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
-                        else incoming_session_header
-                    ),
+                    # A raw process alias is ambiguous when thread-id exists.
+                    # Exact turn/response aliases remain independent inputs.
+                    session_header=durable_session_header_alias,
                     previous_response_id=payload.previous_response_id,
                 )
             except ProxyResponseError:
@@ -1641,6 +1649,7 @@ class _HTTPBridgeStreamingMixin:
             affinity = _AffinityPolicy()
             incoming_turn_state_header = None
             session_header_fallback_key = None
+            durable_session_header_alias = None
         owner_bound_full_resend_ignores_broad_session = (
             not forwarded_request
             and durable_full_resend_fresh_bridge_proof is not None
@@ -1655,6 +1664,7 @@ class _HTTPBridgeStreamingMixin:
             affinity = _AffinityPolicy(kind=StickySessionKind.CODEX_SESSION)
             incoming_session_header = None
             session_header_fallback_key = None
+            durable_session_header_alias = None
             _log_http_bridge_event(
                 "fresh_reattach_broad_session_owner_ignored",
                 bridge_session_key,
@@ -2209,11 +2219,7 @@ class _HTTPBridgeStreamingMixin:
                                 session_key_value=bridge_session_key.affinity_key,
                                 api_key_id=bridge_session_key.api_key_id,
                                 turn_state=takeover_turn_state,
-                                session_header=(
-                                    session_header_fallback_key.affinity_key
-                                    if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
-                                    else incoming_session_header
-                                ),
+                                session_header=durable_session_header_alias,
                                 previous_response_id=effective_payload.previous_response_id,
                             )
                         except Exception:

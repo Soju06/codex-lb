@@ -48,6 +48,7 @@ from app.modules.proxy.affinity import (
     _resolve_prompt_cache_key,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
+    _thread_codex_session_affinity,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import resolve_required_account_id
@@ -433,6 +434,14 @@ def _sticky_key_for_compact_request(
             codex_session_source="turn_state",
         )
     elif (
+        thread_affinity := _thread_codex_session_affinity(
+            headers,
+            enabled=codex_session_affinity,
+            max_age_seconds=openai_cache_affinity_max_age_seconds,
+        )
+    ) is not None:
+        policy = thread_affinity
+    elif (
         session_affinity := _bare_codex_session_affinity(
             headers,
             enabled=codex_session_affinity,
@@ -618,7 +627,11 @@ class _CompactMixin:
             api_key=api_key,
         )
         sticky_key_source = "none"
-        if affinity.kind == StickySessionKind.CODEX_SESSION:
+        if affinity.codex_session_source == "thread_header":
+            # The payload cache hint remains unchanged; diagnostics must not
+            # imply that it supplied the internal thread-local routing key.
+            sticky_key_source = "thread_header"
+        elif affinity.kind == StickySessionKind.CODEX_SESSION:
             if _sticky_key_from_turn_state_header(headers) is not None:
                 sticky_key_source = "turn_state_header"
             elif _sticky_key_from_session_header(headers) is not None:

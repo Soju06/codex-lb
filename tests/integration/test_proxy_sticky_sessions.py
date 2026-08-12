@@ -495,6 +495,70 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
 
 
 @pytest.mark.asyncio
+async def test_backend_thread_rows_route_sibling_responses_and_compact_independently(
+    async_client,
+    monkeypatch,
+):
+    from app.modules.proxy.affinity import _codex_backend_identity
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    account_a_id = await _import_account(async_client, "acc_thread_route_a", "thread-route-a@example.com")
+    account_b_id = await _import_account(async_client, "acc_thread_route_b", "thread-route-b@example.com")
+    process_session = "process-thread-route-shared"
+    root_headers = {"session-id": process_session, "thread-id": "thread-route-root"}
+    child_headers = {"session-id": process_session, "thread-id": "thread-route-child"}
+    root_key = _codex_backend_identity(root_headers).thread_selection_key
+    child_key = _codex_backend_identity(child_headers).thread_selection_key
+    assert root_key is not None
+    assert child_key is not None
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        await repo.upsert(root_key, account_a_id, kind=StickySessionKind.PROMPT_CACHE)
+        await repo.upsert(child_key, account_b_id, kind=StickySessionKind.PROMPT_CACHE)
+
+    observed: list[tuple[str, str, str | None]] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, kwargs
+        observed.append(("responses", account_id, payload.prompt_cache_key))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_thread_route"}}\n\n'
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token
+        observed.append(("compact", account_id, payload.prompt_cache_key))
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "prompt_cache_key": process_session,
+    }
+
+    responses_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={**payload, "stream": True},
+        headers=root_headers,
+    )
+    compact_response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers=child_headers,
+    )
+
+    assert responses_response.status_code == 200
+    assert compact_response.status_code == 200
+    assert observed == [
+        ("responses", "acc_thread_route_a", process_session),
+        ("compact", "acc_thread_route_b", process_session),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_proxy_unregistered_turn_state_fails_closed_for_stream_and_compact(
     async_client,
     monkeypatch,
@@ -1663,6 +1727,80 @@ async def test_sticky_insert_if_absent_never_rebinds_existing_owner(db_setup):
     assert first_owner == "acc_live_immutable_a"
     assert second_owner == "acc_live_immutable_a"
     assert persisted_owner == "acc_live_immutable_a"
+
+
+@pytest.mark.asyncio
+async def test_seeded_sticky_upsert_is_atomic_and_preserves_first_seed_owner(db_setup, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.sql import Insert
+
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        accounts = AccountsRepository(session)
+        for account_id in ("acc_seeded_a", "acc_seeded_b"):
+            await accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=AccountStatus.ACTIVE,
+                    deactivation_reason=None,
+                )
+            )
+
+    seed_key = "seeded-process"
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        first_thread = await repo.upsert_with_seed_if_absent(
+            "seeded-thread-a",
+            "acc_seeded_a",
+            kind=StickySessionKind.PROMPT_CACHE,
+            seed_key=seed_key,
+            seed_kind=StickySessionKind.CODEX_SESSION,
+        )
+        second_thread = await repo.upsert_with_seed_if_absent(
+            "seeded-thread-b",
+            "acc_seeded_b",
+            kind=StickySessionKind.PROMPT_CACHE,
+            seed_key=seed_key,
+            seed_kind=StickySessionKind.CODEX_SESSION,
+        )
+
+        assert first_thread.account_id == "acc_seeded_a"
+        assert second_thread.account_id == "acc_seeded_b"
+        assert await repo.get_account_id(seed_key, kind=StickySessionKind.CODEX_SESSION) == "acc_seeded_a"
+
+        original_build_upsert = repo._build_upsert_statement
+
+        def _build_failing_upsert(key: str, account_id: str, kind: StickySessionKind) -> Insert:
+            del account_id
+            return original_build_upsert(key, "missing-account", kind)
+
+        monkeypatch.setattr(repo, "_build_upsert_statement", _build_failing_upsert)
+        with pytest.raises(IntegrityError):
+            await repo.upsert_with_seed_if_absent(
+                "seeded-thread-failing",
+                "acc_seeded_a",
+                kind=StickySessionKind.PROMPT_CACHE,
+                seed_key="seeded-process-failing",
+                seed_kind=StickySessionKind.CODEX_SESSION,
+            )
+
+        # The repository rolls back both statements itself, so even a caller
+        # that catches the failure cannot accidentally commit the seed later.
+        assert (
+            await repo.get_account_id(
+                "seeded-process-failing",
+                kind=StickySessionKind.CODEX_SESSION,
+            )
+            is None
+        )
 
 
 @pytest.mark.asyncio

@@ -436,6 +436,7 @@ from app.modules.proxy.affinity import (
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,  # noqa: F401
     _sticky_key_from_turn_state_header,
+    _websocket_continuity_aliases_from_headers,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import (
@@ -1213,6 +1214,45 @@ async def _process_upstream_websocket_transport_end(
 
 
 class _WebSocketMixin:
+    async def _touch_active_websocket_thread_affinity(
+        self,
+        request_state: _WebSocketRequestState,
+        account: Account,
+    ) -> None:
+        """Refresh bounded thread locality without turning it into ownership."""
+
+        proxy = cast(_WebSocketServiceProtocol, self)
+        policy = request_state.affinity_policy
+        if (
+            policy.codex_session_source != "thread_header"
+            or policy.selection_key is None
+            or policy.kind != StickySessionKind.PROMPT_CACHE
+            or policy.max_age_seconds is None
+        ):
+            return
+        now = time.monotonic()
+        touch_interval = max(1.0, min(float(policy.max_age_seconds) / 2.0, 60.0))
+        if now - request_state.thread_affinity_last_touch_at < touch_interval:
+            return
+        try:
+            # A response can outlive the selection TTL. Throttled event-time
+            # touches keep reconnect locality current, while exact response or
+            # bridge ownership remains the hard authority for this turn.
+            async with proxy._repo_factory() as repos:
+                await repos.sticky_sessions.upsert(
+                    policy.selection_key,
+                    account.id,
+                    kind=policy.kind,
+                )
+        except Exception:
+            _facade().logger.warning(
+                "Failed to refresh active Codex thread affinity account_id=%s",
+                account.id,
+                exc_info=True,
+            )
+            return
+        request_state.thread_affinity_last_touch_at = now
+
     def _websocket_continuity_state_for_request(
         self,
         headers: Mapping[str, str],
@@ -1225,28 +1265,37 @@ class _WebSocketMixin:
         _ = proxy
         if not codex_session_affinity:
             return _WebSocketContinuityState()
-        session_id = _owner_lookup_session_id_from_headers(headers, synthesized_turn_state=synthesized_turn_state)
         api_key_id = api_key.id if api_key is not None else None
-        cache_keys: list[tuple[str, str | None]] = []
-        if session_id is not None:
-            cache_keys.append((session_id, api_key_id))
-        if synthesized_turn_state is not None:
-            generated_key = (synthesized_turn_state, api_key_id)
-            if generated_key not in cache_keys:
-                cache_keys.append(generated_key)
+        cache_keys = [
+            (continuity_key, api_key_id)
+            for continuity_key in _websocket_continuity_aliases_from_headers(
+                headers,
+                synthesized_turn_state=synthesized_turn_state,
+            )
+        ]
         if not cache_keys:
             return _WebSocketContinuityState()
+        explicit_turn_state = _sticky_key_from_turn_state_header(headers)
+        exact_client_turn = explicit_turn_state is not None and explicit_turn_state != synthesized_turn_state
+        # An exact client turn state is hard continuity. If its alias is
+        # unknown, do not borrow retained response/tool state from the broader
+        # thread key; the turn may have a different owner. Once the exact alias
+        # resolves, publishing that same state under the thread key is safe and
+        # keeps a later unanchored reconnect thread-local.
+        lookup_keys = cache_keys[:1] if exact_client_turn else cache_keys
         continuity_state = next(
             (
                 existing_state
-                for key in cache_keys
+                for key in lookup_keys
                 if (existing_state := proxy._websocket_continuity_index.get(key)) is not None
             ),
             None,
         )
+        exact_alias_resolved = continuity_state is not None
         if continuity_state is None:
             continuity_state = _WebSocketContinuityState()
-        for key in cache_keys:
+        publish_keys = cache_keys if not exact_client_turn or exact_alias_resolved else lookup_keys
+        for key in publish_keys:
             proxy._websocket_continuity_index.pop(key, None)
             proxy._websocket_continuity_index[key] = continuity_state
         while len(proxy._websocket_continuity_index) > _facade()._WEBSOCKET_CONTINUITY_CACHE_LIMIT:
@@ -2966,7 +3015,9 @@ class _WebSocketMixin:
             synthesized_turn_state=synthesized_turn_state,
         )
         sticky_key_source = "none"
-        if affinity_policy.kind == StickySessionKind.CODEX_SESSION:
+        if affinity_policy.codex_session_source == "thread_header":
+            sticky_key_source = "thread_header"
+        elif affinity_policy.kind == StickySessionKind.CODEX_SESSION:
             turn_state_key = _sticky_key_from_turn_state_header(headers)
             if turn_state_key is not None and turn_state_key == synthesized_turn_state:
                 sticky_key_source = "generated_turn_state"
@@ -3356,6 +3407,8 @@ class _WebSocketMixin:
                     reallocate_sticky=reallocate_sticky,
                     sticky_source=request_state.affinity_policy.codex_session_source,
                     legacy_sticky_key=request_state.affinity_policy.legacy_selection_key,
+                    sticky_seed_key=request_state.affinity_policy.seed_selection_key,
+                    sticky_seed_kind=request_state.affinity_policy.seed_selection_kind,
                     spill_bare_session_on_account_cap=request_state.affinity_policy.spill_on_account_cap,
                     require_unambiguous_account=request_state.affinity_policy.require_unambiguous_account,
                     sticky_max_age_seconds=sticky_max_age_seconds,
@@ -4970,6 +5023,9 @@ class _WebSocketMixin:
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, response_create_gate)
+
+        if request_state is not None:
+            await proxy._touch_active_websocket_thread_affinity(request_state, account)
 
         if len(grouped_previous_response_request_states) > 1:
             upstream_control.reconnect_requested = True

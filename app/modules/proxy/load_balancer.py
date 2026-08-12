@@ -521,6 +521,8 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         sticky_source: _CodexSessionSource | None = None,
         legacy_sticky_key: str | None = None,
+        sticky_seed_key: str | None = None,
+        sticky_seed_kind: StickySessionKind | None = None,
         spill_bare_session_on_account_cap: bool = False,
         require_unambiguous_account: bool = False,
         sticky_max_age_seconds: int | None = None,
@@ -686,12 +688,14 @@ class LoadBalancer:
         selection_error_code: str | None = None
         selection_resets_at: int | None = None
         legacy_existing_account_id: str | None = None
-        if sticky_source == "session_header" and legacy_sticky_key is not None:
+        if legacy_sticky_key is not None:
             async with self._repo_factory() as repos:
                 legacy_existing_account_id = await repos.sticky_sessions.get_account_id(
                     legacy_sticky_key,
                     kind=StickySessionKind.CODEX_SESSION,
-                    max_age_seconds=sticky_max_age_seconds,
+                    # Raw rows may be historical turn-state ownership. The
+                    # bounded thread TTL must never age out that hard evidence.
+                    max_age_seconds=None,
                 )
             if required_account_id is not None and (
                 legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
@@ -703,6 +707,13 @@ class LoadBalancer:
                     account=None,
                     error_message="Account-owned continuity sources conflict; retry the logical turn",
                     error_code="continuity_owner_conflict",
+                )
+        sticky_seed_account_id: str | None = None
+        if sticky_seed_key is not None and sticky_seed_kind is not None:
+            async with self._repo_factory() as repos:
+                sticky_seed_account_id = await repos.sticky_sessions.get_account_id(
+                    sticky_seed_key,
+                    kind=sticky_seed_kind,
                 )
         # Resolve uniqueness from the model/API-key/security-scoped pool before
         # runtime health, budget, or cap filtering. Transient pressure cannot
@@ -776,6 +787,9 @@ class LoadBalancer:
                     sticky_source=sticky_source,
                     legacy_sticky_key=legacy_sticky_key,
                     legacy_existing_account_id=legacy_existing_account_id,
+                    sticky_seed_key=sticky_seed_key,
+                    sticky_seed_kind=sticky_seed_kind,
+                    sticky_seed_account_id=sticky_seed_account_id,
                     spill_bare_session_on_account_cap=spill_bare_session_on_account_cap,
                     require_unambiguous_account=require_unambiguous_account,
                     sticky_max_age_seconds=sticky_max_age_seconds,
@@ -1539,6 +1553,7 @@ class LoadBalancer:
         sticky_repo: StickySessionsRepository | None,
         routing_costs_by_account_id: RoutingCostsByAccount | None = None,
         sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+        initial_preferred_account_id: str | None = None,
         preserve_existing_mapping_on_fallback: bool = False,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
@@ -1562,6 +1577,7 @@ class LoadBalancer:
             sticky_repo=sticky_repo,
             routing_costs_by_account_id=routing_costs_by_account_id,
             sticky_existing_account_id=sticky_existing_account_id,
+            initial_preferred_account_id=initial_preferred_account_id,
             preserve_existing_mapping_on_fallback=preserve_existing_mapping_on_fallback,
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,

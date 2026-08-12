@@ -5703,6 +5703,8 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         reallocate_sticky=False,
         sticky_source=None,
         legacy_sticky_key=None,
+        sticky_seed_key=None,
+        sticky_seed_kind=None,
         sticky_max_age_seconds=123,
         prefer_earlier_reset_window="primary",
         routing_strategy="usage_weighted",
@@ -5833,6 +5835,47 @@ async def test_thread_goal_request_persists_conversation_id_and_passes_dashboard
     assert selection_kwargs[0]["prefer_earlier_reset_window"] == "primary"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["conversation_id"] == "conv-thread-goal"
+
+
+@pytest.mark.asyncio
+async def test_thread_goal_request_routes_from_payload_thread_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc-thread-goal-payload")
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        selection_kwargs.append(kwargs)
+        return AccountSelection(account=account, error_message=None)
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_service, "core_thread_goal_request", AsyncMock(return_value={"ok": True}))
+
+    payload = {"threadId": "thread-from-payload", "goal": "finish"}
+    headers = {
+        "session-id": "process-shared",
+        # The payload is the endpoint's exact subject and must not be replaced
+        # by a broader or stale generic request header.
+        "thread-id": "thread-from-header",
+        "user-agent": "codex/1.2",
+    }
+    response = await service.thread_goal_request("set", payload, headers)
+
+    assert response == {"ok": True}
+    affinity = cast(proxy_service._AffinityPolicy, selection_kwargs[0]["affinity_policy"])
+    expected_key = proxy_affinity._codex_backend_identity(
+        headers,
+        thread_id="thread-from-payload",
+    ).thread_selection_key
+    assert affinity.selection_key == expected_key
+    assert affinity.codex_session_source == "thread_header"
+    assert affinity.legacy_selection_key == "process-shared"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["conversation_id"] == "thread-from-header"
 
 
 @pytest.mark.asyncio
@@ -10399,6 +10442,133 @@ def test_sticky_key_for_compact_request_prefers_codex_session_affinity():
     assert policy.reallocate_sticky is False
     assert policy.spill_on_account_cap is True
     assert policy.max_age_seconds is None
+
+
+def test_backend_codex_thread_affinity_is_shared_by_responses_and_compact_without_rewriting_cache_hint() -> None:
+    headers_by_thread = {
+        "root": {"session-id": "process-shared", "thread-id": "thread-root"},
+        "child": {"session-id": "process-shared", "thread-id": "thread-child"},
+    }
+    keys_by_surface: dict[str, dict[str, str]] = {"responses": {}, "compact": {}}
+
+    for surface, payload in (
+        (
+            "responses",
+            ResponsesRequest.model_validate(
+                {
+                    "model": "gpt-5.6-sol",
+                    "instructions": "hi",
+                    "input": [],
+                    "prompt_cache_key": "process-shared",
+                }
+            ),
+        ),
+        (
+            "compact",
+            ResponsesCompactRequest.model_validate(
+                {
+                    "model": "gpt-5.6-sol",
+                    "instructions": "hi",
+                    "input": [],
+                    "prompt_cache_key": "process-shared",
+                }
+            ),
+        ),
+    ):
+        for thread_name, headers in headers_by_thread.items():
+            request_payload = payload.model_copy()
+            if isinstance(request_payload, ResponsesRequest):
+                policy = proxy_service._sticky_key_for_responses_request(
+                    request_payload,
+                    headers=headers,
+                    codex_session_affinity=True,
+                    openai_cache_affinity=True,
+                    openai_cache_affinity_max_age_seconds=300,
+                    sticky_threads_enabled=False,
+                )
+            else:
+                policy = proxy_service._sticky_key_for_compact_request(
+                    request_payload,
+                    headers=headers,
+                    codex_session_affinity=True,
+                    openai_cache_affinity=True,
+                    openai_cache_affinity_max_age_seconds=300,
+                    sticky_threads_enabled=False,
+                )
+
+            assert policy.key is not None
+            keys_by_surface[surface][thread_name] = policy.key
+            assert policy.kind == StickySessionKind.PROMPT_CACHE
+            assert policy.codex_session_source == "thread_header"
+            assert policy.legacy_selection_key == "process-shared"
+            assert policy.seed_selection_key == proxy_affinity._codex_session_selection_key("process-shared")
+            assert policy.seed_selection_kind == StickySessionKind.CODEX_SESSION
+            assert policy.max_age_seconds == 300
+            assert request_payload.prompt_cache_key == "process-shared"
+
+    assert keys_by_surface["responses"] == keys_by_surface["compact"]
+    assert keys_by_surface["responses"]["root"] != keys_by_surface["responses"]["child"]
+
+
+def test_codex_thread_identity_is_source_separated_and_supports_thread_only_clients() -> None:
+    process_thread = proxy_affinity._codex_backend_identity(
+        {"session-id": "same-value", "thread-id": "same-value"}
+    ).thread_selection_key
+    thread_only = proxy_affinity._codex_backend_identity({"thread-id": "same-value"}).thread_selection_key
+
+    assert process_thread is not None
+    assert thread_only is not None
+    assert process_thread != thread_only
+    assert process_thread.startswith("\n")
+    assert thread_only.startswith("\n")
+    assert "same-value" not in process_thread
+    assert "same-value" not in thread_only
+
+
+def test_codex_thread_identity_length_frames_client_values() -> None:
+    left = proxy_affinity._codex_backend_identity(
+        {
+            "session-id": "process-a\0thread\0thread-b",
+            "thread-id": "thread-c",
+        }
+    ).thread_selection_key
+    right = proxy_affinity._codex_backend_identity(
+        {
+            "session-id": "process-a",
+            "thread-id": "thread-b\0thread\0thread-c",
+        }
+    ).thread_selection_key
+
+    assert left is not None
+    assert right is not None
+    assert left != right
+
+
+def test_codex_thread_identity_normalizes_header_names_and_blank_values() -> None:
+    identity = proxy_affinity._codex_backend_identity(
+        {
+            "SESSION-ID": " process-mixed-case ",
+            "THREAD-ID": " thread-mixed-case ",
+        }
+    )
+    expected = proxy_affinity._codex_backend_identity(
+        {
+            "session-id": "process-mixed-case",
+            "thread-id": "thread-mixed-case",
+        }
+    )
+    blank = proxy_affinity._codex_backend_identity(
+        {
+            "session-id": "   ",
+            "thread-id": "\t",
+        }
+    )
+
+    assert identity == expected
+    assert identity.thread_selection_key is not None
+    assert blank.process_session is None
+    assert blank.thread_id is None
+    assert blank.thread_selection_key is None
 
 
 @pytest.mark.parametrize("codex_session_affinity", [False, True])
@@ -21526,6 +21696,147 @@ def test_websocket_continuity_state_reuses_codex_session_scope():
     assert second is first
     assert second.last_completed_response_id == "resp_cached"
     assert unscoped is not first
+
+
+def test_websocket_continuity_state_isolates_sibling_codex_threads() -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    root_headers = {"session-id": "process-shared", "thread-id": "thread-root"}
+    child_headers = {"session-id": "process-shared", "thread-id": "thread-child"}
+
+    root = service._websocket_continuity_state_for_request(
+        root_headers,
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    root.last_completed_response_id = "resp-root"
+    root.last_pending_tool_call_types["call-root"] = "function_call"
+
+    child = service._websocket_continuity_state_for_request(
+        child_headers,
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    root_reconnect = service._websocket_continuity_state_for_request(
+        root_headers,
+        api_key=None,
+        codex_session_affinity=True,
+    )
+
+    assert child is not root
+    assert child.last_completed_response_id is None
+    assert child.last_pending_tool_call_types == {}
+    assert root_reconnect is root
+    assert root_reconnect.last_completed_response_id == "resp-root"
+    assert root_reconnect.last_pending_tool_call_types == {"call-root": "function_call"}
+
+
+def test_websocket_explicit_turn_state_precedes_broader_thread_state() -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    thread_headers = {"session-id": "process-shared", "thread-id": "thread-exact"}
+    explicit_turn_state = "turn_client_exact"
+
+    broader_thread_state = service._websocket_continuity_state_for_request(
+        thread_headers,
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    broader_thread_state.last_completed_response_id = "resp-thread-broad"
+    exact_turn_state = service._websocket_continuity_state_for_request(
+        {"x-codex-turn-state": explicit_turn_state},
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    exact_turn_state.last_completed_response_id = "resp-turn-exact"
+
+    resolved = service._websocket_continuity_state_for_request(
+        {**thread_headers, "x-codex-turn-state": explicit_turn_state},
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    thread_reconnect = service._websocket_continuity_state_for_request(
+        thread_headers,
+        api_key=None,
+        codex_session_affinity=True,
+    )
+
+    assert resolved is exact_turn_state
+    assert resolved is not broader_thread_state
+    assert resolved.last_completed_response_id == "resp-turn-exact"
+    assert thread_reconnect is exact_turn_state
+
+
+def test_websocket_unknown_explicit_turn_state_does_not_reuse_broader_thread_state() -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    thread_headers = {"session-id": "process-shared", "thread-id": "thread-hard-turn"}
+
+    broader_thread_state = service._websocket_continuity_state_for_request(
+        thread_headers,
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    broader_thread_state.last_completed_response_id = "resp-thread-broad"
+
+    unknown_turn_state = service._websocket_continuity_state_for_request(
+        {**thread_headers, "x-codex-turn-state": "turn_client_unknown"},
+        api_key=None,
+        codex_session_affinity=True,
+    )
+    thread_reconnect = service._websocket_continuity_state_for_request(
+        thread_headers,
+        api_key=None,
+        codex_session_affinity=True,
+    )
+
+    assert unknown_turn_state is not broader_thread_state
+    assert unknown_turn_state.last_completed_response_id is None
+    assert thread_reconnect is broader_thread_state
+    assert thread_reconnect.last_completed_response_id == "resp-thread-broad"
+
+
+@pytest.mark.asyncio
+async def test_active_websocket_refreshes_only_its_bounded_thread_affinity() -> None:
+    sticky_sessions = AsyncMock(spec=StickySessionsRepository)
+
+    class _ThreadAffinityRepoContext:
+        async def __aenter__(self) -> SimpleNamespace:
+            return SimpleNamespace(sticky_sessions=sticky_sessions)
+
+        async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+            del exc_type, exc, tb
+            return False
+
+    service = proxy_service.ProxyService(cast(Any, lambda: _ThreadAffinityRepoContext()))
+    thread_key = proxy_affinity._codex_backend_identity(
+        {"session-id": "process-active", "thread-id": "thread-active"}
+    ).thread_selection_key
+    assert thread_key is not None
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-active-thread-touch",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        affinity_policy=proxy_service._AffinityPolicy(
+            key=thread_key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=300,
+            codex_session_source="thread_header",
+            legacy_codex_session_key="process-active",
+            seed_selection_key=proxy_affinity._codex_session_selection_key("process-active"),
+            seed_selection_kind=StickySessionKind.CODEX_SESSION,
+        ),
+        thread_affinity_last_touch_at=0.0,
+    )
+    account = _make_account("acc-active-thread-touch")
+
+    await service._touch_active_websocket_thread_affinity(request_state, account)
+
+    sticky_sessions.upsert.assert_awaited_once_with(
+        thread_key,
+        account.id,
+        kind=StickySessionKind.PROMPT_CACHE,
+    )
 
 
 def test_websocket_continuity_state_seeds_generated_turn_state_alias():
@@ -37434,6 +37745,47 @@ async def test_select_account_with_budget_reconciles_sticky_mapping_for_preferre
         assert select_account.await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
         assert select_account.await_args.kwargs["sticky_source"] == "turn_state"
         assert select_account.await_args.kwargs["legacy_sticky_key"] is None
+
+
+@pytest.mark.asyncio
+async def test_select_account_with_budget_keeps_thread_seed_for_first_exact_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    owner = _make_account("acc-thread-first-exact-owner")
+    select_account = AsyncMock(return_value=AccountSelection(account=owner, error_message=None))
+    process_key = proxy_affinity._codex_session_selection_key("process-first-exact-owner")
+    thread_policy = proxy_service._AffinityPolicy(
+        key="thread-first-exact-owner",
+        kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        codex_session_source="thread_header",
+        legacy_codex_session_key="process-first-exact-owner",
+        seed_selection_key=process_key,
+        seed_selection_kind=proxy_service.StickySessionKind.CODEX_SESSION,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 10.0)
+
+    await service._select_account_with_budget(
+        deadline=123.0,
+        request_id="req-thread-first-exact-owner",
+        kind="stream",
+        request_stage="first_turn",
+        **thread_policy.selection_kwargs(),
+        preferred_account_id=owner.id,
+        preferred_account_is_continuity_owner=True,
+        lease_kind="stream",
+    )
+
+    select_account.assert_awaited_once()
+    assert select_account.await_args is not None
+    assert select_account.await_args.kwargs["required_account_id"] == owner.id
+    assert select_account.await_args.kwargs["sticky_key"] == thread_policy.selection_key
+    assert select_account.await_args.kwargs["sticky_seed_key"] == process_key
+    assert select_account.await_args.kwargs["sticky_seed_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
 
 
 @pytest.mark.asyncio

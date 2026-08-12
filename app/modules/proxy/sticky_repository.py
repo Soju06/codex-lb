@@ -191,6 +191,42 @@ class StickySessionsRepository:
             raise RuntimeError("StickySession immutable insert did not resolve an owner")
         return owner_id
 
+    async def upsert_with_seed_if_absent(
+        self,
+        key: str,
+        account_id: str,
+        *,
+        kind: StickySessionKind,
+        seed_key: str,
+        seed_kind: StickySessionKind,
+    ) -> StickySession:
+        """Upsert one mapping and initialize its immutable seed atomically."""
+
+        # Keep these writes in one transaction. A process seed without the
+        # initiating thread row is false placement evidence, while a thread
+        # row without its seed makes the first admitted thread invisible to
+        # later siblings. Do not replace the seed's DO NOTHING with an upsert:
+        # another thread may have won first-writer initialization already.
+        seed_statement = self._build_insert_do_nothing_statement(seed_key, account_id, seed_kind)
+        mapping_statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
+        async with sqlite_writer_section():
+            try:
+                await self._session.execute(seed_statement)
+                result = await self._session.execute(
+                    mapping_statement,
+                    execution_options={"populate_existing": True},
+                )
+                row = result.scalar_one_or_none()
+                if row is None:
+                    raise RuntimeError(f"StickySession seeded upsert failed for key={key!r} kind={kind.value!r}")
+                await self._session.commit()
+            except BaseException:
+                # This method owns both writes as one unit even when a caller
+                # catches the error and keeps using the same session.
+                await self._session.rollback()
+                raise
+        return row
+
     async def delete(self, key: str, *, kind: StickySessionKind) -> bool:
         if not key:
             return False

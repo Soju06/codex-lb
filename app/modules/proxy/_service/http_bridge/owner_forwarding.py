@@ -381,7 +381,8 @@ class _HTTPBridgeOwnerForwardingMixin:
             original_request_unanchored=(
                 recovery_forward
                 or (
-                    owner_forward.key.affinity_kind in {"session_header", "internal_unanchored_parallel"}
+                    owner_forward.key.affinity_kind
+                    in {"session_header", "thread_header", "internal_unanchored_parallel"}
                     and incoming_turn_state is None
                     and payload.previous_response_id is None
                 )

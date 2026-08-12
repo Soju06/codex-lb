@@ -29,7 +29,7 @@ from app.core.balancer.logic import (
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
 from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -224,6 +224,8 @@ class _StubStickySessionsRepository:
         self.abandoned_keys: set[str] = set()
         self.deleted: list[tuple[str, StickySessionKind | None]] = []
         self.upserts: list[tuple[str, str, StickySessionKind | None]] = []
+        self.insert_if_absent_calls: list[tuple[str, str, StickySessionKind]] = []
+        self.seeded_upserts: list[tuple[str, str, StickySessionKind, str, StickySessionKind]] = []
 
     async def get_account_id(self, *args: Any, **kwargs: Any) -> str | None:
         lookup = await self.get_account_id_and_abandonment(*args, **kwargs)
@@ -242,12 +244,44 @@ class _StubStickySessionsRepository:
         sticky_key = cast(str, args[0])
         account_id = cast(str, args[1])
         self.account_id = account_id
+        if self.account_ids_by_key is not None:
+            self.account_ids_by_key[sticky_key] = account_id
         self.upserts.append((sticky_key, account_id, kwargs.get("kind")))
         return None
+
+    async def insert_if_absent(
+        self,
+        key: str,
+        account_id: str,
+        kind: StickySessionKind,
+    ) -> str:
+        self.insert_if_absent_calls.append((key, account_id, kind))
+        if self.account_ids_by_key is None:
+            self.account_ids_by_key = {}
+        return self.account_ids_by_key.setdefault(key, account_id)
+
+    async def upsert_with_seed_if_absent(
+        self,
+        key: str,
+        account_id: str,
+        *,
+        kind: StickySessionKind,
+        seed_key: str,
+        seed_kind: StickySessionKind,
+    ) -> None:
+        self.seeded_upserts.append((key, account_id, kind, seed_key, seed_kind))
+        if self.account_ids_by_key is None:
+            self.account_ids_by_key = {}
+        self.account_ids_by_key.setdefault(seed_key, account_id)
+        self.account_ids_by_key[key] = account_id
+        self.account_id = account_id
+        self.upserts.append((key, account_id, kind))
 
     async def delete(self, *args: Any, **kwargs: Any) -> bool:
         sticky_key = cast(str, args[0])
         self.deleted.append((sticky_key, kwargs.get("kind")))
+        if self.account_ids_by_key is not None:
+            self.account_ids_by_key.pop(sticky_key, None)
         self.account_id = None
         return True
 
@@ -259,13 +293,20 @@ class _StubStickySessionsRepository:
         expected_account_id: str | None,
         restore_account_id: str | None,
     ) -> bool:
-        if self.account_id != expected_account_id:
+        current_account_id = (
+            self.account_ids_by_key.get(key) if self.account_ids_by_key is not None else self.account_id
+        )
+        if current_account_id != expected_account_id:
             return False
         if restore_account_id is None:
             self.deleted.append((key, kind))
+            if self.account_ids_by_key is not None:
+                self.account_ids_by_key.pop(key, None)
             self.account_id = None
             return True
         self.upserts.append((key, restore_account_id, kind))
+        if self.account_ids_by_key is not None:
+            self.account_ids_by_key[key] = restore_account_id
         self.account_id = restore_account_id
         return True
 
@@ -2112,6 +2153,74 @@ async def test_sticky_probe_reservation_restores_affinity_after_repeated_commit_
 
 
 @pytest.mark.asyncio
+async def test_provisional_recovery_probe_does_not_publish_process_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    healthy = _make_account("acc-probe-seed-healthy")
+    probing = _make_account("acc-probe-seed-probing")
+    accounts_repo = _StubAccountsRepository([healthy, probing])
+    usage_repo = _StubUsageRepository(
+        primary={
+            healthy.id: _usage_row_with_percent(
+                211,
+                healthy.id,
+                used_percent=30.0,
+                reset_at=now_epoch + 300,
+            ),
+            probing.id: _usage_row_with_percent(
+                212,
+                probing.id,
+                used_percent=10.0,
+                reset_at=now_epoch + 300,
+            ),
+        },
+        secondary={},
+    )
+    sticky_repo = _StubStickySessionsRepository()
+    sticky_repo.account_ids_by_key = {}
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+    balancer._runtime[probing.id] = RuntimeState(
+        health_tier=HEALTH_TIER_PROBING,
+        last_selected_at=0.0,
+        version=37,
+        health_version=13,
+    )
+    monkeypatch.setattr(balancer, "_commit_due_probe_reservation_locked", lambda *args, **kwargs: False)
+
+    selected = await balancer.select_account(
+        sticky_key="thread-after-probe-loss",
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        legacy_sticky_key="process-after-probe-loss",
+        sticky_seed_key="process-seed-after-probe-loss",
+        sticky_seed_kind=StickySessionKind.CODEX_SESSION,
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == healthy.id
+    assert selected.lease is not None
+    assert sticky_repo.account_ids_by_key == {
+        "process-seed-after-probe-loss": healthy.id,
+        "thread-after-probe-loss": healthy.id,
+    }
+    assert sticky_repo.seeded_upserts == [
+        (
+            "thread-after-probe-loss",
+            healthy.id,
+            StickySessionKind.PROMPT_CACHE,
+            "process-seed-after-probe-loss",
+            StickySessionKind.CODEX_SESSION,
+        )
+    ]
+
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_sticky_probe_reservation_restore_does_not_clobber_newer_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2762,6 +2871,131 @@ async def test_legacy_raw_session_mapping_wins_when_namespaced_row_also_exists()
 
     for lease in saturated_leases:
         await balancer.release_account_lease(lease)
+
+
+@pytest.mark.asyncio
+async def test_new_codex_thread_is_seeded_from_process_preference_without_rewriting_process_row() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-process-seed")
+    assert alternate is not None
+    process_session = "process-seed"
+    process_key = _codex_session_selection_key(process_session)
+    thread_key = _codex_backend_identity(
+        {"session-id": process_session, "thread-id": "thread-new"}
+    ).thread_selection_key
+    assert thread_key is not None
+    sticky_repo.account_ids_by_key = {process_key: owner.id}
+
+    selected = await balancer.select_account(
+        sticky_key=thread_key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        legacy_sticky_key=process_session,
+        sticky_seed_key=process_key,
+        sticky_seed_kind=StickySessionKind.CODEX_SESSION,
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == owner.id
+    assert sticky_repo.account_ids_by_key == {
+        process_key: owner.id,
+        thread_key: owner.id,
+    }
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == [(thread_key, owner.id, StickySessionKind.PROMPT_CACHE)]
+
+
+@pytest.mark.asyncio
+async def test_first_codex_thread_initializes_process_preference_once_for_later_siblings() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-first-process")
+    assert alternate is not None
+    process_session = "process-first-thread"
+    process_key = _codex_session_selection_key(process_session)
+    first_thread_key = _codex_backend_identity(
+        {"session-id": process_session, "thread-id": "thread-first"}
+    ).thread_selection_key
+    sibling_thread_key = _codex_backend_identity(
+        {"session-id": process_session, "thread-id": "thread-sibling"}
+    ).thread_selection_key
+    assert first_thread_key is not None
+    assert sibling_thread_key is not None
+    sticky_repo.account_ids_by_key = {}
+
+    first = await balancer.select_account(
+        sticky_key=first_thread_key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        legacy_sticky_key=process_session,
+        sticky_seed_key=process_key,
+        sticky_seed_kind=StickySessionKind.CODEX_SESSION,
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+    )
+    assert first.account is not None
+    first_account_id = first.account.id
+
+    sibling = await balancer.select_account(
+        sticky_key=sibling_thread_key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        legacy_sticky_key=process_session,
+        sticky_seed_key=process_key,
+        sticky_seed_kind=StickySessionKind.CODEX_SESSION,
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+    )
+
+    assert sibling.account is not None
+    assert sibling.account.id == first_account_id
+    assert sticky_repo.account_ids_by_key[process_key] == first_account_id
+    assert sticky_repo.insert_if_absent_calls == []
+    assert sticky_repo.seeded_upserts == [
+        (
+            first_thread_key,
+            first_account_id,
+            StickySessionKind.PROMPT_CACHE,
+            process_key,
+            StickySessionKind.CODEX_SESSION,
+        )
+    ]
+    assert sticky_repo.upserts == [
+        (first_thread_key, first_account_id, StickySessionKind.PROMPT_CACHE),
+        (sibling_thread_key, first_account_id, StickySessionKind.PROMPT_CACHE),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_raw_process_owner_wins_over_thread_locality() -> None:
+    balancer, owner, alternate, sticky_repo = _make_cap_spillover_balancer("thread-legacy-owner")
+    assert alternate is not None
+    process_session = "legacy-process-owner"
+    thread_key = _codex_backend_identity(
+        {"session-id": process_session, "thread-id": "thread-existing"}
+    ).thread_selection_key
+    assert thread_key is not None
+    sticky_repo.account_ids_by_key = {
+        process_session: owner.id,
+        thread_key: alternate.id,
+    }
+
+    selected = await balancer.select_account(
+        sticky_key=thread_key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        legacy_sticky_key=process_session,
+        sticky_max_age_seconds=300,
+        routing_strategy="usage_weighted",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == owner.id
+    assert sticky_repo.account_ids_by_key == {
+        process_session: owner.id,
+        thread_key: alternate.id,
+    }
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
 
 
 @pytest.mark.asyncio

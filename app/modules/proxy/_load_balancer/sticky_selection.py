@@ -185,6 +185,7 @@ class StickySelectionOwner(Protocol):
         sticky_repo: StickySessionsRepository | None,
         routing_costs_by_account_id: RoutingCostsByAccount | None,
         sticky_existing_account_id: str | None | object,
+        initial_preferred_account_id: str | None,
         preserve_existing_mapping_on_fallback: bool,
         traffic_class: TrafficClass,
         ignore_standard_quota: bool,
@@ -203,6 +204,9 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     sticky_source: _CodexSessionSource | None
     legacy_sticky_key: str | None
     legacy_existing_account_id: str | None
+    sticky_seed_key: str | None
+    sticky_seed_kind: StickySessionKind | None
+    sticky_seed_account_id: str | None
     spill_bare_session_on_account_cap: bool
     require_unambiguous_account: bool
     sticky_max_age_seconds: int | None
@@ -265,6 +269,9 @@ async def run_sticky_selection_path(
     sticky_source = request.sticky_source
     legacy_sticky_key = request.legacy_sticky_key
     legacy_existing_account_id = request.legacy_existing_account_id
+    sticky_seed_key = request.sticky_seed_key
+    sticky_seed_kind = request.sticky_seed_kind
+    sticky_seed_account_id = request.sticky_seed_account_id
     spill_bare_session_on_account_cap = request.spill_bare_session_on_account_cap
     require_unambiguous_account = request.require_unambiguous_account
     sticky_max_age_seconds = request.sticky_max_age_seconds
@@ -335,7 +342,7 @@ async def run_sticky_selection_path(
                 # always has, rather than silently bypassing the ambiguous
                 # owner check below.
                 sticky_continuity_abandoned = sticky_owner_lookup.continuity_abandoned is True
-            if sticky_kind == StickySessionKind.CODEX_SESSION and sticky_existing_is_legacy:
+            if sticky_existing_is_legacy:
                 # Mixed-version replicas can create both rows on
                 # different accounts. The raw row was loaded before
                 # branch selection and always wins as possible hard
@@ -368,10 +375,8 @@ async def run_sticky_selection_path(
                 and not sticky_existing_is_legacy
             )
             cap_spillover_allowed = spill_bare_session_on_account_cap and lease_kind is not None and bare_session_key
-            hard_sticky = (
-                sticky_kind == StickySessionKind.CODEX_SESSION
-                and isinstance(sticky_existing_account_id, str)
-                and not bare_session_key
+            hard_sticky = isinstance(sticky_existing_account_id, str) and (
+                sticky_existing_is_legacy or (sticky_kind == StickySessionKind.CODEX_SESSION and not bare_session_key)
             )
             if hard_sticky and required_account_id is not None and sticky_existing_account_id != required_account_id:
                 return _direct_error(
@@ -534,6 +539,11 @@ async def run_sticky_selection_path(
                         relative_availability_top_k=relative_availability_top_k,
                         sticky_repo=repos.sticky_sessions,
                         sticky_existing_account_id=sticky_existing_account_id,
+                        initial_preferred_account_id=(
+                            sticky_seed_account_id
+                            if not isinstance(sticky_existing_account_id, str) and not sticky_continuity_abandoned
+                            else None
+                        ),
                         preserve_existing_mapping_on_fallback=preserve_existing_mapping,
                         traffic_class=traffic_class,
                         ignore_standard_quota=False,
@@ -808,6 +818,11 @@ async def run_sticky_selection_path(
             assert sticky_mutation is not None
             try:
                 async with owner._repo_factory() as repos:
+                    # A recovery-probe reservation is still reversible until
+                    # the runtime CAS below succeeds. Persist its thread row so
+                    # existing rollback machinery can restore it, but do not
+                    # publish an immutable process seed that cannot be safely
+                    # deleted after a concurrent sibling observes it.
                     await _persist_sticky_mutation(
                         sticky_repo=repos.sticky_sessions,
                         sticky_key=sticky_key,
@@ -953,6 +968,12 @@ async def run_sticky_selection_path(
                         sticky_key=sticky_key,
                         sticky_kind=sticky_kind,
                         mutation=sticky_mutation,
+                        initialize_seed_key=(
+                            sticky_seed_key
+                            if sticky_source == "thread_header" and sticky_seed_account_id is None
+                            else None
+                        ),
+                        initialize_seed_kind=sticky_seed_kind,
                     )
             except BaseException:
                 # Runtime admission may already be committed. Preserve
@@ -991,6 +1012,7 @@ async def _select_with_stickiness(
     sticky_repo: StickySessionsRepository | None,
     routing_costs_by_account_id: RoutingCostsByAccount | None = None,
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+    initial_preferred_account_id: str | None = None,
     preserve_existing_mapping_on_fallback: bool = False,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
     ignore_standard_quota: bool = False,
@@ -1045,6 +1067,32 @@ async def _select_with_stickiness(
     # reassignment.
     persist_fallback = not preserve_existing_mapping_on_fallback
     apply_sticky_secondary_budget_threshold = False
+
+    if not existing and initial_preferred_account_id is not None:
+        initial_preferred = next(
+            (state for state in states if state.account_id == initial_preferred_account_id),
+            None,
+        )
+        if initial_preferred is not None:
+            initial_result = select_account(
+                [initial_preferred],
+                prefer_earlier_reset=prefer_earlier_reset_accounts,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                routing_strategy=routing_strategy,
+                allow_backoff_fallback=False,
+                relative_availability_power=relative_availability_power,
+                relative_availability_top_k=relative_availability_top_k,
+                traffic_class=traffic_class,
+                ignore_standard_quota=ignore_standard_quota,
+                routing_costs=routing_costs_by_account_id,
+            )
+            if initial_result.account is not None:
+                # Persist only the new thread row. The process mapping supplied
+                # the preference but is deliberately outside this mutation.
+                return finish_selection(
+                    initial_result,
+                    persist_account_id=initial_preferred.account_id,
+                )
 
     if existing:
         pinned = next((state for state in states if state.account_id == existing), None)
@@ -1249,9 +1297,30 @@ async def _persist_sticky_mutation(
     sticky_key: str,
     sticky_kind: StickySessionKind,
     mutation: _StickyMutation,
+    initialize_seed_key: str | None = None,
+    initialize_seed_kind: StickySessionKind | None = None,
 ) -> None:
     if mutation.account_id is None:
         await sticky_repo.delete(sticky_key, kind=sticky_kind)
+        return
+    if initialize_seed_key is not None:
+        if initialize_seed_kind is None:
+            raise ValueError("initialize_seed_kind is required when initialize_seed_key is provided")
+        # Current Codex sends thread-id on the first root request, so a fresh
+        # process has no older bare-session request available to create its
+        # default. Initialize it exactly once from the first admitted thread.
+        # insert-if-absent is essential: failover or a later child may move its
+        # own bounded row but can never rewrite the process/sibling default.
+        # The repository operation is intentionally atomic; splitting it into
+        # the public insert/upsert methods would commit a process default even
+        # when persistence of the initiating thread fails.
+        await sticky_repo.upsert_with_seed_if_absent(
+            sticky_key,
+            mutation.account_id,
+            kind=sticky_kind,
+            seed_key=initialize_seed_key,
+            seed_kind=initialize_seed_kind,
+        )
         return
     await sticky_repo.upsert(sticky_key, mutation.account_id, kind=sticky_kind)
 

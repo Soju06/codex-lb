@@ -61,6 +61,7 @@ from app.core.utils.request_id import (
     set_request_id,
 )
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.db.models import StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyUsageReservationData,
@@ -3409,7 +3410,7 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.account_response_create_release = self._load_balancer.release_account_lease
             if session.account.id != owner_account_id:
                 if (
-                    previous_session_affinity.codex_session_source == "session_header"
+                    previous_session_affinity.codex_session_source in {"session_header", "thread_header"}
                     and previous_session_affinity.selection_key is not None
                     and previous_session_affinity.kind is not None
                 ):
@@ -3554,12 +3555,15 @@ class _HTTPBridgeRequestSubmitMixin:
         if account_id == session.account.id:
             return
         try:
-            if owner_rebind_affinity.legacy_selection_key is not None and owner_rebind_affinity.kind is not None:
+            if owner_rebind_affinity.legacy_selection_key is not None:
                 async with self._repo_factory() as repos:
                     legacy_owner_id = await repos.sticky_sessions.get_account_id(
                         owner_rebind_affinity.legacy_selection_key,
-                        kind=owner_rebind_affinity.kind,
-                        max_age_seconds=owner_rebind_affinity.max_age_seconds,
+                        # The new thread row may be PROMPT_CACHE, but the raw
+                        # compatibility row has always been CODEX_SESSION and
+                        # remains durable hard ownership.
+                        kind=StickySessionKind.CODEX_SESSION,
+                        max_age_seconds=None,
                     )
                 if legacy_owner_id is not None and legacy_owner_id != account_id:
                     raise ProxyResponseError(

@@ -709,7 +709,7 @@ from app.modules.proxy._service.websocket.helpers import (
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _CodexSessionSource,
-    _sticky_key_for_codex_control_request,
+    _sticky_key_for_thread_goal_request,
     _sticky_key_from_session_header,  # noqa: F401
 )
 from app.modules.proxy.affinity import (
@@ -995,9 +995,8 @@ class ProxyService(
         base_settings = get_settings()
         deadline = start + base_settings.proxy_request_budget_seconds
         settings = await get_settings_cache().get()
-        affinity = _sticky_key_for_codex_control_request(
-            headers,
-            codex_session_affinity=codex_session_affinity,
+        affinity = _sticky_key_for_thread_goal_request(
+            payload, headers, codex_session_affinity, settings.openai_cache_affinity_max_age_seconds
         )
         selection_model = api_key.enforced_model if api_key is not None else None
         routing_strategy = _routing_strategy(settings)
@@ -1093,6 +1092,8 @@ class ProxyService(
                     reallocate_sticky=affinity.reallocate_sticky,
                     sticky_source=affinity.codex_session_source,
                     legacy_sticky_key=affinity.legacy_selection_key,
+                    sticky_seed_key=affinity.seed_selection_key,
+                    sticky_seed_kind=affinity.seed_selection_kind,
                     sticky_max_age_seconds=affinity.max_age_seconds,
                     prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
@@ -1427,16 +1428,7 @@ class ProxyService(
         affinity_policy = kwargs.pop("affinity_policy", None)
         if isinstance(affinity_policy, _AffinityPolicy):
             # Expand once at the compatibility edge so transport callers cannot drift.
-            kwargs.update(
-                sticky_key=affinity_policy.selection_key,
-                sticky_kind=affinity_policy.kind,
-                reallocate_sticky=affinity_policy.reallocate_sticky,
-                sticky_source=affinity_policy.codex_session_source,
-                legacy_sticky_key=affinity_policy.legacy_selection_key,
-                spill_bare_session_on_account_cap=affinity_policy.spill_on_account_cap,
-                require_unambiguous_account=affinity_policy.require_unambiguous_account,
-                sticky_max_age_seconds=affinity_policy.max_age_seconds,
-            )
+            kwargs.update(affinity_policy.selection_kwargs())
         required_capability_kwargs = {}
         if kwargs.get("require_security_work_authorized") is True:
             required_capability_kwargs["require_security_work_authorized"] = kwargs.pop(
@@ -1722,6 +1714,8 @@ class ProxyService(
         reallocate_sticky: bool = False,
         sticky_source: _CodexSessionSource | None = None,
         legacy_sticky_key: str | None = None,
+        sticky_seed_key: str | None = None,
+        sticky_seed_kind: StickySessionKind | None = None,
         spill_bare_session_on_account_cap: bool = False,
         require_unambiguous_account: bool = False,
         sticky_max_age_seconds: int | None = None,
@@ -1879,6 +1873,10 @@ class ProxyService(
                         sticky_max_age_seconds=preferred_sticky_inputs[3],
                         sticky_source=preferred_sticky_inputs[4],
                         legacy_sticky_key=preferred_sticky_inputs[5],
+                        # Exact ownership chooses the account; a first-ever thread
+                        # still seeds atomically without overwriting a process default.
+                        sticky_seed_key=sticky_seed_key,
+                        sticky_seed_kind=sticky_seed_kind,
                         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                         prefer_earlier_reset_window=prefer_earlier_reset_window,
                         routing_strategy=routing_strategy,
@@ -1936,6 +1934,8 @@ class ProxyService(
                     reallocate_sticky=reallocate_sticky,
                     sticky_source=sticky_source,
                     legacy_sticky_key=legacy_sticky_key,
+                    sticky_seed_key=sticky_seed_key,
+                    sticky_seed_kind=sticky_seed_kind,
                     spill_bare_session_on_account_cap=_AffinityPolicy.cap_spillover_allowed(
                         spill_bare_session_on_account_cap,
                         preferred_account_id,

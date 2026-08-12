@@ -300,7 +300,7 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("existing_attempt", [False, True], ids=["warmup-new", "warmup-deduped"])
-async def test_scheduler_replays_persisted_free_reset_after_restart(
+async def test_scheduler_restart_uses_post_block_baseline_after_equal_timestamp_match(
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
     existing_attempt: bool,
@@ -324,6 +324,14 @@ async def test_scheduler_replays_persisted_free_reset_after_restart(
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(account)
         usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account.id,
+            100.0,
+            window="monthly",
+            recorded_at=datetime.fromtimestamp(blocked_at, timezone.utc).replace(tzinfo=None),
+            reset_at=legacy_reset_at,
+            window_minutes=43_200,
+        )
         await usage_repo.add_entry(
             account.id,
             100.0,

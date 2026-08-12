@@ -487,7 +487,7 @@ async def _resolve_monthly_reset_evidence(
         since = datetime.fromtimestamp(account.blocked_at, timezone.utc).replace(tzinfo=None)
         history = await usage_repo.history_since(account.id, "monthly", since)
         persisted = _latest_confirmed_reset_transition_after_baseline(
-            history,
+            [entry for entry in history if entry.recorded_at > since],
             expected_reset_at=account.reset_at,
             reset_at_tolerance_seconds=_BLOCK_RESET_MATCH_TOLERANCE_SECONDS,
         )

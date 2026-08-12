@@ -6,7 +6,7 @@ from anyio import to_thread
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.db.migrate import _build_alembic_config, run_upgrade
+from app.db.migrate import _build_alembic_config, inspect_migration_state, run_upgrade
 
 pytestmark = pytest.mark.unit
 
@@ -54,7 +54,7 @@ async def test_telemetry_migration_upgrade_defaults_and_downgrade(tmp_path) -> N
         assert not telemetry_columns & columns
 
         result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
-        assert result.current_revision is not None
+        assert result.current_revision == inspect_migration_state(db_url).head_revision
         columns, _ = await columns_and_rows(engine)
         assert telemetry_columns <= columns
     finally:

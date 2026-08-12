@@ -51,10 +51,12 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # gate, issue #1535). Not a hardcoded default because the right congestion
 # threshold depends on pool size and workload mix, and 0-means-off is the P1
 # default-off switch; the companion min-guarantee constant stayed hardcoded.
-# 117 -> 118: http_responses_session_bridge_anchor_poison_failure_threshold
-# (bridge restart anchor poisoning). Not hardcoded because operators need a
-# bounded deployment-specific poison threshold while recovery telemetry matures.
-MAX_SETTINGS_FIELDS = 118
+# 117 -> 126: durable HTTP bridge continuity controls (operation ledger,
+# ambiguous-continuation recovery, and best-effort transcript spool, #1657).
+# These remain operator-selectable because deployments differ in recovery
+# safety policy and available persistence/latency budgets; their conservative
+# defaults preserve fail-closed behavior and bound background write work.
+MAX_SETTINGS_FIELDS = 126
 
 
 def test_generated_settings_reference_matches_code() -> None:
@@ -68,6 +70,7 @@ def test_generated_settings_reference_matches_code() -> None:
 def test_settings_reference_page_is_checked_in_under_docs() -> None:
     assert OUTPUT_PATH == REPO_ROOT / "docs" / "reference" / "settings.md"
     assert OUTPUT_PATH.is_file()
+    assert "openspec/specs/responses-api-compat" in render_settings_reference()
 
 
 def test_settings_surface_ratchet() -> None:

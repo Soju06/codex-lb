@@ -8751,7 +8751,10 @@ def test_backend_responses_websocket_does_not_expire_downstream_while_request_pe
 
     runtime_settings = _websocket_settings(
         proxy_downstream_websocket_idle_timeout_seconds=0.1,
-        stream_idle_timeout_seconds=0.2,
+        # Keep the upstream stream budget above both delayed messages. The
+        # assertion targets the downstream idle guard, not an upstream idle
+        # timeout; a slower CI runner must not turn the fixture into a race.
+        stream_idle_timeout_seconds=0.5,
     )
 
     async def allow_firewall(_websocket):

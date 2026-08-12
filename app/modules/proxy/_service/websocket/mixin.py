@@ -377,7 +377,9 @@ from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
     _assign_websocket_response_id,
     _find_websocket_request_state_by_response_id,
+    _forget_websocket_stale_previous_response,
     _is_websocket_response_create,
+    _is_websocket_stale_previous_response,
     _match_websocket_request_state_for_anonymous_event,
     _matching_websocket_request_states_for_missing_tool_output_error,
     _matching_websocket_request_states_for_previous_response_error,
@@ -783,6 +785,59 @@ def _track_websocket_owned_task(
             _done_task.exception()
 
     task.add_done_callback(_discard_owned_task)
+
+
+_WEBSOCKET_UPSTREAM_CLOSE_CLEANUP_TIMEOUT_SECONDS = 0.25
+
+
+async def _close_websocket_upstream_for_cleanup(
+    proxy: _WebSocketServiceProtocol,
+    upstream: UpstreamWebSocket,
+    *,
+    timeout_seconds: float,
+) -> None:
+    """Close an upstream socket without letting a stuck close block cleanup.
+
+    Some websocket implementations can wait for a close handshake after the
+    peer has already disappeared. The close operation remains tracked so it
+    can finish asynchronously, while scope finalization continues releasing
+    request ownership and leases within its bounded cleanup budget.
+    """
+
+    close_task = asyncio.create_task(
+        upstream.close(),
+        name="proxy-websocket-upstream-close",
+    )
+    _track_websocket_owned_task(proxy, close_task)
+    effective_timeout = min(
+        max(float(timeout_seconds), 0.0),
+        _WEBSOCKET_UPSTREAM_CLOSE_CLEANUP_TIMEOUT_SECONDS,
+    )
+
+    async def cancel_close_task() -> None:
+        try:
+            await _facade()._await_cancelled_task(
+                close_task,
+                timeout_seconds=effective_timeout,
+                label="proxy websocket upstream close",
+                cleanup_tasks=proxy._background_cleanup_tasks,
+            )
+        except Exception:
+            _facade().logger.debug("Failed to cancel upstream websocket close task", exc_info=True)
+
+    if effective_timeout <= 0:
+        await cancel_close_task()
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(close_task), timeout=effective_timeout)
+    except TimeoutError:
+        _facade().logger.debug(
+            "Upstream websocket close continued after cleanup budget timeout_seconds=%.3f",
+            effective_timeout,
+        )
+        await cancel_close_task()
+    except Exception:
+        _facade().logger.debug("Failed to close upstream websocket during scope cleanup", exc_info=True)
 
 
 async def _await_owned_websocket_task_after_reader_cancellation(
@@ -1457,6 +1512,7 @@ class _WebSocketMixin:
                         if not await proxy._downstream_websocket_is_idle(
                             pending_requests,
                             pending_lock=pending_lock,
+                            upstream_control=upstream_control,
                             downstream_activity=downstream_activity,
                             idle_timeout_seconds=downstream_idle_timeout_seconds,
                         ):
@@ -1466,6 +1522,7 @@ class _WebSocketMixin:
                             if await proxy._downstream_websocket_is_idle(
                                 pending_requests,
                                 pending_lock=pending_lock,
+                                upstream_control=upstream_control,
                                 downstream_activity=downstream_activity,
                                 idle_timeout_seconds=downstream_idle_timeout_seconds,
                             ):
@@ -2470,16 +2527,18 @@ class _WebSocketMixin:
                     # release that wait.
                     reader_to_await.cancel()
                 if upstream is not None:
-                    try:
-                        await upstream.close()
-                    except Exception:
-                        _facade().logger.debug("Failed to close upstream websocket", exc_info=True)
+                    await _close_websocket_upstream_for_cleanup(
+                        proxy,
+                        upstream,
+                        timeout_seconds=cleanup_timeout,
+                    )
                 if reader_to_await is not None:
                     try:
                         await _facade()._await_cancelled_task(
                             reader_to_await,
                             label="proxy websocket upstream reader",
                             cancel=False,
+                            cleanup_tasks=proxy._background_cleanup_tasks,
                         )
                     except Exception:
                         # Reader failure must not skip lease release or the
@@ -2609,7 +2668,12 @@ class _WebSocketMixin:
                 timeout=max(float(cleanup_timeout), 0.0),
             )
             if not done:
-                _facade().logger.warning("Websocket scope cleanup exceeded its remaining drain budget")
+                _facade().logger.warning(
+                    "Websocket scope cleanup exceeded its remaining drain budget "
+                    "timeout_seconds=%.3f background_cleanup_tasks=%d",
+                    max(float(cleanup_timeout), 0.0),
+                    sum(1 for task in proxy._background_cleanup_tasks if not task.done()),
+                )
 
     async def _prepare_websocket_response_create_request(
         self,
@@ -4097,6 +4161,10 @@ class _WebSocketMixin:
         account_id_value = account_id.strip()
         if not account_id_value:
             return
+        _forget_websocket_stale_previous_response(
+            previous_response_id=response_id,
+            api_key_id=api_key_id,
+        )
         cache_keys = [(response_id, api_key_id, None)]
         normalized_session_id = _facade()._normalize_session_id(session_id)
         if normalized_session_id is not None:
@@ -4133,6 +4201,7 @@ class _WebSocketMixin:
         session_id: str | None = None,
         surface: str,
         request_state: _WebSocketRequestState | None = None,
+        force_request_log_lookup: bool = False,
     ) -> str | None:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4151,6 +4220,24 @@ class _WebSocketMixin:
             request_state.previous_response_owner_requested_at = requested_at
             request_state.previous_response_owner_session_id = owner_session_id
 
+        def _raise_stale_response_cache_suppression(*, outcome: str) -> NoReturn:
+            _record_lookup_metadata(source="stale_response_cache", outcome=outcome)
+            _record_continuity_owner_resolution(
+                surface=surface,
+                source="stale_response_cache",
+                outcome=outcome,
+                previous_response_id=response_id,
+                session_id=session_id_value,
+            )
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "stream_incomplete",
+                    "Previous response is temporarily unavailable; retrying is suppressed for the recovery window.",
+                    error_type="server_error",
+                ),
+            )
+
         if previous_response_id is None:
             return None
         response_id = previous_response_id.strip()
@@ -4158,8 +4245,19 @@ class _WebSocketMixin:
             return None
         api_key_id = api_key.id if api_key is not None else None
         session_id_value = _facade()._normalize_session_id(session_id)
+        stale_cache_hit = (
+            request_state is not None
+            and not force_request_log_lookup
+            and not request_state.fresh_upstream_request_is_retry_safe
+            and _is_websocket_stale_previous_response(
+                previous_response_id=response_id,
+                api_key_id=api_key_id,
+            )
+        )
         cache_key = (response_id, api_key_id, session_id_value)
-        cached_account_id = proxy._websocket_previous_response_account_index.get(cache_key)
+        cached_account_id = (
+            None if force_request_log_lookup else proxy._websocket_previous_response_account_index.get(cache_key)
+        )
         if cached_account_id is not None:
             _record_lookup_metadata(source="request_cache", outcome="hit")
             _record_continuity_owner_resolution(
@@ -4171,9 +4269,13 @@ class _WebSocketMixin:
             )
             return cached_account_id
         fallback_account_id = (
-            proxy._websocket_previous_response_account_index.get((response_id, api_key_id, None))
-            if session_id_value is not None
-            else None
+            None
+            if force_request_log_lookup
+            else (
+                proxy._websocket_previous_response_account_index.get((response_id, api_key_id, None))
+                if session_id_value is not None
+                else None
+            )
         )
         try:
             async with proxy._repo_factory() as repos:
@@ -4183,6 +4285,8 @@ class _WebSocketMixin:
                     session_id=session_id_value,
                 )
         except Exception as exc:
+            if stale_cache_hit:
+                _raise_stale_response_cache_suppression(outcome="lookup_failed")
             if fallback_account_id is not None:
                 _record_lookup_metadata(source="request_cache_fallback", outcome="hit")
                 _record_continuity_owner_resolution(
@@ -4217,6 +4321,12 @@ class _WebSocketMixin:
                 _facade()._previous_response_owner_lookup_failed_error_envelope(),
             ) from exc
         if owner_record is None:
+            if stale_cache_hit:
+                _raise_stale_response_cache_suppression(outcome="hit")
+            if force_request_log_lookup:
+                proxy._websocket_previous_response_account_index.pop(cache_key, None)
+                if session_id_value is not None:
+                    proxy._websocket_previous_response_account_index.pop((response_id, api_key_id, None), None)
             if fallback_account_id is not None:
                 _record_lookup_metadata(source="request_cache_fallback", outcome="hit")
                 _record_continuity_owner_resolution(
@@ -5329,11 +5439,16 @@ class _WebSocketMixin:
         pending_requests: deque[_WebSocketRequestState],
         *,
         pending_lock: anyio.Lock,
+        upstream_control: _WebSocketUpstreamControl | None = None,
         downstream_activity: _DownstreamWebSocketActivity,
         idle_timeout_seconds: float,
     ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        if upstream_control is not None:
+            terminal_task = upstream_control.terminal_message_task
+            if terminal_task is not None and not terminal_task.done():
+                return False
         async with pending_lock:
             if pending_requests:
                 return False
@@ -5830,10 +5945,10 @@ class _WebSocketMixin:
         status: str = "error",
         penalize_account: bool = True,
         suppress_sequenced_downstream_errors: bool = False,
-    ) -> None:
+    ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        finalization_task: asyncio.Task[None] | None = None
+        finalization_task: asyncio.Task[bool] | None = None
         await pending_lock.acquire()
         try:
             remaining = list(pending_requests)
@@ -5865,10 +5980,10 @@ class _WebSocketMixin:
             pending_lock.release()
 
         if finalization_task is None:
-            return
+            return True
 
         try:
-            await asyncio.shield(finalization_task)
+            settlement_succeeded = await asyncio.shield(finalization_task)
         except asyncio.CancelledError:
             remaining_timeout = shutdown_state.remaining_drain_timeout_seconds()
             timeout_seconds = (
@@ -5881,6 +5996,7 @@ class _WebSocketMixin:
                 # the claimed states and remains visible to lifespan draining.
                 await asyncio.wait({finalization_task}, timeout=timeout_seconds)
             raise
+        return settlement_succeeded
 
     async def _finalize_claimed_websocket_requests(
         self,
@@ -5898,7 +6014,7 @@ class _WebSocketMixin:
         status: str,
         penalize_account: bool,
         suppress_sequenced_downstream_errors: bool,
-    ) -> None:
+    ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
 
@@ -5967,6 +6083,7 @@ class _WebSocketMixin:
                         request_state.request_log_id or request_state.request_id,
                         exc_info=True,
                     )
+
             if response_create_gate is not None:
                 await _release_websocket_response_create_ownership_for_cleanup(
                     request_state,
@@ -6132,6 +6249,8 @@ class _WebSocketMixin:
                         penalty_code,
                         exc_info=True,
                     )
+
+        return reservation_release_succeeded
 
     async def _emit_websocket_terminal_error(
         self,

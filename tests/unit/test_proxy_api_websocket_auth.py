@@ -630,6 +630,35 @@ def test_public_previous_response_not_found_error_is_masked_to_stream_incomplete
     assert "resp_missing" not in masked.model_dump_json()
 
 
+def test_public_previous_response_not_found_can_enable_client_full_history_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    envelope = proxy_api_module.OpenAIErrorEnvelopeModel(
+        error=proxy_api_module.OpenAIError(
+            message="Previous response with id 'resp_missing' not found.",
+            type="invalid_request_error",
+            code="previous_response_not_found",
+            param="previous_response_id",
+        )
+    )
+    monkeypatch.setattr(
+        proxy_api_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="client_full_history_once"
+        ),
+    )
+
+    status_code, preserved = proxy_api_module._mask_previous_response_not_found_error(
+        envelope,
+        default_status=400,
+        allow_client_full_history_once=True,
+    )
+
+    assert status_code == 400
+    assert preserved == envelope
+
+
 def test_public_previous_response_invalid_request_param_is_masked_to_stream_incomplete():
     envelope = proxy_api_module.OpenAIErrorEnvelopeModel(
         error=proxy_api_module.OpenAIError(

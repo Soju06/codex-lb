@@ -106,6 +106,29 @@ When `stream` is `false` or omitted, the service MUST return a single `chat.comp
 - **WHEN** the upstream indicates a tool call sequence
 - **THEN** the returned `chat.completion` includes `tool_calls` and a `finish_reason` of `tool_calls`
 
+### Requirement: Non-streaming chat collect closes the upstream generator
+
+When `stream` is `false` or omitted, `POST /v1/chat/completions` MUST close the upstream Responses generator after collect returns or raises, including when the first consumed event is `response.failed` or `error`. Closing MUST run the generator finalizer so an open API-key reservation is released or settled before the HTTP response is returned.
+
+#### Scenario: First-event rate limit releases the reservation
+
+- **WHEN** the startup probe did not consume the stream
+- **AND** the first upstream event is `response.failed` with
+  `code=rate_limit_exceeded`
+- **AND** the request reserved API-key usage
+- **THEN** the reservation is released before the error response is returned
+
+### Requirement: Non-streaming chat errors use the Responses status map
+
+When non-streaming `POST /v1/chat/completions` returns an OpenAI error envelope collected from the upstream Responses stream, the HTTP status MUST match the non-streaming `/v1/responses` mapping for that envelope (`429` for `rate_limit_exceeded`, `503` for unavailable-selection codes, `401`/`400` where that path already maps them). The envelope body MUST remain an OpenAI error object.
+
+#### Scenario: Collected rate limit is 429
+
+- **WHEN** non-streaming chat collect returns
+  `{ "error": { "code": "rate_limit_exceeded", ... } }`
+- **THEN** the HTTP status is `429`
+- **AND** the body is that OpenAI error envelope
+
 ### Requirement: response_format mapping
 If the client sends `response_format`, the service MUST translate it to the Responses `text.format` controls. For `json_schema`, the schema payload MUST be validated and missing `json_schema` MUST result in a 4xx error with an OpenAI error envelope.
 
@@ -141,6 +164,10 @@ For upstream failures or invalid requests, the service MUST return an OpenAI err
 #### Scenario: Streaming error
 - **WHEN** the upstream returns a failure during streaming
 - **THEN** the service emits an error chunk and terminates the stream with `data: [DONE]`
+
+#### Scenario: Non-streaming collected rate limit
+- **WHEN** non-streaming collect returns `rate_limit_exceeded`
+- **THEN** the service returns that OpenAI error envelope with HTTP 429
 
 ### Requirement: Drop unknown message-object fields during coercion
 

@@ -24,7 +24,10 @@ See `openspec/specs/chat-completions-compat/spec.md` for normative requirements.
 ## Failure Modes
 
 - **Upstream stream failure:** Emit an error chunk, then terminate with `data: [DONE]`.
-- **Non-stream failures:** Return an OpenAI error envelope with 5xx status.
+- **Non-stream failures:** Return an OpenAI error envelope. HTTP status follows
+  the same map as non-stream `/v1/responses` (`429` for `rate_limit_exceeded`,
+  not a blanket 502). The upstream Responses generator is closed so reservation
+  finalizers run even when the first collected event is `response.failed`.
 - **Invalid content types:** Reject with `invalid_request_error`.
 
 ## Examples

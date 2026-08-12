@@ -18783,6 +18783,43 @@ async def test_submit_http_bridge_request_restores_recovery_claim_when_stream_le
 
 
 @pytest.mark.asyncio
+async def test_cleanup_http_bridge_submit_interruption_clears_restored_operation_identity() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    mark_operation_unknown = AsyncMock(return_value=True)
+    service._durable_bridge = cast(Any, SimpleNamespace(mark_operation_unknown=mark_operation_unknown))
+    session = _make_bridge_session(key_value="restored-operation-identity")
+    session.durable_session_id = "durable-restored-operation-identity"
+    session.durable_owner_epoch = 2
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-restored-operation-identity",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        operation_id="operation-restored",
+        operation_fingerprint="fingerprint-restored",
+        operation_parent_response_id="resp-parent",
+        operation_registered=True,
+        operation_recovery_claimed=True,
+    )
+
+    await service._cleanup_http_bridge_submit_interruption(
+        session,
+        request_state=request_state,
+        gate_acquired=False,
+        request_enqueued=False,
+        counted_in_queue=False,
+    )
+
+    mark_operation_unknown.assert_awaited_once()
+    assert request_state.operation_recovery_claimed is False
+    assert request_state.operation_id is None
+    assert request_state.operation_fingerprint is None
+    assert request_state.operation_parent_response_id is None
+
+
+@pytest.mark.asyncio
 async def test_submit_hard_turn_rolls_back_new_operation_before_retiring_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2352,6 +2352,9 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
             if restored:
                 request_state.operation_recovery_claimed = False
+                request_state.operation_id = None
+                request_state.operation_fingerprint = None
+                request_state.operation_parent_response_id = None
         elif (
             request_state.operation_created
             and request_state.operation_registered

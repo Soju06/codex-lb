@@ -4,7 +4,7 @@ The nullable column preserves the existing unrestricted policy for every
 existing API key. New writes serialize a non-empty canonical JSON list.
 
 Revision ID: 20260806_030000_add_api_key_allowed_reasoning_efforts
-Revises: 20260806_120000_add_http_bridge_owner_process_epoch
+Revises: 20260811_000000_add_hourly_rollup_cancelled_count
 Create Date: 2026-08-06 03:00:00.000000
 """
 
@@ -15,7 +15,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260806_030000_add_api_key_allowed_reasoning_efforts"
-down_revision = "20260806_120000_add_http_bridge_owner_process_epoch"
+down_revision = "20260811_000000_add_hourly_rollup_cancelled_count"
 branch_labels = None
 depends_on = None
 

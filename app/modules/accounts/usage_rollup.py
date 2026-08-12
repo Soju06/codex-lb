@@ -298,7 +298,15 @@ def _insert_fn(session: AsyncSession):
 
 
 def _state_bootstrap_stmt(session: AsyncSession):
-    stmt = _insert_fn(session)(AccountUsageRollupState).values(id=_STATE_ROW_ID, folded_through=_EPOCH)
+    # `upgrade_repair_from` is explicitly NULL: a state row bootstrapped by
+    # THIS (post-cancelled_count) code is never legacy-suspect. Old code's
+    # bootstrap omits the column and gets the epoch server default, which is
+    # exactly what marks its post-migration backfill for repair (#1552).
+    stmt = _insert_fn(session)(AccountUsageRollupState).values(
+        id=_STATE_ROW_ID,
+        folded_through=_EPOCH,
+        upgrade_repair_from=None,
+    )
     return stmt.on_conflict_do_nothing(index_elements=[AccountUsageRollupState.id])
 
 

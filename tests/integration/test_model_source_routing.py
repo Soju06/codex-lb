@@ -1017,6 +1017,79 @@ async def test_downstream_disconnect_closes_source_stream(async_client, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_source_stream_disconnect_logs_cancelled_not_error(async_client, db_setup, monkeypatch):
+    """Regression for #1552: a downstream disconnect mid-stream on a
+    model-source route is a normal client-side terminal — recorded as
+    status=cancelled (like the main proxy path), counted in cancelled_count,
+    and excluded from the error rate and top_error."""
+    from datetime import timedelta
+
+    from starlette.requests import Request
+
+    import app.modules.proxy.api as proxy_api
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceUsageHolder
+    from app.modules.request_logs.repository import RequestLogsRepository
+
+    async def record_release(reservation: object) -> None:
+        del reservation
+
+    monkeypatch.setattr(proxy_api, "_release_reservation", record_release)
+
+    async def source_stream() -> AsyncIterator[bytes]:
+        yield b"data: partial\n\n"
+        await asyncio.sleep(60)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "query_string": b"",
+        }
+    )
+    source = ModelSource(
+        id="src_cx_log",
+        name="cx-log",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=False,
+    )
+    response_stream = cast(
+        AsyncGenerator[bytes, None],
+        proxy_api._source_chat_stream_with_settlement(
+            source_stream(),
+            usage_holder=SourceUsageHolder(),
+            request=request,
+            source=source,
+            api_key=None,
+            model="cx-log-model",
+            reservation=None,
+        ),
+    )
+
+    assert await anext(response_stream) == b"data: partial\n\n"
+    await response_stream.aclose()
+
+    async with SessionLocal() as session:
+        row = (await session.execute(select(RequestLog).where(RequestLog.model_source_id == "src_cx_log"))).scalar_one()
+        assert row.status == "cancelled"
+        assert row.error_code == "client_disconnected"
+
+        # The status classification is what every metric surface keys on:
+        # the disconnect must not join the error numerator or top_error.
+        aggregate = await RequestLogsRepository(session).aggregate_usage_metrics_since(utcnow() - timedelta(minutes=5))
+        assert aggregate.request_count == 1
+        assert aggregate.error_count == 0
+        assert aggregate.cancelled_count == 1
+        assert aggregate.top_error is None
+
+
+@pytest.mark.asyncio
 async def test_opportunistic_key_routes_to_source_without_account_pool(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
 

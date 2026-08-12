@@ -98,14 +98,30 @@ async def test_usage_summary_metrics(db_setup):
             error_code="rate_limit_exceeded",
             requested_at=now - timedelta(hours=1),
         )
+        # Regression for #1552: cancelled (client-disconnect) terminals stay
+        # in the request total but leave the error numerator and top_error,
+        # even when they outnumber genuine errors.
+        for index in range(2):
+            await logs_repo.add_log(
+                account_id="acc2",
+                request_id=f"req_summary_cancelled_{index}",
+                model="gpt-5.1",
+                input_tokens=1,
+                output_tokens=0,
+                latency_ms=10,
+                status="cancelled",
+                error_code="client_disconnected",
+                requested_at=now - timedelta(minutes=30 + index),
+            )
 
         summary = await service.get_usage_summary()
         metrics = summary.metrics
         assert metrics is not None
-        assert metrics.requests_7d == 2
-        assert metrics.tokens_secondary_window == 35
-        assert metrics.error_rate_7d == pytest.approx(0.5)
+        assert metrics.requests_7d == 4
+        assert metrics.tokens_secondary_window == 37
+        assert metrics.error_rate_7d == pytest.approx(0.25)
         assert metrics.top_error == "rate_limit_exceeded"
+        assert metrics.cancelled_7d == 2
 
 
 @pytest.mark.asyncio

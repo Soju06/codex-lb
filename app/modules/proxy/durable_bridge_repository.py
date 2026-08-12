@@ -2123,10 +2123,20 @@ class DurableBridgeRepository:
                     # enter the normal proof-gated recovery path.
                     operation_retained_session_ids = retained_recovery_ids & operation_session_ids
                     if operation_retained_session_ids:
+                        eligible_operation_sessions = set(
+                            await self._session.scalars(
+                                select(HttpBridgeSessionRecord.id)
+                                .where(
+                                    HttpBridgeSessionRecord.id.in_(operation_retained_session_ids),
+                                    startup_purge_filter,
+                                )
+                                .with_for_update()
+                            )
+                        )
                         await self._session.execute(
                             update(HttpBridgeOperationRecord)
                             .where(
-                                HttpBridgeOperationRecord.session_id.in_(operation_retained_session_ids),
+                                HttpBridgeOperationRecord.session_id.in_(eligible_operation_sessions),
                                 HttpBridgeOperationRecord.state == "submitted",
                             )
                             .values(state="unknown", updated_at=now)

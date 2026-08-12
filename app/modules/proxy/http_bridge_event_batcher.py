@@ -259,7 +259,7 @@ class HttpBridgeOperationEventBatcher:
         async with self._lock:
             context = self._contexts.get(operation_id)
             dropped = operation_id in self._dropped_operations
-        if context is None:
+        if dropped or context is None:
             return False
         try:
             persisted = await self._durable_bridge.append_terminal_operation_event(

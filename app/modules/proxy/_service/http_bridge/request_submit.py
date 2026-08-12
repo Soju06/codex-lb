@@ -2378,6 +2378,10 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                 if rolled_back:
                     request_state.operation_registered = False
+                    request_state.operation_created = False
+                    request_state.operation_id = None
+                    request_state.operation_fingerprint = None
+                    request_state.operation_parent_response_id = None
         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
         if request_state.response_create_gate is not None:
             if gate_acquired or request_state.response_create_gate_acquired:

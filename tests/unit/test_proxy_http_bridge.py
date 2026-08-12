@@ -18788,8 +18788,11 @@ async def test_submit_hard_turn_rolls_back_new_operation_before_retiring_session
         instance_id="instance-hard-turn-unsent-operation",
         owner_epoch=3,
     )
-    assert request_state.operation_created is True
+    assert request_state.operation_created is False
     assert request_state.operation_registered is False
+    assert request_state.operation_id is None
+    assert request_state.operation_fingerprint is None
+    assert request_state.operation_parent_response_id is None
 
 
 @pytest.mark.asyncio

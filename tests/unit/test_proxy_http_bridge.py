@@ -18820,6 +18820,131 @@ async def test_cleanup_http_bridge_submit_interruption_clears_restored_operation
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_capacity_retry_reclaims_unknown_operation_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = _make_bridge_session(key_value="unknown-operation-capacity-retry")
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    session.durable_session_id = "durable-unknown-operation-capacity-retry"
+    session.durable_owner_epoch = 4
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unknown-operation-capacity-retry",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        hard_continuity_anchor=True,
+        previous_response_id="resp-parent",
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","input":"retry"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    existing_operation = SimpleNamespace(
+        operation_id="operation-existing-unknown",
+        session_id=session.durable_session_id,
+        state="unknown",
+        created=False,
+        event_spool_complete=False,
+        response_id=None,
+    )
+    lookup = AsyncMock(return_value=existing_operation)
+    claim_unknown = AsyncMock(return_value=True)
+    restore_unknown = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=lookup,
+            get_operation=AsyncMock(return_value=existing_operation),
+            record_operation=AsyncMock(return_value=existing_operation),
+            claim_unknown_operation_for_recovery=claim_unknown,
+            mark_operation_unknown=restore_unknown,
+            release_live_session=AsyncMock(return_value=None),
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-unknown-operation-capacity-retry",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    capacity_error = ProxyResponseError(
+        429,
+        openai_error(
+            "account_response_create_cap",
+            "Account response-create concurrency limit reached",
+            error_type="rate_limit_error",
+        ),
+    )
+    admission_calls = 0
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+        **_kwargs: Any,
+    ) -> None:
+        nonlocal admission_calls
+        admission_calls += 1
+        if admission_calls == 1:
+            raise capacity_error
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+    wait_calls = 0
+
+    async def capacity_wait(**_kwargs: object):
+        nonlocal wait_calls
+        wait_calls += 1
+        if False:
+            yield ""
+
+    monkeypatch.setattr(http_bridge_streaming_module, "_http_bridge_account_capacity_wait_seconds", lambda _exc: 0.001)
+    monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", capacity_wait)
+
+    async def send_and_finish(_text: str) -> None:
+        event_queue = request_state.event_queue
+        assert event_queue is not None
+        await event_queue.put(None)
+
+    send_text.side_effect = send_and_finish
+
+    async for _ in service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+        queue_limit=4,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
+        request_deadline=time.monotonic() + 10.0,
+    ):
+        pass
+
+    assert wait_calls == 1
+    assert admission_calls == 2
+    assert claim_unknown.await_count == 2
+    restore_unknown.assert_awaited_once()
+    send_text.assert_awaited_once()
+    assert request_state.operation_id == "operation-existing-unknown"
+
+
+@pytest.mark.asyncio
 async def test_submit_hard_turn_rolls_back_new_operation_before_retiring_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

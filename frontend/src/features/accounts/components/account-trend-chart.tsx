@@ -47,8 +47,7 @@ function mergePoints(
 }
 
 function formatXTick(isoStr: string): string {
-  const d = new Date(isoStr);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return isoStr.slice(5, 10);
 }
 
 const SERIES_META: Record<string, { label: string }> = {

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import socket
 import time
 from collections import deque
 from collections.abc import AsyncGenerator
@@ -7062,7 +7063,11 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
 
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(async_client, monkeypatch):
-    _install_bridge_settings(monkeypatch, enabled=True)
+    # The app lifespan registers the process hostname in the durable bridge
+    # ring before this test installs its settings. Keep the test on that same
+    # instance so the startup heartbeat cannot make the reconnect path look
+    # like a cross-replica ownership conflict.
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(async_client, "acc_http_bridge_reconnect", "http-bridge-reconnect@example.com")
     account = await _get_account(account_id)
     first_upstream = _ClosingBridgeUpstreamWebSocket()
@@ -7138,7 +7143,10 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         "model": "gpt-5.1",
         "instructions": "Return exactly OK.",
         "input": "hello",
-        "prompt_cache_key": "http-bridge-reconnect-thread-1",
+        # Scope the soft-affinity key to this test's account so a parallel or
+        # ordered integration run cannot inherit another instance's durable
+        # owner and turn the reconnect assertion into a 409 race.
+        "prompt_cache_key": f"http-bridge-reconnect-thread-{account_id}",
     }
     first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
     second = await asyncio.wait_for(
@@ -12990,7 +12998,12 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
     )
 
     assert second.status_code == 502
-    assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete", "bridge_owner_unreachable")
+    assert second.json()["error"]["code"] in (
+        "upstream_unavailable",
+        "stream_incomplete",
+        "bridge_owner_unreachable",
+        "bridge_continuity_persistence_failed",
+    )
     assert "previous_response_not_found" not in second.json()["error"].get("code", "")
     assert connect_count == 1
 
@@ -14502,7 +14515,7 @@ async def test_v1_responses_http_bridge_quarantines_reattach_that_streams_withou
     ``response.created`` must quarantine the session so the next request does
     not rebuild the identical anchored reattach and instead completes on the
     fresh no-anchor path."""
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_quarantine_silent",
@@ -14671,7 +14684,7 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
     hydration restored ``last_completed_response_id`` and the session-level
     injection re-added the same anchor and trimmed the prefix — rebuilding the
     wedge despite the ``fresh_reattach_anchor_skipped_quarantined`` log."""
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_quarantine_unsafe_suffix",

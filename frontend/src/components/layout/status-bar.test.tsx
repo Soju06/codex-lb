@@ -9,6 +9,8 @@ import {
   createDashboardOverview,
   createDashboardSettings,
 } from "@/test/mocks/factories";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { formatTimeLong } from "@/utils/formatters";
 import { server } from "@/test/mocks/server";
 
 function renderStatusBar(props: StatusBarProps = {}) {
@@ -72,6 +74,31 @@ describe("StatusBar", () => {
 
     expect(await screen.findByText("Not ready")).toBeInTheDocument();
     expect(await screen.findByText("Synced")).toBeInTheDocument();
+  });
+
+  it("updates the last sync clock when the date format changes", async () => {
+    const lastSyncAt = "2026-08-09T14:30:45.000Z";
+    server.use(
+      http.get("/health/ready", () => HttpResponse.json({ status: "ok" })),
+      http.get("/api/dashboard/overview", () =>
+        HttpResponse.json(createDashboardOverview({ lastSyncAt })),
+      ),
+    );
+    useDateDisplayFormatStore.setState({ dateDisplayFormat: "default" });
+
+    renderStatusBar();
+
+    const defaultTime = formatTimeLong(lastSyncAt, "default").time;
+    const footer = screen.getByRole("contentinfo");
+    await screen.findByText("Ready");
+    expect(footer).toHaveTextContent(defaultTime);
+
+    act(() => {
+      useDateDisplayFormatStore.setState({ dateDisplayFormat: "iso8601" });
+    });
+
+    const isoTime = formatTimeLong(lastSyncAt, "iso8601").time;
+    expect(footer).toHaveTextContent(isoTime);
   });
 
   it("shows checking while readiness is pending without blocking usage status", async () => {

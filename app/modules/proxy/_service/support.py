@@ -881,6 +881,25 @@ class _WebSocketRequestState:
     # claimed recovery journal; an attempted send must remain consumed.
     recovery_attempt_dispatched: bool = False
     recovery_attempt_event_observed: bool = False
+    # Durable operation identity for a continuity-bound response.create. It is
+    # stable across client reconnects with the same parent response and body.
+    operation_id: str | None = None
+    operation_fingerprint: str | None = None
+    operation_parent_response_id: str | None = None
+    operation_registered: bool = False
+    # Account-neutral durable recovery keeps the original operation identity
+    # while asking request submission to rebind it to the replacement session.
+    operation_rebind_required: bool = False
+    # True after an existing UNKNOWN operation is claimed for this attempt.
+    # If admission fails before send, cleanup must restore UNKNOWN rather than
+    # treating the pre-existing row like a newly-created operation.
+    operation_recovery_claimed: bool = False
+    # True only when this request created the durable operation row. A
+    # pre-dispatch admission failure may remove that row; an existing row
+    # represents an ambiguous upstream attempt and must remain fenced.
+    operation_created: bool = False
+    operation_replay: bool = False
+    operation_dispatched: bool = False
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto

@@ -650,6 +650,7 @@ from app.modules.proxy._service.websocket import (
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,  # noqa: F401
     _assign_websocket_response_id,  # noqa: F401
+    _clear_websocket_stale_previous_response_cache,  # noqa: F401
     _draining_websocket_request_states,  # noqa: F401
     _find_websocket_request_state_by_response_id,  # noqa: F401
     _is_websocket_previous_response_output_item,  # noqa: F401
@@ -731,6 +732,7 @@ from app.modules.proxy.helpers import (
     _parse_openai_error,
     _upstream_error_from_openai,
 )
+from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
 from app.modules.proxy.http_bridge_forwarding import (
     HTTPBridgeForwardContext as HTTPBridgeForwardContext,
 )
@@ -936,9 +938,11 @@ class ProxyService(
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
         self._durable_bridge = DurableBridgeSessionCoordinator(SessionLocal)
+        self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher.from_settings(self._durable_bridge)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._http_bridge_sessions: dict[_HTTPBridgeSessionKey, _HTTPBridgeSession] = {}
-        _initialize_http_bridge_retry_circuit(self)
+        _initialize_http_bridge_retry_circuit(self, _clear_websocket_stale_previous_response_cache)
+        self._http_bridge_account_timeout_failures, self._http_bridge_account_timeout_lock = {}, asyncio.Lock()
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
         self._http_bridge_previous_response_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
@@ -947,12 +951,11 @@ class ProxyService(
         self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._stream_api_key_release_retry_semaphore = asyncio.Semaphore(_STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY)
         # In-memory pin from upstream-issued file_id -> codex-lb account_id.
-        # Used so ``finalize_file`` for a given ``file_id`` is routed to
-        # the same account that handled ``create_file``. Cross-instance
-        # routing is best-effort: if the finalize request lands on a
-        # different replica with no pin, we fall back to a fresh load-
-        # balancer selection. The TTL is short enough (5 min) that we
-        # never hold stale pins after the upstream upload window closes.
+        # Used so ``finalize_file`` for a given ``file_id`` is routed to the
+        # same account that handled ``create_file``. Cross-instance
+        # routing is best-effort: if finalize lands on a replica without a pin, we
+        # fall back to a fresh load-balancer selection. The TTL is short enough
+        # (5 min) that we never hold stale pins after the upstream upload window closes.
         self._file_account_pins: dict[str, _FilePinEntry] = {}
         self._file_account_pin_lock = asyncio.Lock()
         self._http_bridge_lock = anyio.Lock()

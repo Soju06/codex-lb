@@ -9,6 +9,7 @@ import { DEFAULT_OVERVIEW_TIMEFRAME } from "@/features/dashboard/schemas";
 import { getServiceReadiness } from "@/features/health/api";
 import { getRuntimeVersion } from "@/features/runtime/api";
 import { getSettings } from "@/features/settings/api";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { formatTimeLong } from "@/utils/formatters";
 
 const GITHUB_REPOSITORY_URL = "https://github.com/soju06/codex-lb";
@@ -116,7 +117,8 @@ export function StatusBar({ onHeightChange }: StatusBarProps = {}) {
     retry: false,
     staleTime: 6 * 60 * 60 * 1000,
   });
-  const lastSync = formatTimeLong(lastSyncAt);
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
+  const lastSync = formatTimeLong(lastSyncAt, dateDisplayFormat);
   const [isUsageSynced, setIsUsageSynced] = useState(false);
   useEffect(() => {
     function check() {

@@ -20,7 +20,7 @@ describe("AccountList", () => {
     });
   }
 
-  it("renders a compact list with account status, quota, credits, and warm-up state", () => {
+  it("renders a compact list with subscription and purchased credits", () => {
     render(
       <AccountList
         accounts={[
@@ -30,6 +30,7 @@ describe("AccountList", () => {
             email: "primary@example.com",
             status: "active",
             creditsBalance: 42.5,
+            remainingCreditsSecondary: 5_065.2,
             limitWarmupEnabled: true,
           }),
         ]}
@@ -43,8 +44,10 @@ describe("AccountList", () => {
     expect(screen.getByText("5h")).toBeInTheDocument();
     expect(screen.getByText("Weekly")).toBeInTheDocument();
     expect(screen.getAllByTestId("account-list-quota-meter")).toHaveLength(2);
+    expect(screen.getByText("5065.20")).toBeInTheDocument();
     expect(screen.getByText("42.50")).toBeInTheDocument();
     expect(screen.getByText("On")).toBeInTheDocument();
+    expect(screen.getByTestId("dashboard-account-list").firstElementChild).toHaveClass("min-w-[76rem]");
   });
 
   it("renders primary idle warm-up attempts as 5h", () => {
@@ -232,7 +235,7 @@ describe("AccountList", () => {
     expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
   });
 
-  it("sorts accounts with missing credit telemetry after real credit balances", async () => {
+  it("sorts purchased credits without replacing subscription quota", async () => {
     const user = userEvent.setup();
     render(
       <AccountList
@@ -259,13 +262,39 @@ describe("AccountList", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Credits" }));
+    await user.click(screen.getByRole("button", { name: "Purchased" }));
 
     expect(rowNames()).toEqual(["Empty Account", "Low Account", "Unknown Account"]);
 
-    await user.click(screen.getByRole("button", { name: "Credits, sorted ascending" }));
+    await user.click(screen.getByRole("button", { name: "Purchased, sorted ascending" }));
 
     expect(rowNames()).toEqual(["Low Account", "Empty Account", "Unknown Account"]);
+  });
+
+  it("sorts subscription credits independently of purchased credits", async () => {
+    const user = userEvent.setup();
+    render(
+      <AccountList
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-high-quota",
+            displayName: "High Quota Account",
+            creditsBalance: 0,
+            remainingCreditsSecondary: 5_000,
+          }),
+          createAccountSummary({
+            accountId: "acc-low-quota",
+            displayName: "Low Quota Account",
+            creditsBalance: 100,
+            remainingCreditsSecondary: 50,
+          }),
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Subscription" }));
+
+    expect(rowNames()).toEqual(["Low Quota Account", "High Quota Account"]);
   });
 
   it("hides the reset action when no reset credits are available", () => {

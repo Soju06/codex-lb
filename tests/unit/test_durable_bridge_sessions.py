@@ -28,10 +28,12 @@ from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
 )
-from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
+    durable_bridge_hash,
+    durable_bridge_operation_id,
 )
 
 pytestmark = pytest.mark.unit
@@ -2226,6 +2228,24 @@ async def test_durable_bridge_lookup_active_lease_survives_request_lookup(
     assert lookup.lease_is_active(now=utcnow()) is True
 
 
+def test_durable_bridge_lookup_lease_accepts_offset_aware_timestamp() -> None:
+    lookup = DurableBridgeLookup(
+        session_id="session-aware-lease",
+        canonical_kind="session_header",
+        canonical_key="sid-aware-lease",
+        api_key_scope="anonymous",
+        account_id="acc-1",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state=None,
+        latest_response_id=None,
+    )
+
+    assert lookup.lease_is_active(now=utcnow()) is True
+
+
 @pytest.mark.asyncio
 async def test_durable_bridge_lookup_falls_back_to_latest_turn_state_when_alias_missing(
     coordinator: DurableBridgeSessionCoordinator,
@@ -2432,6 +2452,57 @@ async def test_startup_purges_owned_bridge_rows(
             ("parent-cache", StickySessionKind.PROMPT_CACHE),
         )
         assert sticky is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_reclassifies_submitted_operation_for_recovery(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-submitted-recovery",
+        api_key_id=None,
+        instance_id="instance-submitted-recovery",
+        owner_process_epoch="old-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6",
+        service_tier=None,
+        latest_turn_state="turn-state",
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    fingerprint = durable_bridge_hash("submitted-recovery")
+    operation_id = durable_bridge_operation_id(claimed.session_id, fingerprint)
+    async with async_session_factory() as session:
+        repository = DurableBridgeRepository(session)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claimed.session_id,
+            instance_id="instance-submitted-recovery",
+            owner_epoch=claimed.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="acc-1",
+            model="gpt-5.6",
+            parent_response_id=None,
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claimed.session_id)
+            .values(last_seen_at=utcnow() - timedelta(minutes=5))
+        )
+        await session.commit()
+
+        deleted = await repository.purge_owned_sessions_on_startup(
+            instance_id="instance-submitted-recovery",
+            owner_process_epoch="new-process",
+        )
+
+        assert deleted == 0
+        operation = await repository.get_operation(operation_id=operation_id)
+        assert operation is not None
+        assert operation.state == "unknown"
 
 
 @pytest.mark.asyncio
@@ -2743,6 +2814,7 @@ async def test_startup_retention_normalizes_aware_postgres_timestamps() -> None:
     exhausted = SimpleNamespace(all=lambda: [])
     session = SimpleNamespace(
         execute=AsyncMock(side_effect=[selected, SimpleNamespace(), exhausted]),
+        scalars=AsyncMock(return_value=[]),
         commit=AsyncMock(),
     )
     repository = DurableBridgeRepository(cast(AsyncSession, session))

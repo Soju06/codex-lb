@@ -259,6 +259,12 @@ async def test_usage_summary_sql_aggregate_matches_legacy_python_summation(async
             (100, None, None, 250, 0.25, "error", "rate_limit_exceeded"),  # cached > input clamps
             (None, 20, 5, 70, None, "error", "rate_limit_exceeded"),  # input None: cached unclamped
             (10, 0, 99, -5, 0.125, "error", "insufficient_quota"),  # output=0 wins over reasoning; negative cached
+            # Cancelled terminals (#1552): counted in requests, excluded from
+            # the error numerator and from top_error even when their code
+            # would otherwise dominate.
+            (5, 1, None, 0, 0.01, "cancelled", "client_disconnected"),
+            (5, 1, None, 0, 0.01, "cancelled", "client_disconnected"),
+            (5, 1, None, 0, 0.01, "cancelled", "client_disconnected"),
         ]
         for index, (inp, out, reasoning, cached, cost, status, error_code) in enumerate(cases):
             await logs_repo.add_log(
@@ -302,11 +308,12 @@ async def test_usage_summary_sql_aggregate_matches_legacy_python_summation(async
     payload = response.json()
 
     metrics = payload["metrics"]
-    assert metrics["requests7d"] == legacy_metrics.requests_7d == 5
+    assert metrics["requests7d"] == legacy_metrics.requests_7d == 8
     assert metrics["tokensSecondaryWindow"] == legacy_metrics.tokens_secondary_window
     assert metrics["cachedTokensSecondaryWindow"] == legacy_metrics.cached_tokens_secondary_window
-    assert metrics["errorRate7d"] == pytest.approx(legacy_metrics.error_rate_7d)
+    assert metrics["errorRate7d"] == pytest.approx(legacy_metrics.error_rate_7d) == pytest.approx(3 / 8)
     assert metrics["topError"] == legacy_metrics.top_error == "rate_limit_exceeded"
+    assert metrics["cancelled7d"] == legacy_metrics.cancelled_7d == 3
 
     cost = payload["cost"]
     assert cost["totalUsd7d"] == pytest.approx(legacy_cost.total_usd_7d)

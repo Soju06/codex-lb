@@ -1656,11 +1656,18 @@ async def test_source_chat_reasoning_allowlist_preserves_client_plane_effort(asy
             "model": model,
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning_effort": "minimal",
+            "thinking": {
+                "effort": "minimal",
+                "type": "disabled",
+                "enabled": False,
+                "vendor_hint": "keep",
+            },
         },
     )
 
     assert response.status_code == 200
     assert captured["reasoning_effort"] == "minimal"
+    assert captured["thinking"] == {"effort": "minimal", "vendor_hint": "keep"}
     assert "reasoning" not in captured
 
 
@@ -1838,12 +1845,13 @@ async def test_source_chat_reasoning_allowlist_materializes_canonicalized_model_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("with_allowlist", "reasoning", "enable_thinking"),
+    ("with_allowlist", "reasoning", "enable_thinking", "thinking_effort"),
     [
-        (False, None, False),
-        (True, None, False),
-        (True, {"effort": "low"}, False),
-        (True, {"effort": "low"}, True),
+        (False, None, False, None),
+        (True, None, False, None),
+        (True, {"effort": "low"}, False, None),
+        (True, {"effort": "low"}, True, None),
+        (True, {"effort": "low"}, False, " "),
     ],
 )
 async def test_source_responses_preserves_effortless_provider_thinking_object(
@@ -1852,6 +1860,7 @@ async def test_source_responses_preserves_effortless_provider_thinking_object(
     with_allowlist,
     reasoning,
     enable_thinking,
+    thinking_effort,
 ):
     if with_allowlist:
         await _enable_api_key_auth(async_client)
@@ -1879,6 +1888,8 @@ async def test_source_responses_preserves_effortless_provider_thinking_object(
         supports_responses=True,
     )
     thinking = {"type": "adaptive", "budget": 4096, "budget_tokens": 2048, "vendor_hint": "keep"}
+    if thinking_effort is not None:
+        thinking["effort"] = thinking_effort
     headers: dict[str, str] = {}
     if with_allowlist:
         created = await async_client.post(
@@ -1906,7 +1917,8 @@ async def test_source_responses_preserves_effortless_provider_thinking_object(
     response = await async_client.post("/v1/responses", headers=headers, json=request_payload)
 
     assert response.status_code == 200
-    assert captured["thinking"] == thinking
+    expected_thinking = {key: value for key, value in thinking.items() if key != "effort"}
+    assert captured["thinking"] == expected_thinking
     if reasoning is None:
         assert "reasoning" not in captured
     else:

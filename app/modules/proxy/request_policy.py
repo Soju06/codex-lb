@@ -237,8 +237,12 @@ def normalize_source_reasoning_aliases(payload: dict[str, JsonValue]) -> None:
     if preserve_provider_thinking:
         payload.pop("thinking", None)
     normalize_reasoning_aliases(payload)
-    if preserve_provider_thinking:
-        payload["thinking"] = provider_thinking
+    if preserve_provider_thinking and thinking_mapping is not None:
+        preserved_thinking = dict(thinking_mapping.items())
+        preserved_effort = preserved_thinking.get("effort")
+        if isinstance(preserved_effort, str) and not preserved_effort.strip():
+            preserved_thinking.pop("effort")
+        payload["thinking"] = preserved_thinking
 
 
 def apply_api_key_enforcement(
@@ -464,7 +468,13 @@ def apply_api_key_enforcement_to_chat_payload(
                     thinking.pop("effort")
                     payload["thinking"] = thinking
                 if isinstance(thinking_effort, str) and thinking_effort.strip():
-                    payload["thinking"] = {**thinking, "effort": wire_effort}
+                    aligned_thinking = {**thinking, "effort": wire_effort}
+                    thinking_type = aligned_thinking.get("type")
+                    if isinstance(thinking_type, str) and thinking_type.strip().lower() == "disabled":
+                        aligned_thinking.pop("type")
+                    if aligned_thinking.get("enabled") is False:
+                        aligned_thinking.pop("enabled")
+                    payload["thinking"] = aligned_thinking
                 else:
                     thinking_type = thinking.get("type")
                     is_inactive = thinking.get("enabled") is False or (

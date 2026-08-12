@@ -721,6 +721,19 @@ def test_source_chat_reasoning_policy_aligns_conflicting_aliases() -> None:
     }
 
 
+@pytest.mark.parametrize("inactive_selector", [{"type": "disabled"}, {"enabled": False}])
+def test_source_chat_reasoning_policy_removes_inactive_selector_from_explicit_thinking(
+    inactive_selector: dict[str, JsonValue],
+) -> None:
+    payload: dict[str, JsonValue] = {
+        "thinking": {"effort": "low", **inactive_selector, "vendor_hint": "keep"},
+    }
+
+    apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="low")
+
+    assert payload == {"thinking": {"effort": "low", "vendor_hint": "keep"}}
+
+
 @pytest.mark.parametrize("effort", ["minimal", "xhigh"])
 def test_source_chat_reasoning_policy_preserves_client_plane_effort(effort: str) -> None:
     payload: dict[str, JsonValue] = {"reasoning_effort": "low"}
@@ -806,6 +819,20 @@ def test_source_reasoning_policy_preserves_effortless_thinking_beside_enable_ali
     normalize_source_reasoning_aliases(payload)
 
     assert payload == {"reasoning": {"effort": "low"}, "thinking": thinking}
+
+
+def test_source_reasoning_policy_strips_blank_effort_from_preserved_thinking() -> None:
+    payload: dict[str, JsonValue] = {
+        "reasoning": {"effort": "low"},
+        "thinking": {"effort": " ", "type": "adaptive", "vendor_hint": "keep"},
+    }
+
+    normalize_source_reasoning_aliases(payload)
+
+    assert payload == {
+        "reasoning": {"effort": "low"},
+        "thinking": {"type": "adaptive", "vendor_hint": "keep"},
+    }
 
 
 @pytest.mark.parametrize("thinking", [False, {"type": "disabled"}, {"enabled": False}])

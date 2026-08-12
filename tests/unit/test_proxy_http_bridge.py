@@ -561,9 +561,7 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
         started_at=time.monotonic(),
         transport="http",
         previous_response_id=None,
-        operation_parent_response_id="resp-parent" if anchored else None,
-        operation_id="op-recovery-proof",
-        operation_registered=True,
+        hard_continuity_anchor=True,
     )
     session = _make_bridge_session(
         key=proxy_service._HTTPBridgeSessionKey("turn_state_header", turn_state, None),
@@ -571,6 +569,7 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
     )
     session.durable_session_id = "durable-recovery-proof"
     session.durable_owner_epoch = 1
+    session.closed = True
 
     def fake_prepare(
         _payload: proxy_service.ResponsesRequest,
@@ -585,11 +584,8 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
         return request_state, '{"type":"response.create"}'
 
     async def fail_eventlessly(*_args: Any, **_kwargs: Any):
-        raise ProxyResponseError(
-            502,
-            openai_error("stream_incomplete", "upstream closed", error_type="server_error"),
-        )
-        yield ""
+        raise AssertionError("submit should fail before the upstream event reader is entered")
+        yield ""  # pragma: no cover
 
     monkeypatch.setattr(
         proxy_service,
@@ -618,11 +614,69 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(service._durable_bridge, "release_live_session", AsyncMock(return_value=None))
     monkeypatch.setattr(service._durable_bridge, "reset_operation_event_spool", AsyncMock(return_value=True))
+    completed_operations: list[Any] = (
+        [SimpleNamespace(state="completed", event_spool_complete=True, response_id="resp-parent"), None]
+        if anchored
+        else [None]
+    )
+
+    async def get_operation_by_fingerprint(**_kwargs: Any) -> Any:
+        return completed_operations.pop(0)
+
+    async def get_operation(**_kwargs: Any) -> None:
+        return None
+
+    async def record_operation(**kwargs: Any) -> Any:
+        request_state.operation_id = kwargs["operation_id"]
+        return SimpleNamespace(
+            created=True,
+            operation_id=kwargs["operation_id"],
+            state="submitted",
+            event_spool_complete=False,
+            response_id=None,
+        )
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=get_operation_by_fingerprint,
+            get_operation=get_operation,
+            record_operation=record_operation,
+            lookup_request_targets=AsyncMock(return_value=None),
+            release_live_session=AsyncMock(return_value=None),
+            reset_operation_event_spool=AsyncMock(return_value=True),
+        ),
+    )
+    service._http_bridge_sessions[session.key] = session
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-bridge"))
     monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
-    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fail_eventlessly)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+    monkeypatch.setattr(service, "_retry_http_bridge_request_on_fresh_upstream", AsyncMock(return_value=False))
+
+    async def submit_then_fail(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+        request_deadline: float | None = None,
+    ):
+        del propagate_http_errors, downstream_turn_state, request_deadline
+        await service._submit_http_bridge_request_with_handoff(
+            _session,
+            request_state=request_state,
+            text_data=text_data,
+            queue_limit=queue_limit,
+            request_scope_id=request_state.request_id,
+        )
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", submit_then_fail)
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_via_http_bridge(
@@ -642,6 +696,9 @@ async def test_stream_via_http_bridge_marks_recovery_only_after_parent_proof(
             pass
 
     assert getattr(exc_info.value, "http_bridge_durable_recovery_eligible", False) is anchored
+    if anchored:
+        assert request_state.previous_response_id == "resp-parent"
+        assert request_state.operation_parent_response_id == "resp-parent"
 
 
 @pytest.mark.asyncio

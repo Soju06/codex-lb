@@ -25,7 +25,9 @@ external source. A sole `enable_thinking: true` control authorized as `medium`
 MUST remain enabled on source egress.
 When source selection replaces an effort-bearing model alias with a canonical
 source model slug and the client supplied no separate reasoning control, the
-service MUST materialize that authorized effort as `reasoning_effort`.
+service MUST materialize that authorized effort as `reasoning_effort`. This
+applies whether the alias came from the client model or the API key's enforced
+model.
 
 #### Scenario: Source-routed chat request is rejected before forwarding
 
@@ -82,6 +84,15 @@ service MUST materialize that authorized effort as `reasoning_effort`.
 - **GIVEN** a source registered for `gpt-5.6-sol` and an API key that allows
   `xhigh`
 - **WHEN** a Chat Completions client requests `gpt-5.6-sol-xhigh` without a
+  separate reasoning control
+- **THEN** the source receives model `gpt-5.6-sol`
+- **AND** it receives `reasoning_effort: "xhigh"`
+
+#### Scenario: Canonical source retains effort from an enforced model alias
+
+- **GIVEN** a source registered for `gpt-5.6-sol` and an API key that enforces
+  `gpt-5.6-sol-xhigh` and allows `xhigh`
+- **WHEN** a Chat Completions client requests canonical `gpt-5.6-sol` without a
   separate reasoning control
 - **THEN** the source receives model `gpt-5.6-sol`
 - **AND** it receives `reasoning_effort: "xhigh"`

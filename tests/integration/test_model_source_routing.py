@@ -1634,9 +1634,11 @@ async def test_source_chat_reasoning_allowlist_preserves_enable_thinking(async_c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("alias_source", ["requested", "enforced"])
 async def test_source_chat_reasoning_allowlist_materializes_canonicalized_model_alias_effort(
     async_client,
     source_upstream,
+    alias_source,
 ):
     await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}
@@ -1654,21 +1656,21 @@ async def test_source_chat_reasoning_allowlist_materializes_canonicalized_model_
         base_url=base_url,
         raw_metadata_json='{"supports_reasoning": true}',
     )
-    created = await async_client.post(
-        "/api/api-keys/",
-        json={
-            "name": "source-canonical-model-alias-effort-key",
-            "assignedSourceIds": [source_id],
-            "allowedReasoningEfforts": ["xhigh"],
-        },
-    )
+    key_payload = {
+        "name": "source-canonical-model-alias-effort-key",
+        "assignedSourceIds": [source_id],
+        "allowedReasoningEfforts": ["xhigh"],
+    }
+    if alias_source == "enforced":
+        key_payload["enforcedModel"] = f"{model}-xhigh"
+    created = await async_client.post("/api/api-keys/", json=key_payload)
     assert created.status_code == 200
 
     response = await async_client.post(
         "/v1/chat/completions",
         headers={"Authorization": f"Bearer {created.json()['key']}"},
         json={
-            "model": f"{model}-xhigh",
+            "model": f"{model}-xhigh" if alias_source == "requested" else model,
             "messages": [{"role": "user", "content": "hi"}],
         },
     )

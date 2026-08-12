@@ -12,6 +12,7 @@ class _FakeDurableBridge:
         self.append_result = append_result
         self.batches: list[list[str]] = []
         self.finalized: list[str] = []
+        self.updated: list[dict[str, object]] = []
 
     async def append_operation_events(self, *, events, max_bytes: int) -> bool:
         del max_bytes
@@ -20,6 +21,10 @@ class _FakeDurableBridge:
 
     async def finalize_operation_event_spool(self, **kwargs) -> bool:
         self.finalized.append(kwargs["operation_id"])
+        return True
+
+    async def update_operation(self, **kwargs) -> bool:
+        self.updated.append(kwargs)
         return True
 
 
@@ -94,8 +99,26 @@ async def test_dropped_batch_is_never_marked_replayable() -> None:
     )
     try:
         await _enqueue(batcher, "one")
-        await _enqueue(batcher, "terminal", terminal=True)
+        for _ in range(20):
+            if durable.batches:
+                break
+            await asyncio.sleep(0.01)
+        assert (
+            await batcher.append_terminal_event(
+                operation_id="op-1",
+                session_id="session-1",
+                instance_id="instance-1",
+                owner_epoch=1,
+                event_text="terminal",
+                max_bytes=1024,
+                state="completed",
+            )
+            is False
+        )
         assert durable.finalized == []
+        assert durable.updated[0]["state"] == "completed"
+        assert batcher._contexts == {}
+        assert batcher._dropped_operations == set()
     finally:
         await batcher.close()
 

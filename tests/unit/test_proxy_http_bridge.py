@@ -23250,6 +23250,7 @@ async def test_http_bridge_liveness_timeout_is_neutral_not_replayed_and_forces_r
         session,
         detail=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
         response_events_seen=0,
+        retired_request_count=1,
     )
     assert session.queued_request_count == 0
     assert session.closed is True
@@ -23400,6 +23401,7 @@ async def test_http_bridge_liveness_send_receive_race_settles_request_once(
         session,
         detail=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
         response_events_seen=0,
+        retired_request_count=2,
     )
 
 
@@ -23522,6 +23524,7 @@ async def test_http_bridge_closed_without_liveness_claim_still_settles_pending_s
         session,
         detail=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
         response_events_seen=0,
+        retired_request_count=2,
     )
 
 
@@ -23641,7 +23644,12 @@ async def test_http_bridge_clean_close_before_response_does_not_penalize_account
 
     assert fail_pending.await_args is not None
     assert fail_pending.await_args.kwargs["penalize_account"] is False
-    retire.assert_awaited_once_with(session, detail="stream_incomplete", response_events_seen=0)
+    retire.assert_awaited_once_with(
+        session,
+        detail="stream_incomplete",
+        response_events_seen=0,
+        retired_request_count=0,
+    )
 
 
 @pytest.mark.asyncio
@@ -23811,6 +23819,103 @@ async def test_retire_stale_pending_http_bridge_session_unregisters_aliases_and_
     release_account_lease.assert_awaited_once_with(lease)
     assert session.account_lease is None
     close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_idle_retirement_does_not_record_retry_circuit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-idle-retire")
+    record_failure = AsyncMock()
+    close = AsyncMock()
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close)
+
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="stream_incomplete",
+        response_events_seen=0,
+    )
+
+    record_failure.assert_not_awaited()
+    close.assert_awaited_once_with(session, reason="retire_stale_pending")
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_eventless_pending_retirement_records_one_retry_circuit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_eventless_http_bridge_owner(request_id="req-eventless-retire")
+    session = _make_bridge_session(
+        key_value="bridge-eventless-retire",
+        pending_requests=deque([owner]),
+        queued_request_count=1,
+    )
+    record_failure = AsyncMock()
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="missing_response_created_timeout",
+        response_events_seen=0,
+    )
+
+    record_failure.assert_awaited_once_with(session, detail="missing_response_created_timeout")
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_direct_retirement_derives_observed_response_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_eventless_http_bridge_owner(request_id="req-eventful-direct-retire")
+    owner.response_event_count = 1
+    session = _make_bridge_session(
+        key_value="bridge-eventful-direct-retire",
+        pending_requests=deque([owner]),
+        queued_request_count=1,
+    )
+    record_failure = AsyncMock()
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+
+    await service._retire_stale_pending_http_bridge_session(
+        session,
+        detail="stuck_response_create_gate",
+    )
+
+    record_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_failure_preserves_pre_drain_request_for_retry_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_eventless_http_bridge_owner(request_id="req-reader-failure-retire")
+    session = _make_bridge_session(
+        key_value="bridge-reader-failure-retire",
+        pending_requests=deque([owner]),
+        queued_request_count=1,
+    )
+    record_failure = AsyncMock()
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+
+    retired = await service._fail_http_bridge_reader_and_maybe_retire(
+        session,
+        error_code="stream_incomplete",
+        error_message="upstream closed before response.completed",
+        penalize_account=False,
+        response_events_seen=0,
+    )
+
+    assert retired is True
+    assert not session.pending_requests
+    record_failure.assert_awaited_once_with(session, detail="stream_incomplete")
 
 
 @pytest.mark.asyncio
@@ -24809,7 +24914,12 @@ async def test_http_bridge_eventless_timeout_force_retires_with_admission_waiter
 
     assert retired is True
     assert session.closed is True
-    retire.assert_awaited_once_with(session, detail="missing_response_created_timeout", response_events_seen=0)
+    retire.assert_awaited_once_with(
+        session,
+        detail="missing_response_created_timeout",
+        response_events_seen=0,
+        retired_request_count=0,
+    )
     fail_pending_await_args = fail_pending.await_args
     assert fail_pending_await_args is not None
     assert fail_pending_await_args.kwargs["penalize_account"] is False
@@ -24833,7 +24943,12 @@ async def test_http_bridge_reader_failure_retires_without_waiters_when_notificat
             error_message="closed",
         )
 
-    retire.assert_awaited_once_with(session, detail="stream_incomplete", response_events_seen=0)
+    retire.assert_awaited_once_with(
+        session,
+        detail="stream_incomplete",
+        response_events_seen=0,
+        retired_request_count=0,
+    )
 
 
 @pytest.mark.asyncio

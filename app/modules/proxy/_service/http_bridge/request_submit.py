@@ -2698,16 +2698,56 @@ class _HTTPBridgeRequestSubmitMixin:
         detail: str,
         retry_circuit_detail: str | None = None,
         response_events_seen: int | None = None,
+        retired_request_count: int | None = None,
     ) -> None:
         async with session.pending_lock:
             retired_request_states = list(session.pending_requests)
+            if retired_request_count is None:
+                retired_request_count = sum(
+                    1
+                    for request_state in retired_request_states
+                    if _http_bridge_request_counts_against_queue(request_state)
+                )
+            if response_events_seen is None:
+                # Direct retirement must derive event evidence from the same
+                # locked ownership snapshot as the pending count. Otherwise an
+                # eventful stale-gate owner looks eventless merely because its
+                # caller omitted this optional handoff, creating a false
+                # circuit strike. Explicit values remain authoritative for
+                # reader-failure callers whose pending deque was already
+                # drained before entering this shared boundary.
+                response_events_seen = max(
+                    (
+                        max(
+                            request_state.response_event_count,
+                            int(
+                                request_state.response_id is not None
+                                or request_state.latency_response_created_ms is not None
+                                or request_state.downstream_visible
+                            ),
+                        )
+                        for request_state in retired_request_states
+                    ),
+                    default=0,
+                )
         # Direct retirement (for example the all-stale stuck-gate path, where
         # the wedged reattach is the only pending request) cancels the reader
         # and fails the pendings without passing the partial-cleanup hook or
         # the reader-failure funnel, so evaluate the wedge shape (#1534) here
         # too; recording is idempotent for callers that already quarantined.
         _record_http_bridge_quarantine_wedged_pending(self, session, retired_request_states)
-        if response_events_seen is None or response_events_seen == 0:
+        # This circuit measures failed request lifecycles, not upstream socket
+        # churn. ``response_events_seen == 0`` is also true when an idle reader
+        # closes with an empty pending deque. Charging that idle close creates a
+        # phantom first strike, so one later response-create timeout opens the
+        # nominally "repeated" 60-second cooldown and interrupts the client.
+        # Keep the ownership proof at this shared retirement boundary unless a
+        # caller already claimed and drained the deque. The reader-failure
+        # funnel must pass its pre-drain count because terminal notification
+        # deliberately empties ``pending_requests`` before retirement. Without
+        # that handoff, genuine pre-response failures disappear from circuit
+        # accounting while idle closes and request failures look identical.
+        if retired_request_count > 0 and response_events_seen == 0:
             await self._record_http_bridge_retry_circuit_failure(
                 session,
                 detail=retry_circuit_detail or detail,

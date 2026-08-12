@@ -1090,12 +1090,20 @@ class _HTTPBridgeUpstreamEventsMixin:
                         detail=error_code,
                         retry_circuit_detail="clean_close",
                         response_events_seen=observed_response_events,
+                        retired_request_count=failed_pending_count,
                     )
                 else:
                     await self._retire_stale_pending_http_bridge_session(
                         session,
                         detail=retire_detail or error_code,
                         response_events_seen=observed_response_events,
+                        # ``_fail_pending_websocket_requests`` has already
+                        # claimed and drained these states. Carry the count
+                        # sampled under ``pending_lock`` across that ownership
+                        # transfer so normal reader failures still consume one
+                        # strike. The deferred/poison branch records its own
+                        # strike above and intentionally does not pass it.
+                        retired_request_count=failed_pending_count,
                     )
         return force_retire or session.admission_waiter_count == 0
 

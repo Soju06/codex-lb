@@ -38,6 +38,7 @@ from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge.helpers import (
+    _make_http_bridge_session_header_fallback_key,
     _release_http_bridge_unanchored_handoff,
     _reserve_http_bridge_unanchored_handoff,
 )
@@ -12666,6 +12667,89 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
     assert connect_count == 2
     assert upstreams[0].closed is True
     record_retry_circuit_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_idle_retirement_does_not_open_retry_circuit_on_next_failure(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_idle_retirement_circuit",
+        "backend-idle-retirement-circuit@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _FakeBridgeUpstreamWebSocket("resp_idle_retirement_circuit")
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    session_id = "backend-idle-retirement-circuit-session"
+    prompt_cache_key = "backend-idle-retirement-circuit-thread"
+    headers = {"session_id": session_id}
+    bridge_key = _make_http_bridge_session_header_fallback_key(
+        headers=headers,
+        api_key=None,
+        explicit_prompt_cache_key=prompt_cache_key,
+    )
+    assert bridge_key is not None
+    service = get_proxy_service_for_app(app_instance)
+
+    # Reproduce the live ordering without waiting for production-scale
+    # watchdogs: an idle no-pending retirement, then one genuine pre-response
+    # request failure on the same hard key. Only the latter may be a strike.
+    idle_session = _make_dummy_bridge_session(bridge_key)
+    await service._retire_stale_pending_http_bridge_session(
+        idle_session,
+        detail="stream_incomplete",
+        response_events_seen=0,
+    )
+    failed_request_session = _make_dummy_bridge_session(bridge_key)
+    failures = await service._record_http_bridge_retry_circuit_failure(
+        failed_request_session,
+        detail="missing_response_created_timeout",
+    )
+    assert failures == 1
+    assert await service._http_bridge_precreated_retry_allowed(failed_request_session) is True
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue after one real timeout",
+            "prompt_cache_key": prompt_cache_key,
+            "stream": True,
+        },
+        headers=headers,
+    )
+
+    _assert_created_text_delta_completed(events)
+    assert events[-1]["response"]["id"] == "resp_idle_retirement_circuit_1"
 
 
 @pytest.mark.asyncio

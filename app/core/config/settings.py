@@ -287,6 +287,7 @@ class Settings(BaseSettings):
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     live_usage_ingestion_enabled: bool = True
+    rate_limit_reset_credits_refresh_enabled: bool = True
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     warmup_model: str = "gpt-5.4-mini"

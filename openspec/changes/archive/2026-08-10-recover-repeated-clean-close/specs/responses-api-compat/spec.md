@@ -41,6 +41,12 @@ being considered stale. When the watchdog skips a candidate, it MUST emit a
 low-cardinality diagnostic containing the session-closed state, candidate
 count, and pending-state verdicts.
 
+#### Scenario: clean close before response.created is not retried
+
+- **WHEN** the initial upstream HTTP responses bridge closes with `close_code = 1000` before any `response.*` event for the pending request
+- **THEN** the proxy returns HTTP 502 with `error.code = "upstream_rejected_input"`
+- **AND** does not transparently replay the pre-created request
+
 #### Scenario: clean close before response output receives one bounded additional replay
 
 - **GIVEN** an HTTP bridge request has no surfaced `response.*` events
@@ -115,6 +121,13 @@ when no API key is present). The proxy MUST record only the documented
 pre-response failure classes (`stream_incomplete`, `clean_close`, and
 `stream_idle_timeout`).
 
+A bridge retirement MUST record one of those failures only when the retiring
+session still owns at least one pending request and no response event has been
+observed for that request lifecycle. Retiring an idle upstream bridge with no
+pending request MUST NOT advance the circuit or cause a later request to be
+treated as a repeated failure. A pending request that has already emitted a
+response event MUST remain excluded from this pre-response circuit.
+
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
 using exponential backoff from sixty seconds up to ten minutes. Clean-close
@@ -138,6 +151,25 @@ crash the request; the proxy MUST continue using available local state and
 record the failure for observability. Rows older than one hour MUST be treated
 as expired and removed. A successful terminal response MUST clear the local
 and durable circuit state.
+
+#### Scenario: idle bridge retirement does not consume a circuit strike
+
+- **GIVEN** a hard-affinity HTTP bridge has no pending requests
+- **WHEN** its upstream WebSocket closes and the idle bridge is retired
+- **THEN** the retry-circuit failure count for that key remains unchanged
+- **AND** a later request is not placed in cooldown because of the idle close
+
+#### Scenario: eventless pending retirement consumes exactly one strike
+
+- **GIVEN** a hard-affinity HTTP bridge owns a pending request with no observed response event
+- **WHEN** the bridge retires because the upstream fails before acknowledging the request
+- **THEN** the retry circuit records exactly one failure for that request lifecycle
+
+#### Scenario: midstream retirement does not consume a pre-response strike
+
+- **GIVEN** a hard-affinity HTTP bridge owns a pending request with an observed response event
+- **WHEN** the bridge retires before completion
+- **THEN** the pre-response retry-circuit failure count remains unchanged
 
 #### Scenario: the second hard-key failure opens a durable circuit
 
@@ -174,14 +206,45 @@ When an upstream websocket closes while one or more streamed response requests
 are pending and have not reached a terminal event, the proxy MUST record a
 transient upstream error for the account before signaling failure for those
 pending requests, except when the close carries a classified process-wide
-network failure, is a clean close (`close_code = 1000`) before any
-`response.*` event, or carries the classified per-socket
-`upstream_keepalive_timeout` transport error. Clean pre-response closes and
-keepalive timeouts MUST remain account-neutral while using the bounded retry
-and retry-circuit handling above. A classified process-wide network failure
-MUST remain account neutral and use its network error code. For other closes,
-the proxy MUST surface
-`stream_incomplete` to affected pending requests.
+network failure or upstream WebSocket liveness timeout, is a clean close
+(`close_code = 1000`) before any `response.*` event, or carries the classified
+per-socket `upstream_keepalive_timeout` transport error. Clean pre-response
+closes, keepalive timeouts, process-wide network failures, and liveness
+timeouts MUST remain account-neutral and use their classified error and bounded
+retry or retry-circuit handling. For other closes, the proxy MUST surface
+`stream_incomplete` to affected pending requests except when a direct Responses
+WebSocket request has already successfully emitted a finite integer
+`sequence_number`. For that sequenced direct-WebSocket case, the proxy MUST
+record the request outcome as `stream_incomplete` without emitting a synthetic
+terminal frame under the active response id, then MUST close the downstream
+WebSocket with code 1011.
+
+#### Scenario: websocket closes before pending responses complete
+
+- **GIVEN** a streamed response request is pending on an upstream websocket
+- **AND** the direct downstream response has not emitted a numeric sequence, or the request uses another transport
+- **WHEN** the websocket closes before a terminal response event is observed
+- **AND** the close does not carry a classified process-wide network failure or upstream WebSocket liveness timeout
+- **THEN** the pending request fails with `stream_incomplete`
+- **AND** the account receives a transient upstream failure signal for routing
+
+#### Scenario: sequenced direct websocket closes before completion
+
+- **GIVEN** a direct Responses WebSocket request has successfully emitted a finite integer `sequence_number`
+- **WHEN** the upstream websocket closes before a terminal response event is observed
+- **AND** the close does not carry a classified process-wide network failure or upstream WebSocket liveness timeout
+- **THEN** the request is recorded as failed with `stream_incomplete`
+- **AND** no synthetic terminal frame is emitted under the active response id
+- **AND** the downstream WebSocket closes with code 1011
+- **AND** the account receives a transient upstream failure signal for routing
+
+#### Scenario: websocket liveness timeout remains account neutral
+
+- **GIVEN** a streamed response request is pending on an upstream websocket
+- **WHEN** its transport reports `upstream_websocket_liveness_timeout`
+- **THEN** the pending request fails with that classified error code
+- **AND** the account receives no failure-health signal
+- **AND** the request is not transparently replayed
 
 #### Scenario: clean pre-response close does not penalize the account
 

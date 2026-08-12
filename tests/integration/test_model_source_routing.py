@@ -1826,6 +1826,66 @@ async def test_source_responses_preserves_effortless_provider_thinking_object(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_api_key", [False, True])
+async def test_source_responses_preserves_unrestricted_provider_reasoning_alias(
+    async_client,
+    source_upstream,
+    with_api_key,
+):
+    if with_api_key:
+        await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def responses(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(
+            {
+                "id": "resp_provider_reasoning_alias",
+                "object": "response",
+                "status": "completed",
+                "model": "source-provider-reasoning-alias",
+                "output": [],
+            }
+        )
+
+    base_url = await source_upstream(responses)
+    model = "source-provider-reasoning-alias"
+    source_id = await _create_model_source(
+        async_client,
+        name=model,
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    headers: dict[str, str] = {}
+    if with_api_key:
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={
+                "name": "source-provider-reasoning-alias-key",
+                "assignedSourceIds": [source_id],
+            },
+        )
+        assert created.status_code == 200
+        headers["Authorization"] = f"Bearer {created.json()['key']}"
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers=headers,
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "thinking": "minimal",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["thinking"] == "minimal"
+    assert "reasoning" not in captured
+
+
+@pytest.mark.asyncio
 async def test_source_responses_reasoning_allowlist_strips_conflicting_aliases(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}

@@ -613,6 +613,7 @@ class ResponsesTextControls(BaseModel):
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
+    _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
     @classmethod

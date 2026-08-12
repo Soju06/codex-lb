@@ -164,6 +164,13 @@ def _client_reasoning_effort(payload: ResponsesRequest | ResponsesCompactRequest
         effort = reasoning.get("effort")
         if isinstance(effort, str) and effort.strip():
             return effort.strip().lower()
+    return _client_reasoning_effort_from_provider_aliases(payload)
+
+
+def _client_reasoning_effort_from_provider_aliases(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+) -> str | None:
+    reasoning = payload.reasoning.model_dump(mode="json", exclude_none=True) if payload.reasoning is not None else None
     extra = payload.model_extra
     if isinstance(extra, dict):
         alias_payload = dict(extra)
@@ -177,6 +184,21 @@ def _client_reasoning_effort(payload: ResponsesRequest | ResponsesCompactRequest
                 return extra_effort.strip().lower()
 
     return None
+
+
+def _materialize_provider_reasoning_effort(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    effort: str | None,
+) -> None:
+    existing_effort = payload.reasoning.effort if payload.reasoning is not None else None
+    if effort is None or (isinstance(existing_effort, str) and existing_effort.strip()):
+        return
+    if payload.reasoning is None:
+        payload.reasoning = ResponsesReasoning(effort=effort)
+    else:
+        payload.reasoning.effort = effort
+    if isinstance(payload, ResponsesRequest):
+        payload._codex_lb_provider_reasoning_effort_materialized = True
 
 
 def _client_reasoning_effort_from_model(model: str | None) -> str | None:
@@ -227,9 +249,11 @@ def apply_api_key_enforcement(
     """
     client_reasoning_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
     payload._codex_lb_client_reasoning_effort = client_reasoning_effort
+    provider_reasoning_effort = _client_reasoning_effort_from_provider_aliases(payload)
     normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
 
     if api_key is None:
+        _materialize_provider_reasoning_effort(payload, provider_reasoning_effort)
         normalize_unsupported_reasoning_effort(payload)
         return False
 
@@ -277,14 +301,9 @@ def apply_api_key_enforcement(
                 api_key.enforced_reasoning_effort,
             )
 
+    _materialize_provider_reasoning_effort(payload, provider_reasoning_effort)
     if client_reasoning_effort is not None:
         validate_reasoning_effort_access(api_key, client_reasoning_effort)
-        if api_key.allowed_reasoning_efforts is not None and payload.reasoning is None:
-            # Alias-only requests stay provider-shaped until a policy actually
-            # authorizes them. Materialize the authorized effort here so the
-            # normal wire fallback/aliasing runs without changing unrestricted
-            # source payloads during request validation.
-            payload.reasoning = ResponsesReasoning(effort=client_reasoning_effort)
     normalize_unsupported_reasoning_effort(payload)
 
     service_tier_was_enforced = False

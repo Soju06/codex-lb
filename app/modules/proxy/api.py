@@ -4238,6 +4238,16 @@ async def _source_responses_response(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
     source_payload = payload.model_dump_for_forwarding()
+    if payload._codex_lb_provider_reasoning_effort_materialized and (
+        api_key is None or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
+    ):
+        reasoning = source_payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            reasoning = {key: value for key, value in reasoning.items() if key != "effort"}
+            if reasoning:
+                source_payload["reasoning"] = reasoning
+            else:
+                source_payload.pop("reasoning")
     if api_key is not None and (
         api_key.enforced_reasoning_effort is not None
         or (api_key.allowed_reasoning_efforts is not None and payload._codex_lb_client_reasoning_effort is not None)

@@ -392,6 +392,30 @@ def test_reasoning_effort_allowlist_checks_responses_alias_fields(
         apply_api_key_enforcement(request, api_key)
 
 
+@pytest.mark.parametrize(
+    "request_type",
+    [
+        pytest.param(ResponsesRequest, id="responses-and-websocket"),
+        pytest.param(ResponsesCompactRequest, id="compact"),
+    ],
+)
+def test_provider_reasoning_alias_runs_subscription_wire_fallback(request_type) -> None:
+    request = request_type.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "",
+            "input": [],
+            "thinking": "minimal",
+        }
+    )
+
+    apply_api_key_enforcement(request, None)
+
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "low"
+    assert request.to_payload()["reasoning"] == {"effort": "low"}
+
+
 def test_reasoning_effort_allowlist_ignores_blank_alias_before_thinking_effort() -> None:
     request = ResponsesRequest.model_validate(
         {

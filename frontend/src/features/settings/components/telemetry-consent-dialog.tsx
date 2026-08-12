@@ -14,8 +14,9 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { TelemetryPayloadPreview } from "@/features/settings/components/telemetry-payload-preview";
 import { useTelemetryConsent } from "@/features/settings/hooks/use-settings";
 
-// Same location the backend startup notice points operators to.
-const TELEMETRY_DOCS_URL = "https://github.com/Soju06/codex-lb/tree/main/openspec/specs/telemetry";
+// Same published page the backend startup notice points operators to
+// (TELEMETRY_FIELDS_DOCUMENTATION in app/modules/telemetry/scheduler.py).
+const TELEMETRY_DOCS_URL = "https://soju06.github.io/codex-lb/telemetry/";
 
 export function TelemetryConsentDialog() {
   const { t } = useTranslation();

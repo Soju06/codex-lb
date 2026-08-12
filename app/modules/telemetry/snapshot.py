@@ -21,6 +21,7 @@ from app.core.auth.dashboard_mode import DashboardAuthMode
 from app.core.balancer.logic import RoutingStrategy
 from app.core.config.settings import Settings, get_settings
 from app.core.openai.model_registry import get_model_registry
+from app.core.usage.logs import NON_ERROR_STATUSES
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
@@ -213,7 +214,13 @@ class TelemetrySnapshotBuilder:
             ),
             usage_7d=UsageSnapshot(
                 requests=summary.total_requests,
-                success_rate=_ratio(summary.total_requests - summary.total_errors, summary.total_requests),
+                # Cancelled terminals are neither errors nor successes
+                # (NON_ERROR_STATUSES); counting them as successes would
+                # inflate the rate on disconnect-heavy workloads.
+                success_rate=_ratio(
+                    summary.total_requests - summary.total_errors - summary.total_cancelled,
+                    summary.total_requests,
+                ),
                 tokens_input=summary.total_input_tokens,
                 tokens_output=summary.total_output_tokens,
                 tokens_cached_ratio=_ratio(summary.total_cached_tokens, summary.total_input_tokens),
@@ -354,9 +361,19 @@ class TelemetrySnapshotBuilder:
         return int(result.scalar_one())
 
     async def _top_upstream_errors(self, conditions: list[Predicate]) -> list[str]:
+        # Cancelled rows keep upstream_error_code='client_disconnected', so
+        # filtering on the code alone would let routine disconnects displace
+        # genuine upstream failures; restrict to actual error statuses like
+        # the other error-metric surfaces.
         result = await self._session.execute(
             select(RequestLog.upstream_error_code, func.count().label("requests"))
-            .where(and_(*conditions, RequestLog.upstream_error_code.is_not(None)))
+            .where(
+                and_(
+                    *conditions,
+                    RequestLog.upstream_error_code.is_not(None),
+                    RequestLog.status.not_in(NON_ERROR_STATUSES),
+                )
+            )
             .group_by(RequestLog.upstream_error_code)
         )
         counts: defaultdict[str, int] = defaultdict(int)

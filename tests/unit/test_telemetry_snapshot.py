@@ -52,6 +52,7 @@ def _request_log(
     reasoning_effort: str | None = None,
     output_tokens: int = 100,
     account_id: str | None = None,
+    status: str = "success",
     **values,
 ) -> RequestLog:
     return RequestLog(
@@ -59,7 +60,7 @@ def _request_log(
         request_id=request_id,
         requested_at=utcnow(),
         model=model,
-        status="success",
+        status=status,
         useragent_group=useragent_group,
         reasoning_effort=reasoning_effort,
         input_tokens=200,
@@ -400,6 +401,9 @@ async def test_privacy_quick_check_identifying_values_never_serialize(async_sess
             useragent_group="senpi",
             useragent="senpi/1.0 alice@corp.com",
             client_ip="192.0.2.9",
+            # Error status so the private code exercises the top-errors
+            # sanitizer; cancelled/success rows are excluded from that metric.
+            status="error",
             error_message="free text alice W1 super-secret-api-key-hash",
             upstream_error_code="private-upstream-message",
         )
@@ -428,3 +432,72 @@ async def test_privacy_quick_check_identifying_values_never_serialize(async_sess
     assert '"name":"other"' in serialized
     assert '"clients":{"other":1.0}' in serialized
     assert '"top_upstream_errors":["other"]' in serialized
+
+
+@pytest.mark.asyncio
+async def test_success_rate_excludes_cancelled_terminals(async_session: AsyncSession) -> None:
+    async_session.add(_request_log("ok", model="gpt-5.4", useragent_group="codex_exec"))
+    async_session.add(
+        _request_log(
+            "cancel-1",
+            model="gpt-5.4",
+            useragent_group="codex_exec",
+            status="cancelled",
+            upstream_error_code="client_disconnected",
+        )
+    )
+    async_session.add(
+        _request_log(
+            "cancel-2",
+            model="gpt-5.4",
+            useragent_group="codex_exec",
+            status="cancelled",
+            upstream_error_code="client_disconnected",
+        )
+    )
+    async_session.add(
+        _request_log(
+            "err",
+            model="gpt-5.4",
+            useragent_group="codex_exec",
+            status="error",
+            upstream_error_code="server_error",
+        )
+    )
+    await async_session.commit()
+
+    snapshot = await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000004")
+
+    # 1 success out of 4 requests: cancellations are neither successes nor
+    # errors, so they must not inflate the numerator.
+    assert snapshot.usage_7d.success_rate == 0.25
+
+
+@pytest.mark.asyncio
+async def test_top_upstream_errors_exclude_cancelled_terminals(async_session: AsyncSession) -> None:
+    for index in range(3):
+        async_session.add(
+            _request_log(
+                f"cancel-{index}",
+                model="gpt-5.4",
+                useragent_group="codex_exec",
+                status="cancelled",
+                upstream_error_code="client_disconnected",
+            )
+        )
+    async_session.add(
+        _request_log(
+            "err",
+            model="gpt-5.4",
+            useragent_group="codex_exec",
+            status="error",
+            upstream_error_code="server_error",
+        )
+    )
+    await async_session.commit()
+
+    snapshot = await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000005")
+
+    # High-volume disconnects (status='cancelled' with a retained
+    # client_disconnected code) must not displace genuine upstream failures.
+    assert snapshot.usage_7d.top_upstream_errors == ["server_error"]

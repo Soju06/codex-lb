@@ -1710,16 +1710,27 @@ async def test_source_chat_reasoning_allowlist_preserves_enable_thinking(async_c
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "thinking",
+    ("thinking", "expected_thinking"),
     [
-        {"type": "enabled", "budget_tokens": 2048},
-        {"enabled": True, "summary": "auto", "vendor_hint": "keep"},
+        (
+            {"type": "enabled", "budget_tokens": 2048},
+            {"type": "enabled", "budget_tokens": 2048},
+        ),
+        (
+            {"enabled": True, "summary": "auto", "vendor_hint": "keep"},
+            {"enabled": True, "summary": "auto", "vendor_hint": "keep"},
+        ),
+        (
+            {"effort": " ", "enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"},
+            {"enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"},
+        ),
     ],
 )
 async def test_source_chat_reasoning_allowlist_preserves_implicit_thinking_object(
     async_client,
     source_upstream,
     thinking,
+    expected_thinking,
 ):
     await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}
@@ -1758,7 +1769,7 @@ async def test_source_chat_reasoning_allowlist_preserves_implicit_thinking_objec
     )
 
     assert response.status_code == 200
-    assert captured["thinking"] == thinking
+    assert captured["thinking"] == expected_thinking
     assert "reasoning" not in captured
     assert "reasoning_effort" not in captured
 

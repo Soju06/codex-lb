@@ -541,6 +541,40 @@ def test_reasoning_aliases_receive_wire_normalization_after_allowlist(
     assert request.reasoning.effort == wire_effort
 
 
+@pytest.mark.parametrize(
+    "request_type",
+    [
+        pytest.param(ResponsesRequest, id="responses-and-websocket"),
+        pytest.param(ResponsesCompactRequest, id="compact"),
+    ],
+)
+def test_allowed_canonical_reasoning_effort_is_normalized_for_subscription_wire(request_type) -> None:
+    request = request_type.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            "reasoning": {"effort": " LOW "},
+        }
+    )
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            id="key-canonical-reasoning-wire-normalization",
+            enforced_model=None,
+            enforced_reasoning_effort=None,
+            allowed_reasoning_efforts=["low"],
+            enforced_service_tier=None,
+        ),
+    )
+
+    apply_api_key_enforcement(request, api_key)
+
+    assert request.reasoning is not None
+    assert request.reasoning.effort == "low"
+    assert request.to_payload()["reasoning"] == {"effort": "low"}
+
+
 def test_reasoning_effort_allowlist_checks_explicit_effort_with_fast_model_alias() -> None:
     request = ResponsesRequest.model_validate(
         {
@@ -727,6 +761,16 @@ def test_source_chat_reasoning_policy_preserves_implicit_thinking_object(thinkin
     apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="medium")
 
     assert payload == {"thinking": thinking}
+
+
+def test_source_chat_reasoning_policy_strips_blank_effort_from_implicit_thinking_object() -> None:
+    payload: dict[str, JsonValue] = {
+        "thinking": {"effort": " ", "enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"}
+    }
+
+    apply_api_key_enforcement_to_chat_payload(payload, None, allowed_reasoning_effort="medium")
+
+    assert payload == {"thinking": {"enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"}}
 
 
 def test_source_chat_reasoning_policy_drops_conflicting_implicit_thinking_object() -> None:

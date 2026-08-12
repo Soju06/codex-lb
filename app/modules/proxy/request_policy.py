@@ -312,6 +312,12 @@ def apply_api_key_enforcement(
     _materialize_provider_reasoning_effort(payload, provider_reasoning_effort)
     if client_reasoning_effort is not None:
         validate_reasoning_effort_access(api_key, client_reasoning_effort)
+        if (
+            payload.reasoning is not None
+            and isinstance(payload.reasoning.effort, str)
+            and payload.reasoning.effort.strip().lower() == client_reasoning_effort
+        ):
+            payload.reasoning.effort = client_reasoning_effort
     normalize_unsupported_reasoning_effort(payload)
 
     service_tier_was_enforced = False
@@ -453,6 +459,10 @@ def apply_api_key_enforcement_to_chat_payload(
             thinking = payload["thinking"]
             if isinstance(thinking, dict):
                 thinking_effort = thinking.get("effort")
+                if isinstance(thinking_effort, str) and not thinking_effort.strip():
+                    thinking = {**thinking}
+                    thinking.pop("effort")
+                    payload["thinking"] = thinking
                 if isinstance(thinking_effort, str) and thinking_effort.strip():
                     payload["thinking"] = {**thinking, "effort": wire_effort}
                 else:

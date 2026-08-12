@@ -25,7 +25,7 @@ The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eli
 
 ### Requirement: Reset credit polling interval is configurable
 
-The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_seconds` (default `60`) to control the polling cadence. The system SHALL expose setting `rate_limit_reset_credits_refresh_enabled` (default `true`) to enable or disable background reset-credit polling. Because the refresh loop is the sole driver of automatic reset-credit redemption, disabling background polling SHALL also disable automatic redemption; when polling is disabled while the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the system SHALL log a configuration-conflict warning at startup naming both settings.
+The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_seconds` (default `60`) to control the polling cadence. The system SHALL expose setting `rate_limit_reset_credits_refresh_enabled` (default `true`) to enable or disable background reset-credit polling. Because the refresh loop is the sole driver of automatic reset-credit redemption, disabling background polling SHALL also disable automatic redemption; when polling is disabled while the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the system SHALL log a configuration-conflict warning at startup naming both settings. While polling is disabled, the dashboard settings update SHALL reject a request that newly enables `auto_redeem_reset_credits_before_expiry` with a bad-request error naming the polling toggle; an already-persisted opt-in SHALL remain readable and re-savable so unrelated settings edits are not blocked.
 
 #### Scenario: Operator tunes the polling interval
 - **GIVEN** `rate_limit_reset_credits_refresh_interval_seconds` is set to `120`
@@ -44,3 +44,16 @@ The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_secon
 - **WHEN** the application starts
 - **THEN** the system logs a configuration-conflict warning naming both settings
 - **AND** no automatic reset-credit redemption occurs while polling remains disabled
+
+#### Scenario: Auto-redeem opt-in is rejected while polling is disabled
+- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is set to `false`
+- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is `false`
+- **WHEN** a dashboard settings update sets `auto_redeem_reset_credits_before_expiry` to `true`
+- **THEN** the update is rejected with a bad-request error naming the polling toggle
+- **AND** the persisted setting remains `false`
+
+#### Scenario: Persisted auto-redeem does not block unrelated settings edits
+- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is set to `false`
+- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is already `true`
+- **WHEN** a full settings payload that keeps the opt-in unchanged is submitted
+- **THEN** the update succeeds

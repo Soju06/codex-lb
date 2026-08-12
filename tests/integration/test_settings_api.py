@@ -1228,3 +1228,46 @@ async def test_retention_override_tri_state_echo_capture_and_clear(async_client,
         settings = await session.get(DashboardSettings, 1)
         assert settings is not None
         assert settings.request_log_retention_days is None
+
+
+@pytest.mark.asyncio
+async def test_auto_redeem_opt_in_rejected_while_reset_credit_polling_disabled(async_client, monkeypatch):
+    from types import SimpleNamespace
+
+    disabled = SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False)
+    monkeypatch.setattr("app.modules.settings.api.get_app_settings", lambda: disabled)
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["autoRedeemResetCreditsBeforeExpiry"] is False
+    payload["autoRedeemResetCreditsBeforeExpiry"] = True
+
+    response = await async_client.put("/api/settings", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "reset_credit_polling_disabled"
+
+
+@pytest.mark.asyncio
+async def test_full_put_with_persisted_auto_redeem_allowed_while_polling_disabled(async_client, monkeypatch):
+    from types import SimpleNamespace
+
+    async with SessionLocal() as session:
+        await session.execute(
+            text("UPDATE dashboard_settings SET auto_redeem_reset_credits_before_expiry = 1 WHERE id = 1")
+        )
+        await session.commit()
+
+    disabled = SimpleNamespace(rate_limit_reset_credits_refresh_enabled=False)
+    monkeypatch.setattr("app.modules.settings.api.get_app_settings", lambda: disabled)
+
+    response = await async_client.get("/api/settings")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["autoRedeemResetCreditsBeforeExpiry"] is True
+
+    response = await async_client.put("/api/settings", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["autoRedeemResetCreditsBeforeExpiry"] is True

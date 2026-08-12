@@ -20,6 +20,7 @@ from app.core.auth.dependencies import (
     validate_dashboard_session,
 )
 from app.core.clients.http import _build_ssl_context
+from app.core.config.settings import get_settings as get_app_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
@@ -562,6 +563,19 @@ async def update_settings(
         and payload.upstream_proxy_default_pool_id is not None
     ):
         await _validate_proxy_pool_id(context, payload.upstream_proxy_default_pool_id)
+    if (
+        payload.auto_redeem_reset_credits_before_expiry
+        and not current.auto_redeem_reset_credits_before_expiry
+        and not get_app_settings().rate_limit_reset_credits_refresh_enabled
+    ):
+        # The reset-credit refresh loop is the sole driver of automatic
+        # redemption; accepting the opt-in while polling is disabled would
+        # persist a setting that can never run.
+        raise DashboardBadRequestError(
+            "autoRedeemResetCreditsBeforeExpiry requires reset-credit polling; "
+            "set CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED=true first",
+            code="reset_credit_polling_disabled",
+        )
     try:
         legacy_threshold_provided = payload.sticky_reallocation_budget_threshold_pct is not None
         primary_threshold_provided = payload.sticky_reallocation_primary_budget_threshold_pct is not None

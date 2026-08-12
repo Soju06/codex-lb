@@ -142,7 +142,7 @@ _BOOTSTRAP_CORE_AVAILABLE_IN_PLANS = frozenset(
 )
 
 # GPT-5.6 ships to four additional plan tiers upstream
-# (codex-rs/models-manager/models.json at rust-v0.144.1).
+# (codex-rs/models-manager/models.json at rust-v0.145.0).
 _BOOTSTRAP_GPT56_AVAILABLE_IN_PLANS = frozenset(
     {
         *_BOOTSTRAP_AVAILABLE_IN_PLANS,
@@ -219,7 +219,7 @@ def _gpt56_raw(
     availability_nux: dict[str, JsonValue] | None = None,
 ) -> dict[str, JsonValue]:
     """Raw catalog fields for the GPT-5.6 family, mirroring the upstream
-    bundled catalog (codex-rs/models-manager/models.json at rust-v0.144.1)
+    bundled catalog (codex-rs/models-manager/models.json at rust-v0.145.0)
     field-for-field. The ~16.5 KB ``base_instructions`` string and the
     personality-templated ``model_messages`` object are deliberately not
     bundled; the live upstream registry supplies them on the first refresh.

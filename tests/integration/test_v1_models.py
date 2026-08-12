@@ -314,7 +314,8 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
         "max",
     }
 
-    # Live upstream catalog evidence recorded on 2026-08-11.
+    # Reproducible upstream catalog evidence:
+    # codex-rs/models-manager/models.json at rust-v0.145.0.
     for gpt56 in (sol, terra, luna):
         assert gpt56["minimal_client_version"] == "0.144.0"
         assert gpt56["tool_mode"] == "code_mode_only"

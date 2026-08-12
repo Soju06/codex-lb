@@ -27,7 +27,7 @@ EXPECTED_CORE_MODEL_PLANS = {
 }
 
 # The 21-plan list upstream advertises for GPT-5.6
-# (codex-rs/models-manager/models.json at rust-v0.144.1).
+# (codex-rs/models-manager/models.json at rust-v0.145.0).
 EXPECTED_GPT56_MODEL_PLANS = {
     "business",
     "edu",
@@ -271,7 +271,8 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert luna.default_reasoning_level == "medium"
     assert [level.effort for level in luna.supported_reasoning_levels] == ["low", "medium", "high", "xhigh", "max"]
 
-    # Live upstream catalog evidence recorded on 2026-08-11.
+    # Reproducible upstream catalog evidence:
+    # codex-rs/models-manager/models.json at rust-v0.145.0.
     for gpt56 in (sol, terra, luna):
         assert gpt56.minimal_client_version == "0.144.0"
         assert gpt56.raw["tool_mode"] == "code_mode_only"

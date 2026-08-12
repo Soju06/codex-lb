@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 126 settings. Every setting is an environment
+codex-lb currently exposes 127 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -148,6 +148,7 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` | `bool` | `True` |
+| `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | `bool` | `True` |
 | `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS` | `int` | `60` |
 | `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` | `int` | `0` |
 | `CODEX_LB_USAGE_FETCH_MAX_RETRIES` | `int` | `2` |

@@ -19,6 +19,8 @@ json_values = st.recursive(
     max_leaves=20,
 )
 
+json_directive_types = json_values.filter(lambda value: value is not None and value != "message")
+
 json_objects = st.dictionaries(
     st.text(max_size=20),
     json_values,

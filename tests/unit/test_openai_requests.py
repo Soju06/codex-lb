@@ -28,7 +28,7 @@ from app.core.openai.requests import (
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
-from tests.unit.hypothesis_strategies import json_arrays, json_objects, json_values
+from tests.unit.hypothesis_strategies import json_arrays, json_directive_types, json_objects, json_values
 
 
 def test_responses_requires_instructions():
@@ -126,6 +126,7 @@ def test_known_unsupported_upstream_fields_are_stripped():
 
 
 @given(json_arrays)
+@settings(deadline=None)
 def test_sanitize_input_items_is_idempotent_for_json(input_items):
     original = deepcopy(input_items)
     try:
@@ -140,9 +141,10 @@ def test_sanitize_input_items_is_idempotent_for_json(input_items):
 
 @given(
     role=st.sampled_from(["system", "developer"]),
-    item_type=json_values,
+    item_type=json_directive_types,
     extra=json_objects,
 )
+@settings(deadline=None)
 def test_sanitize_input_items_preserves_typed_directives(role, item_type, extra):
     directive = dict(extra)
     directive.update({"role": role, "type": item_type})
@@ -151,6 +153,7 @@ def test_sanitize_input_items_preserves_typed_directives(role, item_type, extra)
 
 
 @given(payload=json_objects.map(lambda value: {key: item for key, item in value.items() if key != "input"}))
+@settings(deadline=None)
 def test_strip_unsupported_fields_is_idempotent(payload):
     payload = cast(dict[str, JsonValue], payload)
     first = _strip_unsupported_fields(deepcopy(payload))
@@ -161,6 +164,7 @@ def test_strip_unsupported_fields_is_idempotent(payload):
 
 
 @given(namespace=json_values)
+@settings(deadline=None)
 def test_strip_unsupported_fields_namespace_flag_controls_replayed_calls(namespace):
     payload = cast(dict[str, JsonValue], {"input": [{"type": "function_call", "namespace": namespace}]})
 

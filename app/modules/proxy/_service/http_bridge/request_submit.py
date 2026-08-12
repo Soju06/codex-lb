@@ -1374,7 +1374,9 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.operation_created = operation.created
 
         async def _cleanup_unsubmitted_recovery_claim() -> None:
-            if not request_state.operation_recovery_claimed or request_state.operation_dispatched:
+            if (
+                not request_state.operation_recovery_claimed and not request_state.operation_created
+            ) or request_state.operation_dispatched:
                 return
             await self._cleanup_http_bridge_submit_interruption(
                 session,

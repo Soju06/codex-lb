@@ -18718,6 +18718,81 @@ async def test_submit_http_bridge_request_restores_recovery_claim_when_stream_le
 
 
 @pytest.mark.asyncio
+async def test_submit_hard_turn_rolls_back_new_operation_before_retiring_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="hard-turn-unsent-operation")
+    session.durable_session_id = "durable-hard-turn-unsent-operation"
+    session.durable_owner_epoch = 3
+    session.upstream_control.retire_after_drain = True
+    session.upstream_close_attempted = True
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-turn-unsent-operation",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        hard_continuity_anchor=True,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","input":"same"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    record_operation = AsyncMock(
+        return_value=SimpleNamespace(
+            created=True,
+            operation_id="operation-unsent",
+            state="submitted",
+            response_id=None,
+            event_spool_complete=False,
+        )
+    )
+    rollback_operation = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=None),
+            get_operation=AsyncMock(return_value=None),
+            record_operation=record_operation,
+            rollback_operation_before_dispatch=rollback_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-hard-turn-unsent-operation",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-hard-turn-unsent-operation",
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
+    record_operation.assert_awaited_once()
+    rollback_operation.assert_awaited_once_with(
+        operation_id="operation-unsent",
+        session_id="durable-hard-turn-unsent-operation",
+        instance_id="instance-hard-turn-unsent-operation",
+        owner_epoch=3,
+    )
+    assert request_state.operation_created is True
+    assert request_state.operation_registered is False
+
+
+@pytest.mark.asyncio
 async def test_cleanup_http_bridge_submit_interruption_releases_gate_state_when_gate_already_acquired() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     admission = cast(Any, SimpleNamespace(release=Mock()))

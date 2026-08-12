@@ -25,7 +25,7 @@ The system SHALL poll upstream `GET /wham/rate-limit-reset-credits` for each eli
 
 ### Requirement: Reset credit polling interval is configurable
 
-The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_seconds` (default `60`) to control the polling cadence. The system SHALL expose setting `rate_limit_reset_credits_refresh_enabled` (default `true`) to enable or disable background reset-credit polling.
+The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_seconds` (default `60`) to control the polling cadence. The system SHALL expose setting `rate_limit_reset_credits_refresh_enabled` (default `true`) to enable or disable background reset-credit polling. Because the refresh loop is the sole driver of automatic reset-credit redemption, disabling background polling SHALL also disable automatic redemption; when polling is disabled while the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is enabled, the system SHALL log a configuration-conflict warning at startup naming both settings.
 
 #### Scenario: Operator tunes the polling interval
 - **GIVEN** `rate_limit_reset_credits_refresh_interval_seconds` is set to `120`
@@ -37,3 +37,10 @@ The system SHALL expose setting `rate_limit_reset_credits_refresh_interval_secon
 - **WHEN** the application starts
 - **THEN** the reset-credit polling scheduler does not create a background polling task
 - **AND** no upstream reset-credits fetches occur
+
+#### Scenario: Disabled polling conflicts with persisted auto-redeem opt-in
+- **GIVEN** `rate_limit_reset_credits_refresh_enabled` is set to `false`
+- **AND** the persisted dashboard setting `auto_redeem_reset_credits_before_expiry` is `true`
+- **WHEN** the application starts
+- **THEN** the system logs a configuration-conflict warning naming both settings
+- **AND** no automatic reset-credit redemption occurs while polling remains disabled

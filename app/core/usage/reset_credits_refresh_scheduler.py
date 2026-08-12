@@ -71,11 +71,29 @@ class RateLimitResetCreditsRefreshScheduler:
 
     async def start(self) -> None:
         if not self.enabled:
+            await self._warn_if_auto_redeem_conflicts()
             return
         if self._task and not self._task.done():
             return
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
+
+    async def _warn_if_auto_redeem_conflicts(self) -> None:
+        # The refresh loop is the only driver of automatic redemption, so a
+        # disabled scheduler silently starves a persisted auto-redeem opt-in.
+        try:
+            async with get_background_session() as session:
+                dashboard_settings = await SettingsRepository(session).get_or_create()
+                auto_redeem_enabled = dashboard_settings.auto_redeem_reset_credits_before_expiry
+        except Exception:
+            logger.exception("Reset credits auto-redeem conflict check failed")
+            return
+        if auto_redeem_enabled:
+            logger.warning(
+                "rate_limit_reset_credits_refresh_enabled=false disables automatic reset-credit "
+                "redemption, but dashboard setting auto_redeem_reset_credits_before_expiry is "
+                "enabled; credits will expire without redemption until polling is re-enabled"
+            )
 
     async def stop(self) -> None:
         if not self._task:

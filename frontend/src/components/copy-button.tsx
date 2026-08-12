@@ -1,5 +1,5 @@
 import { Check, Copy } from "lucide-react";
-import { useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -15,7 +15,17 @@ export type CopyButtonProps = {
 export function CopyButton({ value, label, iconOnly = false }: CopyButtonProps) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const labelText = label ?? t("components.copyButton.copy");
+
+  useEffect(
+    () => () => {
+      if (resetTimerRef.current !== null) {
+        clearTimeout(resetTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const handleCopy = async (event: MouseEvent<HTMLButtonElement>) => {
     const trigger = event.currentTarget;
@@ -28,7 +38,13 @@ export function CopyButton({ value, label, iconOnly = false }: CopyButtonProps) 
       if (copiedToClipboard) {
         setCopied(true);
         toast.success(t("components.copyButton.toasts.copied"));
-        setTimeout(() => setCopied(false), 1200);
+        if (resetTimerRef.current !== null) {
+          clearTimeout(resetTimerRef.current);
+        }
+        resetTimerRef.current = setTimeout(() => {
+          resetTimerRef.current = null;
+          setCopied(false);
+        }, 1200);
         return;
       }
 

@@ -479,14 +479,20 @@ def normalize_unsupported_reasoning_effort(
     Client-plane efforts the reference Codex client aliases before sending
     (``ultra`` -> ``max``) are rewritten the same way here.
 
-    Returns the effort that was replaced, or ``None`` when nothing was
-    rewritten. Model sources do not have the backend quirk this works around,
-    but whether a request is served by one is only known after source
-    selection, which happens later. Callers that can reach a source therefore
-    carry this value forward and restore it there; see
-    ``restore_source_reasoning_effort``. The returned value is deliberately the
-    post-enforcement effort rather than the client's original, so restoring it
-    cannot resurrect an effort an API key overrode.
+    Returns the effort that the unsupported-effort fallback replaced, in
+    normalized (trimmed, lowercased) form, or ``None`` when nothing restorable
+    was rewritten. Model sources do not have the backend quirk that fallback
+    works around, but whether a request is served by one is only known after
+    source selection, which happens later; callers that can reach a source
+    carry this value forward and restore it there (see
+    ``restore_source_reasoning_effort``).
+
+    The ``ultra`` -> ``max`` wire alias is never reported. That aliasing mirrors
+    the reference client and is required on every upstream surface, so it must
+    survive source routing too.
+
+    The reported value is the post-enforcement effort rather than the client's
+    original, so restoring it cannot resurrect an effort an API key overrode.
     """
 
     if payload.reasoning is None or payload.reasoning.effort is None:
@@ -505,7 +511,9 @@ def normalize_unsupported_reasoning_effort(
             requested_effort,
             wire_alias,
         )
-        return requested_effort
+        # Deliberately not reported as restorable: the ultra -> max alias must
+        # hold on every surface, source-routed payloads included.
+        return None
 
     if normalized_effort not in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
         return None
@@ -522,7 +530,7 @@ def normalize_unsupported_reasoning_effort(
         requested_effort,
         fallback,
     )
-    return requested_effort
+    return normalized_effort
 
 
 def restore_source_reasoning_effort(
@@ -548,11 +556,15 @@ def restore_source_reasoning_effort(
         return
     if payload.model is None:
         return
+    restored_effort = pre_normalization_effort.strip().lower()
     declared = {level.effort for level in source_model_reasoning_levels(source, payload.model)}
-    if pre_normalization_effort.strip().lower() not in declared:
+    if restored_effort not in declared:
         return
     current_effort = payload.reasoning.effort
-    payload.reasoning.effort = pre_normalization_effort
+    # Normalized on assignment rather than trusting the caller: the sole
+    # producer already reports the normalized form, but that invariant is
+    # non-local and a casing variant must never reach the wire.
+    payload.reasoning.effort = restored_effort
     logger.info(
         "reasoning_effort_restored_for_source request_id=%s model=%s source_id=%s "
         "normalized_effort=%s restored_effort=%s",
@@ -560,7 +572,7 @@ def restore_source_reasoning_effort(
         payload.model,
         source.id,
         current_effort,
-        pre_normalization_effort,
+        restored_effort,
     )
 
 

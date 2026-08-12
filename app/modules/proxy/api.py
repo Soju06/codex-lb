@@ -3851,8 +3851,10 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
-    # The replaced effort is discarded: this endpoint does not reach the
-    # source-routing branch, so the rewrite must stick.
+    # The replaced effort is discarded: the enforced Responses payload built
+    # here is only ever forwarded to a subscription. This endpoint does
+    # source-route, but that branch forwards the untouched original chat
+    # payload, so there is nothing for a restore to undo.
     prohibit_fast_mode, service_tier_was_enforced, _ = await _apply_api_key_enforcement_with_fast_mode_policy(
         responses_payload, api_key
     )
@@ -4233,7 +4235,7 @@ async def _source_responses_response(
     source: ModelSource,
     api_key: ApiKeyData | None,
     rate_limit_headers: Mapping[str, str],
-    pre_normalization_effort: str | None = None,
+    pre_normalization_effort: str | None,
 ) -> Response:
     # This is the first point where the request is known to be served by a
     # model source rather than a subscription account, so it is the only place

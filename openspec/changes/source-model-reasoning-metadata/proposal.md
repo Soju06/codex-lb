@@ -15,7 +15,10 @@ which makes the capability undiscoverable in the client UI.
 Backends differ in the efforts they accept — for example Alibaba Model Studio
 exposes `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`, while DeepSeek and
 Kimi expose `low`/`high`/`max` — so the advertised set has to be operator
-declared rather than inferred.
+declared rather than inferred. `none` is the one exception: it is outside the
+advertised vocabulary here, matching the subscription catalog, which never
+advertises it either. Clients can still send it; it is simply not offered in the
+effort picker.
 
 ## What Changes
 
@@ -27,28 +30,33 @@ declared rather than inferred.
 - Keep the existing no-reasoning behavior for models that do not opt in.
 - Normalize declared efforts and clamp them to the set the client surfaces
   understand, so one operator typo cannot affect other catalog entries.
-- Undo the `minimal` normalization for requests that are actually routed to a
-  model source and that declared the effort, instead of inferring the route
-  from registry membership.
+- Undo the unsupported-effort rewrite for requests that are actually routed to
+  a model source and that declared the effort, instead of inferring the route
+  from registry membership. This covers only the `minimal` workaround; the
+  `ultra` -> `max` wire alias mirrors the reference client and stays applied on
+  every surface.
 
 ## Relationship to `supports_reasoning`
 
-`raw_metadata_json` carries two reasoning keys with different jobs:
+`raw_metadata_json` carries reasoning keys with different jobs:
 
 - `supported_reasoning_levels` / `default_reasoning_level` drive **catalog
   advertising**. Codex clients read them to populate the reasoning-effort picker.
+- `supports_reasoning_summaries` advertises reasoning-summary support on the same
+  entries.
 - `supports_reasoning` gates `sanitize_source_chat_payload`, which strips
   `reasoning`, `reasoning_effort` and related toggles on the **Chat
   Completions** path only. The Responses path forwards them regardless.
 
-Declaring levels now implies the chat-path opt-in. The earlier revision of this
-change documented the split instead, but that left `/v1/models` reporting
-`supports_reasoning: true` (it is derived from a non-empty level set) for a
-model whose chat requests are silently stripped — a contradiction visible on the
-API surface, not merely a documentation subtlety. The explicit
+Declaring levels or summary support now implies the chat-path opt-in. The earlier
+revision of this change documented the split instead, but that left `/v1/models`
+reporting `supports_reasoning: true` for a model whose chat requests are silently
+stripped — a contradiction visible on the API surface, not merely a documentation
+subtlety. That flag is derived from either declared key, so both have to imply
+the opt-in for the surface to stay consistent. The explicit
 `"supports_reasoning": true` opt-in still works on its own for models that
-declare no levels, so the sanitizer keeps protecting backends that reject
-unknown fields.
+declare neither, so the sanitizer keeps protecting backends that reject unknown
+fields.
 
 The dashboard side of this — a single `Reasoning` toggle that only affects the
 chat path, and no UI for the levels at all — is tracked separately in #1672.

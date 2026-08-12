@@ -6,9 +6,20 @@
 
 ## 2. Effort delivery
 
-- [x] 2.1 Skip the `minimal` normalization for models absent from a populated
-      registry snapshot, keeping the conservative rewrite when no snapshot is
-      available.
+- [x] 2.1 Apply the unsupported-effort rewrite unconditionally at enforcement
+      time and restore it at the source-routing branch, gated on the effort
+      being declared for that source model. Route membership is not inferred
+      from the model registry.
+- [x] 2.2 Report the replaced effort from the normalizer and thread it through
+      enforcement. Paths whose enforced Responses payload only ever reaches a
+      subscription (WebSocket, stream, collect, compact, and chat -- whose own
+      source branch forwards the untouched original chat payload) discard it, so
+      the workaround still applies there.
+- [x] 2.3 Report only fallback rewrites, so the `ultra` -> `max` wire alias
+      survives source routing, and restore the normalized effort form.
+- [x] 2.4 Normalize and clamp declared efforts to the supported vocabulary.
+- [x] 2.5 Treat declared levels or `supports_reasoning_summaries` as the
+      chat-path reasoning opt-in.
 
 ## 3. Verification
 
@@ -16,11 +27,14 @@
       out-of-range default, and the no-metadata default.
 - [x] 3.2 Manual end-to-end check that `/backend-api/codex/models` advertises the
       declared efforts and that forwarding behavior is unchanged.
-- [x] Replace the registry-membership skip with a restore at the source-routing
-      branch, gated on the effort being declared for that source model.
-- [x] Report the replaced effort from the normalizer and thread it through
-      enforcement; subscription-only paths (WebSocket, stream, collect, compact,
-      chat) discard it so the workaround still applies there.
-- [x] Normalize and clamp declared efforts to the supported vocabulary.
-- [x] Treat a non-empty declared level set as the chat-path reasoning opt-in.
+- [x] 3.3 Unit coverage for the restore matrix (declared, undeclared, enforced),
+      the never-restored `ultra` alias, and the normalized restored form.
+- [x] 3.4 Integration coverage that a source declaring `minimal` receives it,
+      via both `/v1/responses` and the codex-native `/backend-api/codex/responses`
+      route. Mutation-checked per call site: dropping the restore call, or the
+      threading at either route, fails the corresponding test. One test per route
+      is required -- the codex-native threading is invisible to the `/v1` test.
+- [ ] 3.5 The WebSocket scenario is verified by inspection only: the WebSocket
+      service tree contains no model-source references, so there is no restore to
+      suppress. Left unchecked rather than claimed as tested.
 

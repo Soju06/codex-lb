@@ -170,10 +170,12 @@ def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
 
     Source catalog entries have no first-class reasoning flag; a model that
     genuinely supports reasoning can opt in with ``"supports_reasoning": true``
-    in ``raw_metadata_json``. Declaring ``supported_reasoning_levels`` implies
-    the same opt-in: advertising efforts to clients while the chat-completions
-    sanitizer strips them would make the capability visible on ``/v1/models``
-    and inert on the wire. Everything else is treated as non-reasoning so
+    in ``raw_metadata_json``. Declaring ``supported_reasoning_levels`` or
+    ``supports_reasoning_summaries`` implies the same opt-in: both are surfaced
+    as ``supports_reasoning`` on ``/v1/models``, so advertising either while the
+    chat-completions sanitizer strips the client's reasoning fields would make
+    the capability visible and inert at once. Everything else is treated as
+    non-reasoning so
     client-sent reasoning toggles are stripped before forwarding.
     """
     entry = _enabled_source_model(source, model)
@@ -181,6 +183,8 @@ def source_model_supports_reasoning(source: ModelSource, model: str) -> bool:
         return False
     raw = _raw_metadata(entry)
     if raw.get("supports_reasoning") is True:
+        return True
+    if raw.get("supports_reasoning_summaries") is True:
         return True
     return bool(_reasoning_levels_from_metadata(raw))
 

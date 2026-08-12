@@ -64,20 +64,43 @@ operator typo must not be able to affect entries other than its own.
 - **THEN** the entry advertises no reasoning efforts, no default effort, and no
   reasoning-summary support
 
-### Requirement: Declared reasoning efforts imply the chat-path reasoning opt-in
+### Requirement: Declared reasoning capabilities imply the chat-path reasoning opt-in
 
-A source model that declares `supported_reasoning_levels` MUST be treated as
-having opted into reasoning for the chat-completions path, as if
-`"supports_reasoning": true` were set. Advertising efforts on `/v1/models` while
-the chat-completions sanitizer strips the client's reasoning fields would make
-the same capability simultaneously visible and inert. The explicit
-`"supports_reasoning": true` opt-in MUST keep working for models that declare no
-levels.
+A source model that declares `supported_reasoning_levels` or
+`"supports_reasoning_summaries": true` MUST be treated as having opted into
+reasoning for the chat-completions path, as if `"supports_reasoning": true` were
+set. Both keys are surfaced as `supports_reasoning` on `/v1/models`, so
+advertising either while the chat-completions sanitizer strips the client's
+reasoning fields would make the same capability simultaneously visible and
+inert. The explicit `"supports_reasoning": true` opt-in MUST keep working for
+models that declare neither.
+
+A declared capability MUST win over an explicit `"supports_reasoning": false`.
+That mirrors the `/v1/models` derivation, which reports `supports_reasoning` from
+the declared levels and summary flag before consulting the raw key, so honoring
+the veto on the chat path alone would reintroduce the same visible-and-inert
+contradiction. An operator whose backend accepts efforts on the Responses path
+but rejects them on the chat path must omit the declarations rather than veto
+them.
+
+#### Scenario: A declared capability outranks an explicit false
+
+- **GIVEN** a source model that declares `supported_reasoning_levels` and sets
+  `"supports_reasoning": false`
+- **WHEN** a chat-completions request for that model carries reasoning fields
+- **THEN** the fields are forwarded, matching what `/v1/models` advertises
 
 #### Scenario: Declaring levels enables reasoning on the chat path
 
 - **GIVEN** a source model that declares `supported_reasoning_levels` and does
   not set `"supports_reasoning"`
+- **WHEN** a chat-completions request for that model carries reasoning fields
+- **THEN** the fields are forwarded rather than stripped
+
+#### Scenario: Declaring summary support enables reasoning on the chat path
+
+- **GIVEN** a source model that sets `"supports_reasoning_summaries": true` and
+  declares neither `supported_reasoning_levels` nor `"supports_reasoning"`
 - **WHEN** a chat-completions request for that model carries reasoning fields
 - **THEN** the fields are forwarded rather than stripped
 
@@ -100,7 +123,14 @@ the caller so it can be restored once a source has actually been selected.
 Restoration MUST occur only when a source was selected and the replaced effort
 is among the efforts that source declares for the model. The reported effort
 MUST be the post-enforcement value, so restoring it cannot resurrect an effort
-an API key overrode.
+an API key overrode, and MUST be the normalized (trimmed, lowercased) form, so
+restoration cannot reintroduce a casing variant the normalizer removed.
+
+Restoration MUST apply only to efforts replaced by the unsupported-effort
+fallback. The `ultra` -> `max` rewrite is a wire alias rather than a workaround:
+it mirrors the reference client and is required on every upstream surface, so it
+MUST remain applied to source-routed payloads even when the source declares
+`ultra`.
 
 Registry membership MUST NOT be used to decide this. A populated snapshot can
 omit a genuine subscription model — a partial refresh, an account unavailable
@@ -122,6 +152,13 @@ present in the snapshot yet source-routed.
 - **AND** a request for that model with `reasoning.effort` of `minimal`
 - **WHEN** the request is routed to the source
 - **THEN** the source receives the rewritten effort
+
+#### Scenario: A source declaring ultra still receives the max alias
+
+- **GIVEN** a source model declaring `["ultra", "max"]`
+- **AND** a request for that model with `reasoning.effort` of `ultra`
+- **WHEN** the request is routed to the source
+- **THEN** the source receives `max`
 
 #### Scenario: Subscription requests keep the workaround
 

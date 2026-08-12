@@ -2176,6 +2176,50 @@ def test_restore_source_reasoning_effort_skips_an_undeclared_effort():
     assert payload.reasoning is not None and payload.reasoning.effort == "low"
 
 
+def test_ultra_alias_is_never_restored_for_a_source():
+    """The ultra -> max alias must hold on every upstream surface.
+
+    An existing requirement makes the proxy forward ``ultra`` as ``max`` on any
+    outbound Responses payload, with no source carve-out, and real Codex clients
+    already rewrite it client-side. So the normalizer must not report the alias
+    as restorable, even for a source that declares ``ultra``.
+    """
+    payload = _payload_with_effort("qwen3.8-max", "ultra")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning is not None and payload.reasoning.effort == "max"
+    assert replaced is None, "the wire alias must not be reported as restorable"
+
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["ultra", "max", "high"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning.effort == "max"
+
+
+def test_restore_source_reasoning_effort_uses_the_normalized_effort():
+    """The restored value must be normalized, not the raw client string.
+
+    Pre-PR a source would have received the normalized rewrite, so forwarding
+    ``" MINIMAL "`` verbatim would be a new behaviour with no operator opt-in.
+    """
+    payload = _payload_with_effort("qwen3.8-max", " MINIMAL ")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+    assert replaced == "minimal"
+
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["minimal", "low"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning is not None and payload.reasoning.effort == "minimal"
+
+
 def test_restore_source_reasoning_effort_cannot_resurrect_an_enforced_effort():
     """The captured value is post-enforcement, so an API key that pinned an
     effort still wins after the restore."""

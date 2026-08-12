@@ -350,3 +350,25 @@ def test_source_model_reasoning_levels_accessor_matches_the_catalog() -> None:
         "low",
     ]
     assert source_model_reasoning_levels(source, "unknown-model") == ()
+
+
+def test_declared_summaries_imply_the_chat_path_reasoning_opt_in() -> None:
+    """``supports_reasoning_summaries`` is surfaced as ``supports_reasoning`` on
+    /v1/models, so declaring it alone must not leave the chat path stripping."""
+    summaries_only = _reasoning_source(json.dumps({"supports_reasoning_summaries": True}))
+    assert source_model_supports_reasoning(summaries_only, "reasoning-model") is True
+
+
+def test_declared_capability_outranks_an_explicit_false() -> None:
+    """A declared capability wins over ``"supports_reasoning": false``.
+
+    /v1/models derives ``supports_reasoning`` from the declared levels and the
+    summary flag before consulting the raw key, so honoring the veto here alone
+    would advertise the capability while the chat path strips it.
+    """
+    vetoed_levels = _reasoning_source(json.dumps({"supported_reasoning_levels": ["low"], "supports_reasoning": False}))
+    assert source_model_supports_reasoning(vetoed_levels, "reasoning-model") is True
+    vetoed_summaries = _reasoning_source(
+        json.dumps({"supports_reasoning_summaries": True, "supports_reasoning": False})
+    )
+    assert source_model_supports_reasoning(vetoed_summaries, "reasoning-model") is True

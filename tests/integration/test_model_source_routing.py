@@ -1635,3 +1635,94 @@ async def test_source_stream_success_passes_through_sse(async_client, source_ups
 
     assert b'"content":"hello"' in received
     assert b"[DONE]" in received
+
+
+@pytest.mark.asyncio
+async def test_source_responses_payload_restores_declared_minimal_effort(async_client, source_upstream):
+    """The minimal rewrite must be undone for a source that declared the effort.
+
+    This pins the wiring, not just the helper: the restore lives inside
+    _source_responses_response, and both the call and the threading of the
+    replaced effort through enforcement have to survive for the source to see
+    ``minimal`` instead of the ``low`` fallback.
+    """
+    captured: dict[str, object] = {}
+
+    async def capture(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response({"id": "resp_source_reasoning", "status": "completed", "output": []})
+
+    base_url = await source_upstream(capture)
+    model = "reasoning-levels-model"
+    await _create_model_source(
+        async_client,
+        name="reasoning-levels",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+        raw_metadata_json='{"supported_reasoning_levels": ["minimal", "low", "high"]}',
+    )
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "reasoning": {"effort": "minimal"},
+        },
+    )
+
+    assert response.status_code == 200
+    reasoning = captured["reasoning"]
+    assert isinstance(reasoning, dict)
+    assert reasoning["effort"] == "minimal"
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_payload_restores_declared_minimal_effort(async_client, source_upstream):
+    """The codex-native route must thread the replaced effort too.
+
+    Codex CLI talks to this route, and ``--reasoning-effort minimal`` is where
+    the rewrite originates, so this call site matters more than the /v1 one.
+    It forces streaming for source-routed requests, hence the SSE upstream.
+    """
+    captured: dict[str, object] = {}
+    frames = b'data: {"type":"response.completed","response":{"id":"resp_codex","status":"completed"}}\n\n'
+
+    async def capture(request: web.Request) -> web.StreamResponse:
+        captured.update(await request.json())
+        response = web.StreamResponse(status=200, headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(frames)
+        await response.write_eof()
+        return response
+
+    base_url = await source_upstream(capture)
+    model = "codex-reasoning-levels-model"
+    await _create_model_source(
+        async_client,
+        name="codex-reasoning-levels",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+        raw_metadata_json='{"supported_reasoning_levels": ["minimal", "low", "high"]}',
+    )
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "stream": True,
+            "reasoning": {"effort": "minimal"},
+        },
+    ) as response:
+        assert response.status_code == 200
+        async for _ in response.aiter_bytes():
+            pass
+
+    reasoning = captured["reasoning"]
+    assert isinstance(reasoning, dict)
+    assert reasoning["effort"] == "minimal"

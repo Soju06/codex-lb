@@ -111,12 +111,12 @@ async def test_dropped_batch_is_never_marked_replayable() -> None:
                 owner_epoch=1,
                 event_text="terminal",
                 max_bytes=1024,
-                state="completed",
+                state="failed",
             )
             is False
         )
         assert durable.finalized == []
-        assert durable.updated[0]["state"] == "completed"
+        assert durable.updated[0]["state"] == "failed"
         assert batcher._contexts == {}
         assert batcher._dropped_operations == set()
     finally:

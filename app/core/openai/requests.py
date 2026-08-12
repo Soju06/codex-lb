@@ -1807,11 +1807,7 @@ def _normalize_thinking_alias(
         if isinstance(summary, str) and summary.strip():
             normalized["summary"] = summary.strip()
         thinking_type = thinking_mapping.get("type")
-        if (
-            "effort" not in normalized
-            and isinstance(thinking_type, str)
-            and thinking_type.strip().lower() == "enabled"
-        ):
+        if "effort" not in normalized and isinstance(thinking_type, str) and thinking_type.strip().lower() == "enabled":
             normalized["effort"] = "medium"
         enabled = thinking_mapping.get("enabled")
         if "effort" not in normalized and enabled is True:

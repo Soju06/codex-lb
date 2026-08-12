@@ -18919,6 +18919,7 @@ async def test_http_bridge_capacity_retry_reclaims_unknown_operation_before_send
     monkeypatch.setattr(http_bridge_streaming_module, "_iter_account_capacity_wait_sse", capacity_wait)
 
     async def send_and_finish(_text: str) -> None:
+        assert claim_unknown.await_count == 2
         event_queue = request_state.event_queue
         assert event_queue is not None
         await event_queue.put(None)

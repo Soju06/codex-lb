@@ -813,15 +813,8 @@ async def _close_websocket_upstream_for_cleanup(
         max(float(timeout_seconds), 0.0),
         _WEBSOCKET_UPSTREAM_CLOSE_CLEANUP_TIMEOUT_SECONDS,
     )
-    if effective_timeout <= 0:
-        return
-    try:
-        await asyncio.wait_for(asyncio.shield(close_task), timeout=effective_timeout)
-    except TimeoutError:
-        _facade().logger.debug(
-            "Upstream websocket close continued after cleanup budget timeout_seconds=%.3f",
-            effective_timeout,
-        )
+
+    async def cancel_close_task() -> None:
         try:
             await _facade()._await_cancelled_task(
                 close_task,
@@ -831,6 +824,18 @@ async def _close_websocket_upstream_for_cleanup(
             )
         except Exception:
             _facade().logger.debug("Failed to cancel upstream websocket close task", exc_info=True)
+
+    if effective_timeout <= 0:
+        await cancel_close_task()
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(close_task), timeout=effective_timeout)
+    except TimeoutError:
+        _facade().logger.debug(
+            "Upstream websocket close continued after cleanup budget timeout_seconds=%.3f",
+            effective_timeout,
+        )
+        await cancel_close_task()
     except Exception:
         _facade().logger.debug("Failed to close upstream websocket during scope cleanup", exc_info=True)
 

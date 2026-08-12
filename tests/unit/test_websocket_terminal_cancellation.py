@@ -1278,6 +1278,42 @@ async def test_stuck_upstream_close_is_cancelled_after_scope_cleanup_timeout() -
 
 
 @pytest.mark.asyncio
+async def test_upstream_close_is_cancelled_when_cleanup_budget_is_exhausted() -> None:
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    close_started = asyncio.Event()
+    close_cancelled = False
+
+    async def close() -> None:
+        nonlocal close_cancelled
+        close_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            close_cancelled = True
+            raise
+
+    upstream = cast(UpstreamWebSocket, SimpleNamespace(close=close))
+
+    await websocket_mixin._close_websocket_upstream_for_cleanup(
+        service,
+        upstream,
+        timeout_seconds=0.0,
+    )
+
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    for _ in range(20):
+        if close_cancelled and not service._background_cleanup_tasks:
+            break
+        await asyncio.sleep(0)
+    assert close_cancelled is True
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message_kind", ["text", "transport_end"])
 async def test_reader_cancellation_remains_cancelled_when_owned_child_fails(
     monkeypatch: pytest.MonkeyPatch,

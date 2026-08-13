@@ -1,15 +1,18 @@
 import { ChevronRight } from "lucide-react";
-import { useIsFetching, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useIsFetching, useQueryClient, type Query, type QueryKey } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 
+const EMPTY_QUERY_KEYS: readonly QueryKey[] = [];
+
 export type AdvancedSettingsGroupProps = {
   children: ReactNode;
   defaultOpen?: boolean;
   scrollToId?: string;
+  waitForQueryKeys?: readonly QueryKey[];
 };
 
 /**
@@ -22,11 +25,19 @@ export function AdvancedSettingsGroup({
   children,
   defaultOpen = false,
   scrollToId,
+  waitForQueryKeys = EMPTY_QUERY_KEYS,
 }: AdvancedSettingsGroupProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
   const queryClient = useQueryClient();
-  const fetchingQueries = useIsFetching();
+  const isLayoutQuery = useCallback(
+    (query: Query) =>
+      waitForQueryKeys.some((prefix) =>
+        prefix.every((value, index) => Object.is(query.queryKey[index], value)),
+      ),
+    [waitForQueryKeys],
+  );
+  const fetchingQueries = useIsFetching({ predicate: isLayoutQuery });
   const scrolledToIdRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -38,7 +49,7 @@ export function AdvancedSettingsGroup({
       return;
     }
     const frame = window.requestAnimationFrame(() => {
-      if (queryClient.isFetching() > 0) {
+      if (queryClient.isFetching({ predicate: isLayoutQuery }) > 0) {
         return;
       }
       const target = document.getElementById(scrollToId);
@@ -51,7 +62,7 @@ export function AdvancedSettingsGroup({
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [fetchingQueries, open, queryClient, scrollToId]);
+  }, [fetchingQueries, isLayoutQuery, open, queryClient, scrollToId]);
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-xl border bg-card">

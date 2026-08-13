@@ -19,8 +19,9 @@ describe("shouldExpandAdvancedSettings", () => {
 });
 
 describe("AdvancedSettingsGroup", () => {
-  it("scrolls once after the initial async layout settles", async () => {
+  it("scrolls once after preceding layout queries settle", async () => {
     let resolveLayoutQuery: ((value: string) => void) | undefined;
+    let resolveUnrelatedQuery: ((value: string) => void) | undefined;
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -29,6 +30,13 @@ describe("AdvancedSettingsGroup", () => {
       queryFn: () =>
         new Promise<string>((resolve) => {
           resolveLayoutQuery = resolve;
+        }),
+    });
+    const unrelatedQuery = queryClient.fetchQuery({
+      queryKey: ["firewall", "list"],
+      queryFn: () =>
+        new Promise<string>((resolve) => {
+          resolveUnrelatedQuery = resolve;
         }),
     });
     const scrollIntoView = vi.fn();
@@ -44,7 +52,11 @@ describe("AdvancedSettingsGroup", () => {
 
     const view = render(
       <QueryClientProvider client={queryClient}>
-        <AdvancedSettingsGroup defaultOpen scrollToId="firewall">
+        <AdvancedSettingsGroup
+          defaultOpen
+          scrollToId="firewall"
+          waitForQueryKeys={[["advanced-settings-layout"]]}
+        >
           <div id="firewall">Firewall</div>
         </AdvancedSettingsGroup>
       </QueryClientProvider>,
@@ -58,6 +70,9 @@ describe("AdvancedSettingsGroup", () => {
     });
 
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+    resolveUnrelatedQuery?.("ready");
+    await unrelatedQuery;
 
     await queryClient.fetchQuery({
       queryKey: ["later-refresh"],

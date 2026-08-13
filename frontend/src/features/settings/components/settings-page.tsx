@@ -34,6 +34,12 @@ const TotpSettings = lazy(() =>
   import("@/features/settings/components/totp-settings").then((m) => ({ default: m.TotpSettings })),
 );
 
+const FIREWALL_LAYOUT_QUERY_KEYS = [
+  ["accounts", "list"],
+  ["settings", "upstream-proxy"],
+  ["model-sources", "list"],
+] as const;
+
 export function SettingsPage() {
   const { t } = useTranslation();
   const location = useLocation();
@@ -148,6 +154,7 @@ export function SettingsPage() {
               key={expandAdvanced ? `open:${advancedScrollToId ?? ""}` : "closed"}
               defaultOpen={expandAdvanced}
               scrollToId={advancedScrollToId}
+              waitForQueryKeys={FIREWALL_LAYOUT_QUERY_KEYS}
             >
               <RoutingSettings
                 key={[

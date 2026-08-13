@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import {
@@ -127,7 +127,6 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
 
   const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
   const filtersApplied = requestLogFiltersApplied(filters);
-  const [previousFiltersApplied, setPreviousFiltersApplied] = useState(false);
   const since = useMemo(() => timeframeToSinceIso(filters.timeframe), [filters.timeframe]);
   const listFilters = useMemo<RequestLogsListFilters>(
     () => ({
@@ -154,7 +153,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   );
 
   const {
-    data: logsData,
+    data: logsResult,
     error: logsError,
     isFetching: logsIsFetching,
     isLoading: logsIsLoading,
@@ -164,15 +163,19 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     refetch: refetchLogs,
   } = useQuery({
     queryKey: ["dashboard", "request-logs", listFilters],
-    queryFn: () => getRequestLogs(listFilters),
+    queryFn: async () => ({
+      page: await getRequestLogs(listFilters),
+      filtersApplied,
+    }),
     enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     placeholderData: keepPreviousData,
   });
+  const logsData = logsResult?.page;
   const emptyStateFiltersApplied =
-    filtersApplied || (logsIsPlaceholderData && previousFiltersApplied);
+    filtersApplied || (logsIsPlaceholderData && Boolean(logsResult?.filtersApplied));
   const logsQuery = {
     data: logsData,
     error: logsError,
@@ -215,7 +218,6 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
       ...filters,
       ...patch,
     };
-    setPreviousFiltersApplied(filtersApplied);
     setSearchParams(writeFilterState(nextState, searchParams));
   };
 

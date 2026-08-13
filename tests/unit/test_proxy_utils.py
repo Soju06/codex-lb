@@ -38459,7 +38459,9 @@ async def test_forwarded_receiver_cleanup_handoff_timeout_returns_503() -> None:
 
 
 @pytest.mark.asyncio
-async def test_startup_cleanup_guard_runs_after_initial_heartbeat_disconnect() -> None:
+async def test_startup_cleanup_guard_runs_after_initial_heartbeat_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     released: list[str] = []
     started = asyncio.Event()
 
@@ -38472,17 +38474,26 @@ async def test_startup_cleanup_guard_runs_after_initial_heartbeat_disconnect() -
         await asyncio.Event().wait()
         yield "data: never\n\n"
 
+    async def record_release(
+        reservation: object,
+        *,
+        action: str,
+        scheduler: object,
+        request_id: str,
+    ) -> None:
+        del reservation, scheduler, request_id
+        released.append(action)
+
+    monkeypatch.setattr(proxy_api, "_release_reservation_best_effort", record_release)
     startup_task = asyncio.create_task(pending_probe())
     await started.wait()
     cleanup_ready = asyncio.Event()
-
-    class _Cleanup:
-        owns_reservation = True
-        released = False
-
-        async def release(self, *, action: str) -> None:
-            released.append(action)
-
+    reservation_cleanup = proxy_api._ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=None,
+        scheduler=None,
+        request_id="startup-guard-heartbeat",
+    )
     service_stream = hanging_service_stream()
     stream = proxy_api._prepend_initial_sse_heartbeat(
         service_stream,
@@ -38493,14 +38504,16 @@ async def test_startup_cleanup_guard_runs_after_initial_heartbeat_disconnect() -
         stream,
         startup_task=startup_task,
         streams_to_close=(service_stream,),
-        reservation_cleanup=_Cleanup(),
+        reservation_cleanup=reservation_cleanup,
         responses_service_cleanup_ready_event=cleanup_ready,
         responses_owner_forward_dispatched_event=asyncio.Event(),
         responses_owner_forward_rejected_event=asyncio.Event(),
     )
 
     assert await anext(stream) == ": keepalive\n\n"
-    await stream.aclose()
+    close = getattr(stream, "aclose", None)
+    assert callable(close)
+    await close()
     await asyncio.sleep(0)
 
     assert startup_task.cancelled()

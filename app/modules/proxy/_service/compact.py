@@ -704,17 +704,41 @@ class _CompactMixin:
             proxy_pending = list(deferred_proxy_health)
             deferred_proxy_health.clear()
             for failed_account, failed_error, failed_code, failed_status in stream_pending:
-                await proxy._handle_stream_error(
-                    failed_account,
-                    failed_error,
-                    failed_code,
-                    http_status=failed_status,
-                )
+                try:
+                    await proxy._handle_stream_error(
+                        failed_account,
+                        failed_error,
+                        failed_code,
+                        http_status=failed_status,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to flush deferred compact stream health account_id=%s request_id=%s",
+                        failed_account.id,
+                        request_id,
+                        exc_info=True,
+                    )
             for failed_account, failed_exc, extra_error_count in http_500_pending:
-                await proxy._handle_proxy_error(failed_account, failed_exc)
-                await proxy._load_balancer.record_errors(failed_account, extra_error_count)
+                try:
+                    await proxy._handle_proxy_error(failed_account, failed_exc)
+                    await proxy._load_balancer.record_errors(failed_account, extra_error_count)
+                except Exception:
+                    logger.warning(
+                        "Failed to flush deferred compact HTTP 500 health account_id=%s request_id=%s",
+                        failed_account.id,
+                        request_id,
+                        exc_info=True,
+                    )
             for failed_account, failed_exc in proxy_pending:
-                await proxy._handle_proxy_error(failed_account, failed_exc)
+                try:
+                    await proxy._handle_proxy_error(failed_account, failed_exc)
+                except Exception:
+                    logger.warning(
+                        "Failed to flush deferred compact proxy health account_id=%s request_id=%s",
+                        failed_account.id,
+                        request_id,
+                        exc_info=True,
+                    )
 
         async def settle_compact_usage(
             *,

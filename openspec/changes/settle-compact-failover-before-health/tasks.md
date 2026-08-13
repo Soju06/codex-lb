@@ -11,6 +11,7 @@
   non-proxy exits.
 - [x] 1.6 Shield deferred health flush so cancellation during the write
   still completes the penalty.
+- [x] 1.7 Continue remaining deferred health writes if one write fails.
 
 ## 2. Regression coverage
 
@@ -34,6 +35,8 @@
   flushes deferred health.
 - [x] 2.11 Assert cancellation during deferred health flush still completes
   the write.
+- [x] 2.12 Assert a later deferred health write still runs after an earlier
+  write fails.
 
 ## 3. Validation
 

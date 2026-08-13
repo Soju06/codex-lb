@@ -19,3 +19,5 @@ that clients retry. Cancellation and other non-proxy exits skip the dedicated
 settle handlers, so they need an explicit settle-then-flush before the
 original exception continues. The flush itself is shielded so a cancel that
 arrives after queues are drained cannot drop the remaining health write.
+Each deferred entry is written independently so one persistence failure does
+not skip the other failed accounts.

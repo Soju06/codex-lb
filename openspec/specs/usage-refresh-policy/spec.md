@@ -1257,7 +1257,7 @@ local writes but MUST NOT be the mechanism that guarantees dedup.
 
 ### Requirement: Compact failover settles before account-health writes
 
-When `compact_responses` holds an API-key usage reservation, it MUST NOT write account health for a compact upstream failure until that reservation has been settled or released. A `failover_next` decision MUST keep the same reservation for the next account and MUST defer the failed account's health write until the next settlement. Timeout and exhaustion terminals MUST keep settle-then-health order. Compact MUST NOT acquire a second reservation mid-request. If usage finalization fails but the fail-safe reservation release succeeds, compact MUST flush deferred health before surfacing `usage_settlement_failed`. If the reservation remains held because that fail-safe release also fails, deferred health MUST stay unapplied. After a compact reservation is finalized, a deferred health-persistence failure MUST NOT replace the successful compact response. If compact exits through cancellation or any exception other than `ProxyResponseError` or `UpstreamProxyRouteError`, it MUST settle or release the reservation and flush deferred health before propagating that exception. Deferred health flush MUST complete even if the compact request is cancelled while that flush is awaiting a health write.
+When `compact_responses` holds an API-key usage reservation, it MUST NOT write account health for a compact upstream failure until that reservation has been settled or released. A `failover_next` decision MUST keep the same reservation for the next account and MUST defer the failed account's health write until the next settlement. Timeout and exhaustion terminals MUST keep settle-then-health order. Compact MUST NOT acquire a second reservation mid-request. If usage finalization fails but the fail-safe reservation release succeeds, compact MUST flush deferred health before surfacing `usage_settlement_failed`. If the reservation remains held because that fail-safe release also fails, deferred health MUST stay unapplied. After a compact reservation is finalized, a deferred health-persistence failure MUST NOT replace the successful compact response. If compact exits through cancellation or any exception other than `ProxyResponseError` or `UpstreamProxyRouteError`, it MUST settle or release the reservation and flush deferred health before propagating that exception. Deferred health flush MUST complete even if the compact request is cancelled while that flush is awaiting a health write. If one deferred health write fails, compact MUST still attempt the remaining deferred health writes.
 
 #### Scenario: Compact failover_next defers health until settle
 
@@ -1345,6 +1345,12 @@ When `compact_responses` holds an API-key usage reservation, it MUST NOT write a
 - **AND** a later account completed and settlement started flushing
 - **WHEN** the request is cancelled during the deferred health write
 - **THEN** the deferred health write still completes
+
+#### Scenario: Compact continues flushing after one deferred health write fails
+
+- **GIVEN** a compact request that deferred health for more than one failed account
+- **WHEN** the first deferred health write raises
+- **THEN** later deferred health writes are still attempted
 
 ### Requirement: Compact budget-exhausted terminals settle the API-key reservation before raising
 

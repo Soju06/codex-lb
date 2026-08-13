@@ -1,5 +1,5 @@
 import { ChevronRight } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -24,15 +24,33 @@ export function AdvancedSettingsGroup({
 }: AdvancedSettingsGroupProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open || !scrollToId) {
       return;
     }
-    const frame = window.requestAnimationFrame(() => {
-      document.getElementById(scrollToId)?.scrollIntoView({ block: "start" });
-    });
-    return () => window.cancelAnimationFrame(frame);
+    let frame: number | undefined;
+    const scrollToTarget = () => {
+      if (frame !== undefined) {
+        window.cancelAnimationFrame(frame);
+      }
+      frame = window.requestAnimationFrame(() => {
+        document.getElementById(scrollToId)?.scrollIntoView({ block: "start" });
+      });
+    };
+    scrollToTarget();
+
+    const observer = new ResizeObserver(scrollToTarget);
+    if (contentRef.current) {
+      observer.observe(contentRef.current);
+    }
+    return () => {
+      if (frame !== undefined) {
+        window.cancelAnimationFrame(frame);
+      }
+      observer.disconnect();
+    };
   }, [open, scrollToId]);
 
   return (
@@ -50,7 +68,9 @@ export function AdvancedSettingsGroup({
           <span className="mt-0.5 block text-xs text-muted-foreground">{t("settings.advanced.description")}</span>
         </span>
       </CollapsibleTrigger>
-      <CollapsibleContent className="space-y-4 border-t p-4">{children}</CollapsibleContent>
+      <CollapsibleContent ref={contentRef} className="space-y-4 border-t p-4">
+        {children}
+      </CollapsibleContent>
     </Collapsible>
   );
 }

@@ -48,9 +48,6 @@ export function SettingsPage() {
     addPoolMemberMutation,
     testEndpointMutation,
   } = useUpstreamProxyAdmin();
-  const settledAdvancedScrollToId = upstreamProxyQuery.isPending
-    ? undefined
-    : advancedScrollToId;
   const authMode = useAuthStore((state) => state.authMode);
   const passwordManagementEnabled = useAuthStore((state) => state.passwordManagementEnabled);
   const passwordSessionActive = useAuthStore((state) => state.passwordSessionActive);
@@ -150,7 +147,7 @@ export function SettingsPage() {
             <AdvancedSettingsGroup
               key={expandAdvanced ? `open:${advancedScrollToId ?? ""}` : "closed"}
               defaultOpen={expandAdvanced}
-              scrollToId={settledAdvancedScrollToId}
+              scrollToId={advancedScrollToId}
             >
               <RoutingSettings
                 key={[

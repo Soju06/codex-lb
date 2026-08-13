@@ -907,6 +907,7 @@ class _CompactMixin:
                                     "allow_direct_egress": route is None,
                                     "route_trace": route_trace,
                                     "chatgpt_account_id": account_id,
+                                    "use_responses_stream_compaction": request_kind == "compaction",
                                 },
                             ),
                             timeout=upstream_budget,

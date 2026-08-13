@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import errno
 import socket
 from typing import Any, cast
@@ -69,6 +70,92 @@ class _CompactResponse:
 
     def json(self) -> dict[str, str]:
         return {"object": "response.compact", "id": "compact_1"}
+
+
+class _LegacyCompactResponse:
+    status_code = 200
+    headers = {"content-type": "application/json"}
+    content = (
+        b'{"object":"response.compaction","id":"legacy_compact_1","output":'
+        b'[{"type":"compaction","id":"cmp_legacy","encrypted_content":"legacy-enc"}]}'
+    )
+
+    def json(self, **kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {
+            "object": "response.compaction",
+            "id": "legacy_compact_1",
+            "output": [{"type": "compaction", "id": "cmp_legacy", "encrypted_content": "legacy-enc"}],
+        }
+
+
+class _UnsupportedCompactResponse:
+    status_code = 404
+    headers = {"content-type": "application/json"}
+    content = b'{"error":{"type":"invalid_request_error","code":"not_found","message":"Not Found"}}'
+
+    def json(self, **kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return {
+            "error": {
+                "type": "invalid_request_error",
+                "code": "not_found",
+                "message": "Not Found",
+            }
+        }
+
+
+class _CompactionStreamContent:
+    async def iter_chunked(self, size: int):
+        del size
+        yield (
+            b'data: {"type":"response.output_item.done","output_index":0,'
+            b'"item":{"id":"cmp_stream","type":"compaction","status":"completed",'
+            b'"encrypted_content":"stream-enc"}}\n\n'
+        )
+        yield (
+            b'data: {"type":"response.completed","response":{"id":"stream_compact_1",'
+            b'"object":"response","status":"completed","usage":{"input_tokens":7,'
+            b'"output_tokens":2,"total_tokens":9}}}\n\n'
+        )
+
+
+class _CompactionStreamContentWithTrailingHang:
+    def __init__(self) -> None:
+        self.reached_trailing_wait = False
+
+    async def iter_chunked(self, size: int):
+        del size
+        yield (
+            b'data: {"type":"response.output_item.done","output_index":0,'
+            b'"item":{"id":"cmp_stream","type":"compaction","status":"completed",'
+            b'"encrypted_content":"stream-enc"}}\n\n'
+        )
+        yield (
+            b'data: {"type":"response.completed","response":{"id":"stream_compact_1",'
+            b'"object":"response","status":"completed","usage":{"input_tokens":7,'
+            b'"output_tokens":2,"total_tokens":9}}}\n\n'
+        )
+        self.reached_trailing_wait = True
+        await asyncio.sleep(60)
+
+
+class _CompactionStreamResponse:
+    status_code = 200
+    headers = {"content-type": "text/event-stream"}
+
+    def __init__(self, content: object | None = None) -> None:
+        self.content = content or _CompactionStreamContent()
+
+
+class _SequenceCodexClient:
+    def __init__(self, responses: list[object]) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.responses = iter(responses)
+
+    async def request(self, method: str, url: str, *, route: ResolvedUpstreamRoute, **kwargs: Any) -> object:
+        self.calls.append({"method": method, "url": url, "route": route, **kwargs})
+        return next(self.responses)
 
 
 class _TranscribeResponse:
@@ -322,6 +409,107 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     assert client.calls[0]["route"] is route
     assert client.calls[0]["json"]["model"] == "gpt-5.2"
     assert trace.endpoint_id == "ep_1"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_uses_responses_stream_compaction_v2(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = _SequenceCodexClient([_CompactionStreamResponse()])
+    payload = ResponsesCompactRequest(
+        model="gpt-5.6",
+        instructions="Summarize.",
+        input=[{"role": "user", "content": "hello"}],
+    )
+
+    response = await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+        use_responses_stream_compaction=True,
+    )
+
+    assert response.object == "response.compaction"
+    assert response.id == "stream_compact_1"
+    assert response.usage is not None
+    assert response.usage.input_tokens == 7
+    assert response.model_extra is not None
+    assert response.model_extra["output"] == [
+        {
+            "id": "cmp_stream",
+            "type": "compaction",
+            "status": "completed",
+            "encrypted_content": "stream-enc",
+        }
+    ]
+    assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
+    assert client.calls[0]["buffer_response"] is False
+    assert client.calls[0]["json"]["stream"] is True
+    assert client.calls[0]["json"]["input"][-1] == {"type": "compaction_trigger"}
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_stream_compaction_stops_at_completed(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    content = _CompactionStreamContentWithTrailingHang()
+    client = _SequenceCodexClient([_CompactionStreamResponse(content)])
+    payload = ResponsesCompactRequest(
+        model="gpt-5.6",
+        instructions="Summarize.",
+        input=[{"role": "user", "content": "hello"}],
+    )
+
+    response = await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+        use_responses_stream_compaction=True,
+    )
+
+    assert response.object == "response.compaction"
+    assert response.id == "stream_compact_1"
+    assert content.reached_trailing_wait is False
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_falls_back_to_legacy_endpoint_when_stream_is_unsupported(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = _SequenceCodexClient([_UnsupportedCompactResponse(), _LegacyCompactResponse()])
+    payload = ResponsesCompactRequest(
+        model="gpt-5.2",
+        instructions="Summarize.",
+        input=[{"role": "user", "content": "hello"}],
+    )
+
+    response = await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+        use_responses_stream_compaction=True,
+    )
+
+    assert response.object == "response.compaction"
+    assert response.id == "legacy_compact_1"
+    assert [call["url"].rsplit("/codex/", 1)[-1] for call in client.calls] == [
+        "responses",
+        "responses/compact",
+    ]
+    assert client.calls[0]["json"]["input"][-1] == {"type": "compaction_trigger"}
+    assert "stream" not in client.calls[1]["json"]
 
 
 @pytest.mark.asyncio

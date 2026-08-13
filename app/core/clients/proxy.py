@@ -3568,6 +3568,7 @@ async def compact_responses(
     route_trace: UpstreamProxyRouteTrace | None = None,
     chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
+    use_responses_stream_compaction: bool = False,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
         transport = _CompactCommandTransport(
@@ -3581,6 +3582,7 @@ async def compact_responses(
             route_trace=route_trace,
             chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
+            use_responses_stream_compaction=use_responses_stream_compaction,
         )
         return await transport.execute()
 
@@ -3597,6 +3599,127 @@ class _CompactCommandTransport:
     route_trace: UpstreamProxyRouteTrace | None = None
     chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
+    use_responses_stream_compaction: bool = False
+
+    async def _execute_responses_stream_compaction(
+        self,
+        *,
+        settings: Settings,
+        payload_dict: JsonObject,
+        compact_timeout_seconds: float | None,
+        effective_connect_timeout: float,
+    ) -> CompactResponsePayload:
+        input_value = payload_dict.get("input")
+        if not isinstance(input_value, list):
+            error = openai_error(
+                "invalid_request_error",
+                "Responses-stream compaction requires array input.",
+                error_type="invalid_request_error",
+            )
+            error["error"]["param"] = "input"
+            raise ProxyResponseError(
+                400,
+                error,
+                failure_phase="validation",
+            )
+
+        stream_payload_dict = dict(payload_dict)
+        stream_payload_dict["input"] = [*input_value, {"type": "compaction_trigger"}]
+        stream_payload_dict["stream"] = True
+        stream_payload_dict["store"] = False
+        stream_payload = ResponsesRequest.model_validate(stream_payload_dict)
+        stream_payload_dict = stream_payload.to_payload()
+
+        compaction_items: list[JsonObject] = []
+        completed_response: JsonObject | None = None
+        stream = stream_responses(
+            stream_payload,
+            self.headers,
+            self.access_token,
+            self.chatgpt_account_id or self.account_id,
+            session=self.session,
+            route=self.route,
+            codex_client=self.codex_client,
+            route_trace=self.route_trace,
+            allow_direct_egress=self.allow_direct_egress,
+            raise_for_status=True,
+            codex_lb_account_id=self.account_id,
+            upstream_stream_transport_override="http",
+        )
+        with override_stream_timeouts(
+            connect_timeout_seconds=effective_connect_timeout,
+            idle_timeout_seconds=compact_timeout_seconds,
+            total_timeout_seconds=compact_timeout_seconds,
+        ):
+            async for event_block in stream:
+                event_payload = parse_sse_data_json(event_block)
+                if event_payload is None:
+                    continue
+                event_type = event_payload.get("type")
+                if event_type == "response.output_item.done":
+                    item = event_payload.get("item")
+                    if isinstance(item, dict) and item.get("type") in {"compaction", "compaction_summary"}:
+                        compaction_items.append(dict(item))
+                elif event_type == "response.completed":
+                    response = event_payload.get("response")
+                    if isinstance(response, dict):
+                        completed_response = dict(response)
+                    break
+                elif event_type in {"response.failed", "error"}:
+                    raise _proxy_response_error_from_stream_event(event_payload)
+
+        if completed_response is None:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "upstream_error",
+                    "Responses compaction stream closed before response.completed.",
+                    error_type="server_error",
+                ),
+                failure_phase="stream",
+            )
+        if len(compaction_items) != 1:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "upstream_error",
+                    (
+                        "Responses compaction stream expected exactly one compaction output item, "
+                        f"got {len(compaction_items)}."
+                    ),
+                    error_type="server_error",
+                ),
+                failure_phase="stream",
+            )
+
+        compaction_item = compaction_items[0]
+        encrypted_content = compaction_item.get("encrypted_content")
+        if not isinstance(encrypted_content, str) or not encrypted_content:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "upstream_error",
+                    "Responses compaction stream returned an invalid compaction item.",
+                    error_type="server_error",
+                ),
+                failure_phase="parse",
+            )
+        normalized_item = dict(compaction_item)
+        normalized_item["type"] = "compaction"
+        result: dict[str, JsonValue] = {
+            "object": "response.compaction",
+            "output": [normalized_item],
+        }
+        response_id = completed_response.get("id")
+        if isinstance(response_id, str) and response_id:
+            result["id"] = response_id
+        response_status = completed_response.get("status")
+        if isinstance(response_status, str) and response_status:
+            result["status"] = response_status
+        usage = completed_response.get("usage")
+        if isinstance(usage, dict):
+            result["usage"] = dict(usage)
+        return CompactResponsePayload.model_validate(result)
 
     async def execute(self) -> CompactResponsePayload:
         settings = get_settings()
@@ -3692,6 +3815,23 @@ class _CompactCommandTransport:
             headers=upstream_headers,
         )
         try:
+            if self.use_responses_stream_compaction:
+                try:
+                    return await self._execute_responses_stream_compaction(
+                        settings=settings,
+                        payload_dict=payload_dict,
+                        compact_timeout_seconds=compact_timeout_seconds,
+                        effective_connect_timeout=effective_connect_timeout,
+                    )
+                except ProxyResponseError as exc:
+                    if exc.status_code not in {404, 405, 501}:
+                        raise
+                    logger.info(
+                        "Responses-stream compaction unsupported; falling back to legacy endpoint "
+                        "status=%s account_id=%s",
+                        exc.status_code,
+                        self.account_id,
+                    )
             if self.route is not None:
                 owns_codex_client = self.codex_client is None
                 active_codex_client = self.codex_client or CodexClient(create_codex_session())
@@ -4008,6 +4148,38 @@ def _codex_response_status(response: Any) -> int:
     if value is None:
         return 0
     return int(value)
+
+
+def _proxy_response_error_from_stream_event(event_payload: Mapping[str, JsonValue]) -> ProxyResponseError:
+    error_value: JsonValue | None = event_payload.get("error")
+    response_value = event_payload.get("response")
+    if isinstance(response_value, dict) and isinstance(response_value.get("error"), dict):
+        error_value = response_value["error"]
+    if isinstance(error_value, dict):
+        message = error_value.get("message")
+        error_type = error_value.get("type")
+        code = error_value.get("code")
+        detail: OpenAIErrorDetail = {
+            "message": message if isinstance(message, str) else "Upstream Responses compaction stream failed.",
+            "type": error_type if isinstance(error_type, str) else "server_error",
+        }
+        if isinstance(code, str):
+            detail["code"] = code
+        return ProxyResponseError(
+            502,
+            {"error": detail},
+            failure_phase="stream",
+            failure_detail=detail["message"],
+        )
+    return ProxyResponseError(
+        502,
+        openai_error(
+            "upstream_error",
+            "Upstream Responses compaction stream failed.",
+            error_type="server_error",
+        ),
+        failure_phase="stream",
+    )
 
 
 async def _codex_response_json(response: Any) -> Any:

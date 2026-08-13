@@ -10769,9 +10769,11 @@ async def test_service_compact_budget_bounds_unconfigured_upstream_read_timeout(
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
 
-    async def fake_compact(payload, headers, access_token, account_id):
+    async def fake_compact(payload, headers, access_token, account_id, *, use_responses_stream_compaction=None):
+        del payload, headers, access_token, account_id
         captured["connect_timeout"] = proxy_module._COMPACT_CONNECT_TIMEOUT_OVERRIDE.get()
         captured["total_timeout"] = proxy_module._COMPACT_TOTAL_TIMEOUT_OVERRIDE.get()
+        captured["use_responses_stream_compaction"] = use_responses_stream_compaction
         return OpenAIResponsePayload.model_validate({"output": []})
 
     monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
@@ -10782,6 +10784,7 @@ async def test_service_compact_budget_bounds_unconfigured_upstream_read_timeout(
 
     assert captured["connect_timeout"] == pytest.approx(2.0)
     assert captured["total_timeout"] == pytest.approx(2.0)
+    assert captured["use_responses_stream_compaction"] is False
     assert result.model_extra == {"output": []}
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["request_kind"] == "normal"
@@ -35426,6 +35429,8 @@ async def test_compact_responses_forwards_codex_compaction_to_upstream(monkeypat
     assert response.model_extra == {"compaction_summary": {"encrypted_content": "ENCRYPTED_COMPACTION"}}
     select_account.assert_awaited_once()
     upstream.assert_awaited_once()
+    assert upstream.await_args is not None
+    assert upstream.await_args.kwargs["use_responses_stream_compaction"] is True
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
 

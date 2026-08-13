@@ -38,3 +38,17 @@ When `compact_responses` holds an API-key usage reservation, it MUST NOT write a
 - **AND** the first account fails a retryable freshness/connect or post-401 forced-refresh transport error
 - **WHEN** a later account completes and settlement runs
 - **THEN** `_handle_stream_error` for the failed account runs only after that settlement
+
+#### Scenario: Compact second 401 failover defers health until settle
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the same account returns 401 again after a forced refresh
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_proxy_error` for the failed account runs only after that settlement
+
+#### Scenario: Compact permanent refresh settles before the health mark
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the post-401 forced refresh raises a permanent `RefreshError`
+- **WHEN** the compact request records the permanent account failure
+- **THEN** the reservation is settled before `mark_permanent_failure`

@@ -693,6 +693,7 @@ class _CompactMixin:
         )
         deferred_stream_health: list[tuple[Account, Any, str, int | None]] = []
         deferred_http_500_health: list[tuple[Account, ProxyResponseError, int]] = []
+        deferred_proxy_health: list[tuple[Account, ProxyResponseError]] = []
 
         async def settle_compact_usage(
             *,
@@ -711,6 +712,8 @@ class _CompactMixin:
             deferred_stream_health.clear()
             http_500_pending = list(deferred_http_500_health)
             deferred_http_500_health.clear()
+            proxy_pending = list(deferred_proxy_health)
+            deferred_proxy_health.clear()
             for failed_account, failed_error, failed_code, failed_status in stream_pending:
                 await proxy._handle_stream_error(
                     failed_account,
@@ -721,6 +724,17 @@ class _CompactMixin:
             for failed_account, failed_exc, extra_error_count in http_500_pending:
                 await proxy._handle_proxy_error(failed_account, failed_exc)
                 await proxy._load_balancer.record_errors(failed_account, extra_error_count)
+            for failed_account, failed_exc in proxy_pending:
+                await proxy._handle_proxy_error(failed_account, failed_exc)
+
+        async def record_or_defer_proxy_health(
+            failed_account: Account,
+            failed_exc: ProxyResponseError,
+        ) -> None:
+            if api_key is not None and api_key_reservation is not None:
+                deferred_proxy_health.append((failed_account, failed_exc))
+                return
+            await proxy._handle_proxy_error(failed_account, failed_exc)
 
         async def record_or_defer_stream_health(
             failed_account: Account,
@@ -1203,7 +1217,7 @@ class _CompactMixin:
                         if exc.status_code == 401:
                             if refresh_retry_used:
                                 try:
-                                    await proxy._handle_proxy_error(account, exc)
+                                    await record_or_defer_proxy_health(account, exc)
                                 except Exception:
                                     await settle_compact_usage(
                                         api_key=api_key,
@@ -1257,13 +1271,13 @@ class _CompactMixin:
                             except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
                                 if isinstance(refresh_exc, RefreshError):
                                     if refresh_exc.is_permanent:
-                                        await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                                         await settle_compact_usage(
                                             api_key=api_key,
                                             api_key_reservation=api_key_reservation,
                                             response=None,
                                             request_service_tier=request_service_tier,
                                         )
+                                        await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                                         raise exc
                                     if is_transient_refresh_contention(refresh_exc):
                                         # Transient CROSS-REPLICA refresh contention

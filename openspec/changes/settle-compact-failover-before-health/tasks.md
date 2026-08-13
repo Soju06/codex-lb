@@ -14,6 +14,9 @@
   deferred health.
 - [x] 2.4 Assert freshness/connect and post-401 refresh failovers defer
   health until settlement.
+- [x] 2.5 Assert a second 401 after forced refresh defers `_handle_proxy_error`.
+- [x] 2.6 Assert permanent post-401 refresh settles before
+  `mark_permanent_failure`.
 
 ## 3. Validation
 

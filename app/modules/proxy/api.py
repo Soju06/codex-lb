@@ -5210,6 +5210,23 @@ async def _stream_responses(
                     headers=rate_limit_headers,
                 )
             except ProxyResponseError as exc:
+                if forwarded_request and responses_service_cleanup_ready_event.is_set():
+                    # Fallback settlement already transferred cleanup. A 502
+                    # would look like a definitive rejection and let origin
+                    # replay a compact that already ran.
+                    stream = _synthetic_compaction_failure_stream(
+                        response_id=get_request_id() or "unknown",
+                    )
+                    return StreamingResponse(
+                        stream,
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache, no-transform",
+                            "X-Accel-Buffering": "no",
+                            **turn_state_headers,
+                            **rate_limit_headers,
+                        },
+                    )
                 return _stream_startup_error_response(
                     request,
                     exc,

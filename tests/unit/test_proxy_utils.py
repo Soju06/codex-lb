@@ -38521,6 +38521,66 @@ async def test_startup_cleanup_guard_runs_after_initial_heartbeat_disconnect(
 
 
 @pytest.mark.asyncio
+async def test_forwarded_compact_fallback_settlement_keeps_http_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_forwarded_compact_fallback",
+        key_id="key_forwarded_compact_fallback",
+        model="gpt-5.1",
+    )
+
+    async def skip_limits(*args: object, **kwargs: object) -> proxy_service.ApiKeyUsageReservationData:
+        del args, kwargs
+        return reservation
+
+    async def compact_responses(*args: object, **kwargs: object):
+        del args, kwargs
+        proxy_support._signal_propagated_responses_service_cleanup_ready()
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("usage_settlement_failed", "Compact API key usage could not be settled"),
+            failure_phase="usage_settlement",
+        )
+
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    context = SimpleNamespace(
+        service=SimpleNamespace(
+            rate_limit_headers=AsyncMock(return_value={}),
+            compact_responses=compact_responses,
+            stream_http_responses=AsyncMock(),
+            stream_responses=AsyncMock(),
+        )
+    )
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+            "stream": True,
+        }
+    )
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, context),
+        api_key=None,
+        codex_session_affinity=True,
+        skip_limit_enforcement=True,
+        api_key_reservation_override=reservation,
+        forwarded_request=True,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.status_code == 200
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+    assert "response.failed" in body
+    assert "Compact response did not include a compaction output item" in body
+
+
+@pytest.mark.asyncio
 async def test_stream_http_bridge_or_retry_rejects_input_image_file_id(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))

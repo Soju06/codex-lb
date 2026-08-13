@@ -31,9 +31,13 @@ vi.mock("@/features/dashboard/hooks/use-dashboard", () => ({
   useDashboardProjections: vi.fn(),
 }));
 
-vi.mock("@/features/dashboard/hooks/use-request-logs", () => ({
-  useRequestLogs: vi.fn(),
-}));
+vi.mock("@/features/dashboard/hooks/use-request-logs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/features/dashboard/hooks/use-request-logs")>();
+  return {
+    ...actual,
+    useRequestLogs: vi.fn(),
+  };
+});
 
 vi.mock("@/features/dashboard/hooks/use-conversations", () => ({
   useConversations: vi.fn(),

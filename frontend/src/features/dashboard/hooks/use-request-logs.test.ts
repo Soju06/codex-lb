@@ -5,7 +5,7 @@ import { createElement, type PropsWithChildren, useEffect } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
-import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
+import { requestLogFiltersApplied, useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { server } from "@/test/mocks/server";
 
 function createTestQueryClient(): QueryClient {
@@ -431,5 +431,29 @@ describe("useRequestLogs", () => {
     const decoded = result.current.filters.conversationId;
     expect(decoded).toBe(rawId);
     expect(apiParams.some((p) => p === rawId)).toBe(true);
+  });
+});
+
+describe("requestLogFiltersApplied", () => {
+  const defaults = {
+    search: "",
+    timeframe: "all" as const,
+    accountIds: [],
+    apiKeyIds: [],
+    modelOptions: [],
+    statuses: [],
+    conversationId: null,
+    limit: 25,
+    offset: 0,
+  };
+
+  it("is false for default request-log filters", () => {
+    expect(requestLogFiltersApplied(defaults)).toBe(false);
+  });
+
+  it("is true when a narrowing filter is set", () => {
+    expect(requestLogFiltersApplied({ ...defaults, timeframe: "24h" })).toBe(true);
+    expect(requestLogFiltersApplied({ ...defaults, search: "rate" })).toBe(true);
+    expect(requestLogFiltersApplied({ ...defaults, conversationId: "conv-1" })).toBe(true);
   });
 });

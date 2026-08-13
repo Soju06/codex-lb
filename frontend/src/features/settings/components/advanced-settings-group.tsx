@@ -1,5 +1,5 @@
 import { ChevronRight } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -7,7 +7,17 @@ import { cn } from "@/lib/utils";
 
 export type AdvancedSettingsGroupProps = {
   children: ReactNode;
+  defaultOpen?: boolean;
+  scrollToId?: string;
 };
+
+export function shouldExpandAdvancedSettings(search: string, hash: string): boolean {
+  const query = search.startsWith("?") ? search.slice(1) : search;
+  if (new URLSearchParams(query).get("advanced") === "1") {
+    return true;
+  }
+  return hash === "#firewall";
+}
 
 /**
  * Collapsed-by-default container for power-user settings sections.
@@ -15,9 +25,29 @@ export type AdvancedSettingsGroupProps = {
  * Children are unmounted while the group is closed, so section data queries
  * only fire once the operator expands the group.
  */
-export function AdvancedSettingsGroup({ children }: AdvancedSettingsGroupProps) {
+export function AdvancedSettingsGroup({
+  children,
+  defaultOpen = false,
+  scrollToId,
+}: AdvancedSettingsGroupProps) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    if (defaultOpen) {
+      setOpen(true);
+    }
+  }, [defaultOpen]);
+
+  useEffect(() => {
+    if (!open || !scrollToId) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(scrollToId)?.scrollIntoView({ block: "start" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, scrollToId]);
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-xl border bg-card">

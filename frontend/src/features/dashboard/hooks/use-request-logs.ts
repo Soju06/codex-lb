@@ -22,6 +22,18 @@ const DEFAULT_FILTER_STATE: FilterState = {
   offset: 0,
 };
 
+export function requestLogFiltersApplied(filters: FilterState): boolean {
+  return (
+    filters.search.trim() !== "" ||
+    filters.timeframe !== DEFAULT_FILTER_STATE.timeframe ||
+    filters.accountIds.length > 0 ||
+    filters.apiKeyIds.length > 0 ||
+    filters.modelOptions.length > 0 ||
+    filters.statuses.length > 0 ||
+    Boolean(filters.conversationId)
+  );
+}
+
 const REQUEST_LOG_PARAM_KEYS = [
   "search",
   "timeframe",

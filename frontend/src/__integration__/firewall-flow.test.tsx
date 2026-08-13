@@ -78,6 +78,9 @@ describe("firewall flow integration", () => {
 
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/settings");
-    expect(await screen.findByRole("button", { name: "Show advanced settings" })).toBeInTheDocument();
+    expect(window.location.search).toBe("?advanced=1");
+    expect(window.location.hash).toBe("#firewall");
+    expect(await screen.findByRole("heading", { name: "Firewall" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hide advanced settings" })).toBeInTheDocument();
   });
 });

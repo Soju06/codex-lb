@@ -1,6 +1,7 @@
 import { Suspense, lazy } from "react";
 import { Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useLocation } from "react-router-dom";
 
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
@@ -10,7 +11,10 @@ import { FirewallSection } from "@/features/firewall/components/firewall-section
 import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
-import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
+import {
+  AdvancedSettingsGroup,
+  shouldExpandAdvancedSettings,
+} from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
@@ -34,6 +38,9 @@ const TotpSettings = lazy(() =>
 
 export function SettingsPage() {
   const { t } = useTranslation();
+  const location = useLocation();
+  const expandAdvanced = shouldExpandAdvancedSettings(location.search, location.hash);
+  const advancedScrollToId = location.hash.replace(/^#/, "") || undefined;
   const { settingsQuery, updateSettingsMutation } = useSettings();
   const { accountsQuery } = useAccounts();
   const {
@@ -139,7 +146,7 @@ export function SettingsPage() {
 
             <TelemetrySettings disabled={controlsDisabled} />
 
-            <AdvancedSettingsGroup>
+            <AdvancedSettingsGroup defaultOpen={expandAdvanced} scrollToId={advancedScrollToId}>
               <RoutingSettings
                 key={[
                   settings.openaiCacheAffinityMaxAgeSeconds,

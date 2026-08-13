@@ -1,7 +1,9 @@
 import { Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 
 import { EmptyState } from "@/components/empty-state";
+import { Button } from "@/components/ui/button";
 import { AccountCard, type AccountCardProps } from "@/features/dashboard/components/account-card";
 import type { AccountSummary } from "@/features/dashboard/schemas";
 
@@ -25,6 +27,11 @@ export function AccountCards({ accounts, readOnly = false, onAction }: AccountCa
         icon={Users}
         title={t("dashboard.accounts.emptyTitle")}
         description={t("dashboard.accounts.emptyDescription")}
+        action={
+          <Button asChild size="sm">
+            <Link to="/accounts">{t("dashboard.accounts.emptyAction")}</Link>
+          </Button>
+        }
       />
     );
   }

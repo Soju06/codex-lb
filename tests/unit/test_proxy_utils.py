@@ -36283,6 +36283,71 @@ async def test_compact_unexpected_exit_flushes_deferred_health(monkeypatch, exit
 
 
 @pytest.mark.asyncio
+async def test_compact_flush_completes_when_cancelled_during_health_write(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_flush_cancel_a")
+    account_b = _make_account("acc_compact_flush_cancel_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    flush_started = asyncio.Event()
+    release_flush = asyncio.Event()
+    api_key = _make_api_key_data("key_compact_flush_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_flush_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        flush_started.set()
+        await release_flush.wait()
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    task = asyncio.create_task(
+        service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-flush-cancel"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+    )
+    await asyncio.wait_for(flush_started.wait(), timeout=1)
+    task.cancel()
+    await asyncio.sleep(0)
+    release_flush.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
 async def test_ensure_fresh_with_timeout_bounds_whole_singleflight_wait(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_refresh_wait_bound")

@@ -17,4 +17,5 @@ Once usage is finalized, a later deferred health-write failure is a local
 persistence problem. It must not convert a billed compact success into a 500
 that clients retry. Cancellation and other non-proxy exits skip the dedicated
 settle handlers, so they need an explicit settle-then-flush before the
-original exception continues.
+original exception continues. The flush itself is shielded so a cancel that
+arrives after queues are drained cannot drop the remaining health write.

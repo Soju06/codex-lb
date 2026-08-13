@@ -737,14 +737,28 @@ class _CompactMixin:
                 if exc.failure_phase != "usage_settlement" or not exc.reservation_released:
                     raise
                 settlement_error = exc
+            flush_task = asyncio.create_task(
+                flush_deferred_health(),
+                name=f"compact-deferred-health-{request_id}",
+            )
+            cancellation_pending = False
+            while not flush_task.done():
+                try:
+                    await asyncio.shield(flush_task)
+                except asyncio.CancelledError:
+                    cancellation_pending = True
+                except Exception:
+                    break
             try:
-                await flush_deferred_health()
+                flush_task.result()
             except Exception:
                 logger.warning(
                     "Failed to flush deferred compact account health request_id=%s",
                     request_id,
                     exc_info=True,
                 )
+            if cancellation_pending:
+                raise asyncio.CancelledError()
             if settlement_error is not None:
                 raise settlement_error
 

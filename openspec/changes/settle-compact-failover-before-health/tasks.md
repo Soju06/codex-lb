@@ -9,6 +9,8 @@
   fails.
 - [x] 1.5 Settle and flush deferred health on cancellation and other
   non-proxy exits.
+- [x] 1.6 Shield deferred health flush so cancellation during the write
+  still completes the penalty.
 
 ## 2. Regression coverage
 
@@ -30,6 +32,8 @@
   finalized compact success.
 - [x] 2.10 Assert cancellation or another non-proxy exit still settles and
   flushes deferred health.
+- [x] 2.11 Assert cancellation during deferred health flush still completes
+  the write.
 
 ## 3. Validation
 

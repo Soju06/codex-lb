@@ -365,7 +365,7 @@ async def test_stream_idle_timeout_does_not_penalize_account() -> None:
     classified = await streaming_helpers_module._handle_stream_error(
         proxy,
         cast(Account, SimpleNamespace(id="acc-idle")),
-        {"message": "idle", "code": "stream_idle_timeout"},
+        {"message": "idle"},
         "stream_idle_timeout",
     )
 
@@ -14756,7 +14756,7 @@ async def test_stream_responses_first_idle_timeout_fails_over_to_next_account(mo
     assert event["type"] == "response.completed"
     assert event["response"]["id"] == "resp_ok"
     assert seen_excluded_account_ids == [set(), {account_a.id}]
-    record_error.assert_awaited_once_with(account_a)
+    record_error.assert_not_awaited()
     record_success.assert_awaited_once_with(account_b)
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert [call["status"] for call in request_logs.calls] == ["error", "success"]
@@ -14805,7 +14805,7 @@ async def test_stream_responses_first_idle_timeout_surfaces_timeout_when_no_fail
     assert event["response"]["error"]["code"] == "stream_idle_timeout"
     assert event["response"]["error"]["message"] == "idle"
     assert seen_excluded_account_ids == [set(), {account.id}]
-    record_error.assert_awaited_once_with(account)
+    record_error.assert_not_awaited()
     record_success.assert_not_awaited()
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[-1]["error_code"] == "stream_idle_timeout"

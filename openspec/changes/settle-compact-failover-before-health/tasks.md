@@ -12,6 +12,8 @@
   until settlement.
 - [x] 2.3 Assert `UpstreamProxyRouteError` after failover still flushes
   deferred health.
+- [x] 2.4 Assert freshness/connect and post-401 refresh failovers defer
+  health until settlement.
 
 ## 3. Validation
 

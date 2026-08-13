@@ -722,6 +722,22 @@ class _CompactMixin:
                 await proxy._handle_proxy_error(failed_account, failed_exc)
                 await proxy._load_balancer.record_errors(failed_account, extra_error_count)
 
+        async def record_or_defer_stream_health(
+            failed_account: Account,
+            failed_error: Any,
+            failed_code: str,
+            failed_status: int | None = None,
+        ) -> None:
+            if api_key is not None and api_key_reservation is not None:
+                deferred_stream_health.append((failed_account, failed_error, failed_code, failed_status))
+                return
+            await proxy._handle_stream_error(
+                failed_account,
+                failed_error,
+                failed_code,
+                http_status=failed_status,
+            )
+
         try:
 
             async def _call_compact(
@@ -1114,7 +1130,7 @@ class _CompactMixin:
                             request_service_tier=request_service_tier,
                         )
                         _raise_proxy_unavailable(message)
-                    await proxy._handle_stream_error(
+                    await record_or_defer_stream_health(
                         account,
                         {"message": message},
                         "upstream_unavailable",
@@ -1341,7 +1357,7 @@ class _CompactMixin:
                                         request_service_tier=request_service_tier,
                                     )
                                     _raise_proxy_unavailable(message)
-                                await proxy._handle_stream_error(
+                                await record_or_defer_stream_health(
                                     account,
                                     {"message": message},
                                     "upstream_unavailable",
@@ -1524,22 +1540,12 @@ class _CompactMixin:
                         if action == "failover_next":
                             last_exc = exc
                             excluded_account_ids.add(account.id)
-                            if api_key is not None and api_key_reservation is not None:
-                                deferred_stream_health.append(
-                                    (
-                                        account,
-                                        _upstream_error_from_openai(error),
-                                        code,
-                                        exc.status_code,
-                                    )
-                                )
-                            else:
-                                await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    code,
-                                    http_status=exc.status_code,
-                                )
+                            await record_or_defer_stream_health(
+                                account,
+                                _upstream_error_from_openai(error),
+                                code,
+                                exc.status_code,
+                            )
                             transient_exhausted = True
                             break
                         await settle_compact_usage(

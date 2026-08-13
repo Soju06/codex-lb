@@ -31,3 +31,10 @@ When `compact_responses` holds an API-key usage reservation, it MUST NOT write a
 - **WHEN** the next account raises `UpstreamProxyRouteError`
 - **THEN** the reservation is settled
 - **AND** the deferred health write still runs
+
+#### Scenario: Compact refresh/connect failover defers health until settle
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the first account fails a retryable freshness/connect or post-401 forced-refresh transport error
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_stream_error` for the failed account runs only after that settlement

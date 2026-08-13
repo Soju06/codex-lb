@@ -1287,6 +1287,13 @@ When `compact_responses` holds an API-key usage reservation, it MUST NOT write a
 - **THEN** the reservation is settled
 - **AND** the deferred health write still runs
 
+#### Scenario: Compact refresh/connect failover defers health until settle
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the first account fails a retryable freshness/connect or post-401 forced-refresh transport error
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_stream_error` for the failed account runs only after that settlement
+
 ### Requirement: Compact budget-exhausted terminals settle the API-key reservation before raising
 
 On the HTTP bridge / forwarded compact path the caller passes an `api_key_reservation_override` with `owns_reservation` false, making `compact_responses` the SOLE settler of the API-key usage reservation; therefore EVERY budget-exhausted terminal raise in the compact request path that is reached with a held, unsettled reservation MUST settle the compact API-key usage reservation (release it via `_settle_compact_api_key_usage` with `response` `None`) BEFORE raising the budget-exhausted `ProxyResponseError` (`upstream_request_timeout`), so held API-key quota is not leaked. This MUST apply to the outer-loop preflight budget terminals (before the freshness check, before the freshness reserve, and after the freshness check) and to the post-401 forced-refresh preflight budget terminal, each of which propagates straight to the outer `except ProxyResponseError` handler (which does not settle) and the `finally` (which only writes a request log). The terminal MUST preserve its prior escalation: it still raises the same `502` `upstream_request_timeout` error after settling, and it MUST still release the selected account's `response_create` lease where it already did so. A budget-exhausted terminal that is caught by an enclosing handler that already settles the reservation before raising — the inner upstream-call budget terminals, whose `upstream_request_timeout` error is settled by the retry loop's `upstream_request_timeout` / account-neutral branch — MUST NOT settle a second time, so the reservation is never double-settled.

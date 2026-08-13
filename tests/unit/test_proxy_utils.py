@@ -35721,6 +35721,123 @@ async def test_compact_route_error_after_failover_flushes_deferred_health(monkey
 
 
 @pytest.mark.asyncio
+async def test_compact_refresh_connect_failover_settles_before_account_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_refresh_settle_a")
+    account_b = _make_account("acc_compact_refresh_settle_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_refresh_settle")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_refresh_settle",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "retryable_transient"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise AssertionError("account A should fail during freshness")
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-refresh-settle"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
+async def test_compact_post_401_refresh_failover_settles_before_account_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_401_refresh_a")
+    account_b = _make_account("acc_compact_401_refresh_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_401_refresh")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_401_refresh",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "retryable_transient"}
+
+    async def settle_compact_api_key_usage(**kwargs: object) -> None:
+        del kwargs
+        call_order.append("settle_compact_api_key_usage")
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        if account.id == account_a.id and kwargs.get("force"):
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                401,
+                openai_error("invalid_api_key", "token expired"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock(side_effect=settle_compact_api_key_usage))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    result = await service.compact_responses(
+        payload,
+        {"session_id": "sid-compact-401-refresh"},
+        api_key=api_key,
+        api_key_reservation=reservation,
+    )
+
+    assert result.object == "response.compaction"
+    assert call_order == ["settle_compact_api_key_usage", "handle_stream_error"]
+
+
+@pytest.mark.asyncio
 async def test_ensure_fresh_with_timeout_bounds_whole_singleflight_wait(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_refresh_wait_bound")

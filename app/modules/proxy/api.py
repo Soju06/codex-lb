@@ -7320,13 +7320,19 @@ async def _release_reservation_best_effort(
     scheduler: _ResponsesCleanupScheduler | None,
     request_id: str,
 ) -> None:
-    del scheduler, request_id
     if reservation is None:
         return
     try:
         await _release_reservation_deferring_cancellation(reservation)
     except Exception:
         logger.warning("Failed to release API key reservation during %s", action, exc_info=True)
+        if scheduler is None:
+            return
+        scheduler._schedule_cancel_safe_cleanup(
+            _release_reservation_deferring_cancellation(reservation),
+            action=f"{action.replace(' ', '_')}_retry",
+            request_id=request_id,
+        )
 
 
 async def _finalize_image_reservation(

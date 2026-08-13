@@ -38521,6 +38521,54 @@ async def test_startup_cleanup_guard_runs_after_initial_heartbeat_disconnect(
 
 
 @pytest.mark.asyncio
+async def test_reservation_cleanup_schedules_retry_after_persistence_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts: list[str] = []
+    scheduled: list[tuple[str, str]] = []
+    pending: list[Any] = []
+
+    async def fail_first_release(reservation: proxy_service.ApiKeyUsageReservationData) -> None:
+        attempts.append(reservation.reservation_id)
+        if len(attempts) == 1:
+            raise RuntimeError("reservation release persistence failed")
+
+    class _Scheduler:
+        def _schedule_cancel_safe_cleanup(
+            self,
+            coro: Any,
+            *,
+            action: str,
+            request_id: str,
+        ) -> None:
+            scheduled.append((action, request_id))
+            pending.append(coro)
+
+    monkeypatch.setattr(proxy_api, "_release_reservation", fail_first_release)
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_release_retry",
+        key_id="key_release_retry",
+        model="gpt-5.1",
+    )
+    cleanup = proxy_api._ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=reservation,
+        scheduler=cast(proxy_api._ResponsesCleanupScheduler, _Scheduler()),
+        request_id="req_release_retry",
+    )
+
+    await cleanup.release(action="responses startup error")
+
+    assert attempts == ["resv_release_retry"]
+    assert scheduled == [("responses_startup_error_retry", "req_release_retry")]
+    assert pending
+    await pending[0]
+    assert attempts == ["resv_release_retry", "resv_release_retry"]
+    await cleanup.release(action="responses startup error")
+    assert attempts == ["resv_release_retry", "resv_release_retry"]
+
+
+@pytest.mark.asyncio
 async def test_forwarded_compact_fallback_settlement_keeps_http_200(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -34,9 +34,9 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
     monkeypatch,
 ):
     """A forwarded owner must not report compact success when its sole API-key
-    usage settlement fails. The `usage_settlement_failed` error is surfaced
-    without another upstream or account-health attempt, and a fresh repository
-    releases the held quota."""
+    usage settlement fails. After cleanup-ready, the receiver keeps HTTP 200
+    and surfaces `usage_settlement_failed` on the SSE body so origin cannot
+    replay. A fresh repository still releases the held quota."""
     from app.core.config.settings import get_settings
     from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
     from app.db.models import ApiKeyUsageReservation
@@ -156,8 +156,10 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
         headers=headers,
     )
 
-    assert response.status_code == 502, response.text
-    assert response.json()["error"]["code"] == "usage_settlement_failed"
+    assert response.status_code == 200, response.text
+    assert "text/event-stream" in response.headers.get("content-type", "")
+    assert "response.failed" in response.text
+    assert "usage_settlement_failed" in response.text
     assert compact_calls == [raw_account_id]
     assert finalize_attempts == [reservation.reservation_id]
     handle_stream_error.assert_not_awaited()

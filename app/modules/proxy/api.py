@@ -5214,8 +5214,16 @@ async def _stream_responses(
                     # Fallback settlement already transferred cleanup. A 502
                     # would look like a definitive rejection and let origin
                     # replay a compact that already ran.
+                    envelope = _parse_error_envelope(exc.payload)
+                    error = envelope.error
                     stream = _synthetic_compaction_failure_stream(
                         response_id=get_request_id() or "unknown",
+                        error_code=(error.code if error is not None and error.code else "upstream_error"),
+                        error_message=(
+                            error.message
+                            if error is not None and error.message
+                            else "Compact request failed after settlement"
+                        ),
                     )
                     return StreamingResponse(
                         stream,
@@ -5966,11 +5974,16 @@ async def _synthetic_compaction_response_stream(
     yield "data: [DONE]\n\n"
 
 
-async def _synthetic_compaction_failure_stream(*, response_id: str) -> AsyncIterator[str]:
+async def _synthetic_compaction_failure_stream(
+    *,
+    response_id: str,
+    error_code: str = "upstream_error",
+    error_message: str = "Compact response did not include a compaction output item",
+) -> AsyncIterator[str]:
     yield format_sse_event(
         response_failed_event(
-            "upstream_error",
-            "Compact response did not include a compaction output item",
+            error_code,
+            error_message,
             response_id=response_id,
         )
     )

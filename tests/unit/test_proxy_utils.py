@@ -38577,7 +38577,8 @@ async def test_forwarded_compact_fallback_settlement_keeps_http_200(
     chunks = [chunk async for chunk in response.body_iterator]
     body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
     assert "response.failed" in body
-    assert "Compact response did not include a compaction output item" in body
+    assert "usage_settlement_failed" in body
+    assert "Compact API key usage could not be settled" in body
 
 
 @pytest.mark.asyncio

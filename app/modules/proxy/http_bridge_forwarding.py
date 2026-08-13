@@ -145,8 +145,14 @@ class HTTPBridgeOwnerClient:
                 headers=request_headers,
                 skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
             )
+            # I/O begins when __aenter__ is awaited. Cancellation after that
+            # point can leave the receiver settling the reservation.
+            transport_started = False
+            observed_status = False
             try:
+                transport_started = True
                 async with request_context as response:
+                    observed_status = True
                     if response.status != 200:
                         if on_response_rejected is not None:
                             # The receiver contract never transfers cleanup on a
@@ -192,6 +198,10 @@ class HTTPBridgeOwnerClient:
                         )
             except aiohttp.ClientConnectorError:
                 # DNS/connect refusal never delivered the reservation.
+                raise
+            except asyncio.CancelledError:
+                if transport_started and not observed_status and on_request_dispatched is not None:
+                    on_request_dispatched()
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 if on_request_dispatched is not None:

@@ -27,7 +27,7 @@ import { WeeklyCreditsPaceCard } from "@/features/dashboard/components/weekly-cr
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { useConversations } from "@/features/dashboard/hooks/use-conversations";
-import { requestLogFiltersApplied, useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
+import { useRequestLogs } from "@/features/dashboard/hooks/use-request-logs";
 import { buildDashboardView } from "@/features/dashboard/utils";
 import {
   DEFAULT_OVERVIEW_TIMEFRAME,
@@ -93,7 +93,7 @@ export function DashboardPage() {
     enabled: isAdmin && dashboardView === "conversations",
   });
   const { conversationsQuery } = conversationsState;
-  const { filters, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
+  const { filters, emptyStateFiltersApplied, logsQuery, optionsQuery, updateFilters } = useRequestLogs({
     enabled: dashboardView === "request-logs",
   });
   const { resumeMutation, limitWarmupMutation } = useAccountMutations();
@@ -505,7 +505,7 @@ export function DashboardPage() {
                 limit={filters.limit}
                 offset={filters.offset}
                 hasMore={logPage?.hasMore ?? false}
-                filtersApplied={requestLogFiltersApplied(filters)}
+                filtersApplied={emptyStateFiltersApplied}
                 onLimitChange={(limit) => updateFilters({ limit, offset: 0 })}
                 onOffsetChange={(offset) => updateFilters({ offset })}
                 onConversationClick={handleConversationClick}

@@ -105,6 +105,43 @@ describe("useRequestLogs", () => {
     expect(locationSearch).toContain("search=quota");
   });
 
+  it("keeps filtered-empty semantics while clearing a filter", async () => {
+    let releaseUnfiltered: (() => void) | undefined;
+    const unfilteredResponse = new Promise<void>((resolve) => {
+      releaseUnfiltered = resolve;
+    });
+    server.use(
+      http.get("/api/request-logs", async ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("search")) {
+          return HttpResponse.json({ requests: [], total: 0, hasMore: false });
+        }
+        await unfilteredResponse;
+        return HttpResponse.json({ requests: [], total: 1, hasMore: false });
+      }),
+    );
+
+    const queryClient = createTestQueryClient();
+    const wrapper = createWrapper(queryClient, "/dashboard?search=missing");
+    const { result } = renderHook(() => useRequestLogs(), { wrapper });
+
+    await waitFor(() => expect(result.current.logsQuery.isSuccess).toBe(true));
+    expect(result.current.emptyStateFiltersApplied).toBe(true);
+
+    act(() => {
+      result.current.updateFilters({ search: "", offset: 0 });
+    });
+
+    await waitFor(() => expect(result.current.filters.search).toBe(""));
+    expect(result.current.logsQuery.isPlaceholderData).toBe(true);
+    expect(result.current.logsQuery.data?.total).toBe(0);
+    expect(result.current.emptyStateFiltersApplied).toBe(true);
+
+    releaseUnfiltered?.();
+    await waitFor(() => expect(result.current.logsQuery.data?.total).toBe(1));
+    expect(result.current.emptyStateFiltersApplied).toBe(false);
+  });
+
   it("supports pagination updates with total/hasMore response", async () => {
     const queryClient = createTestQueryClient();
     const wrapper = createWrapper(queryClient, "/dashboard?limit=1&offset=0");

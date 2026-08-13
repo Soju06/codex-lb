@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import {
@@ -126,6 +126,8 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
+  const filtersApplied = requestLogFiltersApplied(filters);
+  const [previousFiltersApplied, setPreviousFiltersApplied] = useState(false);
   const since = useMemo(() => timeframeToSinceIso(filters.timeframe), [filters.timeframe]);
   const listFilters = useMemo<RequestLogsListFilters>(
     () => ({
@@ -157,6 +159,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     isFetching: logsIsFetching,
     isLoading: logsIsLoading,
     isPending: logsIsPending,
+    isPlaceholderData: logsIsPlaceholderData,
     isSuccess: logsIsSuccess,
     refetch: refetchLogs,
   } = useQuery({
@@ -168,12 +171,15 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     refetchOnWindowFocus: true,
     placeholderData: keepPreviousData,
   });
+  const emptyStateFiltersApplied =
+    filtersApplied || (logsIsPlaceholderData && previousFiltersApplied);
   const logsQuery = {
     data: logsData,
     error: logsError,
     isFetching: logsIsFetching,
     isLoading: logsIsLoading,
     isPending: logsIsPending,
+    isPlaceholderData: logsIsPlaceholderData,
     isSuccess: logsIsSuccess,
     refetch: refetchLogs,
   };
@@ -209,6 +215,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
       ...filters,
       ...patch,
     };
+    setPreviousFiltersApplied(filtersApplied);
     setSearchParams(writeFilterState(nextState, searchParams));
   };
 
@@ -216,6 +223,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     filters,
     listFilters,
     facetFilters,
+    emptyStateFiltersApplied,
     logsQuery,
     optionsQuery,
     updateFilters,

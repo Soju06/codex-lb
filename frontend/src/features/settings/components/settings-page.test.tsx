@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -272,5 +272,59 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Firewall Section")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Hide advanced settings" })).toBeInTheDocument();
     expect(firewallSectionMock).toHaveBeenCalled();
+  });
+
+  it("waits for preceding async settings before scrolling to firewall", async () => {
+    const scrollIntoView = vi.fn();
+    const elementLookup = vi
+      .spyOn(document, "getElementById")
+      .mockReturnValue({ scrollIntoView } as unknown as HTMLElement);
+    const animationFrame = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        callback(0);
+        return 1;
+      });
+
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: {
+        data: undefined,
+        error: null,
+        isPending: true,
+      },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+
+    const view = renderSettings("/settings?advanced=1#firewall");
+
+    expect(screen.getByText("Firewall Section")).toBeInTheDocument();
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    useUpstreamProxyAdminMock.mockReturnValue({
+      upstreamProxyQuery: {
+        data: upstreamAdmin,
+        error: null,
+        isPending: false,
+      },
+      createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+    });
+    view.rerender(
+      <MemoryRouter initialEntries={["/settings?advanced=1#firewall"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" }),
+    );
+
+    animationFrame.mockRestore();
+    elementLookup.mockRestore();
   });
 });

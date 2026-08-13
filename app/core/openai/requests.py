@@ -983,7 +983,10 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     if is_json_mapping(normalized_payload):
         payload = dict(normalized_payload)
     _trim_compact_input_for_upstream(payload)
-    payload.pop("store", None)
+    # The retired compact endpoint never stored by definition; the plain
+    # responses endpoint (which serves compaction since 2026-08-12) rejects
+    # requests where ``store`` is absent, so it must be explicit.
+    payload["store"] = False
     payload.pop("text", None)
     payload.pop("tools", None)
     payload.pop("tool_choice", None)

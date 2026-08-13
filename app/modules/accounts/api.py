@@ -47,6 +47,8 @@ from app.modules.accounts.schemas import (
     AccountUsageResetConsumeRequest,
     AccountUsageResetConsumeResponse,
     AccountUsageResetCreditsResponse,
+    AccountWeeklyUsageCapRequest,
+    AccountWeeklyUsageCapResponse,
 )
 from app.modules.accounts.service import (
     AccountNotProbableError,
@@ -406,6 +408,19 @@ async def set_account_alias(
     if normalized == "":
         normalized = None
     return AccountAliasResponse(account_id=account_id, alias=normalized)
+
+
+@router.put("/{account_id}/weekly-usage-cap", response_model=AccountWeeklyUsageCapResponse)
+async def set_account_weekly_usage_cap(
+    account_id: str,
+    payload: AccountWeeklyUsageCapRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountWeeklyUsageCapResponse:
+    success = await context.service.set_weekly_usage_cap_pct(account_id, payload.cap)
+    if not success:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountWeeklyUsageCapResponse(account_id=account_id, cap=payload.cap)
 
 
 @router.put("/{account_id}/limit-warmup", response_model=AccountLimitWarmupUpdateResponse)

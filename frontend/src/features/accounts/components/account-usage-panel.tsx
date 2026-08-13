@@ -1,8 +1,9 @@
-import { lazy, Suspense } from "react";
-import { Clock, Flame, RotateCcw } from "lucide-react";
+import { lazy, Suspense, useState } from "react";
+import { Check, Clock, Flame, Pencil, RotateCcw, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { AccountTrendChartProps } from "@/features/accounts/components/account-trend-chart";
 import type {
@@ -36,7 +37,10 @@ export type AccountUsagePanelProps = {
   resetCreditsLoading?: boolean;
   resetCreditsUnavailable?: boolean;
   resetDisabled?: boolean;
+  busy?: boolean;
+  readOnly?: boolean;
   onReset?: (accountId: string) => void;
+  onWeeklyUsageCapChange?: (accountId: string, cap: number | null) => Promise<unknown>;
 };
 
 function QuotaRow({
@@ -223,6 +227,116 @@ function ResetCreditsRow({
   );
 }
 
+function WeeklyUsageCapRow({
+  accountId,
+  cap,
+  busy,
+  readOnly,
+  onChange,
+}: {
+  accountId: string;
+  cap: number | null;
+  busy?: boolean;
+  readOnly?: boolean;
+  onChange: (accountId: string, cap: number | null) => Promise<unknown>;
+}) {
+  const { t } = useTranslation();
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState(cap === null ? "" : String(cap));
+
+  const handleSave = async () => {
+    const trimmed = draft.trim();
+    if (trimmed === "") {
+      await onChange(accountId, null);
+    } else {
+      const value = Number(trimmed);
+      if (!Number.isFinite(value) || value < 0 || value > 100) {
+        return;
+      }
+      await onChange(accountId, value);
+    }
+    setIsEditing(false);
+  };
+
+  const handleCancel = () => {
+    setDraft(cap === null ? "" : String(cap));
+    setIsEditing(false);
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border bg-background/60 px-3 py-2 text-xs">
+      <span className="min-w-0 truncate font-medium text-muted-foreground" title={t("accounts.usage.weeklyCapHelp")}>
+        {t("accounts.usage.weeklyCapTitle")}
+      </span>
+      {isEditing ? (
+        <span className="flex items-center gap-1.5">
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            className="h-7 w-20 text-xs"
+            aria-label={t("accounts.usage.weeklyCapTitle")}
+            placeholder={t("accounts.usage.weeklyCapPlaceholder")}
+            value={draft}
+            autoFocus
+            disabled={busy || readOnly}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void handleSave();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                handleCancel();
+              }
+            }}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t("common.actions.save")}
+            disabled={busy || readOnly}
+            onClick={() => void handleSave()}
+          >
+            <Check className="size-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t("common.cancel")}
+            onClick={handleCancel}
+          >
+            <X className="size-4" />
+          </Button>
+        </span>
+      ) : (
+        <span className="flex items-center gap-1.5">
+          <span className="shrink-0 tabular-nums font-semibold">
+            {cap === null ? t("accounts.usage.weeklyCapUnset") : `${cap}%`}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label={t("accounts.usage.weeklyCapEdit")}
+            title={t("accounts.usage.weeklyCapHelp")}
+            disabled={busy || readOnly}
+            onClick={() => {
+              setDraft(cap === null ? "" : String(cap));
+              setIsEditing(true);
+            }}
+          >
+            <Pencil className="size-3.5" />
+          </Button>
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function AccountUsagePanel({
   account,
   trends,
@@ -230,7 +344,10 @@ export function AccountUsagePanel({
   resetCreditsLoading,
   resetCreditsUnavailable,
   resetDisabled = false,
+  busy = false,
+  readOnly = false,
   onReset,
+  onWeeklyUsageCapChange,
 }: AccountUsagePanelProps) {
   const { t } = useTranslation();
   const primary = account.usage?.primaryRemainingPercent ?? null;
@@ -262,6 +379,15 @@ export function AccountUsagePanel({
           </>
         )}
       </div>
+      {onWeeklyUsageCapChange ? (
+        <WeeklyUsageCapRow
+          accountId={account.accountId}
+          cap={account.weeklyUsageCapPct ?? null}
+          busy={busy}
+          readOnly={readOnly}
+          onChange={onWeeklyUsageCapChange}
+        />
+      ) : null}
       <ResetCreditsRow
         accountId={account.accountId}
         resetCredits={resetCredits}

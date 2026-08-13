@@ -297,6 +297,7 @@ def _account_to_summary(
         is_email_duplicate=is_email_duplicate,
         available_reset_credits=reset_credits_snapshot.available_count if reset_credits_snapshot else 0,
         reset_credit_nearest_expires_at=(reset_credits_snapshot.nearest_expires_at if reset_credits_snapshot else None),
+        weekly_usage_cap_pct=account.weekly_usage_cap_pct,
     )
 
 

@@ -767,3 +767,65 @@ async def test_list_accounts_flags_email_duplicates(async_client):
     assert accounts_by_id["placeholder-b"]["isEmailDuplicate"] is False
     assert accounts_by_id["blank-a"]["isEmailDuplicate"] is False
     assert accounts_by_id["blank-b"]["isEmailDuplicate"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_weekly_usage_cap_missing_account_returns_404(async_client):
+    response = await async_client.put("/api/accounts/missing/weekly-usage-cap", json={"cap": 20})
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["error"]["code"] == "account_not_found"
+
+
+@pytest.mark.asyncio
+async def test_set_and_clear_weekly_usage_cap(async_client):
+    email = "weekly-cap@example.com"
+    raw_account_id = "acc_weekly_cap"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    listing = await async_client.get("/api/accounts")
+    matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
+    assert matched["weeklyUsageCapPct"] is None
+
+    set_response = await async_client.put(
+        f"/api/accounts/{expected_account_id}/weekly-usage-cap",
+        json={"cap": 20},
+    )
+    assert set_response.status_code == 200
+    assert set_response.json()["cap"] == 20
+    listing = await async_client.get("/api/accounts")
+    matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
+    assert matched["weeklyUsageCapPct"] == 20
+
+    clear_response = await async_client.put(
+        f"/api/accounts/{expected_account_id}/weekly-usage-cap",
+        json={"cap": None},
+    )
+    assert clear_response.status_code == 200
+    assert clear_response.json()["cap"] is None
+    listing = await async_client.get("/api/accounts")
+    matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
+    assert matched["weeklyUsageCapPct"] is None
+
+
+@pytest.mark.asyncio
+async def test_set_weekly_usage_cap_out_of_range_rejected(async_client):
+    response = await async_client.put("/api/accounts/missing/weekly-usage-cap", json={"cap": 120})
+    assert response.status_code == 422

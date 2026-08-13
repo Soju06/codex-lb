@@ -17,6 +17,7 @@ import {
   probeAccount,
   reactivateAccount,
   setAccountAlias,
+  setAccountWeeklyUsageCap,
   updateAccount,
   updateAccountLimitWarmup,
   updateAccountRoutingPolicy,
@@ -201,6 +202,18 @@ export function useAccountMutations() {
     },
   });
 
+  const weeklyUsageCapMutation = useMutation({
+    mutationFn: ({ accountId, cap }: { accountId: string; cap: number | null }) =>
+      setAccountWeeklyUsageCap(accountId, cap),
+    onSuccess: () => {
+      toast.success(t("accounts.toasts.weeklyUsageCapUpdated"));
+      void invalidateAccountRelatedQueries(queryClient);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("accounts.toasts.weeklyUsageCapUpdateFailed"));
+    },
+  });
+
   const exportAuthMutation = useMutation({
     mutationFn: exportAccountAuth,
     onSuccess: () => {
@@ -253,6 +266,7 @@ export function useAccountMutations() {
     exportAuthMutation,
     limitWarmupMutation,
     routingPolicyMutation,
+    weeklyUsageCapMutation,
     updateMutation,
     resetCreditConsumeMutation,
   };

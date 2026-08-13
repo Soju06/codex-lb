@@ -131,6 +131,7 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      weeklyUsageCapMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
@@ -173,6 +174,7 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      weeklyUsageCapMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
@@ -219,6 +221,7 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      weeklyUsageCapMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
@@ -276,6 +279,7 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      weeklyUsageCapMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 
@@ -339,6 +343,7 @@ describe("AccountsPage", () => {
       setAliasMutation: idleMutation(),
       limitWarmupMutation: idleMutation(),
       routingPolicyMutation: idleMutation(),
+      weeklyUsageCapMutation: idleMutation(),
       updateMutation: idleMutation(),
     } as unknown as ReturnType<typeof useAccounts>);
 

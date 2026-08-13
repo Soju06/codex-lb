@@ -755,6 +755,17 @@ class AccountsRepository:
             await self._session.commit()
             return result.scalar_one_or_none() is not None
 
+    async def update_weekly_usage_cap_pct(self, account_id: str, cap_pct: float | None) -> bool:
+        async with sqlite_writer_section():
+            result = await self._session.execute(
+                update(Account)
+                .where(Account.id == account_id)
+                .values(weekly_usage_cap_pct=cap_pct)
+                .returning(Account.id)
+            )
+            await self._session.commit()
+            return result.scalar_one_or_none() is not None
+
     async def update_limit_warmup_enabled(self, account_id: str, enabled: bool) -> bool:
         async with sqlite_writer_section():
             result = await self._session.execute(

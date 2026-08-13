@@ -214,4 +214,45 @@ describe("AccountUsagePanel", () => {
     expect(screen.getByText("7-day trend")).toBeInTheDocument();
     expect(screen.getByText("Weekly plan")).toBeInTheDocument();
   });
+
+  it("hides the weekly cap row without a change handler", () => {
+    const account = createAccountSummary({ weeklyUsageCapPct: 20 });
+
+    render(<AccountUsagePanel account={account} trends={null} />);
+
+    expect(screen.queryByText("Weekly usage cap")).not.toBeInTheDocument();
+  });
+
+  it("edits and clears the weekly usage cap", async () => {
+    const account = createAccountSummary({ weeklyUsageCapPct: 20 });
+    const onWeeklyUsageCapChange = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <AccountUsagePanel
+        account={account}
+        trends={null}
+        onWeeklyUsageCapChange={onWeeklyUsageCapChange}
+      />,
+    );
+
+    expect(screen.getByText("20%")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit weekly usage cap" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Weekly usage cap" }), {
+      target: { value: "35" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    });
+    expect(onWeeklyUsageCapChange).toHaveBeenCalledWith(account.accountId, 35);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit weekly usage cap" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Weekly usage cap" }), {
+      target: { value: "" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    });
+    expect(onWeeklyUsageCapChange).toHaveBeenLastCalledWith(account.accountId, null);
+  });
 });

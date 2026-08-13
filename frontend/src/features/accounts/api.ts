@@ -15,6 +15,8 @@ import {
   AccountUsageResetConsumeRequestSchema,
   AccountUsageResetConsumeResponseSchema,
   AccountUsageResetCreditsResponseSchema,
+  AccountWeeklyUsageCapRequestSchema,
+  AccountWeeklyUsageCapResponseSchema,
   AccountTrendsResponseSchema,
   AccountProbeRequestSchema,
   AccountProbeResponseSchema,
@@ -68,6 +70,15 @@ export function setAccountAlias(accountId: string, alias: string | null) {
   return put(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/alias`,
     AccountAliasResponseSchema,
+    { body: validated },
+  );
+}
+
+export function setAccountWeeklyUsageCap(accountId: string, cap: number | null) {
+  const validated = AccountWeeklyUsageCapRequestSchema.parse({ cap });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/weekly-usage-cap`,
+    AccountWeeklyUsageCapResponseSchema,
     { body: validated },
   );
 }

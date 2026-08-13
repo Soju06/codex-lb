@@ -127,6 +127,11 @@ class Account(Base):
         server_default=false(),
         nullable=False,
     )
+    # Optional operator-set hard cap on weekly (secondary-window) usage, in
+    # percent. NULL means "no cap" (the default). Once the account's resolved
+    # weekly usage reaches this value the load balancer stops routing new
+    # requests to it until the window resets or the cap is lifted.
+    weekly_usage_cap_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",

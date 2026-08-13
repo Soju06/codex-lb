@@ -46,6 +46,7 @@ export type AccountDetailProps = {
     routingPolicy: AccountRoutingPolicy,
   ) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
+  onWeeklyUsageCapChange?: (accountId: string, cap: number | null) => Promise<unknown>;
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
   onProxyEndpointTest?: (endpointId: string) => Promise<UpstreamProxyEndpointTestResponse>;
@@ -72,6 +73,7 @@ export function AccountDetail({
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onSecurityWorkAuthorizedChange,
+  onWeeklyUsageCapChange,
   upstreamProxyAdmin = null,
   onProxyBindingSave,
   onProxyEndpointTest,
@@ -169,7 +171,10 @@ export function AccountDetail({
         resetCreditsLoading={resetCreditsLoading}
         resetCreditsUnavailable={resetCreditsUnavailable}
         resetDisabled={usageResetDisabled}
+        busy={busy}
+        readOnly={readOnly}
         onReset={onResetUsage}
+        onWeeklyUsageCapChange={onWeeklyUsageCapChange}
       />
       <AccountTokenInfo account={account} />
       <AccountActions

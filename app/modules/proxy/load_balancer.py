@@ -1981,12 +1981,30 @@ def _build_states(
             secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
+        if _weekly_usage_cap_reached(account, state):
+            continue
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
         state.ignore_standard_quota = account.id in ignore_standard_quota_account_ids
         states.append(state)
         account_map[account.id] = account
     return states, account_map
+
+
+def _weekly_usage_cap_reached(account: Account, state: AccountState) -> bool:
+    """Return True when the account's weekly (secondary-window) usage cap is hit.
+
+    The cap is an operator-set hard stop for quota-sharing setups: once the
+    resolved weekly usage reaches it, the account leaves the candidate pool
+    (which also lets sticky sessions rebind through the existing
+    pinned-account-missing path) until the window resets or the cap is
+    lifted. Accounts without a cap, or without usage data yet, stay eligible.
+    """
+    cap = account.weekly_usage_cap_pct
+    if cap is None:
+        return False
+    used = state.secondary_used_percent
+    return used is not None and used >= cap
 
 
 def _account_lease_stale_ttl_seconds(kind: AccountLeaseKind, settings: object) -> float:

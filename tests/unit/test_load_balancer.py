@@ -6026,3 +6026,50 @@ def test_select_account_fill_first_primary_dominates_over_secondary():
     assert result.account is not None
     # Primary still wins -- only ties break on secondary.
     assert result.account.account_id == "high-secondary"
+
+
+def test_build_states_skips_account_at_weekly_usage_cap():
+    capped = _make_test_account(account_id="capped")
+    capped.weekly_usage_cap_pct = 20.0
+    uncapped = _make_test_account(account_id="uncapped")
+
+    states, account_map = _build_states(
+        accounts=[capped, uncapped],
+        latest_primary={},
+        latest_secondary={"capped": _make_test_usage(account_id="capped", used_percent=25.0)},
+        latest_monthly={},
+        runtime={},
+    )
+
+    assert [state.account_id for state in states] == ["uncapped"]
+    assert "capped" not in account_map
+
+
+def test_build_states_weekly_usage_cap_boundary_is_exclusive_below_cap():
+    account = _make_test_account(account_id="a")
+    account.weekly_usage_cap_pct = 20.0
+
+    states, _ = _build_states(
+        accounts=[account],
+        latest_primary={},
+        latest_secondary={"a": _make_test_usage(account_id="a", used_percent=19.9)},
+        latest_monthly={},
+        runtime={},
+    )
+
+    assert [state.account_id for state in states] == ["a"]
+
+
+def test_build_states_weekly_usage_cap_fails_open_without_usage_data():
+    account = _make_test_account(account_id="a")
+    account.weekly_usage_cap_pct = 20.0
+
+    states, _ = _build_states(
+        accounts=[account],
+        latest_primary={},
+        latest_secondary={},
+        latest_monthly={},
+        runtime={},
+    )
+
+    assert [state.account_id for state in states] == ["a"]

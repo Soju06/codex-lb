@@ -1,0 +1,8 @@
+- [x] Add nullable `weekly_usage_cap_pct` column to `Account` in `app/db/models.py` and ship alembic migration `20260813_000000_add_accounts_weekly_usage_cap` (idempotent upgrade + matching downgrade, parented on the current head).
+- [x] Enforce the cap in `_build_states` (`app/modules/proxy/load_balancer.py`): skip accounts whose resolved `secondary_used_percent` is greater than or equal to their cap; fail open when usage data is missing.
+- [x] Add `AccountsRepository.update_weekly_usage_cap_pct` and `AccountsService.set_weekly_usage_cap_pct` (with account-selection cache invalidation), mirroring the alias layering.
+- [x] Wire `PUT /api/accounts/{account_id}/weekly-usage-cap` in `app/modules/accounts/api.py`, guarded by the existing dashboard-session write dependency; return 404 `account_not_found` for unknown ids; accept `null` to clear and validate `0–100`.
+- [x] Add `AccountWeeklyUsageCapRequest` / `AccountWeeklyUsageCapResponse` pydantic schemas and expose `weekly_usage_cap_pct` on `AccountSummary` via `app/modules/accounts/mappers.py`.
+- [x] Add integration regressions in `tests/integration/test_accounts_api.py`: missing account 404, set-and-list, clear via null, out-of-range rejection; add selector coverage proving capped accounts are skipped and uncapped ones still serve.
+- [x] Add frontend support: parse `AccountSummary.weeklyUsageCapPct`, call the new endpoint, and edit/clear the cap from the account detail usage panel (en + zh i18n).
+- [x] Document the contract as an `account-routing` capability delta in this change.

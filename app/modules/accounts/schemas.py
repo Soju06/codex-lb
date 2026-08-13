@@ -129,6 +129,9 @@ class AccountSummary(DashboardModel):
     # otherwise the latest persisted primary usage_history count from /wham/usage.
     available_reset_credits: int = 0
     reset_credit_nearest_expires_at: datetime | None = None
+    # Operator-set hard cap on weekly (secondary-window) usage in percent;
+    # None means "no cap".
+    weekly_usage_cap_pct: float | None = None
 
 
 class AccountsResponse(DashboardModel):
@@ -323,3 +326,12 @@ class AccountAliasRequest(DashboardModel):
 class AccountAliasResponse(DashboardModel):
     account_id: str
     alias: str | None = None
+
+
+class AccountWeeklyUsageCapRequest(DashboardModel):
+    cap: float | None = Field(default=None, ge=0.0, le=100.0)
+
+
+class AccountWeeklyUsageCapResponse(DashboardModel):
+    account_id: str
+    cap: float | None = None

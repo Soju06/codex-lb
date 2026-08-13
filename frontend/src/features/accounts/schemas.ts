@@ -102,6 +102,7 @@ export const AccountSummarySchema = z.object({
   isEmailDuplicate: z.boolean().optional(),
   availableResetCredits: z.number().nullable().optional(),
   resetCreditNearestExpiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  weeklyUsageCapPct: z.number().min(0).max(100).nullable().optional(),
 });
 
 const RateLimitResetCreditItemSchema = z.object({
@@ -243,6 +244,15 @@ export const AccountAliasRequestSchema = z.object({
 export const AccountAliasResponseSchema = z.object({
   accountId: z.string(),
   alias: z.string().nullable(),
+});
+
+export const AccountWeeklyUsageCapRequestSchema = z.object({
+  cap: z.number().min(0).max(100).nullable(),
+});
+
+export const AccountWeeklyUsageCapResponseSchema = z.object({
+  accountId: z.string(),
+  cap: z.number().min(0).max(100).nullable(),
 });
 
 export const AccountLimitWarmupUpdateRequestSchema = z.object({

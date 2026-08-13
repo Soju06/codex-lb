@@ -680,6 +680,12 @@ class AccountsService:
             normalized = None
         return await self._repo.update_alias(account_id, normalized)
 
+    async def set_weekly_usage_cap_pct(self, account_id: str, cap_pct: float | None) -> bool:
+        updated = await self._repo.update_weekly_usage_cap_pct(account_id, cap_pct)
+        if updated:
+            get_account_selection_cache().invalidate()
+        return updated
+
     async def export_account(self, account_id: str) -> AccountExportResponse | None:
         account = await self._repo.get_by_id(account_id)
         if not account:

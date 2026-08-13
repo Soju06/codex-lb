@@ -1481,6 +1481,7 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
         PROCESS_NETWORK_UNAVAILABLE_CODE,
         "proxy_unavailable",
         "responses_compact_input_too_large",
+        "stream_idle_timeout",
     }
 
 

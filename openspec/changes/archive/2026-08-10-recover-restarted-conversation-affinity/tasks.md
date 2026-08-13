@@ -11,6 +11,7 @@
 - [x] 1.9 Add regressions for cancellation-safe detached closure and same-replica durable-generation fencing.
 - [x] 1.10 Add regressions for idle detached capacity, admission-closed account invalidation, cancellation-safe global shutdown, and same-replica model-transition fencing.
 - [x] 1.11 Add regressions for source-aware security rebind, timed-out eviction capacity, and retryable failed shutdown closure.
+- [x] 1.12 Add regressions for closed detached drain accounting and cap-constrained idle restart replacement.
 
 ## 2. Implementation
 
@@ -27,6 +28,7 @@
 - [x] 2.11 Defer direct-close cancellation through resource finalization and advance same-replica replacement owner epochs.
 - [x] 2.12 Keep every detached generation capacity-owned, make resource close single-flight, preserve model-transition epoch provenance, and schedule all shutdown closes before cancellation propagation.
 - [x] 2.13 Preserve typed abandonment during security rebind, recheck capacity after bounded eviction closes, and retain failed shutdown generations for retry.
+- [x] 2.14 Keep unsettled closed generations restart-blocking and synchronously close an idle forced predecessor when it fills the cap.
 
 ## 3. Validation and Documentation
 
@@ -35,6 +37,7 @@
 - [x] 3.3 Promote stable context to the main capability docs and verify the change.
 - [x] 3.4 Add reversible migration coverage for source-qualified sticky abandonment metadata.
 - [x] 3.5 Document and validate rolling-version marker semantics plus concurrent retirement handling.
+- [x] 3.6 Document detached drain and one-session replacement capacity semantics.
 
 ## 4. Local Deployment
 

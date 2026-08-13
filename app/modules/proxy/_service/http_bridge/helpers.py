@@ -445,10 +445,11 @@ def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
         *service._http_bridge_sessions.values(),
         *service._http_bridge_detached_sessions.values(),
     ]:
-        if session.closed and not _http_bridge_session_has_admission_waiter(session):
-            continue
         if not session.closed:
             live_sessions += 1
+        # `closed` fences new admission; it does not prove that a detached
+        # request has finished queue/pending settlement. Drain must observe
+        # that work even after the generation stops counting as a live socket.
         pending_count = _http_bridge_pending_count_nowait(session, context="drain_status")
         if pending_count is None:
             pending_unknown_sessions += 1

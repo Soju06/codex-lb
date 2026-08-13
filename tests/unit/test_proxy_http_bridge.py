@@ -2440,6 +2440,21 @@ async def test_http_bridge_activity_snapshot_counts_closed_admission_waiter_as_r
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_activity_snapshot_counts_pending_closed_detached_generation() -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    session = _make_bridge_session(queued_request_count=1)
+    session.closed = True
+    service._http_bridge_detached_sessions[id(session)] = session
+
+    snapshot = service.http_bridge_activity_snapshot_nowait()
+
+    assert snapshot["http_bridge_live_sessions"] == 0
+    assert snapshot["http_bridge_pending_or_queued_requests"] == 1
+    assert snapshot["http_bridge_active"] is True
+    assert snapshot["http_bridge_restart_blocking"] is True
+
+
+@pytest.mark.asyncio
 async def test_response_create_gate_timeout_retires_old_pending_without_upstream_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -17262,6 +17277,68 @@ async def test_goal_restart_idle_predecessor_counts_until_its_slow_close_finishe
     release_close.set()
     await service._drain_http_bridge_background_cleanup_tasks(reason="test")
     await service.close_all_http_bridge_sessions()
+
+
+@pytest.mark.asyncio
+async def test_goal_restart_closes_idle_predecessor_before_enforcing_one_session_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-restart-cap-one", None)
+    predecessor = _make_bridge_session(key=key, key_value=key.affinity_key)
+    replacement = _make_bridge_session(key=key, key_value=key.affinity_key)
+    service._http_bridge_sessions[key] = predecessor
+    events: list[str] = []
+
+    async def close_http_bridge_session_bounded(
+        session: proxy_service._HTTPBridgeSession,
+        *,
+        reason: str,
+    ) -> None:
+        assert session is predecessor
+        assert reason == "registry_detach"
+        events.append("close")
+        service._http_bridge_detached_sessions.pop(id(session), None)
+
+    async def create_http_bridge_session(
+        _: proxy_service._HTTPBridgeSessionKey,
+        **__: object,
+    ) -> proxy_service._HTTPBridgeSession:
+        assert events == ["close"]
+        events.append("create")
+        return replacement
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_http_bridge_session)
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", close_http_bridge_session_bounded)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        key,
+        headers={"x-codex-session-id": key.affinity_key},
+        affinity=proxy_service._AffinityPolicy(
+            key=key.affinity_key,
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            abandon_unavailable_legacy_owner=True,
+        ),
+        api_key=None,
+        request_model="gpt-5.6-sol",
+        idle_ttl_seconds=120.0,
+        max_sessions=1,
+    )
+
+    assert resolved is replacement
+    assert events == ["close", "create"]
+    assert id(predecessor) not in service._http_bridge_detached_sessions
+    assert service._http_bridge_sessions[key] is replacement
 
 
 @pytest.mark.asyncio

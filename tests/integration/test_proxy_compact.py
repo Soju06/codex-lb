@@ -1502,14 +1502,15 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
     assert response.status_code == 502, response.text
     assert response.json()["error"]["code"] == "upstream_request_timeout"
 
-    # The forwarded reservation row was RELEASED by compact_responses (sole
-    # settler) before the terminal raised (the fix). Pre-fix it stayed "reserved"
-    # — leaked held API-key quota — because owns_reservation is false on the
-    # forwarded path so the route's finally does not release it.
+    # A forwarded receiver has not transferred cleanup ownership until its
+    # successful HTTP 200. Pre-200 compact budget exhaustion must leave the
+    # reservation reserved so the origin remains the sole cleanup owner.
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
-        assert row.status == "released", f"forwarded reservation leaked held quota; status={row.status!r}"
+        assert row.status == "reserved", (
+            f"forwarded receiver settled the origin reservation before HTTP 200; status={row.status!r}"
+        )
 
 
 @pytest.mark.asyncio

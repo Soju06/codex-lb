@@ -104,6 +104,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
 )
+from app.modules.proxy._service.http_bridge.owner_forwarding import (
+    _owner_forward_failure_allows_local_recovery,
+)
 from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_session_key_quarantined,
 )
@@ -166,6 +169,7 @@ from app.modules.proxy._service.support import (
     _is_local_account_cap_code,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
+    _signal_propagated_responses_service_cleanup_ready,
     _ttft_event_visible_at,
     _WebSocketRequestState,
 )
@@ -929,17 +933,11 @@ class _HTTPBridgeStreamingMixin:
         payload_size_estimate_bytes = len(
             json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         )
-        # File pins are process-local. A remote owner must trust only the
-        # origin-resolved value carried by the authenticated forward context;
-        # re-looking it up here would turn a valid cross-replica pin into a miss.
-        local_file_owner_account_id = (
-            None
-            if forwarded_file_owner_account_id is not None
-            else await self._resolve_file_account_for_responses(payload, headers)
-        )
-        rewritten_file_account_id = resolve_required_account_id(
-            ("signed forwarding context", forwarded_file_owner_account_id),
-            ("local file pin", local_file_owner_account_id),
+        rewritten_file_account_id = await self._resolve_forwarded_file_account_for_responses(
+            payload,
+            headers,
+            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+            require_forwarded_file_owner=forwarded_request,
         )
         ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
@@ -975,6 +973,7 @@ class _HTTPBridgeStreamingMixin:
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
                 rewritten_file_account_id=rewritten_file_account_id,
+                file_account_resolution_complete=True,
                 upstream_stream_transport_override=force_upstream_stream_transport,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -2160,6 +2159,8 @@ class _HTTPBridgeStreamingMixin:
                     yield line
                 return
             except ProxyResponseError as exc:
+                if not _owner_forward_failure_allows_local_recovery(exc):
+                    raise
                 if forwarded_any:
                     yield _partial_output_proxy_error_event_block(
                         exc,
@@ -3710,6 +3711,7 @@ class _HTTPBridgeStreamingMixin:
                 lifecycle = request_state.deferred_account_backoff_lifecycle
                 if lifecycle is not None:
                     lifecycle.settlement_owned = True
+                _signal_propagated_responses_service_cleanup_ready()
             except ProxyResponseError as exc:
                 if request_state.bridge_soft_capacity_reroute_allowed:
                     raise

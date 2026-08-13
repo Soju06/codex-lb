@@ -102,6 +102,15 @@ class _CompactServiceProtocol(Protocol):
         self, payload: ResponsesCompactRequest, headers: Mapping[str, str]
     ) -> str | None: ...
 
+    async def _resolve_forwarded_file_account_for_responses(
+        self,
+        payload: ResponsesCompactRequest,
+        headers: Mapping[str, str],
+        *,
+        forwarded_file_owner_account_id: str | None,
+        require_forwarded_file_owner: bool = False,
+    ) -> str | None: ...
+
     async def _acquire_account_response_create_lease_or_overload(
         self, *, account_id: str, request_id: str, surface: str, concurrency_caps: AccountConcurrencyCaps
     ) -> AccountLease: ...
@@ -579,6 +588,8 @@ class _CompactMixin:
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         client_ip: str | None = None,
+        forwarded_request: bool = False,
+        forwarded_file_owner_account_id: str | None = None,
     ) -> CompactResponsePayload:
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
@@ -602,8 +613,57 @@ class _CompactMixin:
         route_endpoint_id: str | None = None
         route_fallback_used: bool | None = None
         route_fail_closed_reason: str | None = None
+        settlement_attempted = False
+
+        async def settle_compact_usage(
+            *,
+            api_key: ApiKeyData | None,
+            api_key_reservation: ApiKeyUsageReservationData | None,
+            response: CompactResponsePayload | None,
+            request_service_tier: str | None,
+        ) -> None:
+            nonlocal settlement_attempted
+            if settlement_attempted:
+                return
+            if forwarded_request and response is None:
+                # A forwarded receiver has not transferred cleanup ownership
+                # until its successful HTTP 200. Every error before that
+                # acknowledgement remains the origin's single release path.
+                return
+            settlement_attempted = True
+            await proxy._settle_compact_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                response=response,
+                request_service_tier=request_service_tier,
+            )
+
         proxy._raise_for_unsupported_input_image_references(payload)
-        rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
+        try:
+            rewritten_file_account_id = await proxy._resolve_forwarded_file_account_for_responses(
+                payload,
+                headers,
+                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+                require_forwarded_file_owner=forwarded_request,
+            )
+        except ProxyResponseError:
+            if not forwarded_request and api_key is not None and api_key_reservation is not None:
+                await settle_compact_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                    request_service_tier=_service_tier_from_compact_payload(payload),
+                )
+            raise
+        except asyncio.CancelledError:
+            if not forwarded_request and api_key is not None and api_key_reservation is not None:
+                await settle_compact_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                    request_service_tier=_service_tier_from_compact_payload(payload),
+                )
+            raise
         settings = await _service_get_settings_cache().get()
         concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
@@ -1345,12 +1405,12 @@ class _CompactMixin:
                                 )
                                 raise
                             except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
-                                if isinstance(refresh_exc, RefreshError):
-                                    if refresh_exc.is_permanent:
-                                        await settle_compact_usage(
-                                            api_key=api_key,
-                                            api_key_reservation=api_key_reservation,
-                                            response=None,
+                                    if isinstance(refresh_exc, RefreshError):
+                                        if refresh_exc.is_permanent:
+                                            await settle_compact_usage(
+                                                api_key=api_key,
+                                                api_key_reservation=api_key_reservation,
+                                                response=None,
                                             request_service_tier=request_service_tier,
                                         )
                                         await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)

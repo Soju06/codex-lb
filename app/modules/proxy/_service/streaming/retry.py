@@ -47,6 +47,7 @@ from app.modules.proxy._service.support import (
     _request_log_client_fields,
     _RetryableStreamError,
     _signal_propagated_capacity_startup_wait,
+    _signal_propagated_responses_service_cleanup_ready,
     _stream_settlement_error_payload,
     _StreamSettlement,
     _TerminalStreamError,
@@ -247,6 +248,7 @@ class _StreamingRetryMixin:
         suppress_text_done_events: bool,
         request_transport: str,
         rewritten_file_account_id: str | None = None,
+        file_account_resolution_complete: bool = False,
         upstream_stream_transport_override: str | None = None,
         client_ip: str | None = None,
         enforce_openai_sdk_contract: bool = True,
@@ -311,7 +313,7 @@ class _StreamingRetryMixin:
                 upstream_stream_transport,
                 request_id,
             )
-        if rewritten_file_account_id is None:
+        if rewritten_file_account_id is None and not file_account_resolution_complete:
             proxy._raise_for_unsupported_input_image_references(payload)
             rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
         had_prompt_cache_key = _prompt_cache_key_from_request_model(payload) is not None
@@ -857,6 +859,10 @@ class _StreamingRetryMixin:
             return True
 
         try:
+            # From this exact point the service finalizer below owns reservation
+            # settlement/release. Preflight failures before this boundary are
+            # still owned by the originating API startup guard.
+            _signal_propagated_responses_service_cleanup_ready()
             if payload.previous_response_id is not None:
                 previous_response_lookup_session_id = _owner_lookup_session_id_from_headers(headers)
                 preferred_account_id = await proxy._resolve_websocket_previous_response_owner(

@@ -559,7 +559,6 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,  # noqa: F401
     _DownstreamWebSocketActivity,  # noqa: F401
     _event_type_from_payload,  # noqa: F401
-    _FilePinEntry,
     _finalize_ttft_reasoning_deltas,  # noqa: F401
     _http_error_status_from_payload,  # noqa: F401
     _HTTPBridgeSession,
@@ -950,14 +949,7 @@ class ProxyService(
         self._websocket_continuity_index: dict[tuple[str, str | None], _WebSocketContinuityState] = {}
         self._background_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._stream_api_key_release_retry_semaphore = asyncio.Semaphore(_STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY)
-        # In-memory pin from upstream-issued file_id -> codex-lb account_id.
-        # Used so ``finalize_file`` for a given ``file_id`` is routed to the
-        # same account that handled ``create_file``. Cross-instance
-        # routing is best-effort: if finalize lands on a replica without a pin, we
-        # fall back to a fresh load-balancer selection. The TTL is short enough
-        # (5 min) that we never hold stale pins after the upstream upload window closes.
-        self._file_account_pins: dict[str, _FilePinEntry] = {}
-        self._file_account_pin_lock = asyncio.Lock()
+        self._file_pin_session_factory = SessionLocal
         self._http_bridge_lock = anyio.Lock()
         self._work_admission: WorkAdmissionController | None = None
         self._request_log_tasks: set[asyncio.Task[None]] = set()

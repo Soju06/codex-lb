@@ -12,7 +12,7 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - Bare process-session headers use a header-inaccessible, source-separated storage key and are soft only for self-contained pre-visible work.
 - Account-cap spillover is request-local: it selects an alternate without deleting or rebinding the process-session row.
 - Raw and legacy Codex rows remain hard during rolling upgrades because they may represent explicit turn-state ownership.
-- Live file pins, responses, conversations, live/durable bridges, replay, and reattach sources are independent hard evidence; conflicting evidence fails closed instead of using source precedence. Opaque file IDs with no live pin remain unpinned for compatibility with uploads that occurred outside the current process.
+- Durable file pins, responses, conversations, live/durable bridges, replay, and reattach sources are independent hard evidence; conflicting evidence fails closed instead of using source precedence. Opaque file IDs with no live durable pin remain unpinned for compatibility with uploads that occurred outside the current process.
 - Dashboard prompt-cache TTL is persisted in settings so operators can adjust it without restart.
 - Background cleanup removes stale prompt-cache rows proactively, while manual delete and purge endpoints provide operator override.
 
@@ -22,7 +22,7 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - Durable `codex_session` and `sticky_thread` mappings are never deleted by automatic cleanup.
 - HTTP forbids CR/LF in headers and affinity parsing strips surrounding whitespace, while database text preserves LF. The internal soft-key sentinel therefore cannot be reproduced by a normalized client turn-state header.
 - Every transport resolves live and durable turn-state aliases; an existing route or socket is not itself proof that a newly supplied conversation belongs to that account.
-- File owner indexes are process-local. Cross-replica bridge forwarding authenticates the origin-resolved owner rather than requiring a duplicate index on the remote owner.
+- File owner pins live in the shared application database. Cross-replica bridge forwarding still authenticates the origin-resolved owner, but the receiving replica must revalidate that owner against a fresh durable lookup.
 
 ## Failure Modes
 

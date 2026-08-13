@@ -95,6 +95,18 @@ _PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVa
     "propagated_capacity_startup_ready",
     default=None,
 )
+_PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_responses_service_cleanup_ready",
+    default=None,
+)
+_PROPAGATED_RESPONSES_OWNER_FORWARD_DISPATCHED: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_responses_owner_forward_dispatched",
+    default=None,
+)
+_PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_responses_owner_forward_rejected",
+    default=None,
+)
 
 
 def _strip_blank_html_comment_lines(text: str) -> str:
@@ -283,6 +295,48 @@ def _signal_propagated_capacity_startup_ready() -> None:
     if wait_event is not None:
         wait_event.clear()
     event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if event is not None:
+        event.set()
+
+
+def _bind_propagated_responses_service_cleanup_ready(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY.set(event)
+
+
+def _reset_propagated_responses_service_cleanup_ready(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY.reset(token)
+
+
+def _signal_propagated_responses_service_cleanup_ready() -> None:
+    event = _PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY.get()
+    if event is not None:
+        event.set()
+
+
+def _bind_propagated_responses_owner_forward_dispatched(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_RESPONSES_OWNER_FORWARD_DISPATCHED.set(event)
+
+
+def _reset_propagated_responses_owner_forward_dispatched(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_RESPONSES_OWNER_FORWARD_DISPATCHED.reset(token)
+
+
+def _signal_propagated_responses_owner_forward_dispatched() -> None:
+    event = _PROPAGATED_RESPONSES_OWNER_FORWARD_DISPATCHED.get()
+    if event is not None:
+        event.set()
+
+
+def _bind_propagated_responses_owner_forward_rejected(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED.set(event)
+
+
+def _reset_propagated_responses_owner_forward_rejected(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED.reset(token)
+
+
+def _signal_propagated_responses_owner_forward_rejected() -> None:
+    event = _PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED.get()
     if event is not None:
         event.set()
 
@@ -732,12 +786,6 @@ def _consume_api_key_reservation_heartbeat_result(task: asyncio.Task[None]) -> N
         pass
     except Exception:
         logger.warning("API key reservation heartbeat task failed during cancellation", exc_info=True)
-
-
-@dataclass(frozen=True, slots=True)
-class _FilePinEntry:
-    account_id: str
-    expires_at: float
 
 
 @dataclass(frozen=True, slots=True)

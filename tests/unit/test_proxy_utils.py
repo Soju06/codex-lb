@@ -67,6 +67,7 @@ from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import compact as proxy_compact_service
+from app.modules.proxy._service import file_ops as proxy_file_ops
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service import warmup as proxy_warmup_service
 from app.modules.proxy._service.http_bridge import request_submit as proxy_http_bridge_request_submit
@@ -38223,25 +38224,238 @@ async def test_cb_context_open_circuit_closes_request_context_manager(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_lookup_file_pin_returns_live_entry_and_evicts_expired(monkeypatch):
+async def test_responses_file_owner_resolution_batches_one_durable_lookup(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    lookup_batches: list[set[str]] = []
+
+    async def get_live_account_ids(_repository, file_ids) -> dict[str, str]:
+        lookup_batches.append(set(file_ids))
+        return {
+            "file_batch_a": "acc_batch_owner",
+            "file_batch_b": "acc_batch_owner",
+        }
+
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_ids",
+        get_live_account_ids,
+    )
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "Read both files.",
+            "input": [
+                {"type": "input_file", "file_id": "file_batch_a"},
+                {"type": "input_file", "file_id": "file_batch_b"},
+                {"type": "input_file", "file_id": "file_batch_a"},
+            ],
+        }
+    )
+
+    assert await service._resolve_file_account_for_responses(payload, {}) == "acc_batch_owner"
+    assert lookup_batches == [{"file_batch_a", "file_batch_b"}]
+
+
+@pytest.mark.asyncio
+async def test_finalize_file_database_lookup_failure_stops_before_upstream(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    fake_now = [100.0]
+    selection = AsyncMock()
 
-    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: fake_now[0])
+    async def fail_lookup(_repository, _file_id: str) -> str | None:
+        raise RuntimeError("file pin database unavailable")
 
-    await service._pin_file_account("file_live", "acc_live")
+    monkeypatch.setattr(
+        proxy_file_ops.FileAccountPinRepository,
+        "get_live_account_id",
+        fail_lookup,
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
 
-    entry = await service._lookup_file_pin("file_live")
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.finalize_file("file_db_failure", {})
 
-    assert entry is not None
-    assert entry.account_id == "acc_live"
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    selection.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "file_owner_unavailable"
+    assert request_logs.calls[0]["account_id"] is None
 
-    fake_now[0] += service._FILE_ACCOUNT_PIN_TTL_SECONDS + 1
 
-    expired = await service._lookup_file_pin("file_live")
+@pytest.mark.asyncio
+async def test_create_file_database_write_failure_does_not_return_upstream_result(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_unpersisted")
+    selection = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    upstream_create = AsyncMock(return_value={"file_id": "file_unpersisted", "upload_url": "https://upload.invalid"})
+    claim_calls: list[tuple[str, str, int]] = []
 
-    assert expired is None
+    async def fail_claim(
+        _repository,
+        file_id: str,
+        account_id: str,
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        claim_calls.append((file_id, account_id, ttl_seconds))
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_file_ops.FileAccountPinRepository, "claim", fail_claim)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_ensure_previsible_unary_fresh_with_failover", AsyncMock(return_value=account))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_create_file", upstream_create)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.create_file({"file_name": "document.txt"}, {})
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    upstream_create.assert_awaited_once()
+    assert claim_calls == [
+        (
+            "file_unpersisted",
+            "acc_unpersisted",
+            service._FILE_ACCOUNT_PIN_TTL_SECONDS,
+        )
+    ]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "file_owner_unavailable"
+    assert request_logs.calls[0]["account_id"] == account.id
+
+
+@pytest.mark.asyncio
+async def test_finalize_file_database_renewal_failure_logs_error_without_upstream_retry(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_finalize_unrenewed")
+    selection = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    upstream_finalize = AsyncMock(return_value={"status": "success"})
+    unexpected_failover = AsyncMock(
+        side_effect=AssertionError("post-success pin persistence failure must not retry upstream")
+    )
+
+    async def resolve_owner(_repository, _file_id: str) -> str:
+        return account.id
+
+    async def fail_claim(
+        _repository,
+        _file_id: str,
+        _account_id: str,
+        *,
+        ttl_seconds: int,
+    ) -> None:
+        assert ttl_seconds == service._FILE_ACCOUNT_PIN_TTL_SECONDS
+        raise RuntimeError("file pin database unavailable")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_file_ops.FileAccountPinRepository, "get_live_account_id", resolve_owner)
+    monkeypatch.setattr(proxy_file_ops.FileAccountPinRepository, "claim", fail_claim)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", selection)
+    monkeypatch.setattr(service, "_ensure_previsible_unary_fresh_with_failover", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_retry_previsible_unary_call_failover", unexpected_failover)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(proxy_service, "core_finalize_file", upstream_finalize)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.finalize_file("file_finalize_unrenewed", {})
+
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+    upstream_finalize.assert_awaited_once()
+    unexpected_failover.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "file_owner_unavailable"
+    assert request_logs.calls[0]["account_id"] == account.id
+
+
+def test_origin_release_follows_owner_forward_dispatch_outcome() -> None:
+    cleanup_ready = asyncio.Event()
+    dispatched = asyncio.Event()
+    rejected = asyncio.Event()
+
+    assert proxy_api._responses_origin_may_release_reservation(
+        service_cleanup_ready_event=cleanup_ready,
+        owner_forward_dispatched_event=dispatched,
+        owner_forward_rejected_event=rejected,
+    )
+
+    dispatched.set()
+    assert not proxy_api._responses_origin_may_release_reservation(
+        service_cleanup_ready_event=cleanup_ready,
+        owner_forward_dispatched_event=dispatched,
+        owner_forward_rejected_event=rejected,
+    )
+
+    rejected.set()
+    assert proxy_api._responses_origin_may_release_reservation(
+        service_cleanup_ready_event=cleanup_ready,
+        owner_forward_dispatched_event=dispatched,
+        owner_forward_rejected_event=rejected,
+    )
+
+    cleanup_ready.set()
+    assert not proxy_api._responses_origin_may_release_reservation(
+        service_cleanup_ready_event=cleanup_ready,
+        owner_forward_dispatched_event=dispatched,
+        owner_forward_rejected_event=rejected,
+    )
+
+
+def test_owner_forward_failure_allows_local_recovery_only_for_safe_outcomes() -> None:
+    from app.modules.proxy._service.http_bridge.owner_forwarding import (
+        _OwnerForwardOutcome,
+        _OwnerForwardRequestError,
+        _owner_forward_failure_allows_local_recovery,
+    )
+
+    base = proxy_module.ProxyResponseError(
+        503,
+        openai_error("bridge_owner_unreachable", "HTTP bridge owner request failed"),
+    )
+    assert _owner_forward_failure_allows_local_recovery(base)
+    assert _owner_forward_failure_allows_local_recovery(
+        _OwnerForwardRequestError(base, outcome=_OwnerForwardOutcome.NOT_DISPATCHED)
+    )
+    assert _owner_forward_failure_allows_local_recovery(
+        _OwnerForwardRequestError(base, outcome=_OwnerForwardOutcome.RECEIVER_REJECTED)
+    )
+    assert not _owner_forward_failure_allows_local_recovery(
+        _OwnerForwardRequestError(base, outcome=_OwnerForwardOutcome.DISPATCH_AMBIGUOUS)
+    )
+    assert not _owner_forward_failure_allows_local_recovery(
+        _OwnerForwardRequestError(base, outcome=_OwnerForwardOutcome.RECEIVER_ACKNOWLEDGED)
+    )
+
+
+@pytest.mark.asyncio
+async def test_forwarded_receiver_cleanup_handoff_timeout_returns_503() -> None:
+    async def never_ready() -> AsyncIterator[str]:
+        await asyncio.Event().wait()
+        yield "data: never\n\n"
+
+    cleanup_ready = asyncio.Event()
+    stream, startup_error = await proxy_api._probe_stream_startup_error(
+        never_ready(),
+        timeout_seconds=0.01,
+        service_cleanup_ready_event=cleanup_ready,
+    )
+
+    assert isinstance(startup_error, proxy_module.ProxyResponseError)
+    assert startup_error.status_code == 503
+    assert _proxy_error_code(startup_error) == "upstream_unavailable"
+    assert startup_error.failure_detail == "cleanup_handoff_timeout"
+    aclose = getattr(stream, "aclose", None)
+    if callable(aclose):
+        await aclose()
 
 
 @pytest.mark.asyncio

@@ -123,6 +123,8 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        on_request_dispatched: Callable[[], None] | None = None,
+        on_response_rejected: Callable[[], None] | None = None,
         on_response_wait: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
     ) -> AsyncIterator[str]:
@@ -134,13 +136,26 @@ class HTTPBridgeOwnerClient:
         if on_response_wait is not None:
             on_response_wait()
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-            async with session.post(
-                f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
-                json=payload.model_dump_for_forwarding(),
-                headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
+            request_url = f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}"
+            request_payload = payload.model_dump_for_forwarding()
+            request_headers = build_owner_forward_headers(headers=headers, payload=payload, context=context)
+            request_context = session.post(
+                request_url,
+                json=request_payload,
+                headers=request_headers,
                 skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
-            ) as response:
+            )
+            if on_request_dispatched is not None:
+                # Payload/header construction is still a local pre-dispatch
+                # failure. Once the request context starts, a transport failure
+                # cannot prove whether the owner received the signed reservation.
+                on_request_dispatched()
+            async with request_context as response:
                 if response.status != 200:
+                    if on_response_rejected is not None:
+                        # The receiver contract never transfers cleanup on a
+                        # non-200 response, so the origin may safely release.
+                        on_response_rejected()
                     payload_text = await response.text()
                     raise ProxyResponseError(
                         response.status,

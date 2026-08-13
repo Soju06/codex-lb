@@ -66,6 +66,16 @@ class RequestKind(str, Enum):
     WARMUP = "warmup"
 
 
+class FileAccountPin(Base):
+    __tablename__ = "file_account_pins"
+
+    file_id: Mapped[str] = mapped_column(String, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (Index("ix_file_account_pins_expires_at", "expires_at"),)
+
+
 class Account(Base):
     __tablename__ = "accounts"
 

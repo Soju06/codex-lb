@@ -437,6 +437,10 @@ class _HTTPBridgeMixin(
         model_transition_rebind = bool(
             durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, request_model)
         )
+        durable_lookup_owned_by_current_instance = bool(
+            durable_lookup is not None
+            and durable_lookup.owner_instance_id == settings.http_responses_session_bridge_instance_id
+        )
         if model_transition_rebind:
             durable_lookup = None
         if await _http_bridge_should_wait_for_registration(self, key, settings):
@@ -519,7 +523,7 @@ class _HTTPBridgeMixin(
             # ``force_durable_takeover_after_detach`` even though the durable
             # row still represents the detached generation. Advance the epoch
             # for that fresh local replacement so the late release is fenced.
-            unrepresented_current_owner = (
+            unrepresented_current_owner = durable_lookup_owned_by_current_instance or (
                 durable_lookup is not None
                 and durable_lookup.owner_instance_id == settings.http_responses_session_bridge_instance_id
             )
@@ -719,6 +723,7 @@ class _HTTPBridgeMixin(
                     model_transition_parent_key = key
                     key = fork_key
                     durable_lookup = None
+                    durable_lookup_owned_by_current_instance = False
                     force_durable_takeover_after_detach = False
                     locally_owned_fork_key = _http_bridge_locally_owned_fork_key(
                         fork_key, forwarded_request, forwarded_original_request_unanchored
@@ -1440,6 +1445,7 @@ class _HTTPBridgeMixin(
                     bind_account_neutral_recovery_owner(session)
                     model_transition_parent_key, key = key, fork_key
                     durable_lookup = None
+                    durable_lookup_owned_by_current_instance = False
                     force_durable_takeover_after_detach = False
                     locally_owned_fork_key = _http_bridge_locally_owned_fork_key(
                         fork_key, forwarded_request, forwarded_original_request_unanchored
@@ -1544,6 +1550,7 @@ class _HTTPBridgeMixin(
                         durable_lookup,
                         force=force_durable_takeover,
                     ),
+                    and (force_durable_takeover or not unrepresented_current_owner),
                     force_owner_epoch_advance=force_durable_takeover or unrepresented_current_owner,
                     # restart_takeover means recovering a row whose previous
                     # owner is genuinely gone. Every claim now advances the

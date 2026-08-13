@@ -16378,6 +16378,63 @@ async def test_get_or_create_http_bridge_session_fences_unrepresented_local_owne
 
 
 @pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_preserves_local_owner_fence_across_model_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-model-transition", None)
+    created_session = _make_bridge_session(key=key, key_value="sid-model-transition")
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
+    claim_durable = AsyncMock()
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", claim_durable)
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-a"),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a"])),
+    )
+
+    resolved = await service._get_or_create_http_bridge_session(
+        key,
+        headers={"x-codex-session-id": "sid-model-transition"},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-model-transition",
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        api_key=None,
+        request_model="gpt-5.2",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        durable_lookup=proxy_service.DurableBridgeLookup(
+            session_id="durable-model-transition",
+            canonical_kind="session_header",
+            canonical_key="sid-model-transition",
+            api_key_scope="__anonymous__",
+            account_id="acc-bridge",
+            owner_instance_id="instance-a",
+            owner_epoch=1,
+            lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+            state=HttpBridgeSessionState.ACTIVE,
+            latest_turn_state=None,
+            latest_response_id=None,
+            model="gpt-5.1",
+        ),
+    )
+
+    assert resolved is created_session
+    claim_durable.assert_awaited_once()
+    await_args = claim_durable.await_args
+    assert await_args is not None
+    assert await_args.kwargs["allow_takeover"] is False
+    assert await_args.kwargs["force_owner_epoch_advance"] is True
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_recovers_locally_when_owner_endpoint_missing_but_replay_anchor_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

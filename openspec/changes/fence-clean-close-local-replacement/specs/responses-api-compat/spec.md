@@ -30,6 +30,16 @@ existing owner-forwarding or mismatch behavior.
 - **WHEN** another compatible request reuses that session
 - **THEN** the durable owner epoch is not advanced solely because of reuse
 
+#### Scenario: model transition preserves the detached local generation fence
+
+- **GIVEN** a durable row still names the current instance after its local
+  generation has detached
+- **AND** the replacement request selects a model incompatible with that row
+- **WHEN** model filtering discards the durable lookup before session creation
+- **THEN** the replacement claim still advances the durable owner epoch
+- **AND** a delayed release from the previous model generation cannot clear the
+  replacement row
+
 #### Scenario: a live remote owner remains protected
 
 - **GIVEN** a durable bridge row has an unexpired lease owned by another live

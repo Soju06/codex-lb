@@ -1662,6 +1662,8 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
     payload1 = response1.json()
     assert payload1["summary"]["totalRequests"] == 1
     assert payload1["summary"]["totalCostUsd"] == 0.50
+    assert payload1["daily"][0]["requests"] == 1
+    assert payload1["byAccount"][0]["requests"] == 1
 
     # Test filtering by multiple keys (key-1 and key-2)
     response2 = await async_client.get(
@@ -1676,3 +1678,17 @@ async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
     payload2 = response2.json()
     assert payload2["summary"]["totalRequests"] == 2
     assert payload2["summary"]["totalCostUsd"] == 1.50
+
+    # Test filtering by non-matching key returns 0 metrics
+    response3 = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["nonexistent-key"],
+        },
+    )
+    assert response3.status_code == 200
+    payload3 = response3.json()
+    assert payload3["summary"]["totalRequests"] == 0
+    assert payload3["summary"]["totalCostUsd"] == 0.0

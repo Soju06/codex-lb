@@ -108,6 +108,15 @@ class _HTTPBridgeActivityMixin:
             ),
         )
 
+    def _http_bridge_forced_close_must_finish_before_create(
+        self: _HTTPBridgeServiceProtocol,
+        forced_replacement: bool,
+        max_sessions: int,
+    ) -> bool:
+        # Detachment retains capacity. A forced replacement at the cap must
+        # finish closing its idle predecessor before enforcing the same cap.
+        return forced_replacement and _http_bridge_capacity_generation_count(self) >= max_sessions
+
     async def _enforce_http_bridge_capacity_after_planned_closes(
         self: _HTTPBridgeServiceProtocol,
         *,

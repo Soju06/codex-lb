@@ -783,14 +783,10 @@ class _HTTPBridgeMixin(
                     if detached is not None:
                         force_durable_takeover = True
                         if not retiring_with_visible_requests:
-                            if (
-                                force_goal_restart_account_reselection
-                                and _http_bridge_capacity_generation_count(self) >= max_sessions
+                            if self._http_bridge_forced_close_must_finish_before_create(
+                                force_goal_restart_account_reselection,
+                                max_sessions,
                             ):
-                                # Detachment does not release capacity. At a
-                                # one-generation cap, background close would
-                                # make this same restart reject before its idle
-                                # predecessor gets a chance to free the slot.
                                 sessions_to_close_before_create.append(detached)
                             else:
                                 self._schedule_http_bridge_session_closes([detached], reason="registry_detach")

@@ -5,8 +5,10 @@
 
 ## 2. Inert seam regression
 
-- [x] 2.1 Add a direct Responses WebSocket integration regression that loads the published TOML examples and proves Daybreak is authorized-only before first selection while ordinary routing remains unconstrained.
+- [x] 2.1 Add a direct Responses WebSocket integration regression that loads the published TOML examples and proves Daybreak validates its inert API key and routes authorized-only before first selection while ordinary routing remains unconstrained with global API-key auth disabled.
 - [x] 2.2 Confirm the existing unauthenticated-signal and empty-capable-pool fail-closed coverage remains applicable without adding external calls or credentials.
+- [x] 2.3 Add authenticated HTTP Responses and compact fallback regressions that fail before routing while headerless ordinary HTTP remains unchanged.
+- [x] 2.4 Add and run an opt-in installed-Codex loopback regression for real profile resolution, environment-key handling, first WebSocket header emission, and retained HTTP-fallback headers.
 
 ## 3. Verification
 

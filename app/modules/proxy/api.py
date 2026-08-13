@@ -1018,6 +1018,9 @@ async def responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     explicit_openai_sdk_marker = _has_explicit_openai_sdk_marker(request)
     openai_sdk_request = _is_openai_sdk_request(request, payload)
     native_codex_heartbeat = _is_native_codex_request(request.headers) and not explicit_openai_sdk_marker
@@ -1112,7 +1115,11 @@ async def responses_websocket(
     websocket: WebSocket,
     context: ProxyContext = Depends(get_proxy_websocket_context),
 ) -> None:
-    api_key, denial = await _validate_proxy_websocket_request(websocket)
+    capability_header_values = tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER))
+    api_key, denial = await _validate_proxy_websocket_request(
+        websocket,
+        require_api_key=bool(capability_header_values),
+    )
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
@@ -1130,7 +1137,7 @@ async def responses_websocket(
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
         synthesized_turn_state=turn_state if client_turn_state is None else None,
-        capability_header_values=tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER)),
+        capability_header_values=capability_header_values,
     )
 
 
@@ -1154,6 +1161,9 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     try:
         responses_payload = payload.to_responses_request()
         enforce_strict_text_format(responses_payload)
@@ -1419,7 +1429,11 @@ async def v1_responses_websocket(
     websocket: WebSocket,
     context: ProxyContext = Depends(get_proxy_websocket_context),
 ) -> None:
-    api_key, denial = await _validate_proxy_websocket_request(websocket)
+    capability_header_values = tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER))
+    api_key, denial = await _validate_proxy_websocket_request(
+        websocket,
+        require_api_key=bool(capability_header_values),
+    )
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
@@ -1437,7 +1451,7 @@ async def v1_responses_websocket(
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
         synthesized_turn_state=turn_state if client_turn_state is None else None,
-        capability_header_values=tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER)),
+        capability_header_values=capability_header_values,
     )
 
 
@@ -5362,6 +5376,9 @@ async def responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     return await _compact_responses(
         request,
         payload,
@@ -5380,6 +5397,9 @@ async def v1_responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     try:
         compact_payload = payload.to_compact_request()
     except ClientPayloadError as exc:
@@ -6614,6 +6634,27 @@ async def _validate_proxy_websocket_request(
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),
         )
     return api_key, None
+
+
+async def _required_capability_http_transport_denial(
+    request: Request,
+    api_key: ApiKeyData | None,
+) -> JSONResponse | None:
+    """Authenticate capability intent and reject unsupported HTTP routing."""
+
+    if not request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
+        return None
+    if api_key is None:
+        await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))
+    return _logged_error_json_response(
+        request,
+        400,
+        openai_error(
+            "required_capability_transport_unsupported",
+            "Required capability routing is only supported over the Responses WebSocket transport.",
+            error_type="invalid_request_error",
+        ),
+    )
 
 
 def _redact_realtime_live_websocket_scope(websocket: WebSocket, *, path: str) -> None:

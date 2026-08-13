@@ -19,6 +19,7 @@ from app.core.auth.dashboard_access import (
     guest_principal,
 )
 from app.core.auth.dashboard_mode import DashboardAuthMode, get_dashboard_request_auth
+from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -64,6 +65,8 @@ async def validate_proxy_api_key(
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
 ) -> ApiKeyData | None:
     authorization = None if credentials is None else f"Bearer {credentials.credentials}"
+    if request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
+        return await validate_required_proxy_api_key_authorization(authorization)
     return await validate_proxy_api_key_authorization(authorization, request=request)
 
 

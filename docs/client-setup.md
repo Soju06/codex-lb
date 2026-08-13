@@ -78,11 +78,20 @@ this profile only when the selected identity and ChatGPT workspace or API
 organization/project are already approved for the intended Codex product
 surface. The dedicated provider always supplies a Codex LB API key because
 unauthenticated capability carriers are rejected even on a local deployment.
-Codex LB narrows the first and later account selections to eligible
-accounts already marked `security_work_authorized`; if none are available, it
-fails closed without ordinary fallback. Selecting `gpt-5.6-sol` by itself does
-not activate this path, and a Daybreak alias may resolve to that same underlying
-model. See OpenAI's
+When the capability header is present, Codex LB validates that key for the
+request even if global API-key auth is disabled; ordinary requests without the
+header keep the deployment's normal auth behavior. Current Codex clients may
+fall back from WebSocket to HTTP even when `supports_websockets = true`. Codex
+LB authenticates a capability-bearing HTTP fallback and then rejects it with
+`required_capability_transport_unsupported` before account selection or
+upstream dispatch. The same fail-closed guard applies to
+`/responses/compact`; restore direct WebSocket availability instead of
+removing the carrier or retrying through ordinary HTTP. Codex LB narrows a
+direct WebSocket turn's first and later account selections to eligible accounts already marked
+`security_work_authorized`; if none are available, it fails closed without
+ordinary fallback. Selecting `gpt-5.6-sol` by itself does not activate this
+path, and a Daybreak alias may resolve to that same underlying model. See
+OpenAI's
 [Trusted Access guidance](https://developers.openai.com/api/docs/guides/safety-checks/cybersecurity#authorized-access-and-agentic-workflows).
 
 Complete inert examples are available as
@@ -105,17 +114,11 @@ export CODEX_LB_UPSTREAM_STREAM_TRANSPORT=websocket
 `auto` is the default and uses native WebSockets for native Codex headers or models that prefer them.
 You can also switch this in the dashboard under Settings → Routing → Upstream stream transport.
 
-Note: Codex itself does not currently expose a stable documented `wire_api = "websocket"` provider mode.
-If you want to experiment on the Codex side, the current CLI exposes under-development feature flags:
-
-```toml
-[features]
-responses_websockets = true
-# or
-responses_websockets_v2 = true
-```
-
-These flags are experimental and do not replace `wire_api = "responses"`.
+Note: Codex itself does not currently expose a stable documented
+`wire_api = "websocket"` or WebSocket-only provider mode.
+`supports_websockets = true` enables WebSocket attempts but does not disable
+HTTP fallback. Removed `responses_websockets` feature flags are not a
+fail-closed transport control.
 
 Upstream websocket handshakes automatically honor standard proxy environment variables when they are
 present. `wss://` handshakes check `wss_proxy`, `socks_proxy`, `https_proxy`, and `all_proxy`;

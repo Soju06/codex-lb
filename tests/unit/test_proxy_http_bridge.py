@@ -5147,7 +5147,16 @@ async def test_http_bridge_upstream_non_text_archives_with_request_archive_id(
             archive_received=archive_received,
         ),
     )
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-a"),
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-a"),
+    )
     monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", AsyncMock())
     monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", AsyncMock())
@@ -10433,7 +10442,7 @@ def test_verified_durable_full_resend_proof_is_sealed_immutable_and_request_boun
         canonical_key="sid-proof",
         api_key_scope="__anonymous__",
         account_id="acc-proof",
-        owner_instance_id=None,
+        owner_instance_id="instance-a",
         owner_epoch=3,
         lease_expires_at=None,
         state=HttpBridgeSessionState.CLOSED,
@@ -22193,7 +22202,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
         canonical_key="http_turn_model_parent",
         api_key_scope="__anonymous__",
         account_id="acc-model-owner",
-        owner_instance_id=None,
+        owner_instance_id="instance-a",
         owner_epoch=1,
         lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
         state=HttpBridgeSessionState.ACTIVE,
@@ -22264,7 +22273,16 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
             ),
         ),
     )
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-a"),
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-a"),
+    )
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create)
@@ -22292,6 +22310,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
     assert all(call["previous_response_id"] is None for call in creation_calls)
     assert all(call["preferred_account_id"] == "acc-model-owner" for call in creation_calls)
     assert all(call["preferred_account_has_continuity_provenance"] is True for call in creation_calls)
+    assert all(call["durable_model_transition_owned_by_current_instance"] is True for call in creation_calls)
 
 
 @pytest.mark.asyncio

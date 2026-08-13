@@ -349,6 +349,7 @@ class _HTTPBridgeMixin(
         allow_previous_response_recovery_rebind: bool = False,
         allow_bootstrap_owner_rebind: bool = False,
         durable_lookup: DurableBridgeLookup | None = None,
+        durable_model_transition_owned_by_current_instance: bool = False,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
         preferred_account_has_continuity_provenance: bool = False,
@@ -382,6 +383,7 @@ class _HTTPBridgeMixin(
         allow_previous_response_recovery_rebind: bool = False,
         allow_bootstrap_owner_rebind: bool = False,
         durable_lookup: DurableBridgeLookup | None = None,
+        durable_model_transition_owned_by_current_instance: bool = False,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
         preferred_account_has_continuity_provenance: bool = False,
@@ -414,6 +416,7 @@ class _HTTPBridgeMixin(
         allow_previous_response_recovery_rebind: bool = False,
         allow_bootstrap_owner_rebind: bool = False,
         durable_lookup: DurableBridgeLookup | None = None,
+        durable_model_transition_owned_by_current_instance: bool = False,
         request_stage: str = "first_turn",
         preferred_account_id: str | None = None,
         preferred_account_has_continuity_provenance: bool = False,
@@ -437,7 +440,7 @@ class _HTTPBridgeMixin(
         model_transition_rebind = bool(
             durable_lookup is not None and not _http_bridge_models_compatible(durable_lookup.model, request_model)
         )
-        durable_lookup_owned_by_current_instance = bool(
+        durable_lookup_owned_by_current_instance = durable_model_transition_owned_by_current_instance or bool(
             durable_lookup is not None
             and durable_lookup.owner_instance_id == settings.http_responses_session_bridge_instance_id
         )

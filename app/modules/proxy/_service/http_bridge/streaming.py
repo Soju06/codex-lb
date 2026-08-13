@@ -1511,6 +1511,11 @@ class _HTTPBridgeStreamingMixin:
                 and durable_model_transition_lookup.latest_turn_state is not None
             )
         )
+        durable_model_transition_owned_by_current_instance = bool(
+            durable_model_transition_lookup is not None
+            and durable_model_transition_lookup.owner_instance_id
+            == _service_get_settings().http_responses_session_bridge_instance_id
+        )
         if durable_model_transition_lookup is not None:
             _log_http_bridge_event(
                 "model_transition_isolated",
@@ -1533,6 +1538,7 @@ class _HTTPBridgeStreamingMixin:
                     bridge_session_key.api_key_id,
                 )
                 force_local_recovery_creation = True
+                durable_model_transition_owned_by_current_instance = False
             durable_lookup = None
             dead_owner_anchor = False
         if durable_lookup is not None:
@@ -2061,6 +2067,9 @@ class _HTTPBridgeStreamingMixin:
                     forwarded_affinity_kind=forwarded_affinity_kind,
                     forwarded_affinity_key=forwarded_affinity_key,
                     durable_lookup=durable_lookup,
+                    durable_model_transition_owned_by_current_instance=(
+                        durable_model_transition_owned_by_current_instance
+                    ),
                     request_stage=request_state.request_stage,
                     preferred_account_id=request_state.preferred_account_id,
                     preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
@@ -2330,6 +2339,9 @@ class _HTTPBridgeStreamingMixin:
                                 and not owner_forward_fresh_replay
                             ),
                             durable_lookup=durable_lookup,
+                            durable_model_transition_owned_by_current_instance=(
+                                durable_model_transition_owned_by_current_instance
+                            ),
                             request_stage=(
                                 request_state.request_stage
                                 if owner_forward_fresh_replay
@@ -2950,6 +2962,9 @@ class _HTTPBridgeStreamingMixin:
                             forwarded_request=forwarded_request,
                             forwarded_original_request_unanchored=original_request_unanchored,
                             durable_lookup=durable_lookup,
+                            durable_model_transition_owned_by_current_instance=(
+                                durable_model_transition_owned_by_current_instance
+                            ),
                             request_stage=request_state.request_stage,
                             preferred_account_id=replacement_preferred_account_id,
                             preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,
@@ -3313,6 +3328,9 @@ class _HTTPBridgeStreamingMixin:
                             allow_previous_response_recovery_rebind=allow_previous_response_recovery_rebind,
                             session_header_fallback_key=session_header_fallback_key,
                             durable_lookup=durable_lookup,
+                            durable_model_transition_owned_by_current_instance=(
+                                durable_model_transition_owned_by_current_instance
+                            ),
                             request_stage=retry_request_stage,
                             preferred_account_id=retry_preferred_account_id,
                             preferred_account_has_continuity_provenance=preferred_account_has_continuity_provenance,

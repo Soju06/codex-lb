@@ -8,6 +8,10 @@
 
 - [x] 2.1 Assert compact `failover_next` with a held reservation settles
   before `_handle_stream_error`.
+- [x] 2.2 Assert exhausted HTTP 500 retries defer `_handle_proxy_error`
+  until settlement.
+- [x] 2.3 Assert `UpstreamProxyRouteError` after failover still flushes
+  deferred health.
 
 ## 3. Validation
 

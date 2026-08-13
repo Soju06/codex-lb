@@ -17,3 +17,17 @@ When `compact_responses` holds an API-key usage reservation, it MUST NOT write a
 - **GIVEN** a compact request whose upstream call times out
 - **WHEN** the timeout branch records account health
 - **THEN** the reservation is settled before `_handle_stream_error`
+
+#### Scenario: Compact HTTP 500 failover defers health until settle
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the first account exhausts same-account HTTP 500 retries
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_proxy_error` and extra `record_errors` for the failed account run only after that settlement
+
+#### Scenario: Compact route failure after failover still applies deferred health
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **WHEN** the next account raises `UpstreamProxyRouteError`
+- **THEN** the reservation is settled
+- **AND** the deferred health write still runs

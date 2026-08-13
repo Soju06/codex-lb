@@ -691,6 +691,37 @@ class _CompactMixin:
             ("previous response", previous_response_preferred_account_id),
             ("input file", rewritten_file_account_id),
         )
+        deferred_stream_health: list[tuple[Account, Any, str, int | None]] = []
+        deferred_http_500_health: list[tuple[Account, ProxyResponseError, int]] = []
+
+        async def settle_compact_usage(
+            *,
+            api_key: ApiKeyData | None,
+            api_key_reservation: ApiKeyUsageReservationData | None,
+            response: CompactResponsePayload | None,
+            request_service_tier: str | None,
+        ) -> None:
+            await proxy._settle_compact_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                response=response,
+                request_service_tier=request_service_tier,
+            )
+            stream_pending = list(deferred_stream_health)
+            deferred_stream_health.clear()
+            http_500_pending = list(deferred_http_500_health)
+            deferred_http_500_health.clear()
+            for failed_account, failed_error, failed_code, failed_status in stream_pending:
+                await proxy._handle_stream_error(
+                    failed_account,
+                    failed_error,
+                    failed_code,
+                    http_status=failed_status,
+                )
+            for failed_account, failed_exc, extra_error_count in http_500_pending:
+                await proxy._handle_proxy_error(failed_account, failed_exc)
+                await proxy._load_balancer.record_errors(failed_account, extra_error_count)
+
         try:
 
             async def _call_compact(
@@ -845,31 +876,6 @@ class _CompactMixin:
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
             )
-            deferred_compact_health: list[tuple[Account, Any, str, int | None]] = []
-
-            async def settle_compact_usage(
-                *,
-                api_key: ApiKeyData | None,
-                api_key_reservation: ApiKeyUsageReservationData | None,
-                response: CompactResponsePayload | None,
-                request_service_tier: str | None,
-            ) -> None:
-                await proxy._settle_compact_api_key_usage(
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    response=response,
-                    request_service_tier=request_service_tier,
-                )
-                pending = list(deferred_compact_health)
-                deferred_compact_health.clear()
-                for failed_account, failed_error, failed_code, failed_status in pending:
-                    await proxy._handle_stream_error(
-                        failed_account,
-                        failed_error,
-                        failed_code,
-                        http_status=failed_status,
-                    )
-
             for _account_attempt in range(_compact_max_account_attempts()):
                 selection = await proxy._select_account_with_budget_compatible(
                     deadline,
@@ -1372,10 +1378,13 @@ class _CompactMixin:
                                 account.id,
                                 transient_retries,
                             )
-                            await proxy._handle_proxy_error(account, exc)
-                            # Record remaining errors so total equals transient_retries,
-                            # meeting the load balancer backoff threshold (error_count >= 3).
-                            await proxy._load_balancer.record_errors(account, transient_retries - 1)
+                            if api_key is not None and api_key_reservation is not None:
+                                deferred_http_500_health.append((account, exc, transient_retries - 1))
+                            else:
+                                await proxy._handle_proxy_error(account, exc)
+                                # Record remaining errors so total equals transient_retries,
+                                # meeting the load balancer backoff threshold (error_count >= 3).
+                                await proxy._load_balancer.record_errors(account, transient_retries - 1)
                             last_exc = exc
                             excluded_account_ids.add(account.id)
                             transient_exhausted = True
@@ -1516,7 +1525,7 @@ class _CompactMixin:
                             last_exc = exc
                             excluded_account_ids.add(account.id)
                             if api_key is not None and api_key_reservation is not None:
-                                deferred_compact_health.append(
+                                deferred_stream_health.append(
                                     (
                                         account,
                                         _upstream_error_from_openai(error),
@@ -1574,7 +1583,7 @@ class _CompactMixin:
             route_fail_closed_reason = exc.reason
             log_error_code = "upstream_proxy_unavailable"
             log_error_message = exc.reason
-            await proxy._settle_compact_api_key_usage(
+            await settle_compact_usage(
                 api_key=api_key,
                 api_key_reservation=api_key_reservation,
                 response=None,

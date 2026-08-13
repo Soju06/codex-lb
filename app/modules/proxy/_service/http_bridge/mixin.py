@@ -523,7 +523,7 @@ class _HTTPBridgeMixin(
                 durable_lookup is not None
                 and durable_lookup.owner_instance_id == settings.http_responses_session_bridge_instance_id
             )
-            force_durable_takeover = force_durable_takeover_after_detach or unrepresented_current_owner
+            force_durable_takeover = force_durable_takeover_after_detach
             missing_turn_state_alias = False
             sessions_to_close_before_create: list[_HTTPBridgeSession] = []
             session_to_return_after_close: _HTTPBridgeSession | None = None
@@ -1544,7 +1544,7 @@ class _HTTPBridgeMixin(
                         durable_lookup,
                         force=force_durable_takeover,
                     ),
-                    force_owner_epoch_advance=force_durable_takeover,
+                    force_owner_epoch_advance=force_durable_takeover or unrepresented_current_owner,
                     # restart_takeover means recovering a row whose previous
                     # owner is genuinely gone. Every claim now advances the
                     # epoch, so epoch > 1 alone would also count ordinary

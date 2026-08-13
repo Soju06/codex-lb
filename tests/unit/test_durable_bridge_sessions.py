@@ -1659,6 +1659,60 @@ async def test_durable_bridge_forced_generation_advance_fences_same_account_stal
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_forced_local_advance_does_not_take_over_new_remote_owner(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    local = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-local-replacement-race",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="process-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+    remote = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-local-replacement-race",
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_process_epoch="process-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+
+    stale_local_replacement = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-local-replacement-race",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="process-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=False,
+        force_owner_epoch_advance=True,
+    )
+
+    assert remote.owner_epoch == local.owner_epoch + 1
+    assert stale_local_replacement.owner_instance_id == "instance-b"
+    assert stale_local_replacement.owner_epoch == remote.owner_epoch
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_clear_response_anchor_nulls_anchor_fields_but_keeps_turn_state(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

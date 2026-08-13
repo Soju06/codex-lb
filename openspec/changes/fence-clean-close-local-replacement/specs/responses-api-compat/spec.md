@@ -34,6 +34,9 @@ existing owner-forwarding or mismatch behavior.
 
 - **GIVEN** a durable bridge row has an unexpired lease owned by another live
   instance
-- **WHEN** this instance cannot reuse a local session for that key
-- **THEN** it does not advance or take over the remote owner's epoch without
-  the existing takeover authorization
+- **AND** this instance previously observed its own detached generation before
+  the remote owner claimed the row
+- **WHEN** this instance attempts the local replacement claim
+- **THEN** it revalidates the owner under the durable row lock
+- **AND** it does not advance or take over the remote owner's epoch without the
+  existing takeover authorization

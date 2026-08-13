@@ -55,6 +55,7 @@ describe("firewall flow integration", () => {
 
     // Scope queries to the firewall section
     const firewallSection = firewallHeading.closest("section")!;
+    expect(firewallSection).toHaveClass("scroll-mt-16");
     const fw = within(firewallSection);
 
     await user.type(fw.getByPlaceholderText("127.0.0.1 or 2001:db8::1"), "127.0.0.1");

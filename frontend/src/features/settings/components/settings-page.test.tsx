@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -175,10 +176,15 @@ describe("SettingsPage", () => {
   });
 
   function renderSettings(initialEntry = "/settings") {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
     return render(
-      <MemoryRouter initialEntries={[initialEntry]}>
-        <SettingsPage />
-      </MemoryRouter>,
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
     );
   }
 

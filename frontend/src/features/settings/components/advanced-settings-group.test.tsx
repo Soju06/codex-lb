@@ -1,4 +1,5 @@
-import { render } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, render, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
@@ -18,22 +19,18 @@ describe("shouldExpandAdvancedSettings", () => {
 });
 
 describe("AdvancedSettingsGroup", () => {
-  it("repeats deeplink scrolling when async content changes the layout", () => {
-    let resizeCallback: ResizeObserverCallback | undefined;
-    const disconnect = vi.fn();
-    const observe = vi.fn();
-    const resizeObserver = vi
-      .spyOn(globalThis, "ResizeObserver")
-      .mockImplementation(
-        class {
-          constructor(callback: ResizeObserverCallback) {
-            resizeCallback = callback;
-          }
-          observe = observe;
-          unobserve = vi.fn();
-          disconnect = disconnect;
-        },
-      );
+  it("scrolls once after the initial async layout settles", async () => {
+    let resolveLayoutQuery: ((value: string) => void) | undefined;
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const layoutQuery = queryClient.fetchQuery({
+      queryKey: ["advanced-settings-layout"],
+      queryFn: () =>
+        new Promise<string>((resolve) => {
+          resolveLayoutQuery = resolve;
+        }),
+    });
     const scrollIntoView = vi.fn();
     const elementLookup = vi
       .spyOn(document, "getElementById")
@@ -46,22 +43,31 @@ describe("AdvancedSettingsGroup", () => {
       });
 
     const view = render(
-      <AdvancedSettingsGroup defaultOpen scrollToId="firewall">
-        <div id="firewall">Firewall</div>
-      </AdvancedSettingsGroup>,
+      <QueryClientProvider client={queryClient}>
+        <AdvancedSettingsGroup defaultOpen scrollToId="firewall">
+          <div id="firewall">Firewall</div>
+        </AdvancedSettingsGroup>
+      </QueryClientProvider>,
     );
 
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveLayoutQuery?.("ready");
+      await layoutQuery;
+    });
+
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+
+    await queryClient.fetchQuery({
+      queryKey: ["later-refresh"],
+      queryFn: async () => "ready",
+    });
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
-    expect(observe).toHaveBeenCalledTimes(1);
 
-    resizeCallback?.([], {} as ResizeObserver);
-
-    expect(scrollIntoView).toHaveBeenCalledTimes(2);
     view.unmount();
-    expect(disconnect).toHaveBeenCalledTimes(1);
 
     animationFrame.mockRestore();
     elementLookup.mockRestore();
-    resizeObserver.mockRestore();
   });
 });

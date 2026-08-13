@@ -1,4 +1,5 @@
 import { ChevronRight } from "lucide-react";
+import { useIsFetching, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -24,34 +25,33 @@ export function AdvancedSettingsGroup({
 }: AdvancedSettingsGroupProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
+  const fetchingQueries = useIsFetching();
+  const scrolledToIdRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (!open || !scrollToId) {
+      scrolledToIdRef.current = undefined;
       return;
     }
-    let frame: number | undefined;
-    const scrollToTarget = () => {
-      if (frame !== undefined) {
-        window.cancelAnimationFrame(frame);
-      }
-      frame = window.requestAnimationFrame(() => {
-        document.getElementById(scrollToId)?.scrollIntoView({ block: "start" });
-      });
-    };
-    scrollToTarget();
-
-    const observer = new ResizeObserver(scrollToTarget);
-    if (contentRef.current) {
-      observer.observe(contentRef.current);
+    if (scrolledToIdRef.current === scrollToId) {
+      return;
     }
-    return () => {
-      if (frame !== undefined) {
-        window.cancelAnimationFrame(frame);
+    const frame = window.requestAnimationFrame(() => {
+      if (queryClient.isFetching() > 0) {
+        return;
       }
-      observer.disconnect();
+      const target = document.getElementById(scrollToId);
+      if (!target) {
+        return;
+      }
+      target.scrollIntoView({ block: "start" });
+      scrolledToIdRef.current = scrollToId;
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
     };
-  }, [open, scrollToId]);
+  }, [fetchingQueries, open, queryClient, scrollToId]);
 
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="rounded-xl border bg-card">
@@ -68,7 +68,7 @@ export function AdvancedSettingsGroup({
           <span className="mt-0.5 block text-xs text-muted-foreground">{t("settings.advanced.description")}</span>
         </span>
       </CollapsibleTrigger>
-      <CollapsibleContent ref={contentRef} className="space-y-4 border-t p-4">
+      <CollapsibleContent className="space-y-4 border-t p-4">
         {children}
       </CollapsibleContent>
     </Collapsible>

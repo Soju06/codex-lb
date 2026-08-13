@@ -2,7 +2,7 @@
 
 ### Requirement: Compact failover settles before account-health writes
 
-When `compact_responses` holds an API-key usage reservation, it MUST NOT write account health for a compact upstream failure until that reservation has been settled or released. A `failover_next` decision MUST keep the same reservation for the next account and MUST defer the failed account's health write until the next settlement. Timeout and exhaustion terminals MUST keep settle-then-health order. Compact MUST NOT acquire a second reservation mid-request.
+When `compact_responses` holds an API-key usage reservation, it MUST NOT write account health for a compact upstream failure until that reservation has been settled or released. A `failover_next` decision MUST keep the same reservation for the next account and MUST defer the failed account's health write until the next settlement. Timeout and exhaustion terminals MUST keep settle-then-health order. Compact MUST NOT acquire a second reservation mid-request. If usage finalization fails but the fail-safe reservation release succeeds, compact MUST flush deferred health before surfacing `usage_settlement_failed`. If the reservation remains held because that fail-safe release also fails, deferred health MUST stay unapplied.
 
 #### Scenario: Compact failover_next defers health until settle
 
@@ -52,3 +52,19 @@ When `compact_responses` holds an API-key usage reservation, it MUST NOT write a
 - **AND** the post-401 forced refresh raises a permanent `RefreshError`
 - **WHEN** the compact request records the permanent account failure
 - **THEN** the reservation is settled before `mark_permanent_failure`
+
+#### Scenario: Compact fallback release still flushes deferred health
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **AND** a later account completes but usage finalization fails
+- **AND** the fail-safe reservation release succeeds
+- **WHEN** settlement surfaces `usage_settlement_failed`
+- **THEN** the deferred health write still runs
+- **AND** it runs before the `usage_settlement_failed` error is raised
+
+#### Scenario: Compact unsettled reservation keeps deferred health unapplied
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **AND** both usage finalization and fail-safe release fail
+- **WHEN** settlement surfaces `usage_settlement_failed`
+- **THEN** the deferred health write does not run

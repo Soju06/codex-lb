@@ -695,19 +695,7 @@ class _CompactMixin:
         deferred_http_500_health: list[tuple[Account, ProxyResponseError, int]] = []
         deferred_proxy_health: list[tuple[Account, ProxyResponseError]] = []
 
-        async def settle_compact_usage(
-            *,
-            api_key: ApiKeyData | None,
-            api_key_reservation: ApiKeyUsageReservationData | None,
-            response: CompactResponsePayload | None,
-            request_service_tier: str | None,
-        ) -> None:
-            await proxy._settle_compact_api_key_usage(
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                response=response,
-                request_service_tier=request_service_tier,
-            )
+        async def flush_deferred_health() -> None:
             stream_pending = list(deferred_stream_health)
             deferred_stream_health.clear()
             http_500_pending = list(deferred_http_500_health)
@@ -726,6 +714,29 @@ class _CompactMixin:
                 await proxy._load_balancer.record_errors(failed_account, extra_error_count)
             for failed_account, failed_exc in proxy_pending:
                 await proxy._handle_proxy_error(failed_account, failed_exc)
+
+        async def settle_compact_usage(
+            *,
+            api_key: ApiKeyData | None,
+            api_key_reservation: ApiKeyUsageReservationData | None,
+            response: CompactResponsePayload | None,
+            request_service_tier: str | None,
+        ) -> None:
+            settlement_error: ProxyResponseError | None = None
+            try:
+                await proxy._settle_compact_api_key_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=response,
+                    request_service_tier=request_service_tier,
+                )
+            except ProxyResponseError as exc:
+                if exc.failure_phase != "usage_settlement" or not exc.reservation_released:
+                    raise
+                settlement_error = exc
+            await flush_deferred_health()
+            if settlement_error is not None:
+                raise settlement_error
 
         async def record_or_defer_proxy_health(
             failed_account: Account,

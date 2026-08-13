@@ -3,6 +3,8 @@
 - [x] 1.1 Classify compact failover without writing health, and defer the
   health write when a reservation is still held.
 - [x] 1.2 Flush deferred health only after `_settle_compact_api_key_usage`.
+- [x] 1.3 Flush deferred health when finalize fails but fail-safe release
+  succeeds, then surface `usage_settlement_failed`.
 
 ## 2. Regression coverage
 
@@ -17,6 +19,9 @@
 - [x] 2.5 Assert a second 401 after forced refresh defers `_handle_proxy_error`.
 - [x] 2.6 Assert permanent post-401 refresh settles before
   `mark_permanent_failure`.
+- [x] 2.7 Assert fallback-release success still flushes deferred health
+  before `usage_settlement_failed`.
+- [x] 2.8 Assert fallback-release failure keeps deferred health unapplied.
 
 ## 3. Validation
 

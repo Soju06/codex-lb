@@ -478,6 +478,7 @@ class ProxyResponseError(Exception):
         upstream_error_code: str | None = None,
         failed_session: aiohttp.ClientSession | None = None,
         retry_after_seconds: int | None = None,
+        reservation_released: bool = False,
     ) -> None:
         super().__init__(f"Proxy response error ({status_code})")
         self.status_code = status_code
@@ -490,6 +491,7 @@ class ProxyResponseError(Exception):
         self.upstream_error_code = upstream_error_code
         self.failed_session = failed_session
         self.retry_after_seconds = retry_after_seconds
+        self.reservation_released = reservation_released
 
 
 def is_confirmed_pre_dispatch_transport_error(exc: ProxyResponseError) -> bool:

@@ -34762,6 +34762,7 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
     assert _proxy_error_code(exc) == "usage_settlement_failed"
     assert exc.failure_phase == "usage_settlement"
     assert exc.failure_detail == "compact_api_key_usage_persistence_failed"
+    assert exc.reservation_released is False
     assert exc.failure_exception_type == "RuntimeError"
     assert isinstance(exc.__cause__, RuntimeError)
     assert str(exc.__cause__) == "compact finalize failed"
@@ -34776,6 +34777,53 @@ async def test_compact_usage_settlement_surfaces_when_fail_safe_release_fails(mo
     )
     primary_service.release_usage_reservation.assert_not_awaited()
     fail_safe_service.finalize_usage_reservation.assert_not_awaited()
+    fail_safe_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
+
+
+@pytest.mark.asyncio
+async def test_compact_usage_settlement_marks_released_when_fail_safe_succeeds(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_fail_safe_release_succeeds")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_fail_safe_release_succeeds",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    response = CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "model": "gpt-5.1",
+            "output": [],
+            "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        }
+    )
+    primary_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(side_effect=RuntimeError("compact finalize failed")),
+        release_usage_reservation=AsyncMock(),
+    )
+    fail_safe_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(),
+        release_usage_reservation=AsyncMock(),
+    )
+    service_factory = MagicMock(side_effect=[primary_service, fail_safe_service])
+    monkeypatch.setattr(proxy_service, "ApiKeysService", service_factory)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._settle_compact_api_key_usage(
+            api_key=api_key,
+            api_key_reservation=reservation,
+            response=response,
+            request_service_tier=None,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "usage_settlement_failed"
+    assert exc.failure_phase == "usage_settlement"
+    assert exc.reservation_released is True
+    assert isinstance(exc.__cause__, RuntimeError)
+    primary_service.finalize_usage_reservation.assert_awaited_once()
+    primary_service.release_usage_reservation.assert_not_awaited()
     fail_safe_service.release_usage_reservation.assert_awaited_once_with(reservation.reservation_id)
 
 
@@ -35952,6 +36000,171 @@ async def test_compact_permanent_refresh_settles_before_mark_permanent(monkeypat
 
     assert exc_info.value.status_code == 401
     assert call_order == ["settle_compact_api_key_usage", "mark_permanent_failure"]
+
+
+@pytest.mark.asyncio
+async def test_compact_fallback_release_flushes_deferred_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_fallback_flush_a")
+    account_b = _make_account("acc_compact_fallback_flush_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_fallback_flush")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_fallback_flush",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def finalize_usage_reservation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("finalize_usage_reservation")
+        raise RuntimeError("compact finalize failed")
+
+    async def release_usage_reservation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("release_usage_reservation")
+
+    primary_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(side_effect=finalize_usage_reservation),
+        release_usage_reservation=AsyncMock(),
+    )
+    fail_safe_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(),
+        release_usage_reservation=AsyncMock(side_effect=release_usage_reservation),
+    )
+    monkeypatch.setattr(proxy_service, "ApiKeysService", MagicMock(side_effect=[primary_service, fail_safe_service]))
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": "gpt-5.1",
+                "output": [],
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            }
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-fallback-flush"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert _proxy_error_code(exc) == "usage_settlement_failed"
+    assert exc.reservation_released is True
+    assert call_order == [
+        "finalize_usage_reservation",
+        "release_usage_reservation",
+        "handle_stream_error",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compact_unreleased_settlement_keeps_deferred_health(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account_a = _make_account("acc_compact_unreleased_health_a")
+    account_b = _make_account("acc_compact_unreleased_health_b")
+    seen_excluded_account_ids: list[set[str]] = []
+    call_order: list[str] = []
+    api_key = _make_api_key_data("key_compact_unreleased_health")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_unreleased_health",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def handle_stream_error(*args: object, **kwargs: object):
+        del args, kwargs
+        call_order.append("handle_stream_error")
+        return {"failure_class": "quota"}
+
+    async def finalize_usage_reservation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("finalize_usage_reservation")
+        raise RuntimeError("compact finalize failed")
+
+    async def release_usage_reservation(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        call_order.append("release_usage_reservation")
+        raise OSError("compact fail-safe release failed")
+
+    primary_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(side_effect=finalize_usage_reservation),
+        release_usage_reservation=AsyncMock(),
+    )
+    fail_safe_service = SimpleNamespace(
+        finalize_usage_reservation=AsyncMock(),
+        release_usage_reservation=AsyncMock(side_effect=release_usage_reservation),
+    )
+    monkeypatch.setattr(proxy_service, "ApiKeysService", MagicMock(side_effect=[primary_service, fail_safe_service]))
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        if account_id == account_a.chatgpt_account_id:
+            raise proxy_module.ProxyResponseError(
+                429,
+                openai_error("quota_exceeded", "quota exceeded"),
+                failure_phase="status",
+            )
+        return CompactResponsePayload.model_validate(
+            {
+                "object": "response.compaction",
+                "model": "gpt-5.1",
+                "output": [],
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            }
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=[account_a, account_b]))
+    handle_stream_error_mock = AsyncMock(side_effect=handle_stream_error)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error_mock)
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+    _install_two_account_selection(monkeypatch, service, account_a, account_b, seen_excluded_account_ids)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {"session_id": "sid-compact-unreleased-health"},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert _proxy_error_code(exc) == "usage_settlement_failed"
+    assert exc.reservation_released is False
+    assert call_order == ["finalize_usage_reservation", "release_usage_reservation"]
+    handle_stream_error_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

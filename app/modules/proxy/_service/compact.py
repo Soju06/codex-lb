@@ -694,6 +694,7 @@ class _CompactMixin:
         deferred_stream_health: list[tuple[Account, Any, str, int | None]] = []
         deferred_http_500_health: list[tuple[Account, ProxyResponseError, int]] = []
         deferred_proxy_health: list[tuple[Account, ProxyResponseError]] = []
+        settlement_attempted = False
 
         async def flush_deferred_health() -> None:
             stream_pending = list(deferred_stream_health)
@@ -722,6 +723,8 @@ class _CompactMixin:
             response: CompactResponsePayload | None,
             request_service_tier: str | None,
         ) -> None:
+            nonlocal settlement_attempted
+            settlement_attempted = True
             settlement_error: ProxyResponseError | None = None
             try:
                 await proxy._settle_compact_api_key_usage(
@@ -734,7 +737,14 @@ class _CompactMixin:
                 if exc.failure_phase != "usage_settlement" or not exc.reservation_released:
                     raise
                 settlement_error = exc
-            await flush_deferred_health()
+            try:
+                await flush_deferred_health()
+            except Exception:
+                logger.warning(
+                    "Failed to flush deferred compact account health request_id=%s",
+                    request_id,
+                    exc_info=True,
+                )
             if settlement_error is not None:
                 raise settlement_error
 
@@ -1624,6 +1634,22 @@ class _CompactMixin:
                 502,
                 openai_error("upstream_proxy_unavailable", f"Upstream proxy route unavailable: {exc.reason}"),
             ) from exc
+        except BaseException:
+            if not settlement_attempted:
+                try:
+                    await settle_compact_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=request_service_tier,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to settle compact reservation after unexpected exit request_id=%s",
+                        request_id,
+                        exc_info=True,
+                    )
+            raise
         finally:
             usage = response.usage if response else None
             reasoning_effort = payload.reasoning.effort if payload.reasoning else None

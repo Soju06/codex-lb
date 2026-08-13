@@ -12,3 +12,9 @@ a finalize failure even when its fail-safe release succeeds. That exception
 must carry whether the reservation is actually released so deferred health
 can flush before the 502 is surfaced. If the fail-safe release also fails,
 the reservation is still held and deferred health stays queued.
+
+Once usage is finalized, a later deferred health-write failure is a local
+persistence problem. It must not convert a billed compact success into a 500
+that clients retry. Cancellation and other non-proxy exits skip the dedicated
+settle handlers, so they need an explicit settle-then-flush before the
+original exception continues.

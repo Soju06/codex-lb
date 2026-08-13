@@ -5,6 +5,10 @@
 - [x] 1.2 Flush deferred health only after `_settle_compact_api_key_usage`.
 - [x] 1.3 Flush deferred health when finalize fails but fail-safe release
   succeeds, then surface `usage_settlement_failed`.
+- [x] 1.4 Keep a finalized compact success when deferred health persistence
+  fails.
+- [x] 1.5 Settle and flush deferred health on cancellation and other
+  non-proxy exits.
 
 ## 2. Regression coverage
 
@@ -22,6 +26,10 @@
 - [x] 2.7 Assert fallback-release success still flushes deferred health
   before `usage_settlement_failed`.
 - [x] 2.8 Assert fallback-release failure keeps deferred health unapplied.
+- [x] 2.9 Assert a deferred health-persistence failure does not replace a
+  finalized compact success.
+- [x] 2.10 Assert cancellation or another non-proxy exit still settles and
+  flushes deferred health.
 
 ## 3. Validation
 

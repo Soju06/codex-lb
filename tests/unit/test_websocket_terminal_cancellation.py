@@ -241,6 +241,89 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
 
 
 @pytest.mark.asyncio
+async def test_normal_websocket_scope_cleanup_uses_separate_scope_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=0,
+        prohibit_fast_mode=False,
+    )
+
+    class _SettingsCache:
+        async def get(self) -> SimpleNamespace:
+            return settings
+
+    receive_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    class _BlockingDownstreamWebSocket:
+        async def receive(self) -> dict[str, object]:
+            receive_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    async def block_cleanup(*_args: object, **_kwargs: object) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    async def release_cleanup_after_scope_budget_margin() -> None:
+        await asyncio.sleep(0.03)
+        release_cleanup.set()
+
+    monkeypatch.setattr(proxy_service, "_TASK_CANCEL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(websocket_mixin, "_WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS", 0.08)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(proxy_downstream_websocket_idle_timeout_seconds=30.0),
+    )
+    monkeypatch.setattr(proxy_service, "_routing_strategy", lambda _settings: "usage_weighted")
+    monkeypatch.setattr(service, "_websocket_continuity_state_for_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", block_cleanup)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+    caplog.set_level(logging.WARNING)
+
+    scope_task = asyncio.create_task(
+        service.proxy_responses_websocket(
+            cast(WebSocket, _BlockingDownstreamWebSocket()),
+            {},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            api_key=None,
+        )
+    )
+    await asyncio.wait_for(receive_started.wait(), timeout=1)
+
+    started_at = asyncio.get_running_loop().time()
+    scope_task.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    release_task = asyncio.create_task(release_cleanup_after_scope_budget_margin())
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(scope_task, timeout=0.5)
+    elapsed = asyncio.get_running_loop().time() - started_at
+    await release_task
+    await asyncio.sleep(0)
+
+    assert elapsed >= 0.02
+    assert "Websocket scope cleanup exceeded its remaining drain budget" not in caplog.messages
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failing_child",
     ["retired_create_lease_release", "unsent_request_finalization"],

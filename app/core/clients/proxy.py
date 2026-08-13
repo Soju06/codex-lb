@@ -3665,7 +3665,7 @@ class _CompactCommandTransport:
                     if isinstance(response, dict):
                         completed_response = dict(response)
                     break
-                elif event_type in {"response.failed", "error"}:
+                elif event_type in {"response.failed", "response.incomplete", "error"}:
                     raise _proxy_response_error_from_stream_event(event_payload)
 
         if completed_response is None:
@@ -4170,6 +4170,24 @@ def _proxy_response_error_from_stream_event(event_payload: Mapping[str, JsonValu
             {"error": detail},
             failure_phase="stream",
             failure_detail=detail["message"],
+        )
+    if event_payload.get("type") == "response.incomplete":
+        message = "Upstream Responses compaction stream ended incomplete."
+        if isinstance(response_value, dict):
+            incomplete_details = response_value.get("incomplete_details")
+            if isinstance(incomplete_details, dict):
+                reason = incomplete_details.get("reason")
+                if isinstance(reason, str) and reason:
+                    message = f"{message} reason={reason}"
+        return ProxyResponseError(
+            502,
+            openai_error(
+                "upstream_error",
+                message,
+                error_type="server_error",
+            ),
+            failure_phase="stream",
+            failure_detail=message,
         )
     return ProxyResponseError(
         502,

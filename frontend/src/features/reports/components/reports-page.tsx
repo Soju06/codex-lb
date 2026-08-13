@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { listAccounts } from "@/features/accounts/api";
+import { listApiKeys } from "@/features/api-keys/api";
 import { useReports } from "@/features/reports/hooks/use-reports";
 import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -70,6 +71,7 @@ const createDefaultFilters = (): ReportsFiltersState => ({
   startDate: daysAgoLocalISO(6),
   endDate: localDateISO(),
   accountId: [],
+  apiKeyId: [],
   model: "",
   useragent: "",
 });
@@ -129,6 +131,14 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     queryKey: ["accounts", "reports-filter"],
     queryFn: listAccounts,
   });
+  const {
+    data: apiKeysData,
+    error: apiKeysError,
+    refetch: refetchApiKeys,
+  } = useQuery({
+    queryKey: ["api-keys", "reports-filter"],
+    queryFn: listApiKeys,
+  });
 
   const accountOptions = useMemo(
     () =>
@@ -142,6 +152,15 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         isEmail: !account.alias,
       })),
     [accountsData],
+  );
+
+  const apiKeyOptions = useMemo(
+    () =>
+      (apiKeysData ?? []).map((key) => ({
+        value: key.id,
+        label: key.keyPrefix ? `${key.name} · ${key.keyPrefix}` : key.name,
+      })),
+    [apiKeysData],
   );
 
   const modelOptions = useMemo(
@@ -165,14 +184,15 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   const mainReportsError = getErrorMessageOrNull(reportsQuery.error);
   const sharedOptionsError = getErrorMessageOrNull(filterCatalogQuery.error);
   const accountOptionsError = getErrorMessageOrNull(accountsError);
+  const apiKeyOptionsError = getErrorMessageOrNull(apiKeysError);
 
   const hasAnyError = Boolean(
-    mainReportsError || sharedOptionsError || accountOptionsError,
+    mainReportsError || sharedOptionsError || accountOptionsError || apiKeyOptionsError,
   );
 
   const handleRetry = async () => {
     if (!isReportDateRangeValid(filters.startDate, filters.endDate)) {
-      await refetchAccounts();
+      await Promise.allSettled([refetchAccounts(), refetchApiKeys()]);
       return;
     }
 
@@ -180,6 +200,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
       reportsQuery.refetch(),
       filterCatalogQuery.refetch(),
       refetchAccounts(),
+      refetchApiKeys(),
     ]);
   };
 
@@ -217,6 +238,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         filters={filters}
         selectedPresetDays={selectedPresetDays}
         accountOptions={accountOptions}
+        apiKeyOptions={apiKeyOptions}
         modelOptions={modelOptions}
         useragentOptions={useragentOptions}
         visibleChartIds={visibleChartIds}

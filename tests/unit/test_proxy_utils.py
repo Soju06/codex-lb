@@ -4461,6 +4461,53 @@ async def test_compact_fails_closed_when_turn_state_and_file_owners_conflict(
 
 
 @pytest.mark.asyncio
+async def test_compact_owner_lookup_error_survives_settlement_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_owner_cleanup")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_owner_cleanup",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    owner_error = proxy_module.ProxyResponseError(
+        502,
+        openai_error("file_owner_unavailable", "owner lookup failed"),
+    )
+
+    async def fail_owner(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise owner_error
+
+    async def fail_settle(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("usage_settlement_failed", "Compact API key usage could not be settled"),
+            failure_phase="usage_settlement",
+        )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_resolve_forwarded_file_account_for_responses", fail_owner)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", fail_settle)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(
+            payload,
+            {},
+            api_key=api_key,
+            api_key_reservation=reservation,
+        )
+
+    assert exc_info.value is owner_error
+    assert _proxy_error_code(exc_info.value) == "file_owner_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_compact_real_turn_state_still_blocks_file_pin_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -34857,6 +34904,55 @@ async def test_compact_usage_settlement_marks_released_when_fail_safe_succeeds(m
 
 
 @pytest.mark.asyncio
+async def test_compact_usage_settlement_signals_cleanup_ready_when_both_writes_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    api_key = _make_api_key_data("key_compact_double_settlement_handoff")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_compact_double_settlement_handoff",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    response = CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "model": "gpt-5.1",
+            "output": [],
+            "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+        }
+    )
+    service_factory = MagicMock(
+        side_effect=[
+            SimpleNamespace(
+                finalize_usage_reservation=AsyncMock(side_effect=RuntimeError("compact finalize failed")),
+                release_usage_reservation=AsyncMock(),
+            ),
+            SimpleNamespace(
+                finalize_usage_reservation=AsyncMock(),
+                release_usage_reservation=AsyncMock(side_effect=OSError("compact fail-safe release failed")),
+            ),
+        ]
+    )
+    monkeypatch.setattr(proxy_service, "ApiKeysService", service_factory)
+    cleanup_ready = asyncio.Event()
+    token = proxy_support._bind_propagated_responses_service_cleanup_ready(cleanup_ready)
+    try:
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            await service._settle_compact_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=reservation,
+                response=response,
+                request_service_tier=None,
+            )
+    finally:
+        proxy_support._reset_propagated_responses_service_cleanup_ready(token)
+
+    assert _proxy_error_code(exc_info.value) == "usage_settlement_failed"
+    assert cleanup_ready.is_set()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure_path",
     ["body_read", "request_client_error", "request_os_error"],
@@ -38517,6 +38613,66 @@ async def test_startup_cleanup_guard_runs_after_initial_heartbeat_disconnect(
     await asyncio.sleep(0)
 
     assert startup_task.cancelled()
+    assert released == ["responses startup handoff"]
+
+
+@pytest.mark.asyncio
+async def test_startup_cleanup_guard_closes_stream_when_probe_already_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[str] = []
+    released: list[str] = []
+
+    class _CompletedProbeStream:
+        def __aiter__(self) -> "_CompletedProbeStream":
+            return self
+
+        async def __anext__(self) -> str:
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            closed.append("service")
+
+    async def record_release(
+        reservation: object,
+        *,
+        action: str,
+        scheduler: object,
+        request_id: str,
+    ) -> None:
+        del reservation, scheduler, request_id
+        released.append(action)
+
+    monkeypatch.setattr(proxy_api, "_release_reservation_best_effort", record_release)
+    reservation_cleanup = proxy_api._ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=None,
+        scheduler=None,
+        request_id="completed-probe-guard",
+    )
+    service_stream = _CompletedProbeStream()
+    stream = proxy_api._prepend_initial_sse_heartbeat(
+        service_stream,
+        ": keepalive\n\n",
+        request_id="completed-probe-guard",
+    )
+    stream = proxy_api._guard_responses_startup_handoff(
+        stream,
+        startup_task=None,
+        streams_to_close=(service_stream,),
+        reservation_cleanup=reservation_cleanup,
+        responses_service_cleanup_ready_event=asyncio.Event(),
+        responses_owner_forward_dispatched_event=asyncio.Event(),
+        responses_owner_forward_rejected_event=asyncio.Event(),
+    )
+
+    assert await anext(stream) == ": keepalive\n\n"
+    close = getattr(stream, "aclose", None)
+    assert callable(close)
+    await close()
+
+    assert closed == ["service"]
     assert released == ["responses startup handoff"]
 
 

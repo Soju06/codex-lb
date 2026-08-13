@@ -360,8 +360,7 @@ class _ApiKeyUsageMixin:
                     reservation_released=reservation_released,
                 ) from exc
             finally:
-                if settlement_confirmed:
-                    _signal_propagated_responses_service_cleanup_ready()
+                _signal_propagated_responses_service_cleanup_ready()
 
     async def _settle_stream_api_key_usage(
         self,

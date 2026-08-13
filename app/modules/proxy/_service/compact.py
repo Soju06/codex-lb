@@ -648,21 +648,33 @@ class _CompactMixin:
             )
         except ProxyResponseError:
             if not forwarded_request and api_key is not None and api_key_reservation is not None:
-                await settle_compact_usage(
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    response=None,
-                    request_service_tier=_service_tier_from_compact_payload(payload),
-                )
+                try:
+                    await settle_compact_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=_service_tier_from_compact_payload(payload),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to settle compact API key reservation after owner lookup failure",
+                        exc_info=True,
+                    )
             raise
         except asyncio.CancelledError:
             if not forwarded_request and api_key is not None and api_key_reservation is not None:
-                await settle_compact_usage(
-                    api_key=api_key,
-                    api_key_reservation=api_key_reservation,
-                    response=None,
-                    request_service_tier=_service_tier_from_compact_payload(payload),
-                )
+                try:
+                    await settle_compact_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=_service_tier_from_compact_payload(payload),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to settle compact API key reservation after cancelled owner lookup",
+                        exc_info=True,
+                    )
             raise
         settings = await _service_get_settings_cache().get()
         concurrency_caps = effective_account_concurrency_caps(settings)

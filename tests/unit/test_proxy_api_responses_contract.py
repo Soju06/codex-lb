@@ -165,6 +165,48 @@ async def test_rate_limit_header_failure_survives_release_failure(
     assert "Failed to release API key reservation after rate-limit header failure" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_rate_limit_header_failure_uses_reservation_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = object()
+    header_failure = RuntimeError("rate-limit header failure")
+    released: list[str] = []
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise header_failure
+
+    async def record_release(
+        value: object,
+        *,
+        action: str,
+        scheduler: object,
+        request_id: str,
+    ) -> None:
+        del value, scheduler, request_id
+        released.append(action)
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation_best_effort", record_release)
+    cleanup = proxy_api_module._ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=cast(Any, reservation),
+        scheduler=None,
+        request_id="req_header_cleanup",
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation),
+            reservation_cleanup=cleanup,
+        )
+
+    assert caught.value is header_failure
+    assert released == ["rate limit headers"]
+
+
 def test_strip_blank_reasoning_comment_preserves_unmatched_whitespace_and_inline_comments() -> None:
     assert proxy_api_module._strip_blank_html_comment_lines("Need more steps\n") == "Need more steps\n"
     assert proxy_api_module._strip_blank_html_comment_lines("Hard break  \n") == "Hard break  \n"

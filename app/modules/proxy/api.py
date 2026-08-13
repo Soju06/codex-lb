@@ -2065,11 +2065,15 @@ async def _rate_limit_headers_with_reservation_cleanup(
     context: ProxyContext,
     api_key: ApiKeyData | None,
     owned_reservation: ApiKeyUsageReservationData | None,
+    *,
+    reservation_cleanup: _ResponsesReservationCleanup | None = None,
 ) -> dict[str, str]:
     try:
         return await _rate_limit_headers_for_request(context, api_key)
     except BaseException:
-        if owned_reservation is not None:
+        if reservation_cleanup is not None:
+            await reservation_cleanup.release(action="rate limit headers")
+        elif owned_reservation is not None:
             try:
                 await _release_reservation_deferring_cancellation(owned_reservation)
             except (Exception, asyncio.CancelledError):
@@ -5154,6 +5158,7 @@ async def _stream_responses(
             context,
             api_key,
             reservation if owns_reservation else None,
+            reservation_cleanup=reservation_cleanup if owns_reservation else None,
         )
         if include_rate_limit_headers
         else {}
@@ -5493,19 +5498,17 @@ async def _stream_responses(
         keepalive_frame=keepalive_frame,
         on_keepalive=lambda: _record_stream_keepalive("responses"),
     )
-    if startup_handoff_tasks:
-        # Outermost so a client close after the initial heartbeat still runs
-        # the reservation-cleanup finally. Heartbeat/keepalive wrappers do not
-        # close their child iterator on partial consumption.
-        stream = _guard_responses_startup_handoff(
-            stream,
-            startup_task=startup_handoff_tasks[0],
-            streams_to_close=(service_stream,),
-            reservation_cleanup=reservation_cleanup,
-            responses_service_cleanup_ready_event=responses_service_cleanup_ready_event,
-            responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
-            responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
-        )
+    # Outermost so a client close after the initial heartbeat still closes
+    # the service stream, including when the startup probe already completed.
+    stream = _guard_responses_startup_handoff(
+        stream,
+        startup_task=startup_handoff_tasks[0] if startup_handoff_tasks else None,
+        streams_to_close=(service_stream,),
+        reservation_cleanup=reservation_cleanup,
+        responses_service_cleanup_ready_event=responses_service_cleanup_ready_event,
+        responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+        responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
+    )
     return StreamingResponse(
         stream,
         media_type="text/event-stream",
@@ -5563,7 +5566,12 @@ async def _collect_responses(
     responses_owner_forward_dispatched_event = asyncio.Event()
     responses_owner_forward_rejected_event = asyncio.Event()
 
-    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(
+        context,
+        api_key,
+        reservation,
+        reservation_cleanup=reservation_cleanup,
+    )
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
         payload,
@@ -5793,7 +5801,12 @@ async def _compact_responses(
         request_id=ensure_request_id(),
     )
     responses_service_cleanup_ready_event = asyncio.Event()
-    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(
+        context,
+        api_key,
+        reservation,
+        reservation_cleanup=reservation_cleanup,
+    )
     responses_cleanup_ready_token = _bind_propagated_responses_service_cleanup_ready(
         responses_service_cleanup_ready_event
     )
@@ -6789,7 +6802,7 @@ def _record_stream_keepalive(surface: str) -> None:
 async def _guard_responses_startup_handoff(
     stream: AsyncIterator[str],
     *,
-    startup_task: asyncio.Task[str],
+    startup_task: asyncio.Task[str] | None,
     streams_to_close: tuple[AsyncIterator[str], ...],
     reservation_cleanup: _ResponsesReservationCleanup,
     responses_service_cleanup_ready_event: asyncio.Event,
@@ -6801,13 +6814,14 @@ async def _guard_responses_startup_handoff(
             yield line
     finally:
         with anyio.CancelScope(shield=True):
-            release_candidate = False
-            if startup_task.done():
-                release_candidate = startup_task.cancelled() or startup_task.exception() is not None
-            else:
-                release_candidate = True
-                startup_task.cancel()
-                await asyncio.gather(startup_task, return_exceptions=True)
+            release_candidate = startup_task is None
+            if startup_task is not None:
+                if startup_task.done():
+                    release_candidate = startup_task.cancelled() or startup_task.exception() is not None
+                else:
+                    release_candidate = True
+                    startup_task.cancel()
+                    await asyncio.gather(startup_task, return_exceptions=True)
             closed_stream_ids: set[int] = set()
             for stream_index, stream_to_close in enumerate(reversed(streams_to_close)):
                 stream_id = id(stream_to_close)

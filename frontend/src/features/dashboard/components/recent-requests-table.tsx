@@ -204,16 +204,17 @@ export function RecentRequestsTable({
   }, [accounts]);
 
   if (requests.length === 0) {
+    const emptyFromExistingLogs = filtersApplied || total > 0;
     return (
       <EmptyState
         icon={Inbox}
         title={
-          filtersApplied
+          emptyFromExistingLogs
             ? t("dashboard.requests.emptyFilteredTitle")
             : t("dashboard.requests.emptyTitle")
         }
         description={
-          filtersApplied
+          emptyFromExistingLogs
             ? t("dashboard.requests.emptyFilteredDescription")
             : t("dashboard.requests.emptyDescription")
         }

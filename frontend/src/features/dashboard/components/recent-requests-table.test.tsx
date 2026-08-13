@@ -290,6 +290,21 @@ describe("RecentRequestsTable", () => {
     expect(screen.queryByText("No request logs match the current filters.")).not.toBeInTheDocument();
   });
 
+  it("renders filter-empty copy when a later page has no rows but logs exist", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={40}
+        offset={25}
+        accounts={[]}
+        requests={[]}
+      />,
+    );
+    expect(screen.getByText("No matching requests")).toBeInTheDocument();
+    expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
+    expect(screen.queryByText("No requests yet")).not.toBeInTheDocument();
+  });
+
   it("renders filter-empty copy when filters are applied", () => {
     render(
       <RecentRequestsTable

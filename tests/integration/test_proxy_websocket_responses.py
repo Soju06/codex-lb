@@ -7,8 +7,10 @@ import json
 import logging
 import threading
 import time
+import tomllib
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
@@ -43,6 +45,8 @@ from app.modules.proxy.capability_routing import (
 pytestmark = pytest.mark.integration
 
 _REAL_WRITE_REQUEST_LOG = proxy_module.ProxyService._write_request_log
+_CODEX_CLIENT_CONFIG = Path(__file__).resolve().parents[2] / "docs/examples/codex/config.toml"
+_CODEX_DAYBREAK_PROFILE = Path(__file__).resolve().parents[2] / "docs/examples/codex/daybreak-blue.config.toml"
 
 
 @pytest.mark.asyncio
@@ -630,6 +634,142 @@ def _websocket_response_create(text: str) -> dict[str, object]:
         "input": text,
         "stream": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "expected_provider_id", "expected_security_requirement"),
+    [
+        (None, "codex-lb", False),
+        ("daybreak-blue", "codex-lb-daybreak-blue", True),
+    ],
+    ids=["ordinary", "daybreak-blue"],
+)
+def test_codex_provider_profiles_route_before_first_account_attempt(
+    app_instance,
+    monkeypatch,
+    profile_name,
+    expected_provider_id,
+    expected_security_requirement,
+):
+    base_config = tomllib.loads(_CODEX_CLIENT_CONFIG.read_text(encoding="utf-8"))
+    profile_config = (
+        tomllib.loads(_CODEX_DAYBREAK_PROFILE.read_text(encoding="utf-8")) if profile_name is not None else {}
+    )
+    provider_id = profile_config.get("model_provider", base_config["model_provider"])
+    model = profile_config.get("model", base_config["model"])
+    provider = base_config["model_providers"][provider_id]
+    provider_headers = provider.get("http_headers", {})
+    normalized_provider_headers = {name.lower(): value for name, value in provider_headers.items()}
+
+    assert provider_id == expected_provider_id
+    assert model == "gpt-5.6-sol"
+    assert provider["name"] == "openai"
+    assert provider["base_url"].endswith("/backend-api/codex")
+    assert provider["wire_api"] == "responses"
+    assert provider["supports_websockets"] is True
+    assert provider["requires_openai_auth"] is True
+    if expected_security_requirement:
+        assert provider["env_key"] == "CODEX_LB_API_KEY"
+        assert normalized_provider_headers == {REQUIRED_CAPABILITY_HEADER: "trusted_cyber"}
+    else:
+        assert REQUIRED_CAPABILITY_HEADER not in normalized_provider_headers
+
+    api_key = _capability_test_api_key(f"key_profile_{profile_name or 'ordinary'}")
+    upstream = _SequencedUpstreamWebSocket(
+        [],
+        deferred_message_batches=[_websocket_response_batch(f"resp_profile_{profile_name or 'ordinary'}")],
+    )
+    selection_requirements: list[bool] = []
+    opened_account_ids: list[str] = []
+    forwarded_capability_headers: list[bool] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
+        del request
+        assert authorization == "Bearer inert-profile-key"
+        return api_key
+
+    async def keep_authenticated_api_key_policy(self, current_api_key):
+        del self
+        assert current_api_key == api_key
+        return current_api_key
+
+    async def bypass_api_key_usage_reservation(self, current_api_key, **_kwargs):
+        del self, _kwargs
+        assert current_api_key == api_key
+        return None
+
+    async def fake_select_websocket_connect_account(
+        self,
+        deadline,
+        *,
+        request_state,
+        require_security_work_authorized,
+        **_kwargs,
+    ):
+        del self, deadline, request_state, _kwargs
+        selection_requirements.append(require_security_work_authorized)
+        account_kind = "cyber" if require_security_work_authorized else "ordinary"
+        return SimpleNamespace(
+            id=f"acct_profile_{account_kind}",
+            security_work_authorized=require_security_work_authorized,
+        )
+
+    async def fake_try_open_websocket_connect_attempt(self, account, headers, **_kwargs):
+        del self, _kwargs
+        opened_account_ids.append(account.id)
+        forwarded_capability_headers.append(any(name.lower() == REQUIRED_CAPABILITY_HEADER for name in headers))
+        return account, upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_refresh_websocket_api_key_policy",
+        keep_authenticated_api_key_policy,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_reserve_websocket_api_key_usage",
+        bypass_api_key_usage_reservation,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_try_open_websocket_connect_attempt",
+        fake_try_open_websocket_connect_attempt,
+    )
+
+    websocket_headers = {"Authorization": "Bearer inert-profile-key", **provider_headers}
+    response_create = _websocket_response_create("inert profile routing check")
+    response_create["model"] = model
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers=websocket_headers,
+        ) as websocket:
+            websocket.send_text(json.dumps(response_create))
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["response"]["id"] == f"resp_profile_{profile_name or 'ordinary'}"
+    assert completed["type"] == "response.completed"
+    assert selection_requirements == [expected_security_requirement]
+    expected_account_kind = "cyber" if expected_security_requirement else "ordinary"
+    assert opened_account_ids == [f"acct_profile_{expected_account_kind}"]
+    assert forwarded_capability_headers == [False]
 
 
 def test_backend_responses_websocket_fails_over_confirmed_proxy_connect_before_dispatch(

@@ -31,6 +31,67 @@ supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
 
+### Daybreak Blue profile (Trusted Access)
+
+Use a separate provider for authorized defensive cybersecurity work. The
+ordinary `codex-lb` provider above must remain free of the capability header;
+adding it there would classify every request as requiring the restricted pool.
+
+First add this opt-in provider to the same machine-local
+`~/.codex/config.toml`:
+
+```toml
+[model_providers.codex-lb-daybreak-blue]
+name = "openai"
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+env_key = "CODEX_LB_API_KEY"
+supports_websockets = true
+requires_openai_auth = true
+http_headers = { "X-Codex-LB-Required-Capability" = "trusted_cyber" }
+```
+
+Then create `~/.codex/daybreak-blue.config.toml`:
+
+```toml
+model = "gpt-5.6-sol"
+model_provider = "codex-lb-daybreak-blue"
+```
+
+Activate it explicitly for the task or orchestration root that needs the
+restricted route:
+
+```bash
+export CODEX_LB_API_KEY="sk-clb-..." # key from the dashboard
+codex --profile daybreak-blue
+codex exec --profile daybreak-blue "<authorized defensive task>"
+```
+
+Current Codex versions load named profiles from sibling
+`<profile>.config.toml` files; legacy `[profiles.<name>]` tables are no longer
+selected. Provider and profile keys are machine-local, so a project
+`.codex/config.toml` cannot activate this route. See the official
+[Codex profile documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles).
+
+The static header is an authenticated routing requirement, not a grant. Use
+this profile only when the selected identity and ChatGPT workspace or API
+organization/project are already approved for the intended Codex product
+surface. The dedicated provider always supplies a Codex LB API key because
+unauthenticated capability carriers are rejected even on a local deployment.
+Codex LB narrows the first and later account selections to eligible
+accounts already marked `security_work_authorized`; if none are available, it
+fails closed without ordinary fallback. Selecting `gpt-5.6-sol` by itself does
+not activate this path, and a Daybreak alias may resolve to that same underlying
+model. See OpenAI's
+[Trusted Access guidance](https://developers.openai.com/api/docs/guides/safety-checks/cybersecurity#authorized-access-and-agentic-workflows).
+
+Complete inert examples are available as
+[`config.toml`](examples/codex/config.toml) and
+[`daybreak-blue.config.toml`](examples/codex/daybreak-blue.config.toml). To
+roll back, stop using `--profile daybreak-blue`, remove the profile file, and
+optionally remove only the `codex-lb-daybreak-blue` provider block. No server or
+database change is required.
+
 This documented `requires_openai_auth = true` setup uses Codex-backed authentication and does not need an `x-openai-actor-authorization` marker to be eligible for Codex's built-in `$imagegen` tool. Provider configurations that intentionally skip OpenAI login have a different eligibility path; see the [Images compatibility context](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/images-api-compat/context.md#codex-provider-eligibility).
 
 ### WebSocket transport

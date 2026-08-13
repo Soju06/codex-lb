@@ -6161,7 +6161,8 @@ async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_u
             ).scalars()
         }
     assert rows[raw_session].account_id == owner.id
-    assert rows[raw_session].continuity_abandoned_at is not None
+    assert rows[raw_session].continuity_abandoned_at is None
+    assert rows[raw_session].continuity_abandonment_scope == "session_header"
     assert rows[selection_key].account_id == replacement.id
     assert rows[selection_key].continuity_abandoned_at is None
 
@@ -6268,7 +6269,8 @@ async def test_backend_responses_goal_restart_keeps_authority_for_same_request_r
             ).scalars()
         }
     assert rows[raw_session].account_id == owner.id
-    assert rows[raw_session].continuity_abandoned_at is not None
+    assert rows[raw_session].continuity_abandoned_at is None
+    assert rows[raw_session].continuity_abandonment_scope == "session_header"
     assert rows[selection_key].account_id == replacement.id
 
 

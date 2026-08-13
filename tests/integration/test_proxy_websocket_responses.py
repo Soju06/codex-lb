@@ -671,9 +671,18 @@ async def _create_profile_authorization(name: str) -> str:
     ],
     ids=["ordinary", "daybreak-blue"],
 )
+@pytest.mark.parametrize(
+    "path",
+    [
+        "ws://localhost/backend-api/codex/responses",
+        "ws://localhost/backend-api/codex/v1/responses",
+    ],
+    ids=["native", "native-v1-alias"],
+)
 def test_codex_provider_profiles_route_before_first_account_attempt(
     app_instance,
     monkeypatch,
+    path,
     profile_name,
     expected_provider_id,
     expected_security_requirement,
@@ -789,7 +798,7 @@ def test_codex_provider_profiles_route_before_first_account_attempt(
         if authorization is not None:
             websocket_headers["Authorization"] = authorization
         with client.websocket_connect(
-            "ws://localhost/backend-api/codex/responses",
+            path,
             headers=websocket_headers,
         ) as websocket:
             websocket.send_text(json.dumps(response_create))
@@ -812,6 +821,10 @@ def test_codex_provider_profiles_route_before_first_account_attempt(
             {"model": "gpt-5.6-sol", "input": "inert fallback check", "stream": True},
         ),
         (
+            "/backend-api/codex/v1/responses",
+            {"model": "gpt-5.6-sol", "input": "inert fallback check", "stream": True},
+        ),
+        (
             "/v1/responses",
             {"model": "gpt-5.6-sol", "input": "inert fallback check", "stream": True},
         ),
@@ -824,7 +837,7 @@ def test_codex_provider_profiles_route_before_first_account_attempt(
             {"model": "gpt-5.6-sol", "instructions": "", "input": "inert fallback check"},
         ),
     ],
-    ids=["backend", "v1", "backend-compact", "v1-compact"],
+    ids=["backend", "backend-v1-alias", "v1", "backend-compact", "v1-compact"],
 )
 def test_daybreak_profile_http_fallback_fails_closed_before_routing(
     app_instance,

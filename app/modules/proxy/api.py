@@ -30,12 +30,14 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.convertors import Convertor, register_url_convertor
+from starlette.datastructures import Headers
 from starlette.websockets import WebSocketState
 
 from app.core import usage as usage_core
 from app.core.auth.dependencies import (
     set_openai_error_format,
-    validate_codex_usage_identity,
+    validate_codex_provider_api_key,
+    validate_codex_provider_usage_identity,
     validate_proxy_api_key,
     validate_proxy_api_key_authorization,
     validate_required_proxy_api_key,
@@ -222,6 +224,7 @@ from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_MODEL_STATE,
+    IMAGE_ROUTE_STARTED_AT_STATE,
     IMAGE_ROUTE_STREAM_STATE,
     record_images_route_observability,
 )
@@ -346,7 +349,7 @@ register_url_convertor("realtime_live_call_id", _RealtimeLiveCallIdConvertor())
 router = APIRouter(
     prefix="/backend-api/codex",
     tags=["proxy"],
-    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+    dependencies=[Security(validate_codex_provider_api_key), Depends(set_openai_error_format)],
 )
 realtime_call_router = APIRouter(
     prefix="/backend-api/codex",
@@ -365,7 +368,7 @@ wham_router = APIRouter(
 v1_router = APIRouter(
     prefix="/v1",
     tags=["proxy"],
-    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+    dependencies=[Security(validate_codex_provider_api_key), Depends(set_openai_error_format)],
 )
 v1_ws_router = APIRouter(
     prefix="/v1",
@@ -378,12 +381,12 @@ usage_router = APIRouter(
 transcribe_router = APIRouter(
     prefix="/backend-api",
     tags=["proxy"],
-    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+    dependencies=[Security(validate_codex_provider_api_key), Depends(set_openai_error_format)],
 )
 files_router = APIRouter(
     prefix="/backend-api",
     tags=["proxy"],
-    dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+    dependencies=[Security(validate_codex_provider_api_key), Depends(set_openai_error_format)],
 )
 internal_router = APIRouter(
     prefix="/internal/bridge",
@@ -709,6 +712,9 @@ async def _thread_goal_proxy(
     context: ProxyContext,
     api_key: ApiKeyData | None,
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     payload = await _thread_goal_payload_from_request(request)
     try:
         response = await context.service.thread_goal_request(
@@ -874,7 +880,12 @@ async def _codex_control_proxy(
     api_key: ApiKeyData | None,
     *,
     adapter: _CodexControlAdapter = _PASSTHROUGH_CODEX_CONTROL_ADAPTER,
+    enforce_required_capability_transport: bool = True,
 ) -> Response:
+    if enforce_required_capability_transport:
+        capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+        if capability_transport_denial is not None:
+            return capability_transport_denial
     try:
         response = await context.service.codex_control_request(
             path,
@@ -907,7 +918,7 @@ async def _codex_control_proxy(
 async def thread_goal_get(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _thread_goal_proxy(request, "get", context, api_key)
 
@@ -916,7 +927,7 @@ async def thread_goal_get(
 async def thread_goal_set(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _thread_goal_proxy(request, "set", context, api_key)
 
@@ -925,7 +936,7 @@ async def thread_goal_set(
 async def thread_goal_clear(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _thread_goal_proxy(request, "clear", context, api_key)
 
@@ -934,7 +945,7 @@ async def thread_goal_clear(
 async def codex_analytics_events(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "analytics-events/events", context, api_key)
 
@@ -943,7 +954,7 @@ async def codex_analytics_events(
 async def codex_memories_trace_summarize(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "memories/trace_summarize", context, api_key)
 
@@ -967,7 +978,7 @@ async def codex_realtime_calls(
 async def codex_safety_arc(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "safety/arc", context, api_key)
 
@@ -976,7 +987,7 @@ async def codex_safety_arc(
 async def codex_alpha_search(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "alpha/search", context, api_key)
 
@@ -985,7 +996,7 @@ async def codex_alpha_search(
 async def codex_agent_identities_jwks(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _codex_control_proxy(request, "agent-identities/jwks", context, api_key)
 
@@ -996,7 +1007,13 @@ async def wham_agent_identities_jwks(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    return await _codex_control_proxy(request, "wham/agent-identities/jwks", context, api_key)
+    return await _codex_control_proxy(
+        request,
+        "wham/agent-identities/jwks",
+        context,
+        api_key,
+        enforce_required_capability_transport=False,
+    )
 
 
 @router.post("/responses/", include_in_schema=False)
@@ -1016,7 +1033,7 @@ async def responses(
     request: Request,
     payload: dict[str, JsonValue] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
     if capability_transport_denial is not None:
@@ -1102,8 +1119,11 @@ async def opportunistic_admission(
     request: Request,
     model: str | None = None,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     denial = await _opportunistic_admission_denial(request, context, api_key, model=model)
     if denial is not None:
         return denial
@@ -1115,9 +1135,10 @@ async def responses_websocket(
     websocket: WebSocket,
     context: ProxyContext = Depends(get_proxy_websocket_context),
 ) -> None:
-    capability_header_values = tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER))
+    capability_header_values = _required_capability_values(websocket.headers)
     api_key, denial = await _validate_proxy_websocket_request(
         websocket,
+        allow_required_capability=True,
         require_api_key=bool(capability_header_values),
     )
     if denial is not None:
@@ -1159,7 +1180,7 @@ async def v1_responses(
     request: Request,
     payload: V1ResponsesRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
     if capability_transport_denial is not None:
@@ -1267,6 +1288,9 @@ async def internal_bridge_responses(
     api_key, auth_error = await _validate_internal_bridge_api_key(request)
     if auth_error is not None:
         return auth_error
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     if forwarded_request_context.context.signature_version is None:
         try:
             await context.service.validate_http_bridge_legacy_forward_anchor(
@@ -1429,9 +1453,10 @@ async def v1_responses_websocket(
     websocket: WebSocket,
     context: ProxyContext = Depends(get_proxy_websocket_context),
 ) -> None:
-    capability_header_values = tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER))
+    capability_header_values = _required_capability_values(websocket.headers)
     api_key, denial = await _validate_proxy_websocket_request(
         websocket,
+        allow_required_capability=True,
         require_api_key=bool(capability_header_values),
     )
     if denial is not None:
@@ -1457,7 +1482,7 @@ async def v1_responses_websocket(
 
 @router.get("/models", response_model=CodexModelsResponse)
 async def models(
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _build_codex_models_response(api_key)
 
@@ -1465,7 +1490,7 @@ async def models(
 @v1_router.get("/models", response_model=None)
 async def v1_models(
     request: Request,
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     # Codex clients pointed at this proxy via `openai_base_url` fetch their model
     # catalog from `<base_url>/models` and always append a `client_version` query
@@ -1688,9 +1713,13 @@ async def v1_reset_credit(
 
 @usage_router.post("/v1/reset-credit", response_model=V1ResetCreditRedeemResponse)
 async def v1_redeem_reset_credit(
+    request: Request,
     payload: V1ResetCreditRedeemRequest,
     api_key: ApiKeyData = Security(validate_usage_api_key),
-) -> V1ResetCreditRedeemResponse:
+) -> V1ResetCreditRedeemResponse | JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     async with get_background_session() as session:
         account = await AccountsRepository(session).get_by_id(payload.account_id)
         if not _is_reset_credit_account_in_api_key_pool(account, api_key):
@@ -1795,6 +1824,9 @@ async def _run_v1_warmup(
     *,
     mode: str,
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     if mode not in _WARMUP_MODES:
         return _logged_error_json_response(
             request,
@@ -1854,7 +1886,7 @@ async def v1_warmup(
     request: Request,
     payload: WarmupRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _run_v1_warmup(
         request,
@@ -1869,7 +1901,7 @@ async def v1_warmup_by_mode(
     request: Request,
     mode: str,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     return await _run_v1_warmup(
         request,
@@ -2171,8 +2203,11 @@ async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> 
 async def backend_transcribe(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     multipart = await _parse_transcription_multipart(request, require_model=False)
     return await _transcribe_request(
         request=request,
@@ -2194,7 +2229,7 @@ async def backend_files_create(
     request: Request,
     payload: FileCreateRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> JSONResponse:
     """Forward a `POST /backend-api/files` upload registration to upstream.
 
@@ -2205,6 +2240,9 @@ async def backend_files_create(
     apply here -- upstream caps file size at 512 MiB which we enforce in
     ``FileCreateRequest``.
     """
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=_FILES_CREATE_LIMIT_MODEL,
@@ -2240,7 +2278,7 @@ async def backend_files_finalize(
     request: Request,
     file_id: str = Path(..., min_length=1),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> JSONResponse:
     """Forward a `POST /backend-api/files/{file_id}/uploaded` finalize call.
 
@@ -2249,6 +2287,9 @@ async def backend_files_finalize(
     polls upstream for up to 30 s while ``status == "retry"``; we return
     the final payload verbatim so the caller sees what upstream saw.
     """
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     reservation = await _enforce_request_limits(
         api_key,
         request_model=_FILES_FINALIZE_LIMIT_MODEL,
@@ -2286,8 +2327,11 @@ async def backend_files_finalize(
 async def v1_audio_transcriptions(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     multipart = await _parse_transcription_multipart(request, require_model=True)
     assert multipart.model is not None
     model = multipart.model
@@ -2323,8 +2367,17 @@ async def v1_images_generations(
     request: Request,
     payload: V1ImagesGenerationsRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        _record_required_capability_image_transport_denial(
+            request,
+            route="generations",
+            model=payload.model,
+            stream=bool(payload.stream),
+        )
+        return capability_transport_denial
     return await _proxy_images_generation_request(
         request=request,
         payload=payload,
@@ -2347,6 +2400,26 @@ def _record_images_edit_early_rejection(
 ) -> None:
     record_images_route_observability(
         route="edits",
+        model=model,
+        stream=stream,
+        status=400,
+        outcome="invalid_request",
+        started_at=started_at,
+    )
+
+
+def _record_required_capability_image_transport_denial(
+    request: Request,
+    *,
+    route: Literal["generations", "edits"],
+    model: str | None,
+    stream: bool,
+) -> None:
+    started_at = getattr(request.state, IMAGE_ROUTE_STARTED_AT_STATE, None)
+    if not isinstance(started_at, float):
+        started_at = time.perf_counter()
+    record_images_route_observability(
+        route=route,
         model=model,
         stream=stream,
         status=400,
@@ -2384,8 +2457,17 @@ def _images_edit_invalid_request_response(
 async def v1_images_edits(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        _record_required_capability_image_transport_denial(
+            request,
+            route="edits",
+            model=None,
+            stream=False,
+        )
+        return capability_transport_denial
     started_at = time.perf_counter()
     raise_for_unsupported_multipart_content_encoding(request)
 
@@ -2545,7 +2627,7 @@ async def v1_images_edits(
 async def codex_images_edits(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     """Accept Codex's JSON data-URL image-edit payload on its native base URL.
 
@@ -2555,6 +2637,15 @@ async def codex_images_edits(
     then delegate to the shared edit pipeline so validation and upstream
     behavior remain identical.
     """
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        _record_required_capability_image_transport_denial(
+            request,
+            route="edits",
+            model=None,
+            stream=False,
+        )
+        return capability_transport_denial
     started_at = time.perf_counter()
     try:
         raw_payload = await request.json()
@@ -2676,10 +2767,10 @@ async def codex_images_edits(
 @v1_router.post("/images/variations", include_in_schema=False)
 async def v1_images_variations(
     request: Request,
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
     # ``api_key`` is captured purely so the standard
-    # ``Security(validate_proxy_api_key)`` dependency runs and rejects
+    # ``Security(validate_codex_provider_api_key)`` dependency runs and rejects
     # unauthenticated callers with the same policy as every other
     # /v1/images/* route (and the rest of /v1). Without it, this
     # endpoint would return a public 404 even when proxy API-key auth
@@ -3822,8 +3913,11 @@ async def v1_chat_completions(
     request: Request,
     payload: ChatCompletionsRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> Response:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     cursor_compat_client = _is_cursor_compat_client(request, api_key)
     effective_model = _effective_model_for_api_key(api_key, payload.model)
 
@@ -5374,7 +5468,7 @@ async def responses_compact(
     request: Request,
     payload: ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> JSONResponse:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
     if capability_transport_denial is not None:
@@ -5395,7 +5489,7 @@ async def v1_responses_compact(
     request: Request,
     payload: V1ResponsesCompactRequest = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData | None = Security(validate_codex_provider_api_key),
 ) -> JSONResponse:
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
     if capability_transport_denial is not None:
@@ -5676,7 +5770,7 @@ async def _transcribe_request(
 async def codex_usage(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
+    api_key: ApiKeyData | None = Depends(validate_codex_provider_usage_identity),
 ) -> RateLimitStatusPayload:
     payload = (
         await _build_codex_usage_payload_for_api_key(api_key)
@@ -5698,8 +5792,11 @@ async def codex_usage(
 async def codex_consume_rate_limit_reset_credit(
     request: Request,
     payload: ConsumeRateLimitResetCreditRequest = Body(...),
-    api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
+    api_key: ApiKeyData | None = Depends(validate_codex_provider_usage_identity),
 ) -> ConsumeRateLimitResetCreditResponse | JSONResponse:
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    if capability_transport_denial is not None:
+        return capability_transport_denial
     if api_key is not None:
         raise ProxyAuthError("ChatGPT authentication required for usage limit reset credits")
     redeem_request_id = payload.redeem_request_id.strip()
@@ -6612,16 +6709,25 @@ def _is_legacy_proxy_auth_override_type_error(exc: TypeError) -> bool:
     return "unexpected keyword argument 'request'" in message
 
 
+def _required_capability_values(headers: Mapping[str, str]) -> tuple[str, ...]:
+    if isinstance(headers, Headers):
+        return tuple(headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER))
+    normalized_name = CODEX_LB_REQUIRED_CAPABILITY_HEADER.lower()
+    return tuple(value for name, value in headers.items() if name.lower() == normalized_name)
+
+
 async def _validate_proxy_websocket_request(
     websocket: WebSocket,
     *,
+    allow_required_capability: bool = False,
     require_api_key: bool = False,
 ) -> tuple[ApiKeyData | None, JSONResponse | None]:
     denial = await _websocket_firewall_denial_response(websocket)
     if denial is not None:
         return None, denial
+    capability_header_values = _required_capability_values(websocket.headers)
     try:
-        if require_api_key:
+        if require_api_key or capability_header_values:
             api_key = await validate_required_proxy_api_key_authorization(websocket.headers.get("authorization"))
         else:
             api_key = await _validate_proxy_api_key_authorization_for_connection(
@@ -6633,6 +6739,15 @@ async def _validate_proxy_websocket_request(
             status_code=exc.status_code,
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),
         )
+    if capability_header_values and not allow_required_capability:
+        return api_key, JSONResponse(
+            status_code=400,
+            content=openai_error(
+                "required_capability_transport_unsupported",
+                "Required capability routing is only supported over the Responses WebSocket transport.",
+                error_type="invalid_request_error",
+            ),
+        )
     return api_key, None
 
 
@@ -6642,7 +6757,7 @@ async def _required_capability_http_transport_denial(
 ) -> JSONResponse | None:
     """Authenticate capability intent and reject unsupported HTTP routing."""
 
-    if not request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
+    if not _required_capability_values(request.headers):
         return None
     if api_key is None:
         await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))

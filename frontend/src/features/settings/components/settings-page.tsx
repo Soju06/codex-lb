@@ -11,10 +11,8 @@ import { FirewallSection } from "@/features/firewall/components/firewall-section
 import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
-import {
-  AdvancedSettingsGroup,
-  shouldExpandAdvancedSettings,
-} from "@/features/settings/components/advanced-settings-group";
+import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
+import { AdvancedSettingsGroup } from "@/features/settings/components/advanced-settings-group";
 import { AppearanceSettings } from "@/features/settings/components/appearance-settings";
 import { DataRetentionSettings } from "@/features/settings/components/data-retention-settings";
 import { GuestAccessSettings } from "@/features/settings/components/guest-access-settings";
@@ -146,7 +144,11 @@ export function SettingsPage() {
 
             <TelemetrySettings disabled={controlsDisabled} />
 
-            <AdvancedSettingsGroup defaultOpen={expandAdvanced} scrollToId={advancedScrollToId}>
+            <AdvancedSettingsGroup
+              key={expandAdvanced ? `open:${advancedScrollToId ?? ""}` : "closed"}
+              defaultOpen={expandAdvanced}
+              scrollToId={advancedScrollToId}
+            >
               <RoutingSettings
                 key={[
                   settings.openaiCacheAffinityMaxAgeSeconds,

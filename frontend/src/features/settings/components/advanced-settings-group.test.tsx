@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { shouldExpandAdvancedSettings } from "@/features/settings/components/advanced-settings-group";
+import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
 
 describe("shouldExpandAdvancedSettings", () => {
   it("stays collapsed for a plain settings URL", () => {

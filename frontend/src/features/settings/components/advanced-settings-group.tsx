@@ -11,14 +11,6 @@ export type AdvancedSettingsGroupProps = {
   scrollToId?: string;
 };
 
-export function shouldExpandAdvancedSettings(search: string, hash: string): boolean {
-  const query = search.startsWith("?") ? search.slice(1) : search;
-  if (new URLSearchParams(query).get("advanced") === "1") {
-    return true;
-  }
-  return hash === "#firewall";
-}
-
 /**
  * Collapsed-by-default container for power-user settings sections.
  *
@@ -32,12 +24,6 @@ export function AdvancedSettingsGroup({
 }: AdvancedSettingsGroupProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
-
-  useEffect(() => {
-    if (defaultOpen) {
-      setOpen(true);
-    }
-  }, [defaultOpen]);
 
   useEffect(() => {
     if (!open || !scrollToId) {

@@ -5,6 +5,7 @@
 - [x] 1.3 Add routed regressions for scoped-owner retirement and synthesized WebSocket turn-state cleanup.
 - [x] 1.4 Add regressions for canonical compatibility classification and stale post-retirement selection inputs.
 - [x] 1.5 Add regressions proving a colliding explicit turn state retains its owner and model eligibility does not narrow mutation authority.
+- [x] 1.6 Add regressions proving old-reader fail-closed behavior and CAS-loser exclusion of a concurrently retired owner.
 
 ## 2. Implementation
 
@@ -15,6 +16,7 @@
 - [x] 2.5 Prevent stale account snapshots from undoing successful restart retirement.
 - [x] 2.6 Persist source-qualified session-header abandonment while retaining hard explicit turn-state ownership.
 - [x] 2.7 Separate authenticated sticky-mutation authority from model and service-tier replacement eligibility.
+- [x] 2.8 Encode source-qualified retirement so legacy readers retain hard ownership, and preserve the retired owner as exclusion evidence on every typed read.
 
 ## 3. Validation and Documentation
 
@@ -22,6 +24,7 @@
 - [x] 3.2 Review the diff for fail-closed continuity, async/session ownership, transport parity, and simplicity-gate compliance.
 - [x] 3.3 Promote stable context to the main capability docs and verify the change.
 - [x] 3.4 Add reversible migration coverage for source-qualified sticky abandonment metadata.
+- [x] 3.5 Document and validate rolling-version marker semantics plus concurrent retirement handling.
 
 ## 4. Local Deployment
 

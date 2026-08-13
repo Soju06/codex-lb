@@ -32,25 +32,26 @@ Selection may consume the capability only for a raw compatibility row reached th
 
 Mutation authority is the authenticated account-assignment and security-policy scope before requested-model and service-tier filtering. Model eligibility still constrains the replacement pool, but cannot make an otherwise authorized raw owner appear out of scope.
 
-### Tombstone with compare-and-set, then rerun normal selection
+### Mark source-qualified abandonment with compare-and-set, then rerun normal selection
 
-The repository will atomically set `continuity_abandoned_at` plus `continuity_abandonment_scope=session_header` only when the key, kind, expected account, non-tombstoned state, and unavailable account status still match. Selection clears its cached legacy owner and repeats its normal loop. Source-aware lookup treats that row as abandoned for process-session selection but continues returning the retained account to an explicit turn-state request. The existing tombstone semantics then authorize fresh process-session selection and allow the namespaced row to claim the replacement owner.
+The repository will atomically set `continuity_abandonment_scope=session_header` while leaving `continuity_abandoned_at` NULL, only when the key, kind, expected account, unmarked state, and unavailable account status still match. Selection clears its cached legacy owner and repeats its normal loop. Source-aware lookup treats that row as abandoned for process-session selection but continues returning the retained account to an explicit turn-state request. The scope-only representation is intentionally asymmetric with historical global tombstones: an older binary ignores the unknown scope but sees no timestamp tombstone, so it continues to fail closed on the retained owner during rollout or rollback.
 
 Deleting the row outright was rejected because tombstones distinguish deliberate continuity abandonment from an unknown owner. Blindly updating after an earlier status read was rejected because a concurrent rebind or account recovery could otherwise be lost.
 
-The normal loop may still hold account objects loaded before retirement. The successful tombstone therefore records the retired account for the lifetime of the selection call and filters it from later iterations. Re-reading every account after the write was rejected because the request needs only one authoritative exclusion and the broader refresh would add unrelated database work.
+The normal loop may still hold account objects loaded before retirement. Successful retirement therefore records the retired account for the lifetime of the selection call and filters it from later iterations. A compare-and-set loser rereads the marker and receives the retained retired account separately from ownerless affinity, then applies the same exclusion. Re-reading every account after the write was rejected because the request needs only one authoritative exclusion and the broader refresh would add unrelated database work.
 
 ## Risks / Trade-offs
 
 - [A forged marker requests owner abandonment] → The complete payload must still be account-neutral and self-contained, retirement occurs only while the persisted owner is unavailable, and source-qualified abandonment cannot erase a colliding explicit turn-state owner.
-- [A concurrent request changes ownership or restores the account] → One compare-and-set statement verifies both mapping owner and account status at write time; a miss preserves fail-closed behavior.
+- [A concurrent request changes ownership or restores the account] → One compare-and-set statement verifies both mapping owner and account status at write time; a miss rereads authoritative state and preserves fail-closed behavior.
+- [Another restart wins the retirement compare-and-set] → The reread returns the retained retired owner as exclusion evidence so stale account inputs cannot re-pin it.
 - [A restart includes unresolved tool output or account-scoped content] → The existing fresh-replay classifier denies the capability, leaving the hard row untouched.
 - [Transport wiring drifts] → Carry one typed affinity-policy flag through the shared selection boundary and explicitly forward it from the direct WebSocket call site that expands policy fields.
-- [A stale account snapshot restores the old owner] → Successful retirement excludes the old owner from all later iterations of the current selection call.
+- [A stale account snapshot restores the old owner] → Successful retirement or a winner's scoped marker excludes the old owner from all later iterations of the current selection call.
 
 ## Migration Plan
 
-Add nullable `sticky_sessions.continuity_abandonment_scope`. Existing rows require no backfill: a non-null abandonment timestamp with NULL scope retains its historical meaning as a global stale-hard tombstone. Goal restart writes `session_header`; ordinary upsert clears both fields, and stale-hard cleanup may later promote a source-qualified marker to global after the normal age threshold. Downgrade drops only the scope column; operators must not downgrade while source-qualified rows exist because older code would interpret them globally.
+Add nullable `sticky_sessions.continuity_abandonment_scope`. Existing rows require no backfill: a non-null abandonment timestamp with NULL scope retains its historical meaning as a global stale-hard tombstone. Goal restart writes `session_header` with a NULL timestamp; ordinary upsert clears both fields, and stale-hard cleanup may later promote a source-qualified marker to global after the normal age threshold. Older binaries and a downgraded schema see the retained account as hard ownership because the timestamp remains NULL. Downgrade therefore loses only the source-qualified recovery marker rather than weakening ownership.
 
 ## Open Questions
 

@@ -787,13 +787,13 @@ class StickySession(Base):
         onupdate=func.now(),
         nullable=False,
     )
-    # A non-null timestamp marks continuity abandoned either globally (scope
-    # is NULL, as written by stale-hard cleanup) or only for one typed source.
-    # Source-scoped abandonment is what lets a process-session restart stop
-    # consulting an ambiguous raw compatibility row without erasing that
-    # row's retained account_id for an explicit turn-state lookup that happens
-    # to use the same client-controlled text. The row is only hard-deleted by
-    # global stale-hard cleanup after its additional grace window.
+    # A non-null timestamp with NULL scope is the historical global tombstone.
+    # Source-scoped abandonment instead leaves this timestamp NULL and stores
+    # the typed scope below. That asymmetry is intentional: binaries predating
+    # the scope column see a live hard owner during rollout/rollback, while new
+    # binaries can let a process-session restart ignore the ambiguous raw row
+    # without erasing its explicit-turn-state ownership. Stale-hard cleanup
+    # may later promote the scoped marker to a timestamped global tombstone.
     continuity_abandoned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     continuity_abandonment_scope: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
 

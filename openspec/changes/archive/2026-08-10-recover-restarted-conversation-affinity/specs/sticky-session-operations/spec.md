@@ -3,7 +3,7 @@
 ### Requirement: Sticky sessions are explicitly typed
 The system SHALL persist each sticky-session mapping with an explicit kind so durable Codex backend affinity, durable dashboard sticky-thread routing, and bounded prompt-cache affinity can be managed independently. Budget-pressure reallocation MUST apply only to mappings whose kind/source is soft. A raw or legacy `codex_session` mapping MUST remain owner-bound because it may represent explicit turn-state continuity; budget pressure MUST NOT delete or rebind it.
 
-An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. Classification MUST use the canonical upstream request form so accepted compatibility controls and transport-envelope fields do not make equivalent requests disagree. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's account-assignment and security-policy scope computed before model and service-tier eligibility; local capacity, model eligibility, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT determine mutation authority. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account. Because a raw key's persisted source is ambiguous, goal-restart abandonment MUST apply only to `session_header` interpretation and MUST retain the stored account as hard ownership for an explicit `turn_state` lookup using the same text. The successful retirement MUST exclude the retired owner from the remainder of that request even if selection loaded a pre-retirement account snapshot.
+An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_session` owner only when the complete Responses payload is account-neutral and self-contained: it MUST have no nonblank `previous_response_id`, no nonblank `conversation`, no account-scoped input file or image reference, and no unresolved or orphan tool state. Classification MUST use the canonical upstream request form so accepted compatibility controls and transport-envelope fields do not make equivalent requests disagree. The owner MUST be persisted as `PAUSED`, `RATE_LIMITED`, or `QUOTA_EXCEEDED` and MUST belong to the authenticated request's account-assignment and security-policy scope computed before model and service-tier eligibility; local capacity, model eligibility, retry exclusions, runtime health, budget pressure, and an out-of-scope owner MUST NOT determine mutation authority. The retirement write MUST compare the current mapping owner and unavailable account status atomically, MUST preserve a concurrently changed mapping or recovered owner, and on success MUST let normal selection establish affinity to the replacement account. Because a raw key's persisted source is ambiguous, goal-restart abandonment MUST apply only to `session_header` interpretation and MUST retain the stored account as hard ownership for an explicit `turn_state` lookup using the same text. During a rolling deployment or rollback, replicas that do not understand source-qualified abandonment MUST continue treating that retained account as hard ownership. A selector that observes source-qualified abandonment initially or after losing the retirement compare-and-set MUST exclude the retained retired owner until replacement affinity is persisted, even if its account inputs predate retirement.
 
 #### Scenario: Soft sticky reallocation uses split primary and secondary pressure thresholds
 - **WHEN** a request resolves an existing prompt-cache, sticky-thread, or other explicitly soft mapping
@@ -60,6 +60,13 @@ An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_sess
 - **THEN** the process-session restart may select account B
 - **AND** an explicit turn-state lookup of the same text remains hard-bound to account A
 
+#### Scenario: Source-qualified retirement fails closed on an older replica
+
+- **GIVEN** a current replica marks a raw account A mapping abandoned only for `session_header` interpretation
+- **WHEN** a replica that does not understand abandonment scope reads the same raw mapping
+- **THEN** it continues to resolve account A as hard ownership
+- **AND** it cannot re-pin a colliding explicit turn state to another account
+
 #### Scenario: Model eligibility does not narrow retirement authority
 
 - **GIVEN** unavailable account A is inside the authenticated account-assignment and security-policy scope
@@ -81,6 +88,14 @@ An explicit Codex goal-continuation restart MAY abandon a raw legacy `codex_sess
 - **WHEN** guarded retirement tombstones account A's still-current raw legacy mapping
 - **THEN** the remainder of that selection excludes account A from the stale snapshot
 - **AND** the namespaced process-session mapping is not established on account A
+
+#### Scenario: Retirement CAS loser excludes the winner's retired owner
+
+- **GIVEN** two marked restarts read the same raw account A mapping and stale account inputs
+- **AND** the first restart marks account A abandoned only for `session_header` interpretation
+- **WHEN** the second restart loses its retirement compare-and-set and rereads that marker
+- **THEN** the second restart excludes retained account A from its stale inputs
+- **AND** it cannot establish replacement affinity on account A
 
 #### Scenario: Goal marker does not override account-scoped continuity
 

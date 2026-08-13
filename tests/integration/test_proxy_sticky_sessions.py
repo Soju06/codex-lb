@@ -373,7 +373,7 @@ async def test_codex_goal_restart_retires_unavailable_legacy_owner_and_stays_on_
                 )
             ).scalars()
         }
-        session_header_owner = await repo.get_account_id(
+        session_header_lookup = await repo.get_account_id_and_abandonment(
             raw_session,
             kind=StickySessionKind.CODEX_SESSION,
             continuity_source="session_header",
@@ -384,13 +384,21 @@ async def test_codex_goal_restart_retires_unavailable_legacy_owner_and_stays_on_
             continuity_source="turn_state",
         )
     assert rows[raw_session].account_id == owner_id
-    assert rows[raw_session].continuity_abandoned_at is not None
+    assert rows[raw_session].continuity_abandoned_at is None
     assert rows[raw_session].continuity_abandonment_scope == "session_header"
     assert rows[selection_key].account_id == replacement_id
     assert rows[selection_key].continuity_abandoned_at is None
     assert rows[selection_key].continuity_abandonment_scope is None
-    assert session_header_owner is None
+    assert session_header_lookup.account_id is None
+    assert session_header_lookup.continuity_abandoned is True
+    assert session_header_lookup.abandoned_account_id == owner_id
     assert turn_state_owner == owner_id
+    # Parent-version readers know only the timestamp tombstone. Keeping it
+    # NULL makes them fail closed on the retained owner during rollout.
+    legacy_replica_owner = (
+        None if rows[raw_session].continuity_abandoned_at is not None else rows[raw_session].account_id
+    )
+    assert legacy_replica_owner == owner_id
 
 
 @pytest.mark.asyncio
@@ -2376,6 +2384,7 @@ async def test_stale_expiry_race_reread_reports_concurrent_tombstone() -> None:
 
     assert resolved.account_id is None
     assert resolved.continuity_abandoned is True
+    assert resolved.abandoned_account_id is None
     assert persisted_row is not None
     assert persisted_row.continuity_abandoned_at is not None
 

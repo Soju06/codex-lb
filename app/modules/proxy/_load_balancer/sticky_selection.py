@@ -207,6 +207,7 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     sticky_source: _CodexSessionSource | None
     legacy_sticky_key: str | None
     legacy_existing_account_id: str | None
+    legacy_abandoned_account_id: str | None
     sticky_seed_key: str | None
     sticky_seed_kind: StickySessionKind | None
     sticky_seed_account_id: str | None
@@ -273,6 +274,7 @@ async def run_sticky_selection_path(
     sticky_source = request.sticky_source
     legacy_sticky_key = request.legacy_sticky_key
     legacy_existing_account_id = request.legacy_existing_account_id
+    legacy_abandoned_account_id = request.legacy_abandoned_account_id
     sticky_seed_key = request.sticky_seed_key
     sticky_seed_kind = request.sticky_seed_kind
     sticky_seed_account_id = request.sticky_seed_account_id
@@ -325,7 +327,13 @@ async def run_sticky_selection_path(
 
     sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET
     sticky_continuity_abandoned = False
-    retired_legacy_owner_account_ids: set[str] = set()
+    # A source-qualified marker can be observed before this call or after a
+    # retirement CAS miss. In both cases its retained owner is authoritative
+    # exclusion evidence even though it is no longer affinity ownership for
+    # the matching session-header source.
+    retired_legacy_owner_account_ids = (
+        {legacy_abandoned_account_id} if legacy_abandoned_account_id is not None else set()
+    )
     attempt = 0
     suppress_recovery_probe_candidates = False
     while True:
@@ -349,6 +357,12 @@ async def run_sticky_selection_path(
                 # always has, rather than silently bypassing the ambiguous
                 # owner check below.
                 sticky_continuity_abandoned = sticky_owner_lookup.continuity_abandoned is True
+                sticky_abandoned_account_id = sticky_owner_lookup.abandoned_account_id
+                if sticky_owner_lookup.continuity_abandoned is True and isinstance(
+                    sticky_abandoned_account_id,
+                    str,
+                ):
+                    retired_legacy_owner_account_ids.add(sticky_abandoned_account_id)
             if sticky_existing_is_legacy:
                 # Mixed-version replicas can create both rows on
                 # different accounts. The raw row was loaded before
@@ -541,6 +555,10 @@ async def run_sticky_selection_path(
             # replacement.
             assert authoritative_legacy_owner is not None
             legacy_existing_account_id = authoritative_legacy_owner.account_id
+            if authoritative_legacy_owner.continuity_abandoned is True:
+                abandoned_account_id = authoritative_legacy_owner.abandoned_account_id
+                if isinstance(abandoned_account_id, str):
+                    retired_legacy_owner_account_ids.add(abandoned_account_id)
             continue
         sticky_outcome = _StickySelectionOutcome(selection=SelectionResult(None, None))
         if fair_share_denial is not None:

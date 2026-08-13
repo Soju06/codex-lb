@@ -25,7 +25,7 @@ from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessi
 # bind parameters, which this chunk size also respects.
 _DELETE_ENTRIES_CHUNK_SIZE = 250
 
-_ContinuitySource = Literal["session_header", "turn_state"]
+_ContinuitySource = Literal["session_header", "thread_header", "turn_state"]
 _SESSION_HEADER_ABANDONMENT_SCOPE = "session_header"
 
 # Only the Live-call ownership namespace is reserved. Other LF-prefixed keys
@@ -53,6 +53,11 @@ class StickyOwnerLookup:
 
     account_id: str | None
     continuity_abandoned: bool
+    # Source-qualified abandonment makes account_id ownerless only for the
+    # matching source, but selection must still remember which durable owner
+    # was retired. Global stale-hard tombstones leave this unset because their
+    # established recovery path may legitimately reselect a recovered owner.
+    abandoned_account_id: str | None = None
 
 
 def _continuity_is_abandoned_for_source(
@@ -60,12 +65,25 @@ def _continuity_is_abandoned_for_source(
     abandonment_scope: str | None,
     continuity_source: _ContinuitySource | None,
 ) -> bool:
-    if abandoned_at is None:
-        return False
-    # NULL is the historical/global stale-hard tombstone. A non-null scope is
-    # deliberately fail-closed for unknown callers: only the matching typed
-    # request source may stop treating the retained account_id as ownership.
-    return abandonment_scope is None or abandonment_scope == continuity_source
+    if abandonment_scope is not None:
+        # A scope is itself the source-qualified marker. Goal-restart writers
+        # deliberately leave the legacy timestamp NULL so pre-scope binaries
+        # keep treating account_id as hard ownership during rollout/rollback.
+        # Unknown and nonmatching typed callers likewise fail closed.
+        return abandonment_scope == continuity_source
+    # Historical stale-hard tombstones have a timestamp and NULL scope, and
+    # therefore continue to abandon ownership globally for every source.
+    return abandoned_at is not None
+
+
+def _source_scoped_abandoned_account_id(
+    account_id: str,
+    abandonment_scope: str | None,
+    continuity_source: _ContinuitySource | None,
+) -> str | None:
+    if abandonment_scope is not None and abandonment_scope == continuity_source:
+        return account_id
+    return None
 
 
 def _owner_lookup_from_row(
@@ -78,7 +96,15 @@ def _owner_lookup_from_row(
         row.continuity_abandonment_scope,
         continuity_source,
     ):
-        return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
+        return StickyOwnerLookup(
+            account_id=None,
+            continuity_abandoned=True,
+            abandoned_account_id=_source_scoped_abandoned_account_id(
+                row.account_id,
+                row.continuity_abandonment_scope,
+                continuity_source,
+            ),
+        )
     return StickyOwnerLookup(account_id=row.account_id, continuity_abandoned=False)
 
 
@@ -182,7 +208,15 @@ class StickySessionsRepository:
             current_continuity_abandonment_scope,
             continuity_source,
         ):
-            return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
+            return StickyOwnerLookup(
+                account_id=None,
+                continuity_abandoned=True,
+                abandoned_account_id=_source_scoped_abandoned_account_id(
+                    current_account_id,
+                    current_continuity_abandonment_scope,
+                    continuity_source,
+                ),
+            )
         return StickyOwnerLookup(account_id=current_account_id, continuity_abandoned=False)
 
     async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
@@ -315,13 +349,18 @@ class StickySessionsRepository:
                 StickySession.kind == kind,
                 StickySession.account_id == expected_account_id,
                 StickySession.continuity_abandoned_at.is_(None),
+                StickySession.continuity_abandonment_scope.is_(None),
                 StickySession.account_id.in_(unavailable_owner),
             )
-            # Preserve account_id as hard ownership for an explicit turn-state
-            # lookup with the same raw text. The typed scope—not the current
-            # request's key shape—controls which source may ignore this row.
+            # The scope column is the new reader's marker. Keep the legacy
+            # timestamp NULL: older replicas know only that timestamp, so they
+            # continue to treat account_id as hard ownership instead of
+            # globally abandoning and rebinding a colliding explicit turn
+            # state. New readers use typed scope, never key shape, to decide
+            # which source may ignore the retained owner.
             .values(
-                continuity_abandoned_at=func.now(),
+                updated_at=func.now(),
+                continuity_abandoned_at=None,
                 continuity_abandonment_scope=_SESSION_HEADER_ABANDONMENT_SCOPE,
             )
             .returning(StickySession.key)

@@ -12,9 +12,9 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - Bare process-session headers use a header-inaccessible, source-separated storage key and are soft only for self-contained pre-visible work.
 - Account-cap spillover is request-local: it selects an alternate without deleting or rebinding the process-session row.
 - Raw and legacy Codex rows remain hard during rolling upgrades because they may represent explicit turn-state ownership.
-- A raw legacy Codex owner can be abandoned only for an explicit goal-continuation restart whose canonical upstream payload passes the account-neutral fresh-replay proof, and only while that owner has a persisted unavailable status. Canonicalization keeps accepted compatibility fields and transport envelopes from changing classification. The compare-and-set marker is scoped to `session_header`, so an explicit turn-state lookup with colliding raw text retains the stored owner; a concurrent rebind or owner recovery still wins.
+- A raw legacy Codex owner can be abandoned only for an explicit goal-continuation restart whose canonical upstream payload passes the account-neutral fresh-replay proof, and only while that owner has a persisted unavailable status. Canonicalization keeps accepted compatibility fields and transport envelopes from changing classification. The compare-and-set marker is scoped to `session_header`, so an explicit turn-state lookup with colliding raw text retains the stored owner; a concurrent rebind or owner recovery still wins. The scoped marker deliberately leaves the historical global-tombstone timestamp empty, so replicas that do not understand scope continue to fail closed on the retained owner.
 - Restart mutation authority is the authenticated account-assignment and security-policy scope before model and service-tier eligibility. Model filtering constrains only replacement selection.
-- The retired owner is excluded from stale account snapshots for the remainder of the request.
+- The retired owner is excluded from stale account snapshots for the remainder of the request, including when another selector wrote the scoped marker and this selector discovers it after losing the compare-and-set.
 - Durable file pins, responses, conversations, live/durable bridges, replay, and reattach sources are independent hard evidence; conflicting evidence fails closed instead of using source precedence. Opaque file IDs with no live durable pin remain unpinned for compatibility with uploads that occurred outside the current process.
 - Dashboard prompt-cache TTL is persisted in settings so operators can adjust it without restart.
 - Background cleanup removes stale prompt-cache rows proactively, while manual delete and purge endpoints provide operator override.
@@ -37,7 +37,8 @@ See `openspec/specs/sticky-session-operations/spec.md` for normative requirement
 - A turn-state token learned from a retired WebSocket is discarded before a movable bare-session request connects to another account.
 - An ordinary same-session request, or a goal-marked request that still carries previous-response, conversation, account-scoped file/image, or unresolved tool state, remains fail-closed on an unavailable raw owner.
 - Local caps, retry exclusions, transient runtime health, and budget pressure never authorize legacy hard-owner abandonment.
-- Selection inputs can predate the guarded retirement transaction. Once retirement succeeds, the old owner is filtered from those inputs so the request cannot immediately recreate namespaced affinity on it.
+- Selection inputs can predate the guarded retirement transaction. Once retirement succeeds, or once a compare-and-set loser rereads the winner's scoped marker, the old owner is filtered from those inputs so the request cannot immediately recreate namespaced affinity on it.
+- A rolling older replica ignores the scope column. The scoped marker therefore leaves the historical timestamp tombstone empty, causing the older reader to keep the retained hard owner instead of treating the row as globally ownerless.
 
 ## Example
 
@@ -58,6 +59,9 @@ the request remains fail-closed.
 No schema or setting migration is required for bare-session spillover. Namespaced rows appear lazily, and old raw rows age out only through existing operational controls. Rollback simply removes the spillover capability and leaves both row forms readable.
 
 Goal-restart recovery adds no setting. Its nullable abandonment-scope migration
-requires no backfill: historical NULL scope remains global, while
-`session_header` preserves an equal explicit turn-state owner. Downgrade must
-not reinterpret live source-qualified markers with an older binary.
+requires no backfill: a historical non-null timestamp with NULL scope remains
+global, while `session_header` preserves an equal explicit turn-state owner.
+Source-qualified markers leave the legacy timestamp NULL, so an older binary
+safely restores conservative hard ownership during rollback. Dropping the scope
+column loses only restart-recovery state; it does not make the retained owner
+mobile.

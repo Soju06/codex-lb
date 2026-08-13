@@ -722,16 +722,21 @@ class LoadBalancer:
         selection_error_code: str | None = None
         selection_resets_at: int | None = None
         legacy_existing_account_id: str | None = None
+        legacy_abandoned_account_id: str | None = None
         if legacy_sticky_key is not None:
             async with self._repo_factory() as repos:
-                legacy_existing_account_id = await repos.sticky_sessions.get_account_id(
+                legacy_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
                     legacy_sticky_key,
                     kind=StickySessionKind.CODEX_SESSION,
                     # Raw rows may be historical turn-state ownership. The
                     # bounded thread TTL must never age out that hard evidence.
                     max_age_seconds=None,
-                    continuity_source="session_header",
+                    continuity_source=sticky_source,
                 )
+            legacy_existing_account_id = legacy_owner_lookup.account_id
+            abandoned_account_id = legacy_owner_lookup.abandoned_account_id
+            if legacy_owner_lookup.continuity_abandoned is True and isinstance(abandoned_account_id, str):
+                legacy_abandoned_account_id = abandoned_account_id
             if required_account_id is not None and (
                 legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
             ):
@@ -822,6 +827,7 @@ class LoadBalancer:
                     sticky_source=sticky_source,
                     legacy_sticky_key=legacy_sticky_key,
                     legacy_existing_account_id=legacy_existing_account_id,
+                    legacy_abandoned_account_id=legacy_abandoned_account_id,
                     sticky_seed_key=sticky_seed_key,
                     sticky_seed_kind=sticky_seed_kind,
                     sticky_seed_account_id=sticky_seed_account_id,

@@ -1066,6 +1066,13 @@ When an authenticated HTTP-bridge origin forwards that reservation to another re
 - **THEN** the origin MUST make exactly one cancellation-safe release attempt
 - **AND** the receiver MUST NOT settle the origin reservation
 
+#### Scenario: owner non-200 remains a rejection after body-read failure
+
+- **GIVEN** the origin has observed a non-200 owner-forward status
+- **WHEN** reading the rejection body then fails
+- **THEN** the origin MUST treat the outcome as a definitive rejection
+- **AND** it MUST NOT reclassify the dispatch as ambiguous
+
 #### Scenario: compact service settlement is not released twice
 
 - **GIVEN** terminal or direct compaction receives an API-key usage reservation

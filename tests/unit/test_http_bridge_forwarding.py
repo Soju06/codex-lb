@@ -1360,6 +1360,65 @@ async def test_owner_forward_midflight_transport_failure_marks_dispatched(
 
 
 @pytest.mark.asyncio
+async def test_owner_forward_non_200_body_read_failure_keeps_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeResponse:
+        status = 502
+
+        async def __aenter__(self) -> "FakeResponse":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def text(self) -> str:
+            raise aiohttp.ClientPayloadError("truncated owner error body")
+
+    class FakeSession:
+        def __init__(self, *, timeout: aiohttp.ClientTimeout, trust_env: bool) -> None:
+            del timeout, trust_env
+
+        async def __aenter__(self) -> "FakeSession":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def post(self, url: str, **kwargs: object) -> FakeResponse:
+            del url, kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.aiohttp.ClientSession", FakeSession)
+    monkeypatch.setattr("app.modules.proxy.http_bridge_forwarding.time.monotonic", lambda: 10.0)
+    dispatched = {"called": False}
+    rejected = {"called": False}
+
+    async def collect() -> None:
+        client = HTTPBridgeOwnerClient()
+        async for _event in client.stream_responses(
+            owner_endpoint="http://instance-b:2455",
+            payload=_payload(),
+            headers={"Authorization": "Bearer proxy-key"},
+            context=HTTPBridgeForwardContext(
+                origin_instance="instance-a",
+                target_instance="instance-b",
+                codex_session_affinity=False,
+                downstream_turn_state=None,
+            ),
+            request_started_at=10.0,
+            on_request_dispatched=lambda: dispatched.__setitem__("called", True),
+            on_response_rejected=lambda: rejected.__setitem__("called", True),
+        ):
+            return
+
+    with pytest.raises(aiohttp.ClientPayloadError):
+        await collect()
+    assert rejected["called"] is True
+    assert dispatched["called"] is False
+
+
+@pytest.mark.asyncio
 async def test_owner_forward_cancel_during_aenter_marks_dispatched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

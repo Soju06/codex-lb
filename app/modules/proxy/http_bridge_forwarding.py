@@ -204,7 +204,7 @@ class HTTPBridgeOwnerClient:
                     on_request_dispatched()
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError):
-                if on_request_dispatched is not None:
+                if not observed_status and on_request_dispatched is not None:
                     # The request left local construction and may have reached
                     # the owner; origin must not release or replay.
                     on_request_dispatched()

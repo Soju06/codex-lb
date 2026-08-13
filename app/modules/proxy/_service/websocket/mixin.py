@@ -2513,8 +2513,10 @@ class _WebSocketMixin:
             cleanup_timeout = shutdown_state.remaining_drain_timeout_seconds()
             if cleanup_timeout is None:
                 cleanup_timeout = _facade()._TASK_CANCEL_TIMEOUT_SECONDS
+            cleanup_phase = "not_started"
 
             async def finalize_websocket_scope() -> None:
+                nonlocal cleanup_phase
                 nonlocal replay_request_state
                 nonlocal request_state_failure_task
                 nonlocal request_state_to_fail
@@ -2527,6 +2529,7 @@ class _WebSocketMixin:
                     # release that wait.
                     reader_to_await.cancel()
                 if upstream is not None:
+                    cleanup_phase = "upstream_close"
                     await _close_websocket_upstream_for_cleanup(
                         proxy,
                         upstream,
@@ -2534,6 +2537,7 @@ class _WebSocketMixin:
                     )
                 if reader_to_await is not None:
                     try:
+                        cleanup_phase = "upstream_reader"
                         await _facade()._await_cancelled_task(
                             reader_to_await,
                             label="proxy websocket upstream reader",
@@ -2550,6 +2554,7 @@ class _WebSocketMixin:
                     upstream_reader = None
                 if retired_create_lease_release_task is not None:
                     try:
+                        cleanup_phase = "retired_create_lease"
                         await _facade()._await_cancelled_task(
                             retired_create_lease_release_task,
                             timeout_seconds=cleanup_timeout,
@@ -2564,6 +2569,7 @@ class _WebSocketMixin:
                     retired_create_lease_release_task = None
                 if request_state_failure_task is not None:
                     try:
+                        cleanup_phase = "unsent_request"
                         await _facade()._await_cancelled_task(
                             request_state_failure_task,
                             timeout_seconds=cleanup_timeout,
@@ -2580,6 +2586,7 @@ class _WebSocketMixin:
                     replay_request_state = upstream_control.replay_request_state
                     upstream_control.replay_request_state = None
                 if request_state_to_fail is not None:
+                    cleanup_phase = "unsent_request"
                     await proxy._fail_pending_websocket_requests(
                         account=None,
                         account_id_value=account.id if account is not None else upstream_account_id,
@@ -2598,6 +2605,7 @@ class _WebSocketMixin:
                     )
                     request_state_to_fail = None
                 if replay_request_state is not None:
+                    cleanup_phase = "replay_request"
                     await proxy._fail_pending_websocket_requests(
                         account=None,
                         account_id_value=account.id if account is not None else upstream_account_id,
@@ -2615,6 +2623,7 @@ class _WebSocketMixin:
                         penalize_account=False,
                     )
                 client_disconnected = downstream_activity.disconnected
+                cleanup_phase = "pending_requests"
                 await proxy._fail_pending_websocket_requests(
                     account=None if client_disconnected or scope_cancelled else account,
                     account_id_value=account.id if account is not None else upstream_account_id,
@@ -2637,6 +2646,7 @@ class _WebSocketMixin:
                     penalize_account=not (client_disconnected or scope_cancelled),
                 )
                 try:
+                    cleanup_phase = "connection_lease"
                     await release_current_account_lease()
                 except Exception:
                     # Connection-lease cleanup must never replace cancellation
@@ -2645,6 +2655,7 @@ class _WebSocketMixin:
                         "Failed to release websocket connection lease during scope cleanup",
                         exc_info=True,
                     )
+                cleanup_phase = "complete"
 
             cleanup_task = asyncio.create_task(
                 finalize_websocket_scope(),
@@ -2670,8 +2681,9 @@ class _WebSocketMixin:
             if not done:
                 _facade().logger.warning(
                     "Websocket scope cleanup exceeded its remaining drain budget "
-                    "timeout_seconds=%.3f background_cleanup_tasks=%d",
+                    "timeout_seconds=%.3f cleanup_phase=%s background_cleanup_tasks=%d",
                     max(float(cleanup_timeout), 0.0),
+                    cleanup_phase,
                     sum(1 for task in proxy._background_cleanup_tasks if not task.done()),
                 )
 

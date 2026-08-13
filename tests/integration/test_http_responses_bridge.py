@@ -7062,7 +7062,11 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(async_client, monkeypatch):
+async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
     # The app lifespan registers the process hostname in the durable bridge
     # ring before this test installs its settings. Keep the test on that same
     # instance so the startup heartbeat cannot make the reconnect path look
@@ -7074,6 +7078,37 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
     second_upstream = _FakeBridgeUpstreamWebSocket()
     upstreams = [first_upstream, second_upstream]
     connect_count = 0
+    service = get_proxy_service_for_app(app_instance)
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    release_finished = asyncio.Event()
+    replacement_claimed = asyncio.Event()
+    claim_count = 0
+    released_lookup = None
+    original_claim_live_session = service._durable_bridge.claim_live_session
+    original_release_live_session = service._durable_bridge.release_live_session
+
+    async def overlap_replacement_claim_with_release(*args, **kwargs):
+        nonlocal claim_count
+        claim_count += 1
+        lookup = await original_claim_live_session(*args, **kwargs)
+        if claim_count == 2:
+            replacement_claimed.set()
+            await _wait_for_event(release_finished)
+            assert released_lookup is not None
+            # Model the repository refresh that can observe the concurrent
+            # release after the replacement commit. The returned owner must
+            # still be the replacement generation.
+            return released_lookup
+        return lookup
+
+    async def pause_retiring_release(*args, **kwargs):
+        nonlocal released_lookup
+        release_started.set()
+        await _wait_for_event(allow_release)
+        released_lookup = await original_release_live_session(*args, **kwargs)
+        release_finished.set()
+        return released_lookup
 
     async def fake_select_account_with_budget(
         self,
@@ -7138,6 +7173,8 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fail_legacy_stream)
+    monkeypatch.setattr(service._durable_bridge, "claim_live_session", overlap_replacement_claim_with_release)
+    monkeypatch.setattr(service._durable_bridge, "release_live_session", pause_retiring_release)
 
     payload = {
         "model": "gpt-5.1",
@@ -7149,13 +7186,19 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         "prompt_cache_key": f"http-bridge-reconnect-thread-{account_id}",
     }
     first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
-    second = await asyncio.wait_for(
-        async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS
-    )
+    await _wait_for_event(release_started)
+    second_task = asyncio.create_task(async_client.post("/v1/responses", json=payload))
+    await _wait_for_event(replacement_claimed)
+    allow_release.set()
+    second = await asyncio.wait_for(second_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
     assert first.status_code == 200
     assert second.status_code == 200
+    assert claim_count == 2
     assert connect_count == 2
+    assert released_lookup is not None
+    assert released_lookup.owner_instance_id == socket.gethostname()
+    assert released_lookup.owner_epoch == 2
 
 
 @pytest.mark.asyncio

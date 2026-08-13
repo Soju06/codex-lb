@@ -513,7 +513,17 @@ class _HTTPBridgeMixin(
             continuity_error: ProxyResponseError | None = None
             owner_mismatch_error: ProxyResponseError | None = None
             owner_forward: _HTTPBridgeOwnerForward | None = None
-            force_durable_takeover = force_durable_takeover_after_detach
+            # A retiring reader removes its session from the local registry
+            # before durable release finishes. If the next request reaches
+            # creation in that window, there is no local object left to set
+            # ``force_durable_takeover_after_detach`` even though the durable
+            # row still represents the detached generation. Advance the epoch
+            # for that fresh local replacement so the late release is fenced.
+            unrepresented_current_owner = (
+                durable_lookup is not None
+                and durable_lookup.owner_instance_id == settings.http_responses_session_bridge_instance_id
+            )
+            force_durable_takeover = force_durable_takeover_after_detach or unrepresented_current_owner
             missing_turn_state_alias = False
             sessions_to_close_before_create: list[_HTTPBridgeSession] = []
             session_to_return_after_close: _HTTPBridgeSession | None = None

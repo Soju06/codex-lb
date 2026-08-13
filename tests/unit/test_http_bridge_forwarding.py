@@ -7,6 +7,7 @@ from typing import cast
 
 import aiohttp
 import pytest
+from aiohttp.client_reqrep import ConnectionKey
 
 from app.core.config.settings import get_settings
 from app.core.openai.requests import ResponsesRequest
@@ -1243,7 +1244,7 @@ async def test_owner_forward_allows_json_content_type_for_internal_post(
 
 
 def _connector_error() -> aiohttp.ClientConnectorError:
-    connection_key = aiohttp.client_reqrep.ConnectionKey(
+    connection_key = ConnectionKey(
         host="instance-b",
         port=2455,
         is_ssl=False,

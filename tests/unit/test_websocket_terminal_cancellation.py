@@ -152,6 +152,7 @@ async def test_transport_end_replay_requires_send_boundary_only_for_direct_webso
 @pytest.mark.asyncio
 async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains_drain_owned(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     @asynccontextmanager
     async def repo_factory() -> AsyncIterator[SimpleNamespace]:
@@ -213,6 +214,7 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
     )
     await asyncio.wait_for(receive_started.wait(), timeout=1)
 
+    caplog.set_level(logging.WARNING)
     shutdown_state.commit_shutdown(timeout_seconds=0.1)
     started_at = asyncio.get_running_loop().time()
     scope_task.cancel()
@@ -230,6 +232,11 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
         task.get_name() == "proxy-websocket-finalization-scope-cleanup"
         for task in service._background_cleanup_tasks
         if not task.done()
+    )
+    assert any(
+        "Websocket scope cleanup exceeded its remaining drain budget" in message
+        and "cleanup_phase=pending_requests" in message
+        for message in caplog.messages
     )
 
     persistence_drain = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=1))

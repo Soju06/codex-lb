@@ -31,6 +31,7 @@ from app.db.models import (
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_allow_durable_takeover,
+    _http_bridge_claim_allows_takeover,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
 )
 from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
@@ -1983,3 +1984,16 @@ def test_durable_lookup_allows_turn_state_takeover_requires_inactive_lease() -> 
     assert _http_bridge_allow_durable_takeover(expired_draining) is True
     assert _http_bridge_allow_durable_takeover(released_draining) is True
     assert _http_bridge_allow_durable_takeover(closed) is True
+    assert _http_bridge_claim_allows_takeover(live_draining, force=True) is False
+    assert _http_bridge_claim_allows_takeover(expired_draining, force=True) is True
+    assert _http_bridge_claim_allows_takeover(released_draining, force=True) is True
+    assert _http_bridge_claim_allows_takeover(closed, force=True) is True
+    live_active = _durable_lookup(
+        session_id="sess-5",
+        owner_instance_id="instance-b",
+        owner_epoch=1,
+        state=HttpBridgeSessionState.ACTIVE,
+        lease_seconds_from_now=60.0,
+    )
+    assert _http_bridge_claim_allows_takeover(live_active, force=True) is True
+    assert _http_bridge_claim_allows_takeover(live_active, force=False) is False

@@ -16385,6 +16385,72 @@ async def test_get_or_create_http_bridge_session_recovers_locally_when_owner_end
 
 
 @pytest.mark.asyncio
+async def test_get_or_create_http_bridge_session_does_not_force_takeover_live_draining_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_123", None)
+    created_session = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={"x-codex-turn-state": "http_turn_123"},
+        affinity=proxy_service._AffinityPolicy(key="http_turn_123"),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=120.0,
+    )
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
+    claim_durable = AsyncMock()
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", claim_durable)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+    service._ring_membership = cast(Any, SimpleNamespace(resolve_endpoint=AsyncMock(return_value=None)))
+
+    resolved = await service._get_or_create_http_bridge_session(
+        key,
+        headers={"x-codex-turn-state": "http_turn_123"},
+        affinity=proxy_service._AffinityPolicy(key="http_turn_123"),
+        api_key=None,
+        request_model="gpt-5.4",
+        idle_ttl_seconds=120.0,
+        max_sessions=8,
+        previous_response_id="resp_prev_1",
+        allow_forward_to_owner=True,
+        durable_lookup=proxy_service.DurableBridgeLookup(
+            session_id="durable-1",
+            canonical_kind="turn_state_header",
+            canonical_key="http_turn_123",
+            api_key_scope="__anonymous__",
+            account_id="acc-1",
+            owner_instance_id="instance-b",
+            owner_epoch=2,
+            lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
+            state=HttpBridgeSessionState.DRAINING,
+            latest_turn_state="http_turn_123",
+            latest_response_id="resp_prev_1",
+        ),
+    )
+
+    assert resolved is created_session
+    claim_durable.assert_awaited_once()
+    await_args = claim_durable.await_args
+    assert await_args is not None
+    assert await_args.kwargs["allow_takeover"] is False
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_http_bridge_session_recovers_locally_without_anchor_for_single_instance_stale_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

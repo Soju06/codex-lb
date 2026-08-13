@@ -74,11 +74,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
     _http_bridge_alias_target_is_stale,
-    _http_bridge_allow_durable_takeover,
     _http_bridge_can_local_recover_without_ring,
     _http_bridge_can_recover_during_drain,
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
+    _http_bridge_claim_allows_takeover,
     _http_bridge_compatible,
     _http_bridge_continuity_lost_error_envelope,
     _http_bridge_endpoint_matches_current_instance,
@@ -1526,7 +1526,10 @@ class _HTTPBridgeMixin(
                 created_session = await create_session(key, **create_kwargs)
                 await self._claim_durable_http_bridge_session(
                     created_session,
-                    allow_takeover=force_durable_takeover or _http_bridge_allow_durable_takeover(durable_lookup),
+                    allow_takeover=_http_bridge_claim_allows_takeover(
+                        durable_lookup,
+                        force=force_durable_takeover,
+                    ),
                     force_owner_epoch_advance=force_durable_takeover,
                 )
                 async with self._http_bridge_lock:

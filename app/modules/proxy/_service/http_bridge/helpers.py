@@ -1577,6 +1577,18 @@ def _http_bridge_allow_durable_takeover(lookup: DurableBridgeLookup | None) -> b
     return _http_bridge_durable_lookup_allows_turn_state_takeover(lookup)
 
 
+def _http_bridge_claim_allows_takeover(
+    lookup: DurableBridgeLookup | None,
+    *,
+    force: bool,
+) -> bool:
+    if _http_bridge_allow_durable_takeover(lookup):
+        return True
+    if not force:
+        return False
+    return lookup is None or lookup.state != "draining"
+
+
 def _http_bridge_has_durable_recovery_anchor(
     *,
     previous_response_id: str | None,
@@ -2697,6 +2709,7 @@ for _helper_name in (
     "_durable_bridge_lookup_active_owner",
     "_durable_bridge_lookup_allows_local_reuse",
     "_http_bridge_allow_durable_takeover",
+    "_http_bridge_claim_allows_takeover",
     "_http_bridge_has_durable_recovery_anchor",
     "_http_bridge_can_local_recover_without_ring",
     "_http_bridge_can_single_instance_owner_takeover_without_anchor",

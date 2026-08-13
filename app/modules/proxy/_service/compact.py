@@ -786,6 +786,23 @@ class _CompactMixin:
             if settlement_error is not None:
                 raise settlement_error
 
+        async def settle_on_terminal_exit() -> None:
+            if settlement_attempted:
+                return
+            try:
+                await settle_compact_usage(
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    response=None,
+                    request_service_tier=request_service_tier,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to settle compact reservation after unexpected exit request_id=%s",
+                    request_id,
+                    exc_info=True,
+                )
+
         async def record_or_defer_proxy_health(
             failed_account: Account,
             failed_exc: ProxyResponseError,
@@ -1650,6 +1667,7 @@ class _CompactMixin:
                 openai_error("upstream_unavailable", "All account attempts exhausted"),
             )
         except ProxyResponseError as exc:
+            await settle_on_terminal_exit()
             failure_metadata = _request_log_failure_metadata(exc)
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
@@ -1673,20 +1691,7 @@ class _CompactMixin:
                 openai_error("upstream_proxy_unavailable", f"Upstream proxy route unavailable: {exc.reason}"),
             ) from exc
         except BaseException:
-            if not settlement_attempted:
-                try:
-                    await settle_compact_usage(
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        response=None,
-                        request_service_tier=request_service_tier,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Failed to settle compact reservation after unexpected exit request_id=%s",
-                        request_id,
-                        exc_info=True,
-                    )
+            await settle_on_terminal_exit()
             raise
         finally:
             usage = response.usage if response else None

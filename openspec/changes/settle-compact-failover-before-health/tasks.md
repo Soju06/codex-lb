@@ -12,6 +12,8 @@
 - [x] 1.6 Shield deferred health flush so cancellation during the write
   still completes the penalty.
 - [x] 1.7 Continue remaining deferred health writes if one write fails.
+- [x] 1.8 Settle and flush deferred health when a later account selection
+  times out.
 
 ## 2. Regression coverage
 
@@ -37,6 +39,8 @@
   the write.
 - [x] 2.12 Assert a later deferred health write still runs after an earlier
   write fails.
+- [x] 2.13 Assert a post-failover account-selection timeout still flushes
+  deferred health.
 
 ## 3. Validation
 

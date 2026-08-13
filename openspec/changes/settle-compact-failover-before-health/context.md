@@ -20,4 +20,6 @@ settle handlers, so they need an explicit settle-then-flush before the
 original exception continues. The flush itself is shielded so a cancel that
 arrives after queues are drained cannot drop the remaining health write.
 Each deferred entry is written independently so one persistence failure does
-not skip the other failed accounts.
+not skip the other failed accounts. A later `_select_account_with_budget`
+timeout is a `ProxyResponseError`, so it must use the same settle-and-flush
+cleanup as other unsettled exits.

@@ -2441,6 +2441,48 @@ async def test_claim_refuses_live_draining_lease_without_allow_takeover(
 
 
 @pytest.mark.asyncio
+async def test_claim_refuses_live_draining_lease_even_with_allow_takeover(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-draining-force",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+    updated = await coordinator.mark_instance_draining(instance_id="instance-a")
+    assert updated == 1
+
+    refused = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-draining-force",
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_process_epoch="test-process-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_2",
+        latest_response_id="resp_2",
+        allow_takeover=True,
+    )
+
+    assert refused.owner_instance_id == "instance-a"
+    assert refused.state == "draining"
+    assert refused.lease_expires_at == claimed.lease_expires_at
+    assert refused.lease_is_active(now=utcnow()) is True
+
+
+@pytest.mark.asyncio
 async def test_claim_takes_over_expired_draining_lease(
     coordinator: DurableBridgeSessionCoordinator,
     async_session_factory: Callable[[], AsyncSession],

@@ -645,7 +645,12 @@ class DurableBridgeRepository:
             owner_changed = existing.owner_instance_id != instance_id
             if owner_changed:
                 lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
-                if not allow_takeover and not lease_expired and not owner_absent and not state_closed:
+                live_owned_draining = (
+                    existing.state == HttpBridgeSessionState.DRAINING and not lease_expired and not owner_absent
+                )
+                if live_owned_draining or (
+                    not allow_takeover and not lease_expired and not owner_absent and not state_closed
+                ):
                     return _to_snapshot_required(existing)
                 next_epoch = existing.owner_epoch + 1
             elif account_changed or force_owner_epoch_advance:

@@ -7,8 +7,11 @@ had the same hole and fed local session create.
 The live-owner check already exists: `_durable_bridge_lookup_active_owner`
 returns None for closed, missing owner, or expired lease. Claim and local
 create now use that rule. Forced recovery after a missing ring endpoint
-must not override a live DRAINING owner. CLOSED, expired, and ownerless
-DRAINING rows stay recoverable after the draining replica finishes or dies.
+must not override a live DRAINING owner. The locked claim row is the
+source of that decision, so a stale ACTIVE lookup cannot authorize a
+steal after the owner has started draining. CLOSED, expired, and
+ownerless DRAINING rows stay recoverable after the draining replica
+finishes or dies.
 
 Example: instance A marks its session DRAINING during preStop with 60s left
 on the lease. Instance B claims the same session key with

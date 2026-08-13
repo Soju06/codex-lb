@@ -9,6 +9,7 @@ import pickle
 import subprocess
 import time
 from collections import deque
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
@@ -20,6 +21,7 @@ import aiohttp
 import anyio
 import pytest
 from fastapi import WebSocket
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
@@ -36,7 +38,7 @@ from app.core.clients.proxy_websocket import (
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
-from app.db.models import AccountStatus, HttpBridgeSessionState
+from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import http_bridge_forwarding as http_bridge_forwarding_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import support as proxy_support_module
@@ -16448,6 +16450,102 @@ async def test_get_or_create_http_bridge_session_does_not_force_takeover_live_dr
     await_args = claim_durable.await_args
     assert await_args is not None
     assert await_args.kwargs["allow_takeover"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_does_not_steal_when_active_lookup_becomes_live_draining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    coordinator = DurableBridgeSessionCoordinator(cast(Callable[[], AsyncSession], session_factory))
+    stale_lookup = await coordinator.claim_live_session(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_race",
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_process_epoch="test-process-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_race",
+        latest_response_id="resp_prev_1",
+        allow_takeover=True,
+    )
+    assert stale_lookup.state == HttpBridgeSessionState.ACTIVE
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._durable_bridge = coordinator
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "http_turn_race", None)
+    created_session = proxy_service._HTTPBridgeSession(
+        key=key,
+        headers={"x-codex-turn-state": "http_turn_race"},
+        affinity=proxy_service._AffinityPolicy(key="http_turn_race"),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=2.0,
+        idle_ttl_seconds=120.0,
+    )
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", AsyncMock(return_value=created_session))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-a"),
+    )
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-b"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ["instance-a", "instance-b"])),
+    )
+    service._ring_membership = cast(Any, SimpleNamespace(resolve_endpoint=AsyncMock(return_value=None)))
+
+    real_claim = coordinator.claim_live_session
+
+    async def claim_after_drain(*args: Any, **kwargs: Any) -> DurableBridgeLookup:
+        await coordinator.mark_instance_draining(instance_id="instance-b")
+        return await real_claim(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator, "claim_live_session", claim_after_drain)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._get_or_create_http_bridge_session(
+            key,
+            headers={"x-codex-turn-state": "http_turn_race"},
+            affinity=proxy_service._AffinityPolicy(key="http_turn_race"),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+            previous_response_id="resp_prev_1",
+            allow_forward_to_owner=True,
+            durable_lookup=stale_lookup,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.payload["error"]["code"] == "bridge_instance_mismatch"
+    after = await coordinator.lookup_request_targets(
+        session_key_kind="turn_state_header",
+        session_key_value="http_turn_race",
+        api_key_id=None,
+        turn_state="http_turn_race",
+        session_header=None,
+        previous_response_id="resp_prev_1",
+    )
+    assert after is not None
+    assert after.owner_instance_id == "instance-b"
+    assert after.state == HttpBridgeSessionState.DRAINING
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,8 @@
   turn-state helper.
 - [x] 1.3 Mask forced local recovery so a missing ring endpoint cannot
   steal a live DRAINING lease.
+- [x] 1.4 Refuse live DRAINING on the locked claim row even when
+  `allow_takeover` is true.
 
 ## 2. Regression coverage
 
@@ -15,6 +17,8 @@
   DRAINING lookup and true for expired or released DRAINING.
 - [x] 2.3 Assert get-or-create claims with `allow_takeover` false when the
   durable lookup is live DRAINING and the owner endpoint is missing.
+- [x] 2.4 Assert get-or-create does not steal when an ACTIVE lookup becomes
+  live DRAINING before the locked claim.
 
 ## 3. Validation
 

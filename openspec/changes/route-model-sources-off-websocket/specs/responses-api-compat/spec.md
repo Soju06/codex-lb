@@ -21,6 +21,21 @@ fast-mode alias, replacing the raw candidate with the normalized model. A
 source that exposes an alias-named model MUST be matched on the WebSocket
 transport whenever the HTTP path would route to it.
 
+Both checks SHALL apply only to requests that are eligible for model-source
+routing on the HTTP request path, judged on the full client input before any
+WebSocket-specific trimming or anchor injection. A request whose input ends
+with a terminal `compaction_trigger` item, or that references uploaded files
+(`input_file` / file-backed `input_image` items), is excluded from source
+routing over HTTP — the former is served by the upstream compact flow on the
+turn's owner account, the latter is pinned to the subscription account that
+received the upload — and MUST NOT be failed by either WebSocket guard even
+when its model also resolves to an enabled source. Such requests proceed to
+subscription account selection and the owner-routing rules, exactly as they
+would after the HTTP route skips source selection. A malformed compaction
+trigger (repeated, or not the final top-level input item) SHALL keep the
+guards active: the HTTP route rejects that payload with a 400, the WebSocket
+path forwards it verbatim, and the exclusion changes neither.
+
 Both failures MUST use error code `model_source_requires_http_transport`. On the
 connect path the failure MUST be emitted as a service-level connect failure
 (HTTP status `503`), so that Codex clients fall back to the HTTP transport,
@@ -60,6 +75,23 @@ silently routing source traffic to a subscription account would be worse there.
 - **WHEN** the key sends a WebSocket `response.create` for `gpt-5-high`, which enforcement normalizes to `gpt-5`
 - **THEN** the source-ownership check also considers the raw `gpt-5-high` candidate
 - **AND** the request is rejected with `model_source_requires_http_transport` on the connect path and on socket reuse alike
+
+#### Scenario: A file-referencing turn is dispatched to its pinned account, not failed
+
+- **GIVEN** a WebSocket Responses session already has an open subscription-account upstream
+- **AND** a later `response.create` references an uploaded `input_file` pinned to that account
+- **AND** the request's model is also exposed by an enabled model source
+- **WHEN** the turn is prepared for the open socket
+- **THEN** the reuse guard does not fail the turn with `model_source_requires_http_transport`
+- **AND** the turn is forwarded to the pinned subscription account
+
+#### Scenario: A terminal compaction trigger is not failed by the WebSocket guards
+
+- **GIVEN** a `response.create` whose final top-level input item is a `compaction_trigger`
+- **AND** the request's model is also exposed by an enabled model source
+- **WHEN** the request reaches the connect path or an already-open subscription upstream
+- **THEN** neither WebSocket guard fails the request with `model_source_requires_http_transport`
+- **AND** the connect path proceeds to subscription account selection, and an open upstream receives the turn
 
 #### Scenario: An API key that enforces a source-owned model is rejected
 

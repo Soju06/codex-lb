@@ -610,3 +610,304 @@ async def test_connect_guard_sees_the_raw_model_alias(monkeypatch: pytest.Monkey
     assert emitted.get("error_code") == "model_source_requires_http_transport"
     assert emitted.get("status_code") == 503
     assert "gpt-5-high" in catalog.seen_candidates, "the raw alias must reach source selection on the connect path"
+
+
+def _create_frame_with_input(model: str, input_items: list[dict[str, object]]) -> str:
+    return json.dumps(
+        {
+            "type": "response.create",
+            "model": model,
+            "instructions": "",
+            "input": input_items,
+            "stream": True,
+        },
+        separators=(",", ":"),
+    )
+
+
+def _input_file_frame(model: str, file_id: str) -> str:
+    return _create_frame_with_input(
+        model,
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "summarize the attachment"},
+                    {"type": "input_file", "file_id": file_id},
+                ],
+            }
+        ],
+    )
+
+
+def _compaction_trigger_frame(model: str) -> str:
+    return _create_frame_with_input(
+        model,
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "compaction_trigger"},
+        ],
+    )
+
+
+class _TurnSerializedDownstream:
+    """A downstream that sends each next frame only after the prior turn ends.
+
+    ``_Downstream`` hands the session loop the next frame as soon as it asks,
+    so a second turn can be dispatched while the first turn's events are still
+    in flight; the first turn's terminal frame then arrives with no pending
+    client frames left and ends the session before the second turn's events
+    come back. The rejection tests never notice — the guard fails the second
+    turn synchronously inside the message loop — but the forwarding
+    regressions below need the second turn's scripted upstream events to reach
+    the client, so this downstream serializes turns the way a real Codex
+    client does: it waits for a terminal frame before sending the next
+    ``response.create``.
+    """
+
+    def __init__(self, request_texts: list[str]) -> None:
+        self.pending = list(request_texts)
+        self.done = asyncio.Event()
+        self.sent_text: list[str] = []
+        self.turn_completed = asyncio.Event()
+        self._dispatched_any = False
+
+    async def receive(self) -> dict[str, object]:
+        if self.pending:
+            if self._dispatched_any:
+                await self.turn_completed.wait()
+                self.turn_completed.clear()
+            self._dispatched_any = True
+            return {"type": "websocket.receive", "text": self.pending.pop(0)}
+        await self.done.wait()
+        return {"type": "websocket.disconnect"}
+
+    async def send_text(self, text: str) -> None:
+        self.sent_text.append(text)
+        payload = json.loads(text)
+        if payload.get("type") in {"response.completed", "response.failed", "error"}:
+            self.turn_completed.set()
+            if not self.pending:
+                self.done.set()
+
+    async def send_bytes(self, _data: bytes) -> None:
+        return None
+
+    async def close(self, code: int = 1000, reason: str | None = None) -> None:
+        del code, reason
+        self.done.set()
+
+
+@pytest.mark.asyncio
+async def test_reuse_guard_forwards_a_pinned_input_file_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later source-owned turn that references an uploaded file must be forwarded.
+
+    The HTTP route skips source selection whenever the input references an
+    ``input_file`` — the upload is account-scoped, so the request is pinned to
+    the subscription account that received it. The equivalent WebSocket turn
+    must reach that account through the owner-routing path instead of being
+    failed by the reuse guard (regression for the source-routing-exclusions
+    P2).
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_source_guard_file_pin")
+    upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
+
+    async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        return account, upstream
+
+    # The second turn's model is source-owned, like the reuse-guard rejection test.
+    async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
+        return model == "qwen3.8-max"
+
+    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", source_owned_for_qwen)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+
+    await service._pin_file_account("file_ws_guard_pin", account.id)
+    downstream = _TurnSerializedDownstream(
+        [_create_frame("gpt-5.6-sol"), _input_file_frame("qwen3.8-max", "file_ws_guard_pin")]
+    )
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert not any("model_source_requires_http_transport" in text for text in downstream.sent_text), (
+        "HTTP excludes file-referencing requests from source routing, so the "
+        "reuse guard must not fail the file-pinned turn"
+    )
+    assert len(upstream.sent_text) == 2, "the file-pinned turn must be forwarded to the pinned subscription account"
+    assert any("resp_turn_two" in text for text in downstream.sent_text), "the file-pinned turn must complete"
+
+
+@pytest.mark.asyncio
+async def test_reuse_guard_forwards_a_terminal_compaction_trigger_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal compaction-trigger turn must stay on the subscription upstream.
+
+    The HTTP route serves terminal compaction triggers through the upstream
+    compact flow on the turn's owner account and never source-routes them, so
+    the reuse guard must not fail the equivalent WebSocket turn even when its
+    model is also exposed by a source (regression for the
+    source-routing-exclusions P2).
+    """
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_source_guard_compact")
+    upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
+
+    async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        return account, upstream
+
+    async def source_owned_for_qwen(model, _api_key, *, raw_model=None):  # noqa: ANN001
+        return model == "qwen3.8-max"
+
+    monkeypatch.setattr(ws_mixin, "responses_model_is_source_owned", source_owned_for_qwen)
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fake_connect)
+    monkeypatch.setattr(service, "_resolve_compact_turn_state_owner", AsyncMock(return_value=None))
+
+    downstream = _TurnSerializedDownstream([_create_frame("gpt-5.6-sol"), _compaction_trigger_frame("qwen3.8-max")])
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert not any("model_source_requires_http_transport" in text for text in downstream.sent_text), (
+        "HTTP excludes terminal compaction triggers from source routing, so "
+        "the reuse guard must not fail the compaction turn"
+    )
+    assert len(upstream.sent_text) == 2, "the compaction turn must be forwarded to the subscription upstream"
+    assert any("resp_turn_two" in text for text in downstream.sent_text), "the compaction turn must complete"
+
+
+async def _drive_prepared_request_into_connect_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    frame: str,
+):
+    """Prepare ``frame`` for real and drive it into the real connect guard.
+
+    Mirrors ``test_connect_guard_sees_the_raw_model_alias``: the alias catalog
+    makes ``gpt-5-high`` genuinely source-owned, so before the exclusions fix
+    the guard demonstrably fires for these frames — the stubbed account
+    selector standing in for the failover loop proves the guard was skipped.
+    """
+    settings = _make_proxy_settings()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+
+    catalog = _AliasSourceCatalog({"gpt-5-high"})
+    catalog.install(monkeypatch)
+
+    api_key = _alias_allowlist_api_key()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+
+    emitted: dict[str, object] = {}
+    selection_calls = 0
+
+    async def fake_refresh(key):  # noqa: ANN001, ANN202
+        return api_key
+
+    async def fake_emit(self, websocket, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        emitted.update(kwargs)
+
+    async def fake_select(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        nonlocal selection_calls
+        selection_calls += 1
+        return None
+
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", fake_refresh)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_service.ProxyService, "_emit_websocket_connect_failure", fake_emit)
+    monkeypatch.setattr(proxy_service.ProxyService, "_select_websocket_connect_account", fake_select)
+
+    prepared = await service._prepare_websocket_response_create_request(
+        json.loads(frame),
+        headers={},
+        codex_session_affinity=False,
+        openai_cache_affinity=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=0,
+        api_key=api_key,
+    )
+
+    account, upstream = await service._connect_proxy_websocket(
+        {},
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        routing_strategy="capacity_weighted",
+        model=prepared.request_state.model,
+        request_state=prepared.request_state,
+        api_key=api_key,
+        client_send_lock=anyio.Lock(),
+        websocket=AsyncMock(),
+    )
+    return prepared, account, upstream, emitted, lambda: selection_calls
+
+
+@pytest.mark.asyncio
+async def test_connect_guard_skips_input_file_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect guard must not bounce a file-referencing request to HTTP.
+
+    An ``input_file`` reference excludes the request from source routing on
+    the HTTP path — pinned or not, the upload lives on a subscription
+    account — so the connect path must proceed to (owner-required) account
+    selection instead of emitting the 503 fallback.
+    """
+    prepared, account, upstream, emitted, selection_calls = await _drive_prepared_request_into_connect_guard(
+        monkeypatch,
+        _input_file_frame("gpt-5-high", "file_ws_connect_unpinned"),
+    )
+
+    assert emitted == {}, "the connect guard must not emit the 503 HTTP-fallback failure"
+    assert selection_calls() >= 1, "file-referencing requests must proceed to account selection"
+    assert account is None  # the stubbed selector returns no account
+    assert upstream is None
+    assert prepared.request_state.source_route_excluded is True, (
+        "preparation must record the HTTP source-route exclusion on the request state"
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_guard_skips_terminal_compaction_trigger_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The connect guard must not bounce a terminal compaction trigger to HTTP.
+
+    HTTP serves these through the compact flow on the owner account and never
+    source-routes them; the WebSocket connect path must likewise proceed to
+    account selection.
+    """
+    prepared, account, upstream, emitted, selection_calls = await _drive_prepared_request_into_connect_guard(
+        monkeypatch,
+        _compaction_trigger_frame("gpt-5-high"),
+    )
+
+    assert emitted == {}, "the connect guard must not emit the 503 HTTP-fallback failure"
+    assert selection_calls() >= 1, "compaction-trigger requests must proceed to account selection"
+    assert account is None  # the stubbed selector returns no account
+    assert upstream is None
+    assert prepared.request_state.source_route_excluded is True, (
+        "preparation must record the HTTP source-route exclusion on the request state"
+    )

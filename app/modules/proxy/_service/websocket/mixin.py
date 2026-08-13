@@ -476,6 +476,7 @@ from app.modules.proxy.request_policy import (
     openai_client_payload_error,
     openai_invalid_payload_error,
     openai_validation_error,
+    responses_source_route_excluded,
     validate_model_access,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
@@ -1605,6 +1606,15 @@ class _WebSocketMixin:
                                     # (503, which the client transparently falls back from).
                                     and upstream_reader is not None
                                     and not upstream_reader.done()
+                                    # Requests the HTTP route excludes from
+                                    # source routing (a terminal compaction
+                                    # trigger, ``input_file`` references)
+                                    # must stay on subscription accounts even
+                                    # when their model is also source-owned;
+                                    # the owner-routing below dispatches them
+                                    # to the pinned account instead of this
+                                    # guard failing the turn.
+                                    and not request_state.source_route_excluded
                                     and await responses_model_is_source_owned(
                                         request_state.model,
                                         request_state.api_key or api_key,
@@ -2735,6 +2745,17 @@ class _WebSocketMixin:
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
+        # Judged on the full client input, before the websocket-specific
+        # trimming and anchor injection below rewrite it — the same payload
+        # the HTTP route evaluates for its source-selection gate.
+        try:
+            source_route_excluded = responses_source_route_excluded(responses_payload)
+        except ClientPayloadError:
+            # HTTP rejects a malformed compaction trigger with a 400; the
+            # WebSocket path has always forwarded such frames verbatim, so a
+            # parse failure keeps the source guards active instead of
+            # changing that behavior here.
+            source_route_excluded = False
         normalized_payload = responses_payload.to_payload()
         stripped_client_metadata = strip_capability_metadata(normalized_payload.get("client_metadata"))
         if stripped_client_metadata is not normalized_payload.get("client_metadata"):
@@ -2891,6 +2912,7 @@ class _WebSocketMixin:
         request_state.conversation_id = conversation_id
         request_state.client_ip = client_ip
         request_state.raw_source_model = raw_source_model
+        request_state.source_route_excluded = source_route_excluded
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         request_state.require_security_work_authorized = capability_route.require_security_work_authorized
@@ -3133,7 +3155,13 @@ class _WebSocketMixin:
         # per-request api key is used (rather than the session key) so a policy
         # refresh mid-session cannot make this disagree with the equivalent
         # check on the prepared-request path.
-        if await responses_model_is_source_owned(
+        #
+        # Requests the HTTP route excludes from source routing (a terminal
+        # compaction trigger, ``input_file`` references pinned to the
+        # uploading account) skip the guard: they must land on a subscription
+        # account either way, and the owner-required selection below routes
+        # them there instead of bouncing the turn to HTTP.
+        if not request_state.source_route_excluded and await responses_model_is_source_owned(
             model,
             request_state.api_key or api_key,
             # ``model`` is the session loop's post-enforcement

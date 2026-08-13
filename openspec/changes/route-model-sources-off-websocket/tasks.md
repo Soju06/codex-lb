@@ -27,4 +27,10 @@
       preparation and feed it to the source-ownership check on both the
       connect and reuse paths, so an alias-only source behind an alias
       allowlist matches like it does over HTTP (Codex P2).
+- [x] Preserve the HTTP source-routing exclusions in both WebSocket guards:
+      extract the HTTP gate into `responses_source_route_excluded`, stamp it
+      on the prepared request state, and skip the guards for terminal
+      compaction triggers and `input_file`-referencing requests so they
+      dispatch to their (owner-pinned) subscription account instead of
+      failing with `model_source_requires_http_transport` (Codex P2).
 

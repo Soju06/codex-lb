@@ -10,6 +10,50 @@ from app.core.openai.chat_requests import ChatCompletionsRequest
 from app.core.types import JsonValue
 
 
+def test_chat_to_responses_omits_unset_tools() -> None:
+    req = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    )
+
+    responses = req.to_responses_request()
+
+    assert "tools" not in req.model_fields_set
+    assert "tools" not in responses.model_fields_set
+    assert "tools" not in responses.to_payload()
+
+
+def test_chat_to_responses_preserves_explicit_empty_tools() -> None:
+    req = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [],
+        }
+    )
+
+    responses = req.to_responses_request()
+
+    assert responses.to_payload()["tools"] == []
+
+
+def test_chat_responses_shaped_payload_omits_unset_tools() -> None:
+    req = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        }
+    )
+
+    responses = req.to_responses_request()
+
+    assert "tools" not in req.model_fields_set
+    assert "tools" not in responses.model_fields_set
+    assert "tools" not in responses.to_payload()
+
+
 def test_chat_messages_to_responses_mapping():
     payload = {
         "model": "gpt-5.2",

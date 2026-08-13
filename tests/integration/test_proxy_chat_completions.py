@@ -58,6 +58,33 @@ async def test_v1_chat_completions_stream(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_omits_synthesized_tools(async_client, monkeypatch):
+    email = "chatnotools@example.com"
+    raw_account_id = "acc_chatnotools"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_chat_no_tools"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+    async with async_client.stream("POST", "/v1/chat/completions", json=payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    assert "tools" not in seen_payload
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_opportunistic_denial_runs_before_api_key_reservation(async_client, monkeypatch):
     settings = await async_client.put(
         "/api/settings",

@@ -38412,9 +38412,9 @@ def test_origin_release_follows_owner_forward_dispatch_outcome() -> None:
 
 def test_owner_forward_failure_allows_local_recovery_only_for_safe_outcomes() -> None:
     from app.modules.proxy._service.http_bridge.owner_forwarding import (
+        _owner_forward_failure_allows_local_recovery,
         _OwnerForwardOutcome,
         _OwnerForwardRequestError,
-        _owner_forward_failure_allows_local_recovery,
     )
 
     base = proxy_module.ProxyResponseError(
@@ -38456,6 +38456,55 @@ async def test_forwarded_receiver_cleanup_handoff_timeout_returns_503() -> None:
     aclose = getattr(stream, "aclose", None)
     if callable(aclose):
         await aclose()
+
+
+@pytest.mark.asyncio
+async def test_startup_cleanup_guard_runs_after_initial_heartbeat_disconnect() -> None:
+    released: list[str] = []
+    started = asyncio.Event()
+
+    async def pending_probe() -> str:
+        started.set()
+        await asyncio.Event().wait()
+        return "data: late\n\n"
+
+    async def hanging_service_stream() -> AsyncIterator[str]:
+        await asyncio.Event().wait()
+        yield "data: never\n\n"
+
+    startup_task = asyncio.create_task(pending_probe())
+    await started.wait()
+    cleanup_ready = asyncio.Event()
+
+    class _Cleanup:
+        owns_reservation = True
+        released = False
+
+        async def release(self, *, action: str) -> None:
+            released.append(action)
+
+    service_stream = hanging_service_stream()
+    stream = proxy_api._prepend_initial_sse_heartbeat(
+        service_stream,
+        ": keepalive\n\n",
+        request_id="startup-guard-heartbeat",
+    )
+    stream = proxy_api._guard_responses_startup_handoff(
+        stream,
+        startup_task=startup_task,
+        streams_to_close=(service_stream,),
+        reservation_cleanup=_Cleanup(),
+        responses_service_cleanup_ready_event=cleanup_ready,
+        responses_owner_forward_dispatched_event=asyncio.Event(),
+        responses_owner_forward_rejected_event=asyncio.Event(),
+    )
+
+    assert await anext(stream) == ": keepalive\n\n"
+    await stream.aclose()
+    await asyncio.sleep(0)
+
+    assert startup_task.cancelled()
+    assert released == ["responses startup handoff"]
 
 
 @pytest.mark.asyncio

@@ -5452,16 +5452,7 @@ async def _stream_responses(
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
-    if startup_handoff_tasks:
-        stream = _guard_responses_startup_handoff(
-            stream,
-            startup_task=startup_handoff_tasks[0],
-            streams_to_close=(stream,),
-            reservation_cleanup=reservation_cleanup,
-            responses_service_cleanup_ready_event=responses_service_cleanup_ready_event,
-            responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
-            responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
-        )
+    service_stream = stream
     use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
     keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
     if use_codex_keepalive:
@@ -5471,13 +5462,27 @@ async def _stream_responses(
             request_id=get_request_id(),
             route_family="responses",
         )
-    return StreamingResponse(
-        inject_sse_keepalives(
+    stream = inject_sse_keepalives(
+        stream,
+        get_settings().sse_keepalive_interval_seconds,
+        keepalive_frame=keepalive_frame,
+        on_keepalive=lambda: _record_stream_keepalive("responses"),
+    )
+    if startup_handoff_tasks:
+        # Outermost so a client close after the initial heartbeat still runs
+        # the reservation-cleanup finally. Heartbeat/keepalive wrappers do not
+        # close their child iterator on partial consumption.
+        stream = _guard_responses_startup_handoff(
             stream,
-            get_settings().sse_keepalive_interval_seconds,
-            keepalive_frame=keepalive_frame,
-            on_keepalive=lambda: _record_stream_keepalive("responses"),
-        ),
+            startup_task=startup_handoff_tasks[0],
+            streams_to_close=(service_stream,),
+            reservation_cleanup=reservation_cleanup,
+            responses_service_cleanup_ready_event=responses_service_cleanup_ready_event,
+            responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+            responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
+        )
+    return StreamingResponse(
+        stream,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -6738,9 +6743,12 @@ async def _prepend_initial_sse_heartbeat(
         request_id,
         route_family,
     )
-    yield keepalive_frame
-    async for line in stream:
-        yield line
+    try:
+        yield keepalive_frame
+        async for line in stream:
+            yield line
+    finally:
+        await _close_responses_stream_best_effort(stream, action="initial heartbeat")
 
 
 def _record_stream_keepalive(surface: str) -> None:

@@ -278,10 +278,6 @@ async def test_normal_websocket_scope_cleanup_uses_separate_scope_budget(
         cleanup_started.set()
         await release_cleanup.wait()
 
-    async def release_cleanup_after_scope_budget_margin() -> None:
-        await asyncio.sleep(0.03)
-        release_cleanup.set()
-
     monkeypatch.setattr(proxy_service, "_TASK_CANCEL_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(websocket_mixin, "_WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS", 0.08)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache())
@@ -307,18 +303,16 @@ async def test_normal_websocket_scope_cleanup_uses_separate_scope_budget(
     )
     await asyncio.wait_for(receive_started.wait(), timeout=1)
 
-    started_at = asyncio.get_running_loop().time()
     scope_task.cancel()
     await asyncio.wait_for(cleanup_started.wait(), timeout=1)
-    release_task = asyncio.create_task(release_cleanup_after_scope_budget_margin())
+    await asyncio.sleep(0.03)
+    assert scope_task.done() is False
+    release_cleanup.set()
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(scope_task, timeout=0.5)
-    elapsed = asyncio.get_running_loop().time() - started_at
-    await release_task
     await asyncio.sleep(0)
 
-    assert elapsed >= 0.02
     assert "Websocket scope cleanup exceeded its remaining drain budget" not in caplog.messages
     assert service._background_cleanup_tasks == set()
 

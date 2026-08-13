@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import os
 import stat
 import sys
@@ -108,6 +109,32 @@ from app.modules.usage.additional_quota_keys import reload_additional_quota_regi
 from app.modules.usage.live_ingest import start_live_usage_ingestor, stop_live_usage_ingestor
 
 logger = logging.getLogger(__name__)
+
+# On Windows, ``mimetypes`` merges HKCR registry mappings where third-party
+# software commonly remaps web extensions (``.js`` -> ``text/plain``), and
+# browsers enforce strict MIME checking for ES module scripts, so a poisoned
+# mapping renders the dashboard as a blank page (issue #1698). ``FileResponse``
+# resolves ``media_type`` through ``mimetypes.guess_type``, so pin every
+# extension the built dashboard serves; ``add_type`` wins over the merged
+# registry table on all platforms.
+_WEB_ASSET_MIME_TYPES: dict[str, str] = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+    ".json": "application/json",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".html": "text/html",
+}
+
+
+def _ensure_web_asset_mime_types() -> None:
+    for extension, mime_type in _WEB_ASSET_MIME_TYPES.items():
+        mimetypes.add_type(mime_type, extension)
+
+
+_ensure_web_asset_mime_types()
 
 
 def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:

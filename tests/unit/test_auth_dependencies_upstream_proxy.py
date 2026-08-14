@@ -17,7 +17,7 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.mark.asyncio
-async def test_validate_codex_provider_api_key_requires_carrier_authentication(
+async def test_validate_proxy_api_key_requires_carrier_authentication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     principal = object()
@@ -36,7 +36,7 @@ async def test_validate_codex_provider_api_key_requires_carrier_authentication(
     monkeypatch.setattr(auth_dependencies, "validate_required_proxy_api_key_authorization", required_auth)
     monkeypatch.setattr(auth_dependencies, "validate_proxy_api_key_authorization", fail_ordinary_auth)
 
-    resolved = await auth_dependencies.validate_codex_provider_api_key(
+    resolved = await auth_dependencies.validate_proxy_api_key(
         request,
         cast(Any, SimpleNamespace(credentials="inert-key")),
     )
@@ -45,7 +45,7 @@ async def test_validate_codex_provider_api_key_requires_carrier_authentication(
 
 
 @pytest.mark.asyncio
-async def test_validate_codex_provider_api_key_preserves_headerless_authentication(
+async def test_validate_proxy_api_key_preserves_headerless_authentication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     principal = object()
@@ -62,7 +62,7 @@ async def test_validate_codex_provider_api_key_preserves_headerless_authenticati
     monkeypatch.setattr(auth_dependencies, "validate_required_proxy_api_key_authorization", fail_required_auth)
     monkeypatch.setattr(auth_dependencies, "validate_proxy_api_key_authorization", ordinary_auth)
 
-    resolved = await auth_dependencies.validate_codex_provider_api_key(
+    resolved = await auth_dependencies.validate_proxy_api_key(
         request,
         cast(Any, SimpleNamespace(credentials="ordinary-key")),
     )

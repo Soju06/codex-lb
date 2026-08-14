@@ -21,6 +21,7 @@ None.
 
 ### Modified Capabilities
 
+- `api-keys`: Require a valid proxy API key through the existing `validate_proxy_api_key` dependency whenever the capability header is present, even when the global authentication switch is off.
 - `responses-api-compat`: Define the opt-in Codex provider/profile contract that carries trusted-cyber intent before the first Responses WebSocket routing decision without changing ordinary client traffic.
 - `images-api-compat`: Require capability-bearing Images requests to authenticate and fail closed before the existing ordinary image-routing pipeline.
 - `chat-completions-compat`: Defensively reject the authenticated carrier before Chat Completions can enter ordinary routing.

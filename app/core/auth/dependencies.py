@@ -64,15 +64,7 @@ async def validate_proxy_api_key(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
 ) -> ApiKeyData | None:
-    authorization = None if credentials is None else f"Bearer {credentials.credentials}"
-    return await validate_proxy_api_key_authorization(authorization, request=request)
-
-
-async def validate_codex_provider_api_key(
-    request: Request,
-    credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
-) -> ApiKeyData | None:
-    """Authenticate capability intent only on explicit Codex provider ingress."""
+    """A required-capability header authenticates even when global proxy API-key auth is disabled."""
 
     authorization = None if credentials is None else f"Bearer {credentials.credentials}"
     if request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):

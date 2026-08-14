@@ -643,9 +643,14 @@ async def test_capability_header_outside_codex_provider_namespace_keeps_existing
         headers=headers,
     )
 
-    assert response.status_code == 200
-    assert response.json() == {}
-    assert calls == 1
+    if auth_state == "valid":
+        assert response.status_code == 200
+        assert response.json() == {}
+        assert calls == 1
+        return
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+    assert calls == 0
 
 
 @pytest.mark.parametrize(

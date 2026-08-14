@@ -2335,7 +2335,7 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 complete_failed_handoff()
-                raise
+                raise _http_bridge_reconnect_connect_failure(exc, required_preferred_account_id)
             except (aiohttp.ClientError, asyncio.TimeoutError) as transport_exc:
                 if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once:

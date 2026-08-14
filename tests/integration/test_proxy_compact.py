@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import contextlib
 import json
 from datetime import timedelta, timezone
 from typing import cast
@@ -16,7 +15,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
-from app.core.openai.requests import ResponsesCompactRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
@@ -762,24 +761,25 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    session = _JsonSession(
-        _JsonResponse(
-            {
-                "object": "response.compaction",
-                "compaction_summary": {
-                    "encrypted_content": "enc_compact_summary_1",
-                    "summary_text": "condensed thread state",
-                },
-            }
+    captured: dict[str, object] = {}
+
+    async def fake_stream_responses(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        **kwargs,
+    ):
+        del headers, access_token, kwargs
+        captured["payload"] = payload
+        captured["account_id"] = account_id
+        yield (
+            'data: {"type":"response.output_item.done","item":{"type":"compaction_summary",'
+            '"encrypted_content":"enc_compact_summary_1","summary_text":"condensed thread state"}}\n\n'
         )
-    )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_compact_summary_1","status":"completed"}}\n\n'
 
-    @contextlib.asynccontextmanager
-    async def lease_session(session_override=None):
-        assert session_override is None
-        yield session
-
-    monkeypatch.setattr(proxy_client_module, "lease_http_session", lease_session)
+    monkeypatch.setattr(proxy_client_module, "stream_responses", fake_stream_responses)
 
     payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
@@ -787,14 +787,18 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     assert response.status_code == 200
     body = response.json()
     assert body["object"] == "response.compaction"
-    assert body["compaction_summary"] == {
-        "encrypted_content": "enc_compact_summary_1",
-        "summary_text": "condensed thread state",
-    }
-    assert _session_call_url(session).endswith("/codex/responses/compact")
-    call_json = _session_call_json(session)
-    assert "stream" not in call_json
-    assert "store" not in call_json
+    assert body["output"] == [
+        {
+            "type": "compaction",
+            "encrypted_content": "enc_compact_summary_1",
+        }
+    ]
+    request_payload = cast(ResponsesRequest, captured["payload"])
+    request_input = cast(list[dict[str, object]], request_payload.input)
+    assert request_input[-1] == {"type": "compaction_trigger"}
+    assert request_payload.stream is True
+    assert request_payload.store is False
+    assert captured["account_id"] == raw_account_id
 
 
 @pytest.mark.asyncio

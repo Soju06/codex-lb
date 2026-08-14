@@ -3651,6 +3651,7 @@ class _HTTPBridgeStreamingMixin:
                     "fail_closed",
                 )
                 in {"server_anchored_replay_once", "server_indefinite_recovery"}
+                and getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
                 and request_state.hard_continuity_anchor
                 and session.durable_session_id is not None
                 and session.durable_owner_epoch is not None
@@ -3675,6 +3676,17 @@ class _HTTPBridgeStreamingMixin:
             if remaining_budget_seconds <= 0:
                 return False
             wait_seconds = min(retry_cooldown_seconds, remaining_budget_seconds)
+            async with session.pending_lock:
+                if session.queued_request_count >= queue_limit:
+                    raise ProxyResponseError(
+                        429,
+                        openai_error(
+                            "bridge_queue_full",
+                            "HTTP responses session bridge queue is full",
+                            error_type="rate_limit_error",
+                        ),
+                    )
+                session.queued_request_count += 1
             _log_http_bridge_event(
                 "wait_operation_fenced_cooldown",
                 session.key,
@@ -3693,7 +3705,49 @@ class _HTTPBridgeStreamingMixin:
             # No upstream request has been dispatched on this path.  After the
             # cooldown, normal submission still has to create or claim the
             # durable operation fence before response.create can be sent.
-            await asyncio.sleep(wait_seconds)
+            try:
+                current_instance = _service_get_settings().http_responses_session_bridge_instance_id
+                lease_refresh_interval_seconds = max(
+                    1.0,
+                    min(
+                        _http_bridge_durable_lease_ttl_seconds() / 3.0,
+                        wait_seconds,
+                    ),
+                )
+                remaining_wait_seconds = wait_seconds
+                while remaining_wait_seconds > 0:
+                    sleep_seconds = min(remaining_wait_seconds, lease_refresh_interval_seconds)
+                    await asyncio.sleep(sleep_seconds)
+                    remaining_wait_seconds = max(0.0, remaining_wait_seconds - sleep_seconds)
+                    if remaining_wait_seconds <= 0:
+                        break
+                    owner_lookup = await self._durable_bridge.renew_live_session(
+                        session_id=session.durable_session_id,
+                        api_key_id=session.key.api_key_id,
+                        instance_id=current_instance,
+                        owner_epoch=session.durable_owner_epoch,
+                        lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                        latest_turn_state=session.downstream_turn_state,
+                        latest_response_id=None,
+                    )
+                    if (
+                        owner_lookup is None
+                        or owner_lookup.owner_instance_id != current_instance
+                        or owner_lookup.owner_epoch != session.durable_owner_epoch
+                    ):
+                        session.closed = True
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP responses session ownership changed during cooldown; retry the request.",
+                            ),
+                        )
+            finally:
+                async with session.pending_lock:
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
             return True
 
         async def operation_fenced_request_budget_terminal_event() -> str | None:

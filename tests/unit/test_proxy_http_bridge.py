@@ -828,6 +828,62 @@ def _make_eventless_http_bridge_owner(
     )
 
 
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("previous_response_id", None),
+        ("response_id", "resp-created"),
+        ("response_event_count", 1),
+        ("downstream_visible", True),
+        ("last_downstream_sequence_number", 0),
+        ("upstream_model_output_seen", True),
+        ("awaiting_response_created", False),
+        ("file_required_preferred_account", True),
+        ("missing_response_created_retry_count", 1),
+    ],
+)
+def test_http_bridge_same_anchor_eventless_recovery_requires_unambiguous_owner_state(
+    field_name: str,
+    field_value: object,
+) -> None:
+    request_state = _make_eventless_http_bridge_owner()
+    request_state.request_text = '{"type":"response.create","input":"continue"}'
+    request_state.previous_response_id = "resp-parent"
+    setattr(request_state, field_name, field_value)
+
+    assert http_bridge_request_submit_module._http_bridge_can_replay_same_anchor_before_created(request_state) is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_same_anchor_eventless_recovery_requires_hard_session_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_eventless_http_bridge_owner()
+    request_state.request_text = '{"type":"response.create","input":"continue"}'
+    request_state.previous_response_id = "resp-parent"
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "soft-anchor", None),
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.last_upstream_close_code = 1011
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    reconnect = AsyncMock()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert (
+        await service._retry_http_bridge_precreated_request(
+            session,
+            allow_same_anchor_before_created=True,
+        )
+        is False
+    )
+    reconnect.assert_not_awaited()
+    assert request_state.missing_response_created_retry_count == 0
+
+
 class _SilentEventlessUpstream:
     """Upstream double that never produces a response event, for eventless-timeout tests."""
 
@@ -22466,7 +22522,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert owner.response_event_count == (1 if leading_telemetry else 0)
     if leading_telemetry:
         assert owner.latency_first_upstream_event_ms is not None
-    retry_precreated.assert_awaited_once_with(session)
+    retry_precreated.assert_awaited_once_with(session, allow_same_anchor_before_created=True)
     assert write_request_log.await_count == 2
     assert {call.kwargs["error_code"] for call in write_request_log.await_args_list} == {"upstream_request_timeout"}
     fail_reader.assert_awaited_once()

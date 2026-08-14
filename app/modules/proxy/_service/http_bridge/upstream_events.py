@@ -1288,14 +1288,19 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     _extract_model_class(session.request_model) if session.request_model else None
                                 ),
                             )
-                            # A fresh, self-contained hard request can use the
-                            # same bounded pre-created recovery as the idle
-                            # timeout path. Keep the session open until the
-                            # recovery routine claims the handoff; otherwise
-                            # its retry gate would reject the request as
-                            # already retired. Continuity-bound requests still
-                            # fail closed in _retry_http_bridge_precreated_request.
-                            retried = await self._retry_http_bridge_precreated_request(session)
+                            # A fresh, self-contained hard request, or the
+                            # narrower eventless same-anchor continuation
+                            # recovery, can use the same bounded pre-created
+                            # path. Keep the session open until the recovery
+                            # routine claims the handoff; otherwise its retry
+                            # gate would reject the request as already
+                            # retired. Continuity requests that do not satisfy
+                            # the narrow proof still fail closed in
+                            # _retry_http_bridge_precreated_request.
+                            retried = await self._retry_http_bridge_precreated_request(
+                                session,
+                                allow_same_anchor_before_created=True,
+                            )
                             if retried:
                                 continue
                             session.closed = True

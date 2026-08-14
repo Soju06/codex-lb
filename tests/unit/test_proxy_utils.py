@@ -38951,7 +38951,10 @@ async def test_stream_http_bridge_or_retry_rejects_input_image_sediment_url(monk
 
 
 @pytest.mark.asyncio
-async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rejecting(monkeypatch):
+async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rejecting(
+    db_setup,
+    monkeypatch,
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings()
@@ -40602,7 +40605,10 @@ async def test_transcribe_refresh_connection_reset_fails_over(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_files_create_persists_conversation_id_on_refresh_connection_reset_failover(monkeypatch):
+async def test_files_create_persists_conversation_id_on_refresh_connection_reset_failover(
+    db_setup,
+    monkeypatch,
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account_a = _make_account("acc_files_create_refresh_a")
@@ -40697,7 +40703,10 @@ async def test_files_create_body_read_connection_reset_does_not_fail_over(monkey
 
 
 @pytest.mark.asyncio
-async def test_files_finalize_pinned_refresh_connection_reset_fails_closed(monkeypatch):
+async def test_files_finalize_pinned_refresh_connection_reset_fails_closed(
+    db_setup,
+    monkeypatch,
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_files_finalize_pinned")
@@ -40740,7 +40749,10 @@ async def test_files_finalize_pinned_refresh_connection_reset_fails_closed(monke
 
 
 @pytest.mark.asyncio
-async def test_files_finalize_pinned_initial_selection_does_not_fall_back(monkeypatch):
+async def test_files_finalize_pinned_initial_selection_does_not_fall_back(
+    db_setup,
+    monkeypatch,
+):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     pinned_account = _make_account("acc_files_finalize_initial_pinned")

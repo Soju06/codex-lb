@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -45,6 +45,10 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
 )
 DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _PURGE_CLOSED_BATCH_SIZE = 500
+# Claim retry budget: insert races and epoch-CAS losses re-read and retry;
+# each round has a winner, so a small budget converges under any realistic
+# same-row claim contention.
+_CLAIM_CAS_ATTEMPTS = 5
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
 
 
@@ -596,7 +600,10 @@ class DurableBridgeRepository:
         force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeSessionSnapshot:
         session_key_hash = durable_bridge_hash(session_key_value)
-        for attempt in range(2):
+        # Bounded retry budget shared by the insert race (IntegrityError) and
+        # the epoch CAS: every round has a winner, so a loser converges after
+        # at most one fresh read per concurrent claimant.
+        for attempt in range(_CLAIM_CAS_ATTEMPTS):
             now = utcnow()
             lease_expires_at = now + timedelta(seconds=max(1.0, lease_ttl_seconds))
             row = await self._session.execute(
@@ -633,7 +640,7 @@ class DurableBridgeRepository:
                     await self._commit_writer_section()
                 except IntegrityError:
                     await self._session.rollback()
-                    if attempt == 0:
+                    if attempt < _CLAIM_CAS_ATTEMPTS - 1:
                         continue
                     raise
                 await self._session.refresh(record)
@@ -707,16 +714,51 @@ class DurableBridgeRepository:
                     )
                     .values(**values)
                 )
-                if result.rowcount == 0:
+                if not bool(getattr(result, "rowcount", 0)):
                     await self._session.rollback()
-                    if attempt == 0:
+                    if attempt < _CLAIM_CAS_ATTEMPTS - 1:
                         continue
                     raise RuntimeError("Failed to claim durable bridge session after retry")
                 if account_changed:
                     await self._clear_aliases_for_session(existing.id)
                 await self._session.commit()
-            await self._session.refresh(existing)
-            return _to_snapshot_required(existing)
+            # Build the snapshot from the values THIS CAS wrote rather than a
+            # post-commit refresh: another successor can commit its own CAS
+            # between this commit and a refresh, and returning that later epoch
+            # would hand this claimant a fence that collides with the winner's.
+            written_turn_state = values.get("latest_turn_state", existing.latest_turn_state)
+            written_response_id = values.get("latest_response_id", existing.latest_response_id)
+            written_pending_json = values.get("latest_pending_tool_calls_json", existing.latest_pending_tool_calls_json)
+            return DurableBridgeSessionSnapshot(
+                id=existing.id,
+                session_key_kind=existing.session_key_kind,
+                session_key_value=existing.session_key_value,
+                session_key_hash=existing.session_key_hash,
+                api_key_scope=existing.api_key_scope,
+                owner_instance_id=instance_id,
+                owner_process_epoch=owner_process_epoch,
+                owner_epoch=next_epoch,
+                lease_expires_at=lease_expires_at,
+                state=HttpBridgeSessionState.ACTIVE,
+                account_id=account_id,
+                model=model,
+                service_tier=service_tier,
+                latest_turn_state=cast("str | None", written_turn_state),
+                latest_response_id=cast("str | None", written_response_id),
+                latest_input_item_count=cast(
+                    "int | None", values.get("latest_input_item_count", existing.latest_input_item_count)
+                ),
+                latest_input_full_fingerprint=cast(
+                    "str | None",
+                    values.get("latest_input_full_fingerprint", existing.latest_input_full_fingerprint),
+                ),
+                latest_pending_tool_calls=_decode_pending_tool_calls(
+                    cast("str | None", written_response_id),
+                    cast("str | None", written_pending_json),
+                ),
+                last_seen_at=now,
+                closed_at=None,
+            )
         raise RuntimeError("Failed to claim durable bridge session after retry")
 
     async def renew_session(

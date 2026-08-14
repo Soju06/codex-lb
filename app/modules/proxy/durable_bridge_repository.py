@@ -652,47 +652,53 @@ class DurableBridgeRepository:
                     not allow_takeover and not lease_expired and not owner_absent and not state_closed
                 ):
                     return _to_snapshot_required(existing)
-                next_epoch = existing.owner_epoch + 1
-            elif account_changed or force_owner_epoch_advance:
-                next_epoch = existing.owner_epoch + 1
-            else:
-                next_epoch = existing.owner_epoch
+            # Every claim advances the owner epoch, including a same-owner
+            # reclaim: claims come only from a successor in-memory session (a
+            # reused session renews instead of claiming), so a live same-owner
+            # row means the predecessor local session is retiring concurrently
+            # and its outstanding fenced release/renewals must no-op rather
+            # than race this claim into a closed, ownerless row (issue #1695).
+            next_epoch = existing.owner_epoch + 1
 
+            # Write through an explicit UPDATE that sets every ownership field
+            # unconditionally. Mutating ORM attributes lets SQLAlchemy omit
+            # fields whose values match this transaction's (possibly stale)
+            # read, so a release committing between the SELECT and this write
+            # survived the claim and the refresh below returned a closed,
+            # ownerless row to a claimant that believed it had succeeded
+            # (issue #1695; SQLite's with_for_update is a no-op).
+            values: dict[str, object] = {
+                "owner_instance_id": instance_id,
+                "owner_process_epoch": owner_process_epoch,
+                "owner_epoch": next_epoch,
+                "lease_expires_at": lease_expires_at,
+                "state": HttpBridgeSessionState.ACTIVE,
+                "account_id": account_id,
+                "model": model,
+                "service_tier": service_tier,
+                "last_seen_at": now,
+                "closed_at": None,
+            }
+            if account_changed:
+                values["latest_turn_state"] = latest_turn_state
+                values["latest_response_id"] = latest_response_id
+                values["latest_input_item_count"] = None
+                values["latest_input_full_fingerprint"] = None
+                values["latest_pending_tool_calls_json"] = None
+            else:
+                if latest_turn_state is not None:
+                    values["latest_turn_state"] = latest_turn_state
+                if latest_response_id is not None:
+                    values["latest_response_id"] = latest_response_id
+                    values["latest_input_item_count"] = None
+                    values["latest_input_full_fingerprint"] = None
+                    values["latest_pending_tool_calls_json"] = None
             async with sqlite_writer_section():
-                existing.owner_instance_id = instance_id
-                existing.owner_process_epoch = owner_process_epoch
-                existing.owner_epoch = next_epoch
-                existing.lease_expires_at = lease_expires_at
-                existing.state = HttpBridgeSessionState.ACTIVE
                 if account_changed:
                     await self._clear_aliases_for_session(existing.id)
-                existing.account_id = account_id
-                existing.model = model
-                existing.service_tier = service_tier
-                if account_changed:
-                    existing.latest_turn_state = latest_turn_state
-                    existing.latest_response_id = latest_response_id
-                    existing.latest_input_item_count = None
-                    existing.latest_input_full_fingerprint = None
-                    existing.latest_pending_tool_calls_json = None
-                elif owner_changed:
-                    if latest_turn_state is not None:
-                        existing.latest_turn_state = latest_turn_state
-                    if latest_response_id is not None:
-                        existing.latest_response_id = latest_response_id
-                        existing.latest_input_item_count = None
-                        existing.latest_input_full_fingerprint = None
-                        existing.latest_pending_tool_calls_json = None
-                else:
-                    if latest_turn_state is not None:
-                        existing.latest_turn_state = latest_turn_state
-                    if latest_response_id is not None:
-                        existing.latest_response_id = latest_response_id
-                        existing.latest_input_item_count = None
-                        existing.latest_input_full_fingerprint = None
-                        existing.latest_pending_tool_calls_json = None
-                existing.last_seen_at = now
-                existing.closed_at = None
+                await self._session.execute(
+                    update(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id == existing.id).values(**values)
+                )
                 await self._session.commit()
             await self._session.refresh(existing)
             return _to_snapshot_required(existing)

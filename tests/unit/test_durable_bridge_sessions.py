@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
@@ -1498,9 +1499,14 @@ async def test_durable_bridge_stale_owner_cannot_register_turn_state_after_epoch
 
 
 @pytest.mark.asyncio
-async def test_durable_bridge_claim_renews_same_owner_epoch(
+async def test_durable_bridge_same_owner_reclaim_advances_epoch_to_fence_the_predecessor(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
+    """Claims come only from a successor in-memory session (a reused session
+    renews instead of claiming), so a live same-owner row means the predecessor
+    local session is retiring concurrently. The claim must advance the epoch so
+    the predecessor's outstanding fenced release no-ops instead of racing the
+    successor into a closed, ownerless row (issue #1695)."""
     claimed = await coordinator.claim_live_session(
         session_key_kind="session_header",
         session_key_value="sid-123",
@@ -1532,9 +1538,22 @@ async def test_durable_bridge_claim_renews_same_owner_epoch(
     )
 
     assert renewed.session_id == claimed.session_id
-    assert renewed.owner_epoch == claimed.owner_epoch
+    assert renewed.owner_epoch == claimed.owner_epoch + 1
     assert renewed.latest_turn_state == "http_turn_2"
     assert renewed.latest_response_id == "resp_2"
+
+    # The predecessor's release carries the old epoch: it must be fenced out,
+    # leaving the successor's claim live and owned.
+    released = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=False,
+    )
+    assert released is not None
+    assert released.owner_instance_id == "instance-a"
+    assert released.state == HttpBridgeSessionState.ACTIVE
+    assert released.owner_epoch == renewed.owner_epoch
 
 
 @pytest.mark.asyncio
@@ -3291,3 +3310,81 @@ def test_lease_is_active_accepts_timestamptz_aware_expiry():
     # Existing naive-vs-naive behaviour is unchanged.
     assert _lookup_with_lease(naive_now + timedelta(minutes=5)).lease_is_active(now=naive_now) is True
     assert _lookup_with_lease(None).lease_is_active(now=naive_now) is False
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_claim_survives_a_release_committing_mid_claim(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deterministic reproduction of the #1695 CI flake.
+
+    SQLite's with_for_update is a no-op, so the retiring predecessor's fenced
+    release can commit between the successor claim's SELECT and its write.
+    Before the fix, the claim mutated ORM attributes, SQLAlchemy omitted
+    fields whose values matched the stale read (owner unchanged on a single
+    instance), the release's owner=None/state=CLOSED survived the claim's
+    commit, and the refresh handed the claimant a closed, ownerless row —
+    surfaced to the client as 409 bridge_instance_mismatch.
+    """
+    predecessor = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-race",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state="http_turn_1",
+        latest_response_id="resp_1",
+        allow_takeover=True,
+    )
+
+    import app.modules.proxy.durable_bridge_repository as repository_module
+
+    real_writer_section = repository_module.sqlite_writer_section
+    release_injected = False
+
+    @contextlib.asynccontextmanager
+    async def writer_section_with_interleaved_release():
+        nonlocal release_injected
+        if not release_injected:
+            release_injected = True
+            # The predecessor's fenced release lands exactly between the
+            # successor claim's SELECT and its write.
+            async with async_session_factory() as release_session:
+                await DurableBridgeRepository(release_session).release_session(
+                    session_id=predecessor.session_id,
+                    instance_id="instance-a",
+                    owner_epoch=predecessor.owner_epoch,
+                    draining=False,
+                )
+        async with real_writer_section():
+            yield
+
+    monkeypatch.setattr(repository_module, "sqlite_writer_section", writer_section_with_interleaved_release)
+
+    successor = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-race",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=False,
+    )
+
+    assert release_injected is True
+    assert successor.session_id == predecessor.session_id
+    # The claim's write must be authoritative over the interleaved release.
+    assert successor.owner_instance_id == "instance-a"
+    assert successor.state == HttpBridgeSessionState.ACTIVE
+    assert successor.owner_epoch == predecessor.owner_epoch + 1

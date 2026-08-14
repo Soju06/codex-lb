@@ -17526,7 +17526,7 @@ async def test_get_or_create_http_bridge_session_late_owner_after_inflight_evict
     assert owner_exc_info.value.status_code == 429
     assert owner_exc_info.value.payload["error"]["code"] == "capacity_exhausted_active_sessions"
     assert key not in service._http_bridge_sessions
-    close_http_bridge_session.assert_awaited_once_with(created)
+    close_http_bridge_session.assert_awaited_once_with(created, release_durable_session=True)
 
 
 @pytest.mark.asyncio
@@ -17638,7 +17638,7 @@ async def test_recovery_session_is_not_published_when_durable_tables_are_missing
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "upstream_unavailable"
     assert key not in service._http_bridge_sessions
-    close_http_bridge_session.assert_awaited_once_with(created_session)
+    close_http_bridge_session.assert_awaited_once_with(created_session, release_durable_session=True)
 
 
 @pytest.mark.asyncio
@@ -27061,3 +27061,76 @@ async def test_heartbeat_maintenance_tolerates_a_missing_service_or_pass() -> No
 
     await run_http_bridge_heartbeat_maintenance(None)
     await run_http_bridge_heartbeat_maintenance(SimpleNamespace())
+
+
+@pytest.mark.asyncio
+async def test_rejected_creator_does_not_release_the_registered_winners_durable_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #1695: after an inflight evict, a replacement can register while
+    the stale creator is still claiming. The stale creator claims LAST, so its
+    epoch is current and its fenced release would succeed — closing the durable
+    row out from under the session that actually won the registry. A rejected
+    creator must not release a row that now belongs to someone else."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-rejected-creator", None)
+    settings = _make_app_settings()
+    settings.proxy_admission_wait_timeout_seconds = 0.01
+    stale_creator_session = _make_bridge_session(key_value="sid-rejected-creator")
+    stale_creator_session.key = key
+    registered_winner = _make_bridge_session(key_value="sid-rejected-creator-winner")
+    registered_winner.key = key
+    create_started = asyncio.Event()
+    finish_create = asyncio.Event()
+
+    async def create_session(*_: object, **__: object) -> proxy_service._HTTPBridgeSession:
+        create_started.set()
+        await finish_create.wait()
+        return stale_creator_session
+
+    monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
+    monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    close_http_bridge_session = AsyncMock()
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_http_bridge_session)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_http_bridge_should_wait_for_registration", AsyncMock(return_value=False))
+    monkeypatch.setattr(proxy_service, "_http_bridge_owner_instance", AsyncMock(return_value="instance-a"))
+    monkeypatch.setattr(
+        proxy_service,
+        "_active_http_bridge_instance_ring",
+        AsyncMock(return_value=("instance-a", ("instance-a",))),
+    )
+
+    async def get_session() -> proxy_service._HTTPBridgeSession | proxy_service._HTTPBridgeOwnerForward:
+        return await service._get_or_create_http_bridge_session(
+            key,
+            headers={"x-codex-turn-state": "sid-rejected-creator"},
+            affinity=proxy_service._AffinityPolicy(
+                key="sid-rejected-creator",
+                kind=proxy_service.StickySessionKind.CODEX_SESSION,
+            ),
+            api_key=None,
+            request_model="gpt-5.4",
+            idle_ttl_seconds=120.0,
+            max_sessions=8,
+        )
+
+    owner_task = asyncio.create_task(get_session())
+    await asyncio.wait_for(create_started.wait(), timeout=1.0)
+
+    # The waiter times out and evicts the inflight future; a replacement then
+    # wins the registry slot while the stale creator is still in flight.
+    with pytest.raises(ProxyResponseError):
+        await asyncio.wait_for(get_session(), timeout=1.0)
+    async with service._http_bridge_lock:
+        service._http_bridge_sessions[key] = registered_winner
+
+    finish_create.set()
+    with pytest.raises(ProxyResponseError):
+        await asyncio.wait_for(owner_task, timeout=1.0)
+
+    # The winner keeps the registry slot, and the rejected creator closed its
+    # own session WITHOUT releasing the durable row the winner now owns.
+    assert service._http_bridge_sessions[key] is registered_winner
+    close_http_bridge_session.assert_awaited_once_with(stale_creator_session, release_durable_session=False)

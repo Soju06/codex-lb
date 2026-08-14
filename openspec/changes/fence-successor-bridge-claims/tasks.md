@@ -5,6 +5,7 @@
 - [x] 1.3 The update is a compare-and-set on the epoch read, so racing claims serialize instead of sharing a fence; the loser retries against fresh state
 
 - [x] 1.4 Contended retries drop takeover permission, at the repository and at the service's claim retry
+- [x] 1.5 A creator that loses the registry slot closes its session without releasing the durable row
 
 ## 2. Tests
 
@@ -13,6 +14,7 @@
 - [x] 2.3 Racing successor claims land on distinct epochs (deterministic competitor injection)
 - [x] 2.3b A CAS loser does not steal a foreign winner's live lease (fails without revalidation)
 - [x] 2.3c The service's claim retry stops at a live foreign owner instead of restoring takeover
+- [x] 2.3d A rejected creator does not release the registered winner's durable row
 - [x] 2.4 Route-level regression through POST /v1/responses: captive predecessor release lands late and is fenced out
 - [x] 2.5 Existing claim/takeover suites pass unchanged (DRAINING rejection, account-change fencing, process-epoch semantics)
 

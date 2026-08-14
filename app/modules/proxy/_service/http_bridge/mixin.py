@@ -119,6 +119,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _register_http_bridge_turn_state_aliases_locked,
     _require_http_bridge_bound_account_not_excluded,
     _reserve_http_bridge_unanchored_handoff,
+    _settle_failed_http_bridge_creation,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _close_http_bridge_session as _helpers_close_http_bridge_session,
@@ -1557,18 +1558,18 @@ class _HTTPBridgeMixin(
                         code="capacity_exhausted_active_sessions",
                     )
             except BaseException as exc:
-                async with self._http_bridge_lock:
-                    current_future = self._http_bridge_inflight_sessions.get(key)
-                    if current_future is inflight_future:
-                        self._http_bridge_inflight_sessions.pop(key, None)
-                        if inflight_future is not None and not inflight_future.done():
-                            if isinstance(exc, asyncio.CancelledError):
-                                inflight_future.cancel()
-                            else:
-                                inflight_future.set_exception(exc)
-                                inflight_future.exception()
+                superseded = await _settle_failed_http_bridge_creation(
+                    self,
+                    key,
+                    inflight_future=inflight_future,
+                    created_session=created_session,
+                    exc=exc,
+                )
                 if created_session is not None and not session_registered:
-                    await self._close_http_bridge_session(created_session)
+                    await self._close_http_bridge_session(
+                        created_session,
+                        release_durable_session=not superseded,
+                    )
                 raise
             assert created_session is not None
             _log_http_bridge_event(

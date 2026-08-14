@@ -761,6 +761,35 @@ def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> 
     )
 
 
+async def _settle_failed_http_bridge_creation(
+    service: Any,
+    key: "_HTTPBridgeSessionKey",
+    *,
+    inflight_future: Any,
+    created_session: "_HTTPBridgeSession | None",
+    exc: BaseException,
+) -> bool:
+    """Retire a failed creation and report whether another session replaced it.
+
+    A rejected creator claimed the durable row last, so its epoch is the
+    current one and its fenced release WOULD succeed — closing the row out
+    from under the session that actually won the registry slot (issue #1695).
+    The caller uses the return value to skip the durable release in that case.
+    """
+    async with service._http_bridge_lock:
+        current_future = service._http_bridge_inflight_sessions.get(key)
+        if current_future is inflight_future:
+            service._http_bridge_inflight_sessions.pop(key, None)
+            if inflight_future is not None and not inflight_future.done():
+                if isinstance(exc, asyncio.CancelledError):
+                    inflight_future.cancel()
+                else:
+                    inflight_future.set_exception(exc)
+                    inflight_future.exception()
+        registered_session = service._http_bridge_sessions.get(key)
+        return registered_session is not None and registered_session is not created_session
+
+
 async def _close_http_bridge_session(
     service: Any,
     session: "_HTTPBridgeSession",

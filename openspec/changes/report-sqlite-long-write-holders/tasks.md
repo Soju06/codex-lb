@@ -9,3 +9,4 @@
 - [x] 2.2 Read-only transactions and fast writes stay silent
 - [x] 2.3 A write that fails while waiting for the slot does not report its victim transaction as the holder
 - [x] 2.4 A stalled transaction end is included in the measured hold (fails on report-at-event code)
+- [x] 2.5 A bare BEGIN IMMEDIATE holder is attributed; a DBAPI commit failure reports commit_failed_rollback

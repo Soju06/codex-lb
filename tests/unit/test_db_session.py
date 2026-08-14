@@ -1061,3 +1061,90 @@ async def test_sqlite_long_write_watchdog_includes_a_slow_transaction_end_in_the
         assert "outcome=commit" in records[0].getMessage()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_long_write_watchdog_tracks_begin_immediate_holders(tmp_path, monkeypatch, caplog) -> None:
+    """BEGIN IMMEDIATE acquires the writer slot with no DML at all (the
+    accounts merge lock does exactly this), so a holder that never runs a
+    write statement must still be attributed."""
+    monkeypatch.setattr(session_module, "_SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS", 0.0)
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'immediate.db'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    session_module._install_sqlite_long_write_watchdog(engine.sync_engine)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        caplog.clear()
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        with caplog.at_level(logging.WARNING, logger=session_module.__name__):
+            async with factory() as session:
+                await session.execute(sa_text("BEGIN IMMEDIATE"))
+                (await session.execute(sa_text("SELECT count(*) FROM accounts"))).scalar_one()
+                await session.commit()
+
+        records = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "sqlite_long_write_transaction" in record.getMessage()
+        ]
+        assert records, "a BEGIN IMMEDIATE holder with no DML must still be attributed"
+        assert "BEGIN IMMEDIATE" in records[0].getMessage()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_long_write_watchdog_reports_a_failed_commit_as_rollback(tmp_path, monkeypatch, caplog) -> None:
+    """A commit whose DBAPI call raises is followed by a rollback; the report
+    must not claim a durable commit that never happened."""
+    monkeypatch.setattr(session_module, "_SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS", 0.0)
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'failed-commit.db'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    session_module._install_sqlite_long_write_watchdog(engine.sync_engine)
+
+    fail_next_commit = {"armed": False}
+
+    from sqlalchemy.dialects.sqlite.aiosqlite import AsyncAdapt_aiosqlite_connection
+
+    real_commit = AsyncAdapt_aiosqlite_connection.commit
+
+    def failing_commit(self) -> None:
+        if fail_next_commit["armed"]:
+            fail_next_commit["armed"] = False
+            raise RuntimeError("simulated DBAPI commit failure")
+        real_commit(self)
+
+    monkeypatch.setattr(AsyncAdapt_aiosqlite_connection, "commit", failing_commit)
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        caplog.clear()
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        with caplog.at_level(logging.WARNING, logger=session_module.__name__):
+            async with factory() as session:
+                await session.execute(sa_text("DELETE FROM accounts"))
+                fail_next_commit["armed"] = True
+                with pytest.raises(Exception):
+                    await session.commit()
+                await session.rollback()
+
+        records = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "sqlite_long_write_transaction" in record.getMessage()
+        ]
+        assert records
+        assert "outcome=commit_failed_rollback" in records[0].getMessage()
+        assert "outcome=commit " not in records[0].getMessage()
+    finally:
+        await engine.dispose()

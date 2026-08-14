@@ -48,6 +48,11 @@ _SQLITE_WRITE_STATEMENT_PREFIXES = (
     "drop",
     "alter",
     "vacuum",
+    # BEGIN IMMEDIATE/EXCLUSIVE acquire the writer slot with no DML at all
+    # (e.g. AccountsRepository._acquire_sqlite_merge_lock); a plain deferred
+    # BEGIN does not and stays untracked.
+    "begin immediate",
+    "begin exclusive",
 )
 _SQLITE_WATCHDOG_STATEMENT_PREVIEW_CHARS = 300
 
@@ -239,6 +244,13 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
         last_statement = info.pop("sqlite_last_write_statement", None)
         task_name = info.pop("sqlite_write_task", None)
         if started_at is None:
+            # A rollback after a commit whose DBAPI call raised: the pending
+            # report already holds outcome=commit, but the transaction is in
+            # fact ending by rollback — rewrite the outcome so the report does
+            # not claim a durable commit that never happened.
+            pending = info.get("sqlite_write_pending_report")
+            if outcome == "rollback" and isinstance(pending, tuple) and pending[1] == "commit":
+                info["sqlite_write_pending_report"] = (pending[0], "commit_failed_rollback", *pending[2:])
             return
         info["sqlite_write_pending_report"] = (started_at, outcome, first_statement, last_statement, task_name)
 
@@ -261,6 +273,19 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
         info = getattr(connection_record, "info", None)
         if info is not None:
             _finalize_pending_report(info)
+
+    @event.listens_for(engine, "handle_error")
+    def _flip_outcome_on_failed_end(exception_context: object) -> None:
+        # A DBAPI commit that raises still ends the transaction, but by
+        # rollback; the pending report marked at the commit event must not
+        # claim a durable commit that never happened.
+        connection = getattr(exception_context, "connection", None)
+        info = getattr(connection, "info", None) if connection is not None else None
+        if info is None:
+            return
+        pending = info.get("sqlite_write_pending_report")
+        if isinstance(pending, tuple) and pending[1] == "commit":
+            info["sqlite_write_pending_report"] = (pending[0], "commit_failed_rollback", *pending[2:])
 
 
 def _create_main_engine(url: str) -> AsyncEngine:

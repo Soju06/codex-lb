@@ -418,22 +418,32 @@ async def test_pending_bump_survives_a_cancelled_flush(db_setup, monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_pending_bump_survives_a_raising_flush(db_setup, monkeypatch) -> None:
-    """Same contract for a write that raises rather than returning False."""
-    namespace = "test_flush_raised"
-
-    async def raises(ns: str) -> bool:
-        raise RuntimeError("driver exploded")
+async def test_pending_bump_survives_a_raising_flush_and_does_not_starve_others(db_setup, monkeypatch) -> None:
+    """A raise is abnormal (bump() reports failure by returning False), so it
+    must not abort the flush: the loop is sorted, and a persistently raising
+    namespace sorting first would otherwise starve every namespace after it
+    on every cycle. The raiser stays pending; the rest still land."""
+    raising_namespace = "test_flush_raised_a"
+    healthy_namespace = "test_flush_raised_b"
+    real_bump = CacheInvalidationPoller.bump
 
     poller = CacheInvalidationPoller(SessionLocal)
-    monkeypatch.setattr(poller, "bump", raises)
-    poller.request_bump(namespace)
 
-    with pytest.raises(RuntimeError, match="driver exploded"):
-        await poller._flush_pending_bumps()
+    async def raising_for_one(ns: str) -> bool:
+        if ns == raising_namespace:
+            raise RuntimeError("driver exploded")
+        return await real_bump(poller, ns)
 
-    assert namespace in poller._pending_bumps
-    assert await _namespace_version(namespace) is None
+    monkeypatch.setattr(poller, "bump", raising_for_one)
+    poller.request_bump(raising_namespace)
+    poller.request_bump(healthy_namespace)
+
+    await poller._flush_pending_bumps()
+
+    assert raising_namespace in poller._pending_bumps
+    assert await _namespace_version(raising_namespace) is None
+    assert healthy_namespace not in poller._pending_bumps
+    assert await _namespace_version(healthy_namespace) == 1
 
 
 @pytest.mark.asyncio

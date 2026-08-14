@@ -2046,6 +2046,7 @@ class DurableBridgeRepository:
             )
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))
+
     async def rebind_session_account_if_current(
         self,
         *,

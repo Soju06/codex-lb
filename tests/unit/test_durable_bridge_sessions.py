@@ -2282,6 +2282,7 @@ async def test_rebind_session_account_if_current_moves_only_an_unowned_matching_
         session_key_value="sid-rebind",
         api_key_id=None,
         instance_id="instance-a",
+        owner_process_epoch="test-process",
         lease_ttl_seconds=60.0,
         account_id="acc-1",
         model="gpt-5.4",

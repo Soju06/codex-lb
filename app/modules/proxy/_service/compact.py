@@ -73,7 +73,6 @@ from app.modules.proxy.replay_safety import (
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
 )
-from app.modules.proxy.ring_membership import RING_STALE_THRESHOLD_SECONDS
 from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
 

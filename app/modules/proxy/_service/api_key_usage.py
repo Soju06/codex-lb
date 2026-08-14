@@ -308,7 +308,6 @@ class _ApiKeyUsageMixin:
 
         proxy = cast(_ApiKeyUsageServiceProtocol, self)
         reservation_released = False
-        settlement_confirmed = False
         with anyio.CancelScope(shield=True):
             try:
                 async with proxy._repo_factory() as repos:
@@ -325,7 +324,6 @@ class _ApiKeyUsageMixin:
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
                 reservation_released = True
-                settlement_confirmed = True
             except Exception as exc:
                 logger.warning(
                     "Failed to settle compact API key reservation key_id=%s request_id=%s",
@@ -338,7 +336,6 @@ class _ApiKeyUsageMixin:
                         api_keys_service = _service_api_keys_service()(repos.api_keys)
                         await api_keys_service.release_usage_reservation(reservation_id)
                     reservation_released = True
-                    settlement_confirmed = True
                 except Exception:
                     logger.warning(
                         "Failed to release compact API key reservation after settlement failure "

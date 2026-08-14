@@ -260,6 +260,37 @@ async def test_daybreak_capability_unsupported_http_authenticates_before_denial(
     assert response.json()["error"]["code"] == "invalid_api_key"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/responses", "/backend-api/codex/responses", "/v1/chat/completions", "/v1/images/generations"],
+)
+@pytest.mark.parametrize("auth_state", ["valid", "missing", "invalid"])
+async def test_daybreak_json_routes_reject_capability_before_body_validation(
+    async_client: AsyncClient,
+    path: str,
+    auth_state: str,
+) -> None:
+    headers = {
+        **_CAPABILITY_HEADERS,
+        "Content-Type": "application/json",
+    }
+    if auth_state == "valid":
+        key = await _create_api_key(f"Daybreak pre-body guard {path}")
+        headers["Authorization"] = f"Bearer {key}"
+    elif auth_state == "invalid":
+        headers["Authorization"] = "Bearer invalid-daybreak-key"
+
+    response = await async_client.post(path, headers=headers, content=b"{")
+
+    if auth_state == "valid":
+        assert response.status_code == 400
+        assert response.json() == _TRANSPORT_DENIAL
+        return
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
 _RESET_CREDIT_CONSUME_CASES = [
     pytest.param(
         "/v1/reset-credit",

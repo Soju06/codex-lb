@@ -20,3 +20,4 @@
 - [x] 3.2 Document the remediated provider-wide transport boundary, Images fail-closed behavior, and `$imagegen` limitation in the change artifacts and client guide.
 - [x] 3.3 Inspect the final committed diff with one independent Sensitive review and address every actionable in-scope finding before publication.
 - [x] 3.4 Keep capability-header authentication on the existing `validate_proxy_api_key` dependency identity so FastAPI overrides and auth-first upload tests continue to apply.
+- [x] 3.5 Deny capability-bearing typed JSON routes before FastAPI decodes the request body.

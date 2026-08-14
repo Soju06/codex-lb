@@ -1015,7 +1015,10 @@ async def wham_agent_identities_jwks(
     )
 
 
-@router.post("/responses/", include_in_schema=False)
+@router.post(
+    "/responses/",
+    include_in_schema=False,
+)
 @router.post(
     "/responses",
     responses={
@@ -1161,7 +1164,11 @@ async def responses_websocket(
     )
 
 
-@v1_router.post("/responses/", response_model=OpenAIResponseResult, include_in_schema=False)
+@v1_router.post(
+    "/responses/",
+    response_model=OpenAIResponseResult,
+    include_in_schema=False,
+)
 @v1_router.post(
     "/responses",
     response_model=OpenAIResponseResult,
@@ -1710,7 +1717,10 @@ async def v1_reset_credit(
     return response
 
 
-@usage_router.post("/v1/reset-credit", response_model=V1ResetCreditRedeemResponse)
+@usage_router.post(
+    "/v1/reset-credit",
+    response_model=V1ResetCreditRedeemResponse,
+)
 async def v1_redeem_reset_credit(
     request: Request,
     payload: V1ResetCreditRedeemRequest,
@@ -2360,8 +2370,15 @@ async def v1_audio_transcriptions(
     )
 
 
-@router.post("/images/generations", response_model=None, include_in_schema=False)
-@v1_router.post("/images/generations", response_model=None)
+@router.post(
+    "/images/generations",
+    response_model=None,
+    include_in_schema=False,
+)
+@v1_router.post(
+    "/images/generations",
+    response_model=None,
+)
 async def v1_images_generations(
     request: Request,
     payload: V1ImagesGenerationsRequest = Body(...),
@@ -5462,7 +5479,10 @@ async def _collect_responses(
     )
 
 
-@router.post("/responses/compact", response_model=CompactResponseResult)
+@router.post(
+    "/responses/compact",
+    response_model=CompactResponseResult,
+)
 async def responses_compact(
     request: Request,
     payload: ResponsesCompactRequest = Body(...),
@@ -5483,7 +5503,10 @@ async def responses_compact(
     )
 
 
-@v1_router.post("/responses/compact", response_model=CompactResponseResult)
+@v1_router.post(
+    "/responses/compact",
+    response_model=CompactResponseResult,
+)
 async def v1_responses_compact(
     request: Request,
     payload: V1ResponsesCompactRequest = Body(...),

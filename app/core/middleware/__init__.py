@@ -6,6 +6,7 @@ from app.core.middleware.path_rewrite import add_backend_api_codex_v1_alias_midd
 from app.core.middleware.request_body_limit import add_request_body_limit_middleware
 from app.core.middleware.request_decompression import add_request_decompression_middleware
 from app.core.middleware.request_id import add_request_id_middleware
+from app.core.middleware.required_capability_http import add_required_capability_http_middleware
 from app.core.middleware.trusted_proxy_headers import add_trusted_proxy_headers_middleware
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "add_request_body_limit_middleware",
     "add_request_decompression_middleware",
     "add_request_id_middleware",
+    "add_required_capability_http_middleware",
     "add_trusted_proxy_headers_middleware",
 ]

@@ -46,6 +46,7 @@ from app.core.middleware import (
     add_request_body_limit_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
+    add_required_capability_http_middleware,
     add_trusted_proxy_headers_middleware,
 )
 from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
@@ -768,6 +769,7 @@ def create_app() -> FastAPI:
             dashboard_limit=settings.bulkhead_dashboard_limit,
         ),
     )
+    add_required_capability_http_middleware(app)
     add_backend_api_codex_v1_alias_middleware(app)
     add_app_version_middleware(app)
     add_exception_handlers(app)

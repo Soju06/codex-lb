@@ -448,6 +448,7 @@ class _HTTPBridgeSessionRegistryMixin:
         force_owner_epoch_advance: bool = False,
         claim_account_id: str | None = None,
         clear_latest_turn_state: bool = False,
+        record_restart_takeover: bool = False,
     ) -> None:
         current_instance = _service_get_settings().http_responses_session_bridge_instance_id
         current_process_epoch = http_bridge_owner_process_epoch()
@@ -505,7 +506,7 @@ class _HTTPBridgeSessionRegistryMixin:
             if (
                 PROMETHEUS_AVAILABLE
                 and bridge_durable_recover_total is not None
-                and allow_takeover
+                and record_restart_takeover
                 and lookup.owner_epoch > 1
             ):
                 bridge_durable_recover_total.labels(path="restart_takeover").inc()

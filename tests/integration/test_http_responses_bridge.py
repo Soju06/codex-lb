@@ -10733,6 +10733,7 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
         *,
         allow_takeover,
         force_owner_epoch_advance=False,
+        record_restart_takeover=False,
     ):
         del self, session, allow_takeover, force_owner_epoch_advance
 
@@ -11202,6 +11203,7 @@ async def test_v1_responses_http_bridge_forks_follower_when_account_assignment_c
         *,
         allow_takeover,
         force_owner_epoch_advance=False,
+        record_restart_takeover=False,
     ):
         del self, allow_takeover
         durable_claims.append((session.account.id, force_owner_epoch_advance))
@@ -14844,3 +14846,85 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
     fresh_payload = json.loads(fresh_upstream.sent_text[0])
     assert "previous_response_id" not in fresh_payload
     assert fresh_payload["input"] == unsafe_suffix_resend
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_successor_claim_fences_the_retiring_release(
+    async_client, app_instance, monkeypatch
+):
+    """Deterministic route-level regression for issue #1695.
+
+    The retiring session's teardown releases its durable row concurrently with
+    the next request's successor claim. Here the predecessor's release is held
+    captive until the successor's claim (and its 200) have completed, then let
+    loose — on the pre-fix code the release still matched the fence (the
+    same-owner claim kept the epoch) and closed the row out from under the
+    live successor; the claim must advance the epoch so the late release
+    no-ops and a third turn keeps working.
+    """
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
+    account_id = await _import_account(async_client, "acc_http_bridge_fence", "http-bridge-fence@example.com")
+    account = await _get_account(account_id)
+    upstreams = [_ClosingBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers, access_token, account_id_header, *, base_url=None, session=None
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    service = get_proxy_service_for_app(app_instance)
+    coordinator = service._durable_bridge
+    real_release = coordinator.release_live_session
+    release_gate = asyncio.Event()
+    captive_releases: list[dict] = []
+
+    async def captive_release_live_session(**kwargs):
+        if not release_gate.is_set():
+            captive_releases.append(kwargs)
+            return None
+        return await real_release(**kwargs)
+
+    monkeypatch.setattr(coordinator, "release_live_session", captive_release_live_session)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": "hello",
+        "prompt_cache_key": f"http-bridge-fence-thread-{account_id}",
+    }
+    first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    assert first.status_code == 200
+    # The successor claims while the predecessor's release is still captive —
+    # the ordering the CI flake hits nondeterministically.
+    second = await asyncio.wait_for(
+        async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS
+    )
+    assert second.status_code == 200, second.text
+    assert captive_releases, "the retiring session must have attempted its durable release"
+
+    # Let the predecessor's release land late, fenced on its old epoch.
+    release_gate.set()
+    for kwargs in captive_releases:
+        await real_release(**kwargs)
+
+    # The late release must not have closed the successor's row: a third turn
+    # on the same key keeps working instead of failing with 409.
+    third = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    assert third.status_code == 200, third.text

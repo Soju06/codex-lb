@@ -74,6 +74,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _durable_bridge_lookup_allows_local_reuse,
     _forwarded_http_bridge_session_key,
     _http_bridge_alias_target_is_stale,
+    _http_bridge_allow_durable_takeover,
     _http_bridge_can_local_recover_without_ring,
     _http_bridge_can_recover_during_drain,
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
@@ -1531,6 +1532,14 @@ class _HTTPBridgeMixin(
                         force=force_durable_takeover,
                     ),
                     force_owner_epoch_advance=force_durable_takeover,
+                    # restart_takeover means recovering a row whose previous
+                    # owner is genuinely gone. Every claim now advances the
+                    # epoch, so epoch > 1 alone would also count ordinary
+                    # local successor claims (no pre-claim lookup, or a
+                    # forced replace of a live local session).
+                    record_restart_takeover=(
+                        durable_lookup is not None and _http_bridge_allow_durable_takeover(durable_lookup)
+                    ),
                 )
                 async with self._http_bridge_lock:
                     current_future = self._http_bridge_inflight_sessions.get(key)

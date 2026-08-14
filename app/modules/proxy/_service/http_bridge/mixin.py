@@ -79,12 +79,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_can_recover_during_drain,
     _http_bridge_can_single_instance_owner_takeover_without_anchor,
     _http_bridge_can_single_instance_prompt_cache_takeover_without_anchor,
-    _http_bridge_capacity_generation_count,
+    _http_bridge_capacity_after_planned_closes,
     _http_bridge_claim_allows_takeover,
     _http_bridge_compatible,
     _http_bridge_continuity_lost_error_envelope,
     _http_bridge_endpoint_matches_current_instance,
-    _http_bridge_eviction_priority,
     _http_bridge_has_durable_recovery_anchor,
     _http_bridge_incompatible_model_fork_key,
     _http_bridge_inflight_creation_count,
@@ -117,6 +116,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _mark_http_bridge_reader_handoff_reconnect_failed,
     _persist_http_bridge_replacement_account,
     _persistent_http_bridge_affinity,
+    _plan_http_bridge_lru_capacity_closes,
     _preferred_http_bridge_reconnect_turn_state,
     _raise_if_http_bridge_creation_superseded,
     _record_bridge_drain_recovery_allowed,
@@ -1299,45 +1299,16 @@ class _HTTPBridgeMixin(
                         # only the idle generations it has committed to close
                         # synchronously below, before its inflight reservation
                         # can create a replacement socket.
-                        def capacity_after_planned_closes() -> int:
-                            return _http_bridge_capacity_generation_count(self) - len(sessions_to_close_before_create)
-
-                        while capacity_after_planned_closes() >= max_sessions and self._http_bridge_sessions:
-                            evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
-                            for candidate_key, candidate_session in self._http_bridge_sessions.items():
-                                if candidate_key == model_transition_parent_key:
-                                    continue
-                                if getattr(candidate_session, "unanchored_reservation_id", None) is not None:
-                                    continue
-                                pending_count = self._http_bridge_pending_count_nowait(
-                                    candidate_session,
-                                    context="capacity_evict_scan",
-                                )
-                                if pending_count is None:
-                                    continue
-                                if pending_count:
-                                    continue
-                                evictable_sessions.append((candidate_key, candidate_session))
-                            if not evictable_sessions:
-                                break
-                            lru_key, lru_session = min(
-                                evictable_sessions,
-                                key=lambda item: _http_bridge_eviction_priority(item[1]),
-                            )
-                            _log_http_bridge_event(
-                                "evict_lru",
-                                lru_key,
-                                account_id=lru_session.account.id,
-                                model=lru_session.request_model,
-                                cache_key_family=lru_key.affinity_kind,
-                                model_class=_extract_model_class(lru_session.request_model)
-                                if lru_session.request_model
-                                else None,
-                            )
-                            detached = self._detach_http_bridge_session_locked(lru_key, expected_session=lru_session)
-                            if detached is not None:
-                                sessions_to_close_before_create.append(detached)
-                        if capacity_after_planned_closes() >= max_sessions:
+                        _plan_http_bridge_lru_capacity_closes(
+                            self,
+                            max_sessions=max_sessions,
+                            model_transition_parent_key=model_transition_parent_key,
+                            sessions_to_close_before_create=sessions_to_close_before_create,
+                        )
+                        if (
+                            _http_bridge_capacity_after_planned_closes(self, sessions_to_close_before_create)
+                            >= max_sessions
+                        ):
                             if _http_bridge_inflight_creation_count(self):
                                 capacity_wait_future = next(
                                     future

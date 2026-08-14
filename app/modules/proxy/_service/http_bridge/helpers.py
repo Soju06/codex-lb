@@ -433,6 +433,53 @@ def _http_bridge_capacity_generation_count(service: Any) -> int:
     return _http_bridge_session_generation_count(service) + _http_bridge_inflight_creation_count(service)
 
 
+def _http_bridge_capacity_after_planned_closes(
+    service: Any,
+    sessions_to_close_before_create: Sequence["_HTTPBridgeSession"],
+) -> int:
+    return _http_bridge_capacity_generation_count(service) - len(sessions_to_close_before_create)
+
+
+def _plan_http_bridge_lru_capacity_closes(
+    service: Any,
+    *,
+    max_sessions: int,
+    model_transition_parent_key: "_HTTPBridgeSessionKey | None",
+    sessions_to_close_before_create: list["_HTTPBridgeSession"],
+) -> None:
+    while (
+        _http_bridge_capacity_after_planned_closes(service, sessions_to_close_before_create) >= max_sessions
+        and service._http_bridge_sessions
+    ):
+        evictable_sessions: list[tuple[_HTTPBridgeSessionKey, _HTTPBridgeSession]] = []
+        for candidate_key, candidate_session in service._http_bridge_sessions.items():
+            if candidate_key == model_transition_parent_key:
+                continue
+            if getattr(candidate_session, "unanchored_reservation_id", None) is not None:
+                continue
+            pending_count = service._http_bridge_pending_count_nowait(
+                candidate_session,
+                context="capacity_evict_scan",
+            )
+            if pending_count is None or pending_count:
+                continue
+            evictable_sessions.append((candidate_key, candidate_session))
+        if not evictable_sessions:
+            break
+        lru_key, lru_session = min(evictable_sessions, key=lambda item: _http_bridge_eviction_priority(item[1]))
+        _log_http_bridge_event(
+            "evict_lru",
+            lru_key,
+            account_id=lru_session.account.id,
+            model=lru_session.request_model,
+            cache_key_family=lru_key.affinity_kind,
+            model_class=_extract_model_class(lru_session.request_model) if lru_session.request_model else None,
+        )
+        detached = service._detach_http_bridge_session_locked(lru_key, expected_session=lru_session)
+        if detached is not None:
+            sessions_to_close_before_create.append(detached)
+
+
 def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
     inflight_cleanup = _cleanup_http_bridge_inflight_sessions_nowait(service)
     live_sessions = 0
@@ -3017,6 +3064,8 @@ for _helper_name in (
     "_http_bridge_requires_cluster_registration",
     "_effective_http_bridge_idle_ttl_seconds",
     "_http_bridge_eviction_priority",
+    "_http_bridge_capacity_after_planned_closes",
+    "_plan_http_bridge_lru_capacity_closes",
     "_build_http_bridge_prewarm_text",
     "_http_bridge_prewarm_enabled",
     "_record_http_bridge_prewarm_outcome",

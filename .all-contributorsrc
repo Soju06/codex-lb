@@ -1222,6 +1222,15 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "guitarbeat",
+      "name": "Aaron Lorenzo Woods",
+      "avatar_url": "https://avatars.githubusercontent.com/u/83775388?v=4",
+      "profile": "https://github.com/guitarbeat",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

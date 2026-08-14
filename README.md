@@ -286,6 +286,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/kidclone3"><img src="https://avatars.githubusercontent.com/u/54184969?v=4?s=100" width="100px;" alt="DuyBui"/><br /><sub><b>DuyBui</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=kidclone3" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=kidclone3" title="Tests">⚠️</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/kevinsslin"><img src="https://avatars.githubusercontent.com/u/86810837?v=4?s=100" width="100px;" alt="Kevin Lin"/><br /><sub><b>Kevin Lin</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=kevinsslin" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=kevinsslin" title="Tests">⚠️</a></td>
     </tr>
   </tbody>
 </table>

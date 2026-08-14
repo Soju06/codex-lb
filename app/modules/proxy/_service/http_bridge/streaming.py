@@ -3613,10 +3613,82 @@ class _HTTPBridgeStreamingMixin:
                     ),
                 )
 
+        def operation_fenced_cooldown_wait_enabled() -> bool:
+            """Allow a hard turn to wait until its durable fence can arbitrate recovery."""
+            return (
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+                    "fail_closed",
+                )
+                in {"server_anchored_replay_once", "server_indefinite_recovery"}
+                and request_state.hard_continuity_anchor
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+                and request_state.response_id is None
+                and request_state.response_event_count == 0
+            )
+
         def continuity_bound_without_safe_replay() -> bool:
             """Do not hold a client stream through a cooldown we cannot use."""
             return _http_bridge_continuity_bound_without_safe_replay(request_state) and not (
-                _http_bridge_server_anchored_replay_enabled(request_state)
+                _http_bridge_server_anchored_replay_enabled(request_state) or operation_fenced_cooldown_wait_enabled()
+            )
+
+        async def wait_through_operation_fenced_startup_cooldown() -> bool:
+            if session.key.strength != "hard" or not operation_fenced_cooldown_wait_enabled():
+                return False
+            retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+            if retry_cooldown_seconds <= 0:
+                return False
+            remaining_budget_seconds = request_deadline - _service_time().monotonic()
+            if remaining_budget_seconds <= 0:
+                return False
+            wait_seconds = min(retry_cooldown_seconds, remaining_budget_seconds)
+            _log_http_bridge_event(
+                "wait_operation_fenced_cooldown",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail="hard_turn_operation_fence",
+                cache_key_family=session.key.affinity_kind,
+            )
+            logger.info(
+                "HTTP bridge waiting through retry-circuit cooldown before durable hard-turn arbitration "
+                "request_id=%s wait_seconds=%.1f remaining_budget_seconds=%.1f",
+                request_state.request_id,
+                wait_seconds,
+                remaining_budget_seconds,
+            )
+            # No upstream request has been dispatched on this path.  After the
+            # cooldown, normal submission still has to create or claim the
+            # durable operation fence before response.create can be sent.
+            await asyncio.sleep(wait_seconds)
+            return True
+
+        async def operation_fenced_request_budget_terminal_event() -> str | None:
+            if not operation_fenced_cooldown_wait_enabled() or _service_time().monotonic() < request_deadline:
+                return None
+            await self._release_websocket_request_state_reservation(request_state)
+            request_state.api_key_reservation = None
+            if propagate_http_errors:
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "upstream_request_timeout",
+                        "HTTP responses session bridge recovery exceeded the request budget.",
+                        error_type="server_error",
+                    ),
+                )
+            return format_sse_event(
+                cast(
+                    Mapping[str, JsonValue],
+                    response_failed_event(
+                        "stream_idle_timeout",
+                        "HTTP responses session bridge recovery exceeded the request budget",
+                        response_id=_websocket_downstream_response_id(request_state),
+                    ),
+                )
             )
 
         async def startup_continuity_cooldown_terminal_event() -> str | None:
@@ -3687,6 +3759,12 @@ class _HTTPBridgeStreamingMixin:
             )
 
         while True:
+            budget_terminal_event = await operation_fenced_request_budget_terminal_event()
+            if budget_terminal_event is not None:
+                yield budget_terminal_event
+                return
+            if await wait_through_operation_fenced_startup_cooldown():
+                continue
             startup_terminal_event = await startup_continuity_cooldown_terminal_event()
             if startup_terminal_event is not None:
                 yield startup_terminal_event

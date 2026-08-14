@@ -5485,6 +5485,168 @@ async def test_http_bridge_startup_cooldown_releases_api_key_reservation(
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_one_shot_hard_turn_waits_through_startup_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-hard-turn-cooldown-wait")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-turn-cooldown-wait",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        session_id="turn-state-hard-anchor",
+        hard_continuity_anchor=True,
+    )
+    session.durable_session_id = "durable-hard-turn-cooldown-wait"
+    session.durable_owner_epoch = 7
+    cooldown = AsyncMock(side_effect=[0.01, 0.0])
+    submit = AsyncMock(side_effect=RuntimeError("submitted after cooldown"))
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", cooldown)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(RuntimeError, match="submitted after cooldown"):
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=8,
+            propagate_http_errors=True,
+            downstream_turn_state="turn-state-hard-anchor",
+        ):
+            pass
+
+    assert sleeps == [pytest.approx(0.01)]
+    assert cooldown.await_count == 2
+    submit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_one_shot_hard_turn_without_durable_fence_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-hard-turn-no-durable-fence")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-turn-no-durable-fence",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        session_id="turn-state-without-durable-fence",
+        hard_continuity_anchor=True,
+    )
+    submit = AsyncMock()
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=8,
+            propagate_http_errors=True,
+            downstream_turn_state="turn-state-without-durable-fence",
+        ):
+            pass
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
+    submit.assert_not_awaited()
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_one_shot_hard_turn_does_not_submit_after_wait_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="sid-hard-turn-wait-budget")
+    session.durable_session_id = "durable-hard-turn-wait-budget"
+    session.durable_owner_epoch = 9
+    reservation = cast(Any, object())
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-hard-turn-wait-budget",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=reservation,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        session_id="turn-state-wait-budget",
+        hard_continuity_anchor=True,
+    )
+    clock = SimpleNamespace(now=100.0)
+    submit = AsyncMock()
+    release = AsyncMock()
+
+    async def sleep(delay: float) -> None:
+        clock.now += delay
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_anchored_replay_once",
+        ),
+    )
+    monkeypatch.setattr(http_bridge_streaming_module._service_time(), "monotonic", lambda: clock.now)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=30.0))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release)
+    monkeypatch.setattr(http_bridge_streaming_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_http_bridge_session_events(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=8,
+            propagate_http_errors=True,
+            downstream_turn_state="turn-state-wait-budget",
+            request_deadline=105.0,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
+    submit.assert_not_awaited()
+    release.assert_awaited_once_with(request_state)
+    assert request_state.api_key_reservation is None
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_replay_detach_releases_reservation_without_pending_ownership(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

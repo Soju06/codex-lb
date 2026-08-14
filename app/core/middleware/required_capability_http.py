@@ -30,9 +30,15 @@ _JSON_BODY_DENY_PATHS = frozenset(
         "/v1/chat/completions",
         "/v1/images/generations",
         "/v1/reset-credit",
+        "/v1/warmup",
         "/api/codex/rate-limit-reset-credits/consume",
     }
 )
+
+
+def _is_pre_body_deny_path(path: str) -> bool:
+    normalized = path.rstrip("/")
+    return normalized in _JSON_BODY_DENY_PATHS or normalized.startswith("/v1/warmup/")
 
 
 def add_required_capability_http_middleware(app: FastAPI) -> None:
@@ -45,7 +51,7 @@ def add_required_capability_http_middleware(app: FastAPI) -> None:
             return await call_next(request)
         if not request.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER):
             return await call_next(request)
-        if get_route_path(request.scope).rstrip("/") not in _JSON_BODY_DENY_PATHS:
+        if not _is_pre_body_deny_path(get_route_path(request.scope)):
             return await call_next(request)
         try:
             await validate_required_proxy_api_key_authorization(request.headers.get("authorization"))

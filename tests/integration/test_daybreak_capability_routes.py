@@ -263,7 +263,14 @@ async def test_daybreak_capability_unsupported_http_authenticates_before_denial(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "path",
-    ["/v1/responses", "/backend-api/codex/responses", "/v1/chat/completions", "/v1/images/generations"],
+    [
+        "/v1/responses",
+        "/backend-api/codex/responses",
+        "/v1/chat/completions",
+        "/v1/images/generations",
+        "/v1/warmup",
+        "/v1/warmup/default",
+    ],
 )
 @pytest.mark.parametrize("auth_state", ["valid", "missing", "invalid"])
 async def test_daybreak_json_routes_reject_capability_before_body_validation(

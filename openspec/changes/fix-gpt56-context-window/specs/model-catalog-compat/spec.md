@@ -32,6 +32,7 @@ sanctioned divergence from the upstream GPT-5.6 entries.
 #### Scenario: GPT-5.6 bootstrap entries retain the corrected upstream context budget
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
+- **AND** no persisted snapshot is loaded
 - **AND** no `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry applies to these slugs
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` report
@@ -40,6 +41,7 @@ sanctioned divergence from the upstream GPT-5.6 entries.
 #### Scenario: GPT-5.6 entries expose upstream tool and multi-agent metadata
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
+- **AND** no persisted snapshot is loaded
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` carry `tool_mode: "code_mode_only"`, `use_responses_lite: true`, `experimental_supported_tools: []`, and `minimal_client_version: "0.144.0"`
 - **AND** `multi_agent_version` is `"v2"` for Sol and Terra and `"v1"` for Luna
@@ -47,6 +49,7 @@ sanctioned divergence from the upstream GPT-5.6 entries.
 #### Scenario: GPT-5.6 entries expose upstream reasoning-summary and plan metadata
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
+- **AND** no persisted snapshot is loaded
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** each GPT-5.6 entry carries `default_reasoning_summary: "none"`, `reasoning_summary_format: "experimental"`, and `comp_hash: "3000"`
 - **AND** each GPT-5.6 entry's `available_in_plans` includes `edu_plus`, `edu_pro`, `enterprise_cbp_automation`, and `sci`

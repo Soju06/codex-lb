@@ -1549,11 +1549,13 @@ class _HTTPBridgeMixin(
                 await _raise_if_http_bridge_creation_superseded(self, key, inflight_future=inflight_future)
                 await self._claim_durable_http_bridge_session(
                     created_session,
-                    allow_takeover=_http_bridge_claim_allows_takeover(
-                        durable_lookup,
-                        force=force_durable_takeover,
+                    allow_takeover=(
+                        _http_bridge_claim_allows_takeover(
+                            durable_lookup,
+                            force=force_durable_takeover,
+                        )
+                        and (force_durable_takeover or not unrepresented_current_owner)
                     ),
-                    and (force_durable_takeover or not unrepresented_current_owner),
                     force_owner_epoch_advance=force_durable_takeover or unrepresented_current_owner,
                     # restart_takeover means recovering a row whose previous
                     # owner is genuinely gone. Every claim now advances the

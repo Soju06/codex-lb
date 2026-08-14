@@ -2044,9 +2044,12 @@ class _HTTPBridgeMixin(
             session.api_key = request_state.api_key
             forced_refresh_account_id = request_state.force_refresh_account_id
             excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
-            requested_preferred_account_id = (
-                request_state.preferred_account_id if require_preferred_account or account_neutral_recovery else None
-            )
+            if request_state.file_required_preferred_account:
+                requested_preferred_account_id = request_state.preferred_account_id or session.account.id
+            elif require_preferred_account or account_neutral_recovery:
+                requested_preferred_account_id = request_state.preferred_account_id
+            else:
+                requested_preferred_account_id = None
             required_preferred_account_id = resolve_required_account_id(
                 ("requested reconnect owner", requested_preferred_account_id),
                 ("account-neutral recovery", session.account.id if account_neutral_recovery else None),

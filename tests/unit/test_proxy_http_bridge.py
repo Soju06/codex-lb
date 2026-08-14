@@ -8678,6 +8678,124 @@ async def test_reconnect_http_bridge_session_preserves_hard_account_after_1011(
 
 
 @pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_keeps_soft_file_pin_owner_after_1011(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-file-1011", None),
+        key_value="sid-soft-file-1011",
+    )
+    session.last_upstream_close_code = 1011
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        return proxy_service.AccountSelection(account=session.account, error_message=None, error_code=None)
+
+    async def ensure_fresh(account: object, **_: object) -> object:
+        return account
+
+    upstream = cast(Any, SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-soft-file-1011",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id="acc-bridge",
+        file_required_preferred_account=True,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+
+    # when
+    await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    # then
+    assert selection_kwargs[0]["preferred_account_id"] == "acc-bridge"
+    exclude_account_ids = cast(set[str], selection_kwargs[0]["exclude_account_ids"])
+    assert "acc-bridge" not in exclude_account_ids
+    assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is False
+    assert session.account.id == "acc-bridge"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_http_bridge_session_skips_soft_account_after_1011_without_file_pin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-soft-1011", None),
+        key_value="sid-soft-1011",
+    )
+    session.last_upstream_close_code = 1011
+    other_account = cast(Any, SimpleNamespace(id="acc-other", status=AccountStatus.ACTIVE, plan_type="plus"))
+    selection_kwargs: list[dict[str, object]] = []
+
+    async def select_account(_deadline: float, **kwargs: object) -> proxy_service.AccountSelection:
+        selection_kwargs.append(kwargs)
+        return proxy_service.AccountSelection(account=other_account, error_message=None, error_code=None)
+
+    async def ensure_fresh(account: object, **_: object) -> object:
+        return account
+
+    upstream = cast(Any, SimpleNamespace(response_header=lambda _name: None, close=AsyncMock()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-soft-1011",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        preferred_account_id="acc-bridge",
+        file_required_preferred_account=False,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: SimpleNamespace(
+            get=AsyncMock(
+                return_value=SimpleNamespace(
+                    prefer_earlier_reset_accounts=False,
+                    routing_strategy=None,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget_for_stream", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", ensure_fresh)
+    monkeypatch.setattr(service, "_open_upstream_websocket_with_budget", AsyncMock(return_value=upstream))
+
+    # when
+    await service._reconnect_http_bridge_session(session, request_state=request_state)
+
+    # then
+    exclude_account_ids = cast(set[str], selection_kwargs[0]["exclude_account_ids"])
+    assert "acc-bridge" in exclude_account_ids
+    assert selection_kwargs[0]["preferred_account_id"] is None
+    assert selection_kwargs[0]["fallback_on_preferred_account_unavailable"] is True
+
+
+@pytest.mark.asyncio
 async def test_reconnect_http_bridge_session_fails_closed_when_bound_account_is_excluded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -20155,8 +20273,66 @@ async def test_retry_http_bridge_request_on_fresh_upstream_reconnects_without_re
         request_state=request_state,
         restart_reader=True,
         require_same_account=False,
+        require_preferred_account=False,
     )
     send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_requires_file_pin_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-file", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-file",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-file", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-file",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        preferred_account_id="acc-file",
+        file_required_preferred_account=True,
+        transport="http",
+    )
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    # when
+    recovered = await service._retry_http_bridge_request_on_fresh_upstream(
+        session=session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        send_request=False,
+    )
+
+    # then
+    assert recovered is True
+    reconnect.assert_awaited_once_with(
+        session,
+        request_state=request_state,
+        restart_reader=True,
+        require_same_account=False,
+        require_preferred_account=True,
+    )
 
 
 @pytest.mark.asyncio

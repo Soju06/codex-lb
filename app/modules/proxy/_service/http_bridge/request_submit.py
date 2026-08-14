@@ -2826,6 +2826,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 restart_reader=True,
                 require_same_account=require_same_account,
+                require_preferred_account=request_state.file_required_preferred_account,
             )
             if send_request:
                 retry_text_data = self._http_bridge_text_with_account_installation_id(

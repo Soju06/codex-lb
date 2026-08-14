@@ -288,14 +288,11 @@ class CacheInvalidationPoller:
                 if not await self.bump(namespace):
                     self._pending_bumps.add(namespace)
             except BaseException:
-                # Includes CancelledError, which ``stop()`` raises in this task
-                # by design: without restoring the marker the namespace whose
-                # write was in flight is neither written nor pending, so a
-                # mutation that already committed never reaches peer replicas.
-                # Restored even when the abort is ambiguous (cancellation or
-                # a driver error after the database accepted the commit): a redundant
-                # bump only re-runs peers' idempotent callbacks, while dropping
-                # an unconfirmed write leaves them stale until the fallback TTL.
+                # The marker is cleared before the write, so an aborted write
+                # (cancelled or raised) would otherwise leave the namespace
+                # neither written nor pending, breaking the required retry.
+                # Restored even when the abort is ambiguous — a redundant bump
+                # only re-runs peers' idempotent callbacks.
                 self._pending_bumps.add(namespace)
                 raise
 

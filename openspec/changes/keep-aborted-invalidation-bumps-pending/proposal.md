@@ -12,6 +12,10 @@ The restore is unconditional even when the abort's outcome is ambiguous (cancell
 
 Process shutdown is deliberately out of scope: `stop()` cancels the polling task, so a bump queued at that moment has no cycle left to drain it. That is already the documented contract — "a lost bump still converges within the fallback TTL" — and guaranteeing delivery against an unresponsive database at shutdown is a separate concern with its own bounding and task-ownership design.
 
+## Why the ambiguous case still restores
+
+A cancellation or driver error can arrive after the database accepted the commit, so the restore can produce a redundant bump. That is the deliberate trade: a redundant bump only re-runs peers' idempotent invalidation callbacks, while dropping an unconfirmed write leaves them stale until the fallback TTL. The bus already tolerates extra increments — a `request_bump` arriving mid-flush produces one by design.
+
 ## Capabilities
 
 ### New Capabilities

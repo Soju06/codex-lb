@@ -842,3 +842,37 @@ async def test_inflight_poll_does_not_clobber_concurrent_local_bump(db_setup) ->
     await source._poll_once()
     assert source_calls == []
     assert source._known_versions.get(NAMESPACE_RESET_CREDITS) == 2
+
+
+@pytest.mark.asyncio
+async def test_aborted_bump_is_retried_by_the_running_poller(db_setup, monkeypatch) -> None:
+    """End-to-end: the point of restoring the marker is that the background
+    poller actually retries. Without the restore the first raise loses the
+    namespace and no later cycle ever writes its version."""
+    namespace = "test_abort_retried_by_poller"
+    attempts = 0
+    real_bump = CacheInvalidationPoller.bump
+
+    poller = CacheInvalidationPoller(SessionLocal, poll_interval_seconds=0.01)
+
+    async def failing_then_real(ns: str) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("driver exploded")
+        return await real_bump(poller, ns)
+
+    monkeypatch.setattr(poller, "bump", failing_then_real)
+    poller.request_bump(namespace)
+    await poller.start()
+    try:
+        for _ in range(200):
+            if await _namespace_version(namespace) is not None:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await poller.stop()
+
+    assert attempts >= 2, "the poller must retry the aborted namespace"
+    assert await _namespace_version(namespace) == 1
+    assert namespace not in poller._pending_bumps

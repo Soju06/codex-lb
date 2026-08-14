@@ -210,12 +210,11 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
+    resolve_reconnect_preferred_account_id,
     resolve_required_account_id,
     without_http_bridge_session_affinity_headers,
 )
-from app.modules.proxy.durable_bridge_coordinator import (
-    DurableBridgeLookup,
-)
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, AccountLease
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
 
@@ -2044,12 +2043,9 @@ class _HTTPBridgeMixin(
             session.api_key = request_state.api_key
             forced_refresh_account_id = request_state.force_refresh_account_id
             excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
-            if request_state.file_required_preferred_account:
-                requested_preferred_account_id = request_state.preferred_account_id or session.account.id
-            elif require_preferred_account or account_neutral_recovery:
-                requested_preferred_account_id = request_state.preferred_account_id
-            else:
-                requested_preferred_account_id = None
+            requested_preferred_account_id = resolve_reconnect_preferred_account_id(
+                request_state, session.account.id, require_preferred_account, account_neutral_recovery
+            )
             required_preferred_account_id = resolve_required_account_id(
                 ("requested reconnect owner", requested_preferred_account_id),
                 ("account-neutral recovery", session.account.id if account_neutral_recovery else None),

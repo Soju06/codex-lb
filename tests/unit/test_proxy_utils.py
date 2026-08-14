@@ -41959,6 +41959,7 @@ async def test_retry_http_bridge_request_on_fresh_upstream_uses_archive_request_
         request_state=request_state,
         restart_reader=True,
         require_same_account=False,
+        require_preferred_account=False,
     )
     send_text.assert_awaited_once_with('{"type":"response.create","model":"gpt-5.1","input":"retry"}')
     assert send_request_ids == ["archive_bridge_retry_fresh"]

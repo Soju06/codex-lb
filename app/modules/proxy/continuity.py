@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from hashlib import sha256
+from typing import Protocol
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
@@ -52,6 +53,24 @@ def without_http_bridge_session_affinity_headers(headers: Mapping[str, str]) -> 
         for header_name, header_value in headers.items()
         if header_name.lower() not in _HTTP_BRIDGE_SESSION_AFFINITY_HEADERS
     }
+
+
+class _ReconnectPreferredOwner(Protocol):
+    preferred_account_id: str | None
+    file_required_preferred_account: bool
+
+
+def resolve_reconnect_preferred_account_id(
+    request_state: _ReconnectPreferredOwner,
+    session_account_id: str,
+    require_preferred_account: bool,
+    account_neutral_recovery: bool,
+) -> str | None:
+    if request_state.file_required_preferred_account:
+        return request_state.preferred_account_id or session_account_id
+    if require_preferred_account or account_neutral_recovery:
+        return request_state.preferred_account_id
+    return None
 
 
 def resolve_required_account_id(*owners: tuple[str, str | None]) -> str | None:

@@ -817,6 +817,10 @@ class _WebSocketRequestState:
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
+    # Counts the one watchdog-owned same-anchor recovery permitted after an
+    # eventless pre-response-created timeout. Keep this separate from
+    # ``replay_count``, which tracks client/security/fresh-replay attempts.
+    missing_response_created_retry_count: int = 0
     # Counts only the one extra replay permitted after the initial recovery
     # replay when the replacement upstream socket also closes cleanly before
     # producing any response event.

@@ -18,6 +18,19 @@ The Helm chart auto-configures HTTP `/responses` owner handoff for multi-replica
 
 In multi-replica setups, replicas must share the same encryption key (the Helm chart default) for bootstrap-token restart recovery and encrypted-data access to work.
 
+### Account concurrency caps are cluster-wide
+
+`CODEX_LB_PROXY_ACCOUNT_STREAM_LIMIT` (default 8) and `CODEX_LB_PROXY_ACCOUNT_RESPONSE_CREATE_LIMIT` are cluster-wide targets. Each replica enforces its own deterministic share — `floor(cap / replicas)`, with the remainder distributed one slot at a time and every share floored at 1 — so with the default stream cap and three replicas, one account gets 3/3/2 slots per replica, not 8 each.
+
+Practical consequences:
+
+- Size the cap for the total per-account concurrency you want across the cluster; adding replicas re-partitions it rather than raising it. Disconnect-heavy or agent workloads typically want `~8 × replicas`.
+- `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` (default 1) is subtracted from each replica's share at selection time, so small shares feel it disproportionately: a share of 2 leaves 1 slot for new selection.
+- Persistent `account_stream_cap` errors with idle replicas are the undersizing signature; raise the cap first.
+- Run one process per pod (`workers_per_instance` stays 1): shares are partitioned across ring members, and worker processes inside one pod would silently multiply the share.
+
+Semantics and sizing rationale: [proxy-admission-control](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-admission-control).
+
 ## Graceful shutdown
 
 The chart's preStop hook commits one process drain deadline before Uvicorn
@@ -160,4 +173,4 @@ For external database, production config, ingress, observability, and more see t
 
 ---
 
-*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations)*
+*Specs: [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation) · [deployment-networking](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-networking) · [replica-operations](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/replica-operations) · [proxy-admission-control](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/proxy-admission-control)*

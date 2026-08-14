@@ -27,6 +27,7 @@ from app.core.balancer import (
     RoutingStrategy,
     failover_decision,
 )
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -86,6 +87,7 @@ from app.core.resilience.network_recovery import (
 )
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event
@@ -476,7 +478,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import AccountLease, AccountSelection, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
@@ -2454,6 +2456,26 @@ class _WebSocketMixin:
                     )
 
                 try:
+                    if (
+                        text_data is not None
+                        and request_state is not None
+                        and payload is not None
+                        and account is not None
+                        and _is_websocket_response_create(payload)
+                    ):
+                        usage_limit_state = await proxy._load_balancer.check_account_usage_limit(account.id)
+                        if usage_limit_state in {
+                            AccountUsageLimitState.REACHED,
+                            AccountUsageLimitState.DATA_UNAVAILABLE,
+                        }:
+                            status_code, error_payload = selection_failure_response(
+                                AccountSelection(
+                                    account=None,
+                                    error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                                    error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                                )
+                            )
+                            raise ProxyResponseError(status_code, error_payload)
                     if (
                         text_data is not None
                         and request_state is not None

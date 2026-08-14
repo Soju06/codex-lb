@@ -20336,6 +20336,57 @@ async def test_retry_http_bridge_request_on_fresh_upstream_requires_file_pin_own
 
 
 @pytest.mark.asyncio
+async def test_retry_http_bridge_request_on_fresh_upstream_propagates_file_owner_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # given
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "sid-file-unavail", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(
+            key="sid-file-unavail",
+            kind=proxy_service.StickySessionKind.PROMPT_CACHE,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-file", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-file-unavail",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        preferred_account_id="acc-file",
+        file_required_preferred_account=True,
+        transport="http",
+    )
+    owner_unavailable = http_bridge_helpers_module._http_bridge_previous_response_owner_unavailable_error()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock(side_effect=owner_unavailable))
+
+    # when / then
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await service._retry_http_bridge_request_on_fresh_upstream(
+            session=session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            send_request=False,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_request_on_fresh_upstream_refuses_after_response_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

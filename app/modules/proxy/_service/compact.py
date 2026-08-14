@@ -1417,12 +1417,12 @@ class _CompactMixin:
                                 )
                                 raise
                             except (RefreshError, aiohttp.ClientError, asyncio.TimeoutError) as refresh_exc:
-                                    if isinstance(refresh_exc, RefreshError):
-                                        if refresh_exc.is_permanent:
-                                            await settle_compact_usage(
-                                                api_key=api_key,
-                                                api_key_reservation=api_key_reservation,
-                                                response=None,
+                                if isinstance(refresh_exc, RefreshError):
+                                    if refresh_exc.is_permanent:
+                                        await settle_compact_usage(
+                                            api_key=api_key,
+                                            api_key_reservation=api_key_reservation,
+                                            response=None,
                                             request_service_tier=request_service_tier,
                                         )
                                         await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)

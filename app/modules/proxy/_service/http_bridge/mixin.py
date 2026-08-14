@@ -96,6 +96,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_parallel_fork_key,
     _http_bridge_previous_response_alias_key,
     _http_bridge_previous_response_owner_unavailable_error,
+    _http_bridge_reconnect_connect_failure,
     _http_bridge_reconnect_selection_failure,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_needs_unanchored_handoff,
@@ -2290,7 +2291,7 @@ class _HTTPBridgeMixin(
                 if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
                     await release_selected_account_lease()
                     complete_failed_handoff()
-                    raise
+                    raise _http_bridge_reconnect_connect_failure(exc, required_preferred_account_id) from exc
                 try:
                     account = await self._ensure_fresh_with_budget(
                         account,
@@ -2313,7 +2314,7 @@ class _HTTPBridgeMixin(
                     if retry_exc.status_code != 401:
                         await release_selected_account_lease()
                         complete_failed_handoff()
-                        raise
+                        raise _http_bridge_reconnect_connect_failure(retry_exc, required_preferred_account_id)
                     await self._handle_proxy_error(account, retry_exc)
                     await abandon_selected_account_retry(account)
                     continue

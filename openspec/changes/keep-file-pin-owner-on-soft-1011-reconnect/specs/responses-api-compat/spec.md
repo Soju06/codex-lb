@@ -40,3 +40,14 @@ other required owner MAY still skip the closed account.
 - **WHEN** the proxy reconnects that session
 - **THEN** the proxy MUST fail closed with the existing required-owner unavailable error
 - **AND** it MUST NOT replace that envelope with a generic selection failure
+
+#### Scenario: Soft 1011 file-pin reconnect fails closed when the required owner cannot be connected
+
+- **GIVEN** a live in-memory pin `file_xyz -> account_a`
+- **AND** a soft prompt-cache HTTP-bridge session on `account_a` closed with `1011`
+- **AND** the next still-unsubmitted `/v1/responses` request references `file_xyz`
+- **AND** account selection returns `account_a`
+- **AND** opening a replacement upstream for `account_a` fails
+- **WHEN** the proxy reconnects that session on submit
+- **THEN** the client-visible error MUST be the existing required-owner unavailable error
+- **AND** it MUST NOT be replaced with a generic `upstream_unavailable` envelope

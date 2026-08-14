@@ -16,6 +16,8 @@
   `require_preferred_account` argument.
 - [x] 2.4 Assert soft `1011` file-pin reconnect fails closed with the
   required-owner envelope when selection cannot return the pin account.
+- [x] 2.5 Assert submit-on-closed emits the required-owner envelope when
+  the pin account is selected but the replacement socket cannot be opened.
 
 ## 3. Validation
 

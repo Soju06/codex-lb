@@ -389,9 +389,10 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
 @pytest.mark.asyncio
 async def test_pending_bump_survives_a_cancelled_flush(db_setup, monkeypatch) -> None:
     """The marker is cleared before the write is awaited, so a cancelled write
-    must restore it. stop() cancels the polling task by design, so without the
-    restore a mutation that already committed is neither written nor pending
-    and never reaches peer replicas."""
+    must restore it — otherwise the namespace is neither written nor pending
+    and no later cycle can retry it. (At process stop no cycle remains either
+    way; shutdown delivery is explicitly out of scope, and the restore there
+    only keeps the pending set honest.)"""
     namespace = "test_flush_cancelled"
     started = asyncio.Event()
 

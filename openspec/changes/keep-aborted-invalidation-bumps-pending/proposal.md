@@ -6,7 +6,7 @@ The invalidation-bus spec already requires that "coalesced (`request_bump`) name
 
 ## What Changes
 
-- Restore the pending marker when the bump write is cancelled or raises, so the required retry actually happens. `except BaseException` rather than `Exception`, because `CancelledError` is the case that matters.
+- Restore the pending marker when the bump write aborts, so the required retry actually happens. The two abort kinds are handled differently: `CancelledError` restores and re-raises (task teardown must abort the flush), while an ordinary `Exception` — abnormal, since `bump()` reports failure by returning `False` — restores, logs at warning, and continues, so a persistently raising namespace cannot starve the namespaces sorting after it.
 
 The restore is unconditional even when the abort's outcome is ambiguous (cancellation or a driver error arriving after the database accepted the commit): a redundant bump only re-runs peers' idempotent invalidation callbacks, while dropping an unconfirmed write leaves them stale until the fallback TTL. The bus already tolerates extra version increments — `request_bump` arriving mid-flush deliberately produces one.
 

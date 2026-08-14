@@ -318,6 +318,7 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     # codex-rs/models-manager/models.json at rust-v0.145.0.
     for gpt56 in (sol, terra, luna):
         assert gpt56["minimal_client_version"] == "0.144.0"
+        assert gpt56["context_window"] == 272_000
         assert gpt56["tool_mode"] == "code_mode_only"
         assert gpt56["use_responses_lite"] is True
         assert gpt56["apply_patch_tool_type"] == "freeform"

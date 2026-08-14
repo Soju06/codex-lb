@@ -19,7 +19,5 @@ clients do not overfill requests before the live registry refreshes.
 ## Impact
 
 - No schema, route, or database migration change.
-- Bootstrap `/v1/models` and `/backend-api/codex/models` continue to report the
-  existing 272,000-token GPT-5.6 budget, now with synchronized provenance.
-- Affects `model-catalog-compat` documentation and GPT-5.6 bootstrap regression
-  coverage.
+- Before a live registry refresh, bootstrap `/v1/models` and `/backend-api/codex/models` change the GPT-5.6 advertised context budget from 372,000 to 272,000 tokens.
+- Affects `model-catalog-compat` documentation, client setup examples, and GPT-5.6 bootstrap regression coverage.

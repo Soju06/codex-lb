@@ -275,6 +275,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     # codex-rs/models-manager/models.json at rust-v0.145.0.
     for gpt56 in (sol, terra, luna):
         assert gpt56.minimal_client_version == "0.144.0"
+        assert gpt56.context_window == 272_000
         assert gpt56.raw["tool_mode"] == "code_mode_only"
         assert gpt56.raw["use_responses_lite"] is True
         assert gpt56.raw["apply_patch_tool_type"] == "freeform"

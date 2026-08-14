@@ -32,6 +32,7 @@ sanctioned divergence from the upstream GPT-5.6 entries.
 #### Scenario: GPT-5.6 bootstrap entries retain the corrected upstream context budget
 
 - **GIVEN** the model registry has no refreshed upstream snapshot
+- **AND** no `CODEX_LB_MODEL_CONTEXT_WINDOW_OVERRIDES` entry applies to these slugs
 - **WHEN** a client calls `GET /backend-api/codex/models`
 - **THEN** `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` report
   `context_window=272000` and `max_context_window=272000`

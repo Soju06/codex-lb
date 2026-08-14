@@ -179,7 +179,7 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
     point; a live sampler is not needed to attribute it.
     """
 
-    @event.listens_for(engine, "before_cursor_execute")
+    @event.listens_for(engine, "after_cursor_execute")
     def _track_write_statements(
         conn: object,
         cursor: object,
@@ -188,6 +188,11 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
         context: object,
         executemany: bool,
     ) -> None:
+        # after_cursor_execute, not before: the first write statement may wait
+        # up to busy_timeout for the writer slot before failing, and timing
+        # from before the execute would report that victim as the holder. The
+        # slot is only held once a write statement has SUCCEEDED, so the clock
+        # starts there.
         stripped = statement.lstrip().lower()
         if not stripped.startswith(_SQLITE_WRITE_STATEMENT_PREFIXES):
             return

@@ -960,3 +960,51 @@ async def test_sqlite_long_write_watchdog_stays_silent_below_threshold_and_for_r
         ]
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_long_write_watchdog_does_not_blame_a_victim_waiting_for_the_lock(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """A write statement can spend the whole busy timeout waiting for the slot
+    and fail with 'database is locked'. That transaction never held the slot,
+    so its rollback must not be reported as the holder — the clock starts only
+    after the first write statement succeeds."""
+    monkeypatch.setattr(session_module, "_SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS", 0.2)
+    db_path = tmp_path / "victim.db"
+    holder_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path}", poolclass=NullPool, connect_args={"timeout": 5.0}
+    )
+    # Victim gets a short busy timeout so the test stays fast; install the
+    # watchdog directly because the pragma configurer would override the
+    # driver timeout with the production 30s busy_timeout.
+    victim_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path}", poolclass=NullPool, connect_args={"timeout": 0.4}
+    )
+    session_module._install_sqlite_long_write_watchdog(victim_engine.sync_engine)
+    try:
+        async with holder_engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        caplog.clear()
+
+        holder_factory = async_sessionmaker(holder_engine, expire_on_commit=False)
+        victim_factory = async_sessionmaker(victim_engine, expire_on_commit=False)
+        with caplog.at_level(logging.WARNING, logger=session_module.__name__):
+            async with holder_factory() as holder_session:
+                # Journal mode: this write holds the database lock until commit.
+                await holder_session.execute(sa_text("DELETE FROM accounts"))
+                async with victim_factory() as victim_session:
+                    with pytest.raises(Exception, match="database is locked"):
+                        await victim_session.execute(sa_text("DELETE FROM accounts"))
+                    await victim_session.rollback()
+                await holder_session.commit()
+
+        blamed = [
+            record
+            for record in caplog.records
+            if record.levelno >= logging.WARNING and "sqlite_long_write_transaction" in record.getMessage()
+        ]
+        assert not blamed, "the victim's busy-timeout wait must not be reported as a held slot"
+    finally:
+        await victim_engine.dispose()
+        await holder_engine.dispose()

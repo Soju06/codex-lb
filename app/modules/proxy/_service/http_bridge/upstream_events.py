@@ -1382,6 +1382,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
                     )
+                    retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(
+                        tuple(session.pending_requests)
+                    )
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
@@ -1422,6 +1425,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             if close_classification is not None
                             else "websocket_transport_error"
                         ),
+                        retry_circuit_attempt=retry_circuit_attempt,
                         penalize_account=(
                             not account_neutral and not (message.kind == "close" and close_classification == "clean")
                         ),

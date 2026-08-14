@@ -775,6 +775,8 @@ class _HTTPBridgeResponseCreateAttempt:
     disarmed: bool = False
     response_observed: bool = False
     retry_circuit_failure_recorded: bool = False
+    retry_circuit_failure_settled: anyio.Event | None = None
+    retry_circuit_failure_count: int | None = None
 
 
 @dataclass

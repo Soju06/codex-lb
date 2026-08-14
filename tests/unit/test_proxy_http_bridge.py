@@ -23758,6 +23758,52 @@ async def test_http_bridge_clean_close_before_response_does_not_penalize_account
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_clean_close_retry_failure_preserves_pre_recovery_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_eventless_http_bridge_owner(request_id="req-clean-close-retry-attempt")
+    original_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    replacement_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=2)
+    request_state.response_create_attempt = original_attempt
+    session = _make_bridge_session(
+        key_value="bridge-clean-close-retry-attempt",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=UpstreamWebSocketMessage(kind="close", close_code=1000)),
+            close=AsyncMock(),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+
+    async def retry_precreated(target_session: Any, **_kwargs: object) -> bool:
+        assert target_session is session
+        request_state.response_create_attempt = replacement_attempt
+        request_state.response_create_sent_at = None
+        return False
+
+    failure_calls: list[dict[str, object]] = []
+
+    async def fail_reader(target_session: Any, **kwargs: object) -> bool:
+        assert target_session is session
+        failure_calls.append(dict(kwargs))
+        target_session.closed = True
+        return True
+
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+
+    await service._relay_http_bridge_upstream_messages(session)
+
+    assert len(failure_calls) == 1
+    assert failure_calls[0]["retry_circuit_attempt"] is original_attempt
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("routed", [False, True], ids=["direct-close", "routed-receive-error"])
 async def test_http_bridge_reader_maps_ordinary_websocket_receive_failure_to_stream_incomplete(
     monkeypatch: pytest.MonkeyPatch,
@@ -24520,6 +24566,56 @@ async def test_http_bridge_retry_circuit_claims_one_attempt_once_across_concurre
     assert state.cooldown_until == 0.0
     assert attempt.retry_circuit_failure_recorded is True
     assert persist_retry_circuit.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_retry_circuit_duplicate_waits_for_persisted_merge() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-attempt-persist-merge")
+    attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    persist_started = asyncio.Event()
+    allow_persist = asyncio.Event()
+
+    async def persist_retry_circuit(**_kwargs: object) -> SimpleNamespace:
+        persist_started.set()
+        await asyncio.wait_for(allow_persist.wait(), timeout=0.5)
+        return SimpleNamespace(
+            consecutive_failures=2,
+            cooldown_until_epoch=time.time() + 60.0,
+            last_detail="stream_idle_timeout",
+            updated_at_epoch=time.time(),
+        )
+
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(side_effect=persist_retry_circuit),
+    )
+
+    first_task = asyncio.create_task(
+        service._record_http_bridge_retry_circuit_failure(
+            session,
+            detail="stream_idle_timeout",
+            attempt=attempt,
+        )
+    )
+    await asyncio.wait_for(persist_started.wait(), timeout=0.5)
+    duplicate_task = asyncio.create_task(
+        service._record_http_bridge_retry_circuit_failure(
+            session,
+            detail="stream_idle_timeout",
+            attempt=attempt,
+        )
+    )
+    await asyncio.sleep(0)
+    assert duplicate_task.done() is False
+
+    allow_persist.set()
+
+    assert await asyncio.wait_for(first_task, timeout=0.5) == 2
+    assert await asyncio.wait_for(duplicate_task, timeout=0.5) == 2
+    state = cast(Any, service)._http_bridge_retry_circuits[session.key]
+    assert state.consecutive_failures == 2
+    assert attempt.retry_circuit_failure_count == 2
 
 
 @pytest.mark.asyncio

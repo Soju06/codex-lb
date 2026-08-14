@@ -78,6 +78,31 @@ def _record_http_bridge_retry_circuit_duplicate_suppressed(
 
 
 class _HTTPBridgeRetryCircuitMixin:
+    async def _await_http_bridge_retry_circuit_attempt_settlement(
+        self: Any,
+        session: _HTTPBridgeSession,
+        *,
+        attempt: _HTTPBridgeResponseCreateAttempt,
+        detail: str,
+    ) -> int:
+        settled = attempt.retry_circuit_failure_settled
+        if settled is not None:
+            await settled.wait()
+        async with self._http_bridge_retry_circuit_lock:
+            current_state = self._http_bridge_retry_circuits.get(session.key)
+            consecutive_failures = (
+                attempt.retry_circuit_failure_count
+                if attempt.retry_circuit_failure_count is not None
+                else (current_state.consecutive_failures if current_state is not None else 0)
+            )
+        _record_http_bridge_retry_circuit_duplicate_suppressed(
+            session,
+            attempt=attempt,
+            consecutive_failures=consecutive_failures,
+            detail=detail,
+        )
+        return consecutive_failures
+
     def _prune_http_bridge_retry_circuit_state(self: Any, now: float) -> None:
         expiry = now - DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
         for key, state in list(self._http_bridge_retry_circuits.items()):
@@ -383,16 +408,11 @@ class _HTTPBridgeRetryCircuitMixin:
         scoped_attempt = attempt
         if scoped_attempt is not None:
             if scoped_attempt.retry_circuit_failure_recorded:
-                async with self._http_bridge_retry_circuit_lock:
-                    current_state = self._http_bridge_retry_circuits.get(session.key)
-                    consecutive_failures = current_state.consecutive_failures if current_state is not None else 0
-                _record_http_bridge_retry_circuit_duplicate_suppressed(
+                return await self._await_http_bridge_retry_circuit_attempt_settlement(
                     session,
                     attempt=scoped_attempt,
-                    consecutive_failures=consecutive_failures,
                     detail=detail,
                 )
-                return consecutive_failures
             if scoped_attempt.disarmed or scoped_attempt.response_observed:
                 return None
 
@@ -402,14 +422,11 @@ class _HTTPBridgeRetryCircuitMixin:
         max_backoff = max(base_backoff, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS)
         clean_close_max_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS)
         now = time.monotonic()
-        duplicate_suppressed = False
-        consecutive_failures = 0
+        duplicate_attempt: _HTTPBridgeResponseCreateAttempt | None = None
         state: _HTTPBridgeRetryCircuitState | None = None
         async with self._http_bridge_retry_circuit_lock:
             if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
-                state = self._http_bridge_retry_circuits.get(session.key)
-                consecutive_failures = state.consecutive_failures if state is not None else 0
-                duplicate_suppressed = True
+                duplicate_attempt = scoped_attempt
             elif scoped_attempt is not None and (scoped_attempt.disarmed or scoped_attempt.response_observed):
                 return None
             else:
@@ -422,8 +439,9 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.half_open_until = 0.0
                 if scoped_attempt is not None:
                     scoped_attempt.retry_circuit_failure_recorded = True
+                    scoped_attempt.retry_circuit_failure_settled = anyio.Event()
+                    scoped_attempt.retry_circuit_failure_count = None
                 state.consecutive_failures += 1
-                consecutive_failures = state.consecutive_failures
                 state.last_detail = detail
                 if state.consecutive_failures >= threshold:
                     backoff = min(
@@ -444,21 +462,24 @@ class _HTTPBridgeRetryCircuitMixin:
                         backoff,
                         detail,
                     )
-        if duplicate_suppressed:
-            assert scoped_attempt is not None
-            _record_http_bridge_retry_circuit_duplicate_suppressed(
+        if duplicate_attempt is not None:
+            return await self._await_http_bridge_retry_circuit_attempt_settlement(
                 session,
-                attempt=scoped_attempt,
-                consecutive_failures=consecutive_failures,
+                attempt=duplicate_attempt,
                 detail=detail,
             )
-            return consecutive_failures
         assert state is not None
-        await self._persist_http_bridge_retry_circuit(session, state)
-        async with self._http_bridge_retry_circuit_lock:
-            if self._http_bridge_retry_circuits.get(session.key) is state:
-                self._http_bridge_retry_circuit_loaded_keys.add(session.key)
-            return state.consecutive_failures
+        try:
+            await self._persist_http_bridge_retry_circuit(session, state)
+            async with self._http_bridge_retry_circuit_lock:
+                if self._http_bridge_retry_circuits.get(session.key) is state:
+                    self._http_bridge_retry_circuit_loaded_keys.add(session.key)
+                consecutive_failures = state.consecutive_failures
+            return consecutive_failures
+        finally:
+            if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_settled is not None:
+                scoped_attempt.retry_circuit_failure_count = state.consecutive_failures
+                scoped_attempt.retry_circuit_failure_settled.set()
 
     async def _clear_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
         if session.key.strength != "hard":

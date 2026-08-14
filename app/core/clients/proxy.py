@@ -19,6 +19,7 @@ from enum import Enum
 from typing import (
     Any,
     AsyncContextManager,
+    AsyncGenerator,
     AsyncIterator,
     Awaitable,
     Callable,
@@ -1139,14 +1140,14 @@ async def _iter_sse_events(
     resp: SSEResponse,
     idle_timeout_seconds: float,
     max_event_bytes: int,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     next_chunk: asyncio.Task[bytes] | None = None
 
     async def _next_chunk() -> bytes:
         return await iterator.__anext__()
 
-    async def _cancel_pending_chunk(task: asyncio.Task[bytes]) -> None:
-        if task.done():
+    async def _cancel_pending_chunk(task: asyncio.Task[bytes] | None) -> None:
+        if task is None or task.done():
             return
         task.cancel()
         try:
@@ -1460,7 +1461,7 @@ def _response_failed_event_with_optional_status(
     error_type: str,
     response_id: str | None,
     status: JsonValue,
-) -> ResponseFailedEvent | dict[str, JsonValue]:
+) -> ResponseFailedEvent:
     event = response_failed_event(
         code,
         message,
@@ -1469,7 +1470,7 @@ def _response_failed_event_with_optional_status(
     )
     if isinstance(status, int) and not isinstance(status, bool):
         event["status"] = status
-    return cast(dict[str, JsonValue], event)
+    return event
 
 
 def _normalize_stream_payload_for_http_block(
@@ -2701,7 +2702,7 @@ async def stream_responses(
     enforce_openai_sdk_contract: bool = True,
     codex_lb_account_id: str | None = None,
     suppress_live_usage: bool = False,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     effective_allow_direct_egress = allow_direct_egress or (route is None and session is not None)
     async with lease_http_session(session) as client_session:
         async for event_block in _stream_responses_with_session(
@@ -2748,7 +2749,7 @@ async def _stream_responses_with_session(
     enforce_openai_sdk_contract: bool = True,
     codex_lb_account_id: str | None = None,
     suppress_live_usage: bool = False,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     settings = get_settings()
     headers = apply_codex_installation_headers(headers, codex_installation_id)
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")

@@ -35534,7 +35534,7 @@ async def test_compact_responses_surfaces_stream_incomplete_without_account_pena
     assert exc.status_code == 502
     assert exc.failure_detail == "response_incomplete"
     assert _proxy_error_code(exc) == "max_output_tokens"
-    service._handle_stream_error.assert_not_awaited()
+    cast(AsyncMock, service._handle_stream_error).assert_not_awaited()
     record_errors.assert_not_awaited()
     sticky_sessions.delete.assert_not_awaited()
     assert await service.drain_persistence_tasks(timeout_seconds=1)

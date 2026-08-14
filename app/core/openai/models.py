@@ -118,6 +118,7 @@ class CompactResponsePayload(BaseModel):
     object: StrictStr
     id: StrictStr | None = None
     status: StrictStr | None = None
+    service_tier: StrictStr | None = None
     error: OpenAIError | None = None
     usage: ResponseUsage | None = None
 

@@ -40,6 +40,7 @@ class ResponseFailedResponse(TypedDict):
 class ResponseFailedEvent(TypedDict):
     type: Literal["response.failed"]
     response: ResponseFailedResponse
+    status: NotRequired[int]
 
 
 PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE = "Upstream websocket closed before response.completed"

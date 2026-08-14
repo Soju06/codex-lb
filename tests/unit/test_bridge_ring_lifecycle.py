@@ -1997,3 +1997,48 @@ def test_durable_lookup_allows_turn_state_takeover_requires_inactive_lease() -> 
     )
     assert _http_bridge_claim_allows_takeover(live_active, force=True) is True
     assert _http_bridge_claim_allows_takeover(live_active, force=False) is False
+
+
+@pytest.mark.asyncio
+async def test_claim_does_not_retry_takeover_against_a_live_foreign_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repository drops takeover permission after losing a claim race, but
+    the service's own retry loop issues a fresh claim — which would restore the
+    permission and steal the winner's live lease. A live foreign owner must end
+    the retry so the 409 'retry to reach the correct replica' response stands
+    (issue #1695)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(proxy_service, "get_settings", _make_app_settings)
+    session = _make_bridge_session(key_value="sid-foreign-live")
+    session.account = cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE, plan_type="plus"))
+
+    claims: list[bool] = []
+
+    async def claim_live_session(*, allow_takeover, **kwargs):
+        claims.append(allow_takeover)
+        # A live foreign owner: lease well in the future, ACTIVE.
+        return SimpleNamespace(
+            session_id="durable-foreign",
+            owner_instance_id="instance-other",
+            owner_epoch=7,
+            lease_expires_at=utcnow() + timedelta(seconds=600),
+            state=HttpBridgeSessionState.ACTIVE,
+            latest_turn_state=None,
+            latest_response_id=None,
+            canonical_kind=session.key.affinity_kind,
+            canonical_key=session.key.affinity_key,
+            account_id="acc-1",
+            api_key_scope="__anonymous__",
+            lease_is_active=lambda now: True,
+        )
+
+    service._durable_bridge = cast(Any, SimpleNamespace(claim_live_session=claim_live_session))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._claim_durable_http_bridge_session(session, allow_takeover=True)
+
+    assert exc_info.value.status_code == 409
+    # Exactly one claim: the live foreign owner ends the retry instead of
+    # issuing a second, permission-restoring claim.
+    assert claims == [True]

@@ -1222,6 +1222,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "kevinsslin",
+      "name": "Kevin Lin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/86810837?v=4",
+      "profile": "https://github.com/kevinsslin",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

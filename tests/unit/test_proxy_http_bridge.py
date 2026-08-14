@@ -59,6 +59,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
 )
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission
 
@@ -27218,6 +27219,7 @@ async def test_renew_adopts_a_same_instance_epoch_advance_for_the_registered_ses
     renew_live_session = AsyncMock(
         return_value=SimpleNamespace(
             owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+            owner_process_epoch=http_bridge_owner_process_epoch(),
             owner_epoch=4,
             session_id="durable-adopt",
         )
@@ -27251,6 +27253,7 @@ async def test_renew_still_evicts_when_another_local_session_holds_the_slot(
     renew_live_session = AsyncMock(
         return_value=SimpleNamespace(
             owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+            owner_process_epoch=http_bridge_owner_process_epoch(),
             owner_epoch=4,
             session_id="durable-evict",
         )
@@ -27317,3 +27320,37 @@ async def test_settle_failed_creation_releases_when_nothing_replaced_it() -> Non
     )
 
     assert superseded is False
+
+
+@pytest.mark.asyncio
+async def test_renew_evicts_when_a_newer_process_incarnation_advanced_the_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two incarnations can share a configured instance ID across a graceful
+    restart. The successor process's claim must still fence the predecessor
+    out, so adoption requires a matching process epoch, not just the instance
+    ID (issue #1695)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    old_process_session = _make_bridge_session(key_value="sid-restart")
+    old_process_session.durable_session_id = "durable-restart"
+    old_process_session.durable_owner_epoch = 3
+    service._http_bridge_sessions[old_process_session.key] = old_process_session
+    renew_live_session = AsyncMock(
+        return_value=SimpleNamespace(
+            owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+            # Same instance ID, different incarnation.
+            owner_process_epoch="successor-process-epoch",
+            owner_epoch=4,
+            session_id="durable-restart",
+        )
+    )
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(renew_live_session=renew_live_session))
+    monkeypatch.setattr(service, "_schedule_http_bridge_session_closes", Mock())
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await http_bridge_helpers_module._renew_durable_http_bridge_lease(service, old_process_session)
+
+    assert exc_info.value.status_code == 409
+    assert old_process_session.durable_owner_epoch == 3
+    assert old_process_session.closed is True

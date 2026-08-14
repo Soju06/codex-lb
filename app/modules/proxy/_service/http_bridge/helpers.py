@@ -180,6 +180,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
 )
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
@@ -2188,15 +2189,19 @@ async def _renew_durable_http_bridge_lease(
         return
     if (
         lookup.owner_instance_id == current_instance
+        and lookup.owner_process_epoch == http_bridge_owner_process_epoch()
         and lookup.owner_epoch > session.durable_owner_epoch
         and service._http_bridge_sessions.get(session.key) is session
     ):
-        # Our own instance advanced the epoch while this session still holds
-        # the registry slot for its key — a creator that was superseded mid
-        # claim, not a real ownership loss (issue #1695). Evicting here would
-        # 409 the session that legitimately owns the key, so adopt the epoch
-        # and keep renewing. A DIFFERENT local session holding the slot still
-        # falls through: that one won, and this session must be evicted.
+        # THIS process advanced the epoch while this session still holds the
+        # registry slot for its key — a creator that was superseded mid claim,
+        # not a real ownership loss (issue #1695). Evicting here would 409 the
+        # session that legitimately owns the key, so adopt the epoch and keep
+        # renewing. The process-epoch check matters because two incarnations
+        # can share a configured instance ID across a graceful restart: the
+        # successor's claim must still fence the predecessor out. A DIFFERENT
+        # local session holding the slot also falls through: that one won, and
+        # this session must be evicted.
         session.durable_owner_epoch = lookup.owner_epoch
         return
     # Fenced out: another instance/epoch owns the durable session. Never adopt

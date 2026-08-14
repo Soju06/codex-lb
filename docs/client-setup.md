@@ -194,63 +194,83 @@ codex-lb codex-sessions retag --from openai --to codex-lb --yes
 |:---:|:---:|
 | ![retag dry run in WSL](screenshots/codex-session-retag-wsl-dry-run.png) | ![retag apply in WSL](screenshots/codex-session-retag-wsl-apply.png) |
 
-### Automatic Shell Integration & Bi-directional Auto-Toggling (zsh / bash)
+### Automatic Shell Integration (zsh / bash, config-only)
 
-If you frequently toggle between direct OpenAI and `codex-lb` (for instance, running `uvx codex-lb` on demand), manually updating `~/.codex/config.toml` and re-tagging session files each time can cause missing chat history in Codex CLI and the Desktop App.
+If you frequently toggle between direct OpenAI and `codex-lb` (for instance,
+running `uvx codex-lb` on demand), you can automate only the
+`~/.codex/config.toml` provider switch. Keep session retagging on the built-in
+`codex-lb codex-sessions retag` path above, after Codex/Codex CLI is closed,
+instead of rewriting `state_*.sqlite` or `.jsonl` files from a shell hook.
 
-You can add this wrapper function to your shell profile (`~/.zshrc` or `~/.bashrc`) to automatically toggle `~/.codex/config.toml` and re-tag sessions in `state_5.sqlite` and `.jsonl` files whenever `uvx codex-lb` starts and stops:
+Prefer a dedicated wrapper such as `codex_lb_uvx` instead of overriding `uvx`
+globally. That keeps unrelated `uvx` commands untouched, preserves the wrapped
+command's exit status, and restores the previous provider only when this
+invocation changed it.
 
 ```zsh
-# Switch Codex provider and retag sessions automatically
-_switch_codex_provider() {
-  local target="$1"
-  local from
-  if [[ "$target" == "codex-lb" ]]; then
-    from="openai"
-  else
-    from="codex-lb"
-  fi
-  local config_file="$HOME/.codex/config.toml"
-  local db_file="$HOME/.codex/state_5.sqlite"
+_codex_current_provider() {
+  python3 - "$HOME/.codex/config.toml" <<'PY'
+from pathlib import Path
+import sys
+import tomllib
 
-  if [[ -f "$config_file" ]]; then
-    sed -i '' "s/^#* *model_provider = .*/model_provider = \"$target\"/" "$config_file"
-  fi
-
-  if [[ -f "$db_file" ]]; then
-    sqlite3 "$db_file" "UPDATE threads SET model_provider = '$target' WHERE model_provider = '$from';" 2>/dev/null
-  fi
-
-  if [[ -d "$HOME/.codex/sessions" ]]; then
-    find "$HOME/.codex/sessions" -type f -name '*.jsonl' -exec sed -i '' "s/\"model_provider\":\"$from\"/\"model_provider\":\"$target\"/g" {} + 2>/dev/null
-  fi
+config_path = Path(sys.argv[1]).expanduser()
+data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+print(data.get("model_provider", "openai"))
+PY
 }
 
-# Auto-toggle Codex GUI config & retag sessions when running Codex-LB via uvx
-uvx() {
-  if [[ "$*" == *"codex-lb"* ]]; then
-    echo "⚡ Activating Codex-LB and retagging sessions to 'codex-lb'..."
-    _switch_codex_provider "codex-lb"
+_codex_set_provider() {
+  python3 - "$HOME/.codex/config.toml" "$1" <<'PY'
+from pathlib import Path
+import re
+import sys
 
-    local _cleaned=0
-    _do_cleanup() {
-      if [[ $_cleaned -eq 0 ]]; then
-        _cleaned=1
-        echo "\n🔄 Restoring config and retagging sessions to 'openai'..."
-        _switch_codex_provider "openai"
-      fi
-    }
-
-    trap '_do_cleanup' EXIT INT TERM
-
-    command uvx "$@"
-
-    _do_cleanup
-    trap - EXIT INT TERM
-  else
-    command uvx "$@"
-  fi
+config_path = Path(sys.argv[1]).expanduser()
+target = sys.argv[2]
+text = config_path.read_text(encoding="utf-8")
+updated, count = re.subn(
+    r'(?m)^model_provider\s*=\s*"[^"]+"$',
+    f'model_provider = "{target}"',
+    text,
+    count=1,
+)
+if count != 1:
+    raise SystemExit("expected one top-level model_provider entry in ~/.codex/config.toml")
+config_path.write_text(updated, encoding="utf-8")
+PY
 }
+
+codex_lb_uvx() {
+  local previous_provider
+  local status
+
+  previous_provider="$(_codex_current_provider)" || return 1
+
+  if [[ "$previous_provider" != "codex-lb" ]]; then
+    echo "⚡ Switching Codex to codex-lb..."
+    _codex_set_provider "codex-lb" || return 1
+  fi
+
+  command uvx codex-lb "$@"
+  status=$?
+
+  if [[ "$previous_provider" != "codex-lb" ]]; then
+    echo "🔄 Restoring Codex provider to '$previous_provider'..."
+    _codex_set_provider "$previous_provider" || return 1
+  fi
+
+  return $status
+}
+```
+
+If you also want the existing sessions to show up under the provider you are
+switching to, close Codex/Codex CLI first and run the documented retag command
+explicitly:
+
+```bash
+codex-lb codex-sessions retag --from openai --to codex-lb --dry-run
+codex-lb codex-sessions retag --from openai --to codex-lb --yes
 ```
 
 ## OpenCode

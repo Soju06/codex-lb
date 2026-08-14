@@ -548,6 +548,7 @@
   "common.serviceTier.default": "默认",
   "common.serviceTier.flex": "Flex",
   "common.serviceTier.priority": "优先",
+  "common.serviceTier.ultrafast": "Ultrafast",
   "common.states.active": "活跃",
   "common.states.disabled": "已禁用",
   "common.states.enabled": "已启用",

@@ -1346,7 +1346,7 @@ def _normalize_model_slug(value: str | None) -> str | None:
 
 
 _SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
-_SUPPORTED_SERVICE_TIERS = frozenset({"auto", "default", "priority", "flex"})
+_SUPPORTED_SERVICE_TIERS = frozenset({"auto", "default", "priority", "flex", "ultrafast"})
 
 
 def _normalize_expires_at(value: datetime | None) -> datetime | None:

@@ -73,6 +73,31 @@ describe("ApiKeyCreateDialog", () => {
     expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
   });
 
+  it("submits Ultrafast service tier", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Ultrafast key");
+    await user.click(screen.getByRole("combobox", { name: /enforced service tier/i }));
+    await user.click(await screen.findByRole("option", { name: "Ultrafast" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].enforcedServiceTier).toBe("ultrafast");
+  });
+
   it("renders and submits a transport policy override", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

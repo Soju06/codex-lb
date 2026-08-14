@@ -548,6 +548,7 @@
   "common.serviceTier.default": "Default",
   "common.serviceTier.flex": "Flex",
   "common.serviceTier.priority": "Priority",
+  "common.serviceTier.ultrafast": "Ultrafast",
   "common.states.active": "활성",
   "common.states.disabled": "꺼짐",
   "common.states.enabled": "켜짐",

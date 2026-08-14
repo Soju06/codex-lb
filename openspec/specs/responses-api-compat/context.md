@@ -73,6 +73,33 @@ Responses request with:
 Clients that expose Fast Mode as `fast` may keep using that spelling; codex-lb
 normalizes it to `priority` before forwarding.
 
+### Ultrafast Processing
+
+The [OpenAI Responses API reference](https://developers.openai.com/api/reference/resources/responses/methods/create)
+documents `ultrafast` as an access-controlled processing tier currently
+available for `gpt-5.6-sol`. codex-lb forwards this canonical value unchanged;
+it does not grant Ultrafast access by itself.
+
+Account eligibility comes from live or retained per-account upstream catalog
+metadata. The bundled bootstrap catalog deliberately does not advertise
+Ultrafast. If no account advertises the tier, an explicit Ultrafast request
+cannot select an eligible account; API-key enforcement follows the existing
+model-capability fallback when the model itself does not advertise the tier.
+
+Send a Responses request with:
+
+```json
+{
+  "model": "gpt-5.6-sol",
+  "input": "Summarize the change.",
+  "service_tier": "ultrafast"
+}
+```
+
+After completion, verify that the response reports
+`service_tier: "ultrafast"`. Request logs retain `ultrafast` in the requested,
+actual, and effective billable tier fields when upstream confirms it.
+
 ### Operator Fast Mode prohibition
 
 Operators can enable the Routing setting `prohibitFastMode` when qualified

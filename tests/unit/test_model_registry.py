@@ -253,6 +253,7 @@ def test_bootstrap_models_include_representative_upstream_metadata():
         "ultra",
     ]
     assert sol.raw["additional_speed_tiers"] == ["fast"]
+    assert "ultrafast" not in str(sol.raw["service_tiers"])
 
     terra = models["gpt-5.6-terra"]
     assert terra.display_name == "GPT-5.6-Terra"

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -777,10 +778,8 @@ async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, 
 
 
 @pytest.mark.asyncio
-async def test_api_key_enforces_service_tier_for_responses(async_client, monkeypatch):
-    await _populate_test_registry()
-    model_ids = sorted(_TEST_MODELS)
-    forced_model = model_ids[0]
+async def test_api_key_enforces_ultrafast_service_tier_for_responses(async_client, monkeypatch):
+    forced_model = "gpt-5.6-sol"
 
     enable = await async_client.put(
         "/api/settings",
@@ -793,27 +792,47 @@ async def test_api_key_enforces_service_tier_for_responses(async_client, monkeyp
     )
     assert enable.status_code == 200
 
+    account_id = await _import_account(
+        async_client,
+        "acc_enforced_ultrafast_service_tier",
+        "enforced-ultrafast-service-tier@example.com",
+    )
+    advertising_model = replace(
+        _make_upstream_model(forced_model),
+        raw={"service_tiers": [{"slug": "ultrafast"}]},
+    )
+    await get_model_registry().update(
+        {"pro": [advertising_model]},
+        per_account_results={account_id: ("pro", [advertising_model])},
+        active_account_plans={account_id: "pro"},
+    )
+
     created = await async_client.post(
         "/api/api-keys/",
         json={
             "name": "enforced-service-tier",
             "allowedModels": [forced_model],
             "enforcedModel": forced_model,
-            "enforcedServiceTier": "fast",
+            "enforcedServiceTier": "ULTRAFAST",
         },
     )
     assert created.status_code == 200
     key = created.json()["key"]
-    assert created.json()["enforcedServiceTier"] == "priority"
-
-    await _import_account(async_client, "acc_enforced_service_tier", "enforced-service-tier@example.com")
+    assert created.json()["enforcedServiceTier"] == "ultrafast"
 
     seen: dict[str, str | None] = {}
 
     async def fake_stream(payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
         seen["service_tier"] = payload.service_tier
         usage = {"input_tokens": 3, "output_tokens": 2}
-        event = {"type": "response.completed", "response": {"id": "resp_enforced_service_tier", "usage": usage}}
+        event = {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_enforced_service_tier",
+                "service_tier": "ultrafast",
+                "usage": usage,
+            },
+        }
         yield f"data: {json.dumps(event)}\n\n"
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
@@ -833,7 +852,15 @@ async def test_api_key_enforces_service_tier_for_responses(async_client, monkeyp
         assert response.status_code == 200
         _ = [line async for line in response.aiter_lines() if line]
 
-    assert seen["service_tier"] == "priority"
+    assert seen["service_tier"] == "ultrafast"
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        latest_log = result.scalars().first()
+        assert latest_log is not None
+        assert latest_log.requested_service_tier == "ultrafast"
+        assert latest_log.actual_service_tier == "ultrafast"
+        assert latest_log.service_tier == "ultrafast"
 
 
 @pytest.mark.asyncio

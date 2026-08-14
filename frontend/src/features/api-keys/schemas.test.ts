@@ -189,6 +189,15 @@ describe("ApiKeyCreateRequestSchema", () => {
     expect(parsed.enforcedReasoningEffort).toBe("ultra");
   });
 
+  it("accepts Ultrafast service tier in create payload", () => {
+    const parsed = ApiKeyCreateRequestSchema.parse({
+      name: "Ultrafast key",
+      enforcedServiceTier: "ultrafast",
+    });
+
+    expect(parsed.enforcedServiceTier).toBe("ultrafast");
+  });
+
   it("rejects invalid traffic class in create payload", () => {
     const result = ApiKeyCreateRequestSchema.safeParse({
       name: "Bad Key",
@@ -258,6 +267,14 @@ describe("ApiKeyUpdateRequestSchema", () => {
     });
 
     expect(parsed.trafficClass).toBe("opportunistic");
+  });
+
+  it("accepts Ultrafast service tier in update payload", () => {
+    const parsed = ApiKeyUpdateRequestSchema.parse({
+      enforcedServiceTier: "ultrafast",
+    });
+
+    expect(parsed.enforcedServiceTier).toBe("ultrafast");
   });
 });
 

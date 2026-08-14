@@ -11,9 +11,9 @@ codex-lb refreshes usage on its own schedule and treats upstream samples conserv
 **Codex CLI falls back to POST instead of WebSockets.**
 Run the [WebSocket verification steps](client-setup.md#verify-websocket-transport). If codex-lb sits behind a reverse proxy, make sure it forwards WebSocket upgrades — see [Remote Access](deployment/remote.md).
 
-## Fast Mode and service tiers
+## Fast Mode, Ultrafast, and service tiers
 
-Fast Mode and service-tier behavior is documented in the
+Fast Mode, Ultrafast, and service-tier behavior is documented in the
 [Responses API compatibility context](https://github.com/Soju06/codex-lb/blob/main/openspec/specs/responses-api-compat/context.md#fast-mode-and-service-tiers).
 
 ## Old Codex sessions missing after migrating

@@ -296,9 +296,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <div className="text-sm font-medium">{t("apiKeys.form.enforcedServiceTier")}</div>
+              <label htmlFor="edit-api-key-enforced-service-tier" className="text-sm font-medium">
+                {t("apiKeys.form.enforcedServiceTier")}
+              </label>
               <Select value={draft.enforcedServiceTier} onValueChange={(enforcedServiceTier) => updateDraft({ enforcedServiceTier })}>
-                <SelectTrigger>
+                <SelectTrigger id="edit-api-key-enforced-service-tier">
                   <SelectValue placeholder={t("common.options.none")} />
                 </SelectTrigger>
                 <SelectContent>
@@ -307,6 +309,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                   <SelectItem value="default">{t("common.serviceTier.default")}</SelectItem>
                   <SelectItem value="priority">{t("common.serviceTier.priority")}</SelectItem>
                   <SelectItem value="flex">{t("common.serviceTier.flex")}</SelectItem>
+                  <SelectItem value="ultrafast">{t("common.serviceTier.ultrafast")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>

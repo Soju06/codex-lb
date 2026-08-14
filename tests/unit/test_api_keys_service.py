@@ -742,6 +742,23 @@ async def test_create_key_normalizes_fast_service_tier_alias() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_key_preserves_ultrafast_service_tier() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="ultrafast-service-tier-policy",
+            allowed_models=None,
+            enforced_service_tier=" ULTRAFAST ",
+            expires_at=None,
+        )
+    )
+
+    assert created.enforced_service_tier == "ultrafast"
+
+
+@pytest.mark.asyncio
 async def test_update_key_normalizes_service_tier_alias() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

@@ -484,6 +484,20 @@ describe("ApiKeyEditDialog", () => {
     const trafficClassSelect = screen.getByRole("combobox", { name: /traffic class/i });
     expect(trafficClassSelect).toHaveTextContent("Opportunistic");
   });
+
+  it("shows the stored Ultrafast service tier", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ enforcedServiceTier: "ultrafast" })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: /enforced service tier/i })).toHaveTextContent("Ultrafast");
+  });
 });
 
 describe("hasLimitRuleChanges", () => {

@@ -238,6 +238,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                   <SelectItem value="default">{t("common.serviceTier.default")}</SelectItem>
                   <SelectItem value="priority">{t("common.serviceTier.priority")}</SelectItem>
                   <SelectItem value="flex">{t("common.serviceTier.flex")}</SelectItem>
+                  <SelectItem value="ultrafast">{t("common.serviceTier.ultrafast")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>

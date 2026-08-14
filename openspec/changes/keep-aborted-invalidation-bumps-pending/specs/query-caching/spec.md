@@ -39,7 +39,7 @@
 #### Scenario: An aborted bump write keeps its namespace queued
 
 - **GIVEN** a coalesced flush has cleared a namespace's pending marker and is awaiting its bump write
-- **WHEN** that write is cancelled, or raises
+- **WHEN** that write is cancelled before the database accepts its commit, or raises
 - **THEN** the namespace is restored to the pending set for a later cycle, and no version is written
 
 #### Scenario: An ambiguous abort prefers a redundant bump over a lost one

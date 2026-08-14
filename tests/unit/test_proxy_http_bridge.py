@@ -27090,7 +27090,8 @@ async def test_rejected_creator_does_not_release_the_registered_winners_durable_
 
     monkeypatch.setattr(service, "_prune_http_bridge_sessions_locked", Mock(return_value=[]))
     monkeypatch.setattr(service, "_create_http_bridge_session", create_session)
-    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", AsyncMock())
+    claim_durable_session = AsyncMock()
+    monkeypatch.setattr(service, "_claim_durable_http_bridge_session", claim_durable_session)
     close_http_bridge_session = AsyncMock()
     monkeypatch.setattr(service, "_close_http_bridge_session", close_http_bridge_session)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
@@ -27134,3 +27135,7 @@ async def test_rejected_creator_does_not_release_the_registered_winners_durable_
     # own session WITHOUT releasing the durable row the winner now owns.
     assert service._http_bridge_sessions[key] is registered_winner
     close_http_bridge_session.assert_awaited_once_with(stale_creator_session, release_durable_session=False)
+    # It never claimed at all: claiming would have advanced the durable epoch
+    # past the registered winner, fencing the winner's own renewals out of a
+    # row it legitimately owns.
+    claim_durable_session.assert_not_awaited()

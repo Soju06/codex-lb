@@ -761,6 +761,29 @@ def _http_bridge_session_has_visible_requests(session: "_HTTPBridgeSession") -> 
     )
 
 
+async def _raise_if_http_bridge_creation_superseded(
+    service: Any,
+    key: "_HTTPBridgeSessionKey",
+    *,
+    inflight_future: Any,
+) -> None:
+    """Abort a creation whose inflight slot another creator already took.
+
+    An evicted creator has lost the registry slot, so claiming would only
+    advance the durable epoch past the session that won — fencing that
+    winner's own renewals out of a row it legitimately owns (issue #1695).
+    Failing here leaves the row untouched; the caller's failure path then
+    closes this session without releasing the winner's row.
+    """
+    async with service._http_bridge_lock:
+        superseded = service._http_bridge_inflight_sessions.get(key) is not inflight_future
+    if superseded:
+        raise _http_bridge_startup_wait_timeout_error(
+            "http_bridge_session_registration",
+            code="capacity_exhausted_active_sessions",
+        )
+
+
 async def _settle_failed_http_bridge_creation(
     service: Any,
     key: "_HTTPBridgeSessionKey",

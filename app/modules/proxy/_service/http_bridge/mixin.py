@@ -113,6 +113,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _mark_http_bridge_reader_handoff_reconnect_failed,
     _persist_http_bridge_replacement_account,
     _preferred_http_bridge_reconnect_turn_state,
+    _raise_if_http_bridge_creation_superseded,
     _record_bridge_drain_recovery_allowed,
     _record_bridge_first_turn_timeout,
     _refresh_reused_http_bridge_session_with_handoff,
@@ -1526,6 +1527,7 @@ class _HTTPBridgeMixin(
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)
                 created_session = await create_session(key, **create_kwargs)
+                await _raise_if_http_bridge_creation_superseded(self, key, inflight_future=inflight_future)
                 await self._claim_durable_http_bridge_session(
                     created_session,
                     allow_takeover=_http_bridge_claim_allows_takeover(

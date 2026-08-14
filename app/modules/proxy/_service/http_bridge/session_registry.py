@@ -15,8 +15,8 @@ from app.core.metrics.prometheus import (
 )
 from app.db.models import StickySessionKind
 from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_allow_durable_takeover,
     _await_task_deferring_cancellation,
+    _http_bridge_allow_durable_takeover,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_live_previous_response_alias_owner,
     _http_bridge_live_turn_state_alias_owner,

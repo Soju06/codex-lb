@@ -25,15 +25,17 @@ Session `S` is mapped to account A. A has all response-create slots in use, whil
 
 ## Account Cap Sizing Across Replicas
 
-`proxy_account_stream_limit` (default 8) and `proxy_account_response_create_limit` are **cluster-wide targets**, not per-replica values. Each replica derives its own share locally from the sorted bridge-ring membership: `max(1, floor(cap / R) + 1 extra when its rank < cap mod R)` (`app/modules/proxy/cap_partitioning.py`). With the default stream cap of 8 and three replicas the shares are 3/3/2 — a single account can hold at most 2–3 concurrent streams per replica, which surprises operators who read the setting as per-replica.
+Under the default `proxy_account_caps_scope = "partitioned"`, `proxy_account_stream_limit` (default 8) and `proxy_account_response_create_limit` are **cluster-wide targets**, not per-replica values. Each replica derives its own share of a positive cap locally from the sorted bridge-ring membership: `max(1, floor(cap / R) + 1 extra when its rank < cap mod R)` (`app/modules/proxy/cap_partitioning.py`). A cap of `0` stays unlimited everywhere. With the default stream cap of 8 and three replicas the shares are 3/3/2 — a single account can hold at most 2–3 concurrent streams per replica, which surprises operators who read the setting as per-replica. `proxy_account_caps_scope = "replica"` is the supported opt-out: every replica then enforces the full configured cap with no partitioning.
+
+The effective caps are the **dashboard-persisted** values when present (`configured_account_concurrency_caps`), with the environment settings as the pre-initialization defaults — so on a running deployment the cap is normally changed from the dashboard, and an env change alone will not take effect once a dashboard value exists.
 
 Sizing guidance:
 
-- Choose the cap for the **cluster**: the total concurrent upstream streams one account may hold. Scaling replicas out does not raise it; it only re-partitions it.
+- Choose a positive cap for the **cluster**: the total concurrent upstream streams one account may hold. Scaling replicas out does not raise it; it only re-partitions it.
 - Every share is floored at one slot so an account never becomes unroutable on a replica; when `cap < replica_count` the cluster-wide aggregate can therefore exceed the configured cap (up to one per replica).
 - `proxy_account_stream_recovery_reserve` (default 1) is subtracted at **selection time only** — it keeps slots free for recovery/reconnect traffic and is deliberately not consulted when a warm session reacquires its lease between turns. On small per-replica shares the reserve is proportionally heavy: with a share of 2, selection sees 1 usable slot.
 - Membership changes apply with hysteresis: a replica adopts a share **increase** only after the new partition has been stable for a window, while decreases apply immediately — so a missed heartbeat or rolling replacement cannot transiently inflate the aggregate toward upstream.
-- Since turn-scoped leases (#1476), idle warm sessions do not occupy slots; a slot lost to an abnormal condition is reclaimed after `proxy_account_lease_ttl_seconds` (default 900s), which is the fallback bound.
+- Since turn-scoped leases (#1476), idle warm sessions do not occupy slots. A slot lost to an abnormal condition is reclaimed by the stale-lease sweep, whose stream threshold is NOT the raw `proxy_account_lease_ttl_seconds` (default 900s): a legitimately long-running stream must not be reclaimed mid-flight, so the effective bound is `max(lease TTL, longest stream/request budget) + 60s grace` (`_account_lease_stale_ttl_seconds`) — 7260s with the default 7200s Responses budgets. That is the true worst-case recovery time for a leaked stream slot.
 
 Symptom of undersizing: persistent `account_stream_cap` errors and "Waiting for account capacity" retries while replicas are mostly idle. First response is raising `proxy_account_stream_limit` toward `desired-per-account-concurrency` (a common operating point is `~8 × replica_count`), not adding replicas.
 

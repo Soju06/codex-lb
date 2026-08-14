@@ -30,3 +30,13 @@ other required owner MAY still skip the closed account.
 - **AND** the still-unsubmitted request has no live file pin and no other required owner
 - **WHEN** the proxy reconnects that session
 - **THEN** account selection MAY exclude `account_a` and choose another eligible account
+
+#### Scenario: Soft 1011 file-pin reconnect fails closed when the required owner cannot be selected
+
+- **GIVEN** a live in-memory pin `file_xyz -> account_a`
+- **AND** a soft prompt-cache HTTP-bridge session on `account_a` closed with `1011`
+- **AND** the next still-unsubmitted `/v1/responses` request references `file_xyz`
+- **AND** account selection cannot return `account_a`
+- **WHEN** the proxy reconnects that session
+- **THEN** the proxy MUST fail closed with the existing required-owner unavailable error
+- **AND** it MUST NOT replace that envelope with a generic selection failure

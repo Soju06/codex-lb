@@ -189,6 +189,7 @@ from app.modules.proxy.ring_membership import (
     RING_STALE_THRESHOLD_SECONDS,
     RingMembershipService,
 )
+from app.modules.proxy.selection_errors import selection_failure_response
 
 logger = logging.getLogger("app.modules.proxy.service")
 _TASK_CANCEL_TIMEOUT_SECONDS = 1.0
@@ -2500,6 +2501,16 @@ def _http_bridge_previous_response_owner_unavailable_error() -> ProxyResponseErr
             error_type="server_error",
         ),
     )
+
+
+def _http_bridge_reconnect_selection_failure(
+    selection: Any,
+    required_preferred_account_id: str | None,
+) -> ProxyResponseError:
+    if required_preferred_account_id is not None:
+        return _http_bridge_previous_response_owner_unavailable_error()
+    status_code, error_payload = selection_failure_response(selection)
+    return ProxyResponseError(status_code, error_payload)
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:

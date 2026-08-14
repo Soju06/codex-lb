@@ -96,6 +96,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_parallel_fork_key,
     _http_bridge_previous_response_alias_key,
     _http_bridge_previous_response_owner_unavailable_error,
+    _http_bridge_reconnect_selection_failure,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_session_account_active,
@@ -2243,9 +2244,8 @@ class _HTTPBridgeMixin(
                         preferred_candidate_id = None
                     continue
                 record_selected_account_takeover(None)
-                status_code, error_payload = selection_failure_response(selection)
                 complete_failed_handoff()
-                raise ProxyResponseError(status_code, error_payload)
+                raise _http_bridge_reconnect_selection_failure(selection, required_preferred_account_id)
             if required_preferred_account_id is not None and account.id != required_preferred_account_id:
                 if selection.lease is not None:
                     selected_account_lease = selection.lease

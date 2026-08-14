@@ -14,6 +14,8 @@
   closed account.
 - [x] 2.3 Update the fresh-upstream retry call-shape assertion for the new
   `require_preferred_account` argument.
+- [x] 2.4 Assert soft `1011` file-pin reconnect fails closed with the
+  required-owner envelope when selection cannot return the pin account.
 
 ## 3. Validation
 

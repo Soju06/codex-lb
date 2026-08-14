@@ -1008,6 +1008,16 @@ other required owner MAY still skip the closed account.
 - **WHEN** the proxy reconnects that session
 - **THEN** account selection MAY exclude `account_a` and choose another eligible account
 
+#### Scenario: Soft 1011 file-pin reconnect fails closed when the required owner cannot be selected
+
+- **GIVEN** a live in-memory pin `file_xyz -> account_a`
+- **AND** a soft prompt-cache HTTP-bridge session on `account_a` closed with `1011`
+- **AND** the next still-unsubmitted `/v1/responses` request references `file_xyz`
+- **AND** account selection cannot return `account_a`
+- **WHEN** the proxy reconnects that session
+- **THEN** the proxy MUST fail closed with the existing required-owner unavailable error
+- **AND** it MUST NOT replace that envelope with a generic selection failure
+
 ### Requirement: Codex backend session_id preserves account affinity
 When a backend Codex Responses or compact request includes a non-empty accepted session header, the service MUST use that value as the routing affinity key for upstream account selection unless the client supplied a non-empty `x-codex-turn-state` header. If the request lacks a client-supplied `prompt_cache_key`, the service MUST derive and attach a stable `prompt_cache_key` before upstream forwarding so account affinity and upstream prompt-cache routing can coexist. Accepted session headers are `session_id`, `session-id`, `x-codex-session-id`, `x-codex-conversation-id`, and `thread-id`, in that priority order.
 

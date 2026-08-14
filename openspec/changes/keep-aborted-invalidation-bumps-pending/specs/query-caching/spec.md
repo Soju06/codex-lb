@@ -39,12 +39,12 @@
 #### Scenario: An aborted bump write keeps its namespace queued
 
 - **GIVEN** a coalesced flush has cleared a namespace's pending marker and is awaiting its bump write
-- **WHEN** that write is cancelled before the database accepts its commit, or raises
+- **WHEN** that write aborts — cancelled or raised — before the database accepts its commit
 - **THEN** the namespace is restored to the pending set for a later cycle, and no version is written
 
 #### Scenario: An ambiguous abort prefers a redundant bump over a lost one
 
-- **GIVEN** cancellation reaches a bump write after the database accepted its commit but before completion is reported
+- **GIVEN** a bump write aborts — cancelled, or the driver raises — after the database accepted its commit but before completion is reported
 - **WHEN** the namespace is restored and flushed on a later cycle
 - **THEN** the extra version increment only re-runs peers' invalidation callbacks, which is safe
 - **AND** the namespace is not dropped on the chance that the write already landed

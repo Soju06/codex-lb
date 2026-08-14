@@ -27394,9 +27394,11 @@ async def test_renew_does_not_adopt_an_epoch_advance_that_moved_the_row_to_anoth
 
 
 @pytest.mark.asyncio
-async def test_settle_failed_creation_does_not_hand_an_epoch_across_an_account_change() -> None:
-    """Handing the epoch across an account change would leave the winner
-    renewing a row the stale creator rebound to a different account."""
+async def test_settle_failed_creation_releases_a_row_rebound_away_from_the_winner() -> None:
+    """A winner on a different account no longer shares this row: the claim
+    already rewrote its account binding and cleared its continuity aliases.
+    The epoch is not handed over, and the row IS released so the winner is
+    fenced promptly instead of dispatching against a row bound elsewhere."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-account-handover", None)
     winner = _make_bridge_session(key_value="sid-account-handover-winner")
@@ -27419,6 +27421,7 @@ async def test_settle_failed_creation_does_not_hand_an_epoch_across_an_account_c
         exc=RuntimeError("registration lost"),
     )
 
-    assert superseded is True
-    # Epoch NOT handed over: the winner is fenced, evicted, and retries clean.
+    # Not treated as superseded: the row is ours to release, and the winner
+    # will be fenced on its next renewal and retry cleanly.
+    assert superseded is False
     assert winner.durable_owner_epoch == 4

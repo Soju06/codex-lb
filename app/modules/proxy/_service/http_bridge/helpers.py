@@ -816,9 +816,18 @@ async def _settle_failed_http_bridge_creation(
         # just as much the winner as a registered one: releasing here would
         # close the row beneath it, and it would then register with an older
         # epoch and be fenced out on its first renewal (issue #1695).
-        superseded = replacement_in_flight or (
-            registered_session is not None and registered_session is not created_session
+        registered_winner = (
+            registered_session if registered_session is not None and registered_session is not created_session else None
         )
+        # A registered winner on a DIFFERENT account no longer shares this row:
+        # our claim already rewrote its account binding and cleared its
+        # continuity aliases, so preserving the row would leave it bound to our
+        # account while that session keeps dispatching. Release it instead —
+        # the winner is then fenced promptly and retries cleanly.
+        winner_shares_row = registered_winner is not None and (
+            created_session is None or registered_winner.account.id == created_session.account.id
+        )
+        superseded = replacement_in_flight or winner_shares_row
         if superseded and registered_session is not None and created_session is not None:
             # Eviction can still land DURING the claim, so this creator may
             # have advanced the shared row's epoch past the session that won

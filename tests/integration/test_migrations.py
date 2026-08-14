@@ -719,7 +719,7 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
 
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-usage-limits.sqlite'}"
     revision = "20260728_010000_add_account_usage_limits"
-    parent_revision = "20260725_000000_add_http_bridge_pending_tool_calls"
+    parent_revision = "20260806_000000_add_anonymous_telemetry"
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
 
@@ -801,6 +801,18 @@ async def test_account_usage_limits_migration_upgrade_and_downgrade(tmp_path):
                 )
     finally:
         await engine.dispose()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+    migration_state = inspect_migration_state(db_url)
+    assert migration_state.head_revision == revision
+    assert migration_state.current_revision == revision
+    verification_engine = create_async_engine(db_url, future=True)
+    try:
+        async with verification_engine.connect() as conn:
+            revision_rows = await conn.execute(text("SELECT version_num FROM alembic_version"))
+            assert [str(row[0]) for row in revision_rows.fetchall()] == [revision]
+    finally:
+        await verification_engine.dispose()
 
     await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
 

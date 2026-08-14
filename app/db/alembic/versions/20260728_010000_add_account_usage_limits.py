@@ -1,7 +1,7 @@
 """add per-account usage limits
 
 Revision ID: 20260728_010000_add_account_usage_limits
-Revises: 20260808_000000_tune_usage_history_autovacuum
+Revises: 20260806_000000_add_anonymous_telemetry
 Create Date: 2026-07-28
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260728_010000_add_account_usage_limits"
-down_revision = "20260808_000000_tune_usage_history_autovacuum"
+down_revision = "20260806_000000_add_anonymous_telemetry"
 branch_labels = None
 depends_on = None
 

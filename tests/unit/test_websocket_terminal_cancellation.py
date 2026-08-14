@@ -313,7 +313,9 @@ async def test_normal_websocket_scope_cleanup_uses_separate_scope_budget(
         await asyncio.wait_for(scope_task, timeout=0.5)
     await asyncio.sleep(0)
 
-    assert "Websocket scope cleanup exceeded its remaining drain budget" not in caplog.messages
+    assert not any(
+        message.startswith("Websocket scope cleanup exceeded its remaining drain budget") for message in caplog.messages
+    )
     assert service._background_cleanup_tasks == set()
 
 

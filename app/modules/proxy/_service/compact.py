@@ -1346,6 +1346,25 @@ class _CompactMixin:
                                 # stands for; without that proof the replacement
                                 # account would compact a partial history.
                                 replay_payload = None
+                        if (
+                            replay_payload is not None
+                            and affinity.kind == StickySessionKind.CODEX_SESSION
+                            and affinity.codex_session_source == "session_header"
+                            and affinity.legacy_selection_key is not None
+                        ):
+                            # A live raw CODEX_SESSION row from an older replica
+                            # still overrides the namespaced session-header row on
+                            # the next turn. That raw key may be hard turn-state
+                            # ownership and is therefore never safe to rebind to
+                            # the replacement account, so recovery must stay
+                            # owner-bound while it exists.
+                            async with proxy._repo_factory() as repos:
+                                legacy_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
+                                    affinity.legacy_selection_key,
+                                    kind=StickySessionKind.CODEX_SESSION,
+                                )
+                            if legacy_owner_lookup.account_id is not None:
+                                replay_payload = None
                         if replay_payload is None:
                             _record_continuity_fail_closed(
                                 surface="compact",

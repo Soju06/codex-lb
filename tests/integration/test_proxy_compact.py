@@ -1168,6 +1168,81 @@ async def test_proxy_compact_pinned_owner_quota_429_fails_over_with_account_neut
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_quota_429_stays_owner_bound_with_live_legacy_session_header_row(
+    async_client, app_instance, monkeypatch
+):
+    owner_account_id = await _import_account(
+        async_client, email="compact-legacy-owner@example.com", raw_account_id="acc_legacy_owner"
+    )
+    await _import_account(async_client, email="compact-legacy-alt@example.com", raw_account_id="acc_legacy_alt")
+    await _register_durable_previous_response_anchor(
+        app_instance,
+        account_id=owner_account_id,
+        response_id="resp_legacy_anchor",
+        session_key="sid-durable-compact-legacy",
+        recorded_prefix=_NEUTRAL_FULL_RESEND_INPUT[:1],
+    )
+    async with SessionLocal() as session:
+        session.add(
+            StickySession(
+                key="sid-compact-legacy",
+                kind=StickySessionKind.CODEX_SESSION,
+                account_id=owner_account_id,
+            )
+        )
+        await session.commit()
+
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface):
+        del self, previous_response_id, api_key, session_id, surface
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+    calls: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        calls.append(account_id)
+        if account_id == "acc_legacy_owner":
+            raise ProxyResponseError(
+                429,
+                {
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "message": "limit reached",
+                        "plan_type": "plus",
+                        "resets_at": int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 3600,
+                    }
+                },
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_legacy_anchor",
+        },
+        headers={"session_id": "sid-compact-legacy"},
+    )
+
+    assert response.status_code == 429
+    assert calls == ["acc_legacy_owner"]
+    async with SessionLocal() as session:
+        sticky_rows = (
+            (await session.execute(select(StickySession).where(StickySession.kind == StickySessionKind.CODEX_SESSION)))
+            .scalars()
+            .all()
+        )
+        assert [row.key for row in sticky_rows] == ["sid-compact-legacy"]
+        assert [row.account_id for row in sticky_rows] == [owner_account_id]
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_recovery_leaves_a_leased_durable_session_to_its_bridge_owner(
     async_client, app_instance, monkeypatch
 ):

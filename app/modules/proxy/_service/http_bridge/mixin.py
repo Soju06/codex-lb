@@ -1574,9 +1574,7 @@ class _HTTPBridgeMixin(
                         durable_lookup,
                         force=force_durable_takeover,
                     ),
-                    "force_owner_epoch_advance": (
-                        force_durable_takeover or same_replica_durable_predecessor
-                    ),
+                    "force_owner_epoch_advance": (force_durable_takeover or same_replica_durable_predecessor),
                 }
                 restart_takeover = durable_lookup is not None and _http_bridge_allow_durable_takeover(durable_lookup)
                 if restart_takeover:

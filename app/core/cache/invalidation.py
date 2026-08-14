@@ -292,6 +292,10 @@ class CacheInvalidationPoller:
                 # by design: without restoring the marker the namespace whose
                 # write was in flight is neither written nor pending, so a
                 # mutation that already committed never reaches peer replicas.
+                # Restored even when the abort is ambiguous (cancellation
+                # arriving after the database accepted the commit): a redundant
+                # bump only re-runs peers' idempotent callbacks, while dropping
+                # an unconfirmed write leaves them stale until the fallback TTL.
                 self._pending_bumps.add(namespace)
                 raise
 

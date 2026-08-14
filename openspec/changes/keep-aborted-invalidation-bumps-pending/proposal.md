@@ -8,6 +8,8 @@ The invalidation-bus spec already requires that "coalesced (`request_bump`) name
 
 - Restore the pending marker when the bump write is cancelled or raises, so the required retry actually happens. `except BaseException` rather than `Exception`, because `CancelledError` is the case that matters.
 
+The restore is unconditional even when the abort's outcome is ambiguous (cancellation arriving after the database accepted the commit): a redundant bump only re-runs peers' idempotent invalidation callbacks, while dropping an unconfirmed write leaves them stale until the fallback TTL. The bus already tolerates extra version increments — `request_bump` arriving mid-flush deliberately produces one.
+
 Process shutdown is deliberately out of scope: `stop()` cancels the polling task, so a bump queued at that moment has no cycle left to drain it. That is already the documented contract — "a lost bump still converges within the fallback TTL" — and guaranteeing delivery against an unresponsive database at shutdown is a separate concern with its own bounding and task-ownership design.
 
 ## Capabilities

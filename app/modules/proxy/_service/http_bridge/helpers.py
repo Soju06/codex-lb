@@ -810,7 +810,25 @@ async def _settle_failed_http_bridge_creation(
                     inflight_future.set_exception(exc)
                     inflight_future.exception()
         registered_session = service._http_bridge_sessions.get(key)
-        return registered_session is not None and registered_session is not created_session
+        superseded = registered_session is not None and registered_session is not created_session
+        if superseded and created_session is not None:
+            # Eviction can still land DURING the claim, so this creator may
+            # have advanced the shared row's epoch past the session that won
+            # the slot, fencing the winner's own renewals. Both sessions are
+            # this instance's and point at the same row, so hand the epoch we
+            # won over to the winner rather than leaving it stranded.
+            assert registered_session is not None
+            claimed_id = created_session.durable_session_id
+            claimed_epoch = created_session.durable_owner_epoch
+            registered_epoch = registered_session.durable_owner_epoch
+            if (
+                claimed_id is not None
+                and claimed_epoch is not None
+                and registered_session.durable_session_id == claimed_id
+                and (registered_epoch is None or claimed_epoch > registered_epoch)
+            ):
+                registered_session.durable_owner_epoch = claimed_epoch
+        return superseded
 
 
 async def _close_http_bridge_session(

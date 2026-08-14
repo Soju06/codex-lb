@@ -27139,3 +27139,63 @@ async def test_rejected_creator_does_not_release_the_registered_winners_durable_
     # past the registered winner, fencing the winner's own renewals out of a
     # row it legitimately owns.
     claim_durable_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_superseded_creator_hands_its_claimed_epoch_to_the_registered_winner() -> None:
+    """Eviction can land DURING the claim, so a creator may advance the shared
+    row's epoch past the session that won the registry slot — fencing the
+    winner's own renewals out of a row it owns. Both sessions belong to this
+    instance and point at the same row, so the epoch is handed over rather
+    than stranded (issue #1695)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-handover", None)
+    winner = _make_bridge_session(key_value="sid-handover-winner")
+    winner.key = key
+    winner.durable_session_id = "durable-shared"
+    winner.durable_owner_epoch = 4
+    superseded_creator = _make_bridge_session(key_value="sid-handover-stale")
+    superseded_creator.key = key
+    superseded_creator.durable_session_id = "durable-shared"
+    superseded_creator.durable_owner_epoch = 5
+    service._http_bridge_sessions[key] = winner
+
+    superseded = await http_bridge_helpers_module._settle_failed_http_bridge_creation(
+        service,
+        key,
+        inflight_future=None,
+        created_session=superseded_creator,
+        exc=RuntimeError("registration lost"),
+    )
+
+    assert superseded is True
+    assert winner.durable_owner_epoch == 5
+
+
+@pytest.mark.asyncio
+async def test_settle_failed_creation_leaves_an_unrelated_winner_epoch_alone() -> None:
+    """The handover applies only when both sessions point at the same durable
+    row and the creator's epoch is genuinely newer."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-handover-other", None)
+    winner = _make_bridge_session(key_value="sid-handover-other-winner")
+    winner.key = key
+    winner.durable_session_id = "durable-winner-row"
+    winner.durable_owner_epoch = 9
+    creator = _make_bridge_session(key_value="sid-handover-other-stale")
+    creator.key = key
+    creator.durable_session_id = "durable-different-row"
+    creator.durable_owner_epoch = 12
+    service._http_bridge_sessions[key] = winner
+
+    assert (
+        await http_bridge_helpers_module._settle_failed_http_bridge_creation(
+            service,
+            key,
+            inflight_future=None,
+            created_session=creator,
+            exc=RuntimeError("registration lost"),
+        )
+        is True
+    )
+    assert winner.durable_owner_epoch == 9

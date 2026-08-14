@@ -15,6 +15,7 @@
 - [x] 2.3b A CAS loser does not steal a foreign winner's live lease (fails without revalidation)
 - [x] 2.3c The service's claim retry stops at a live foreign owner instead of restoring takeover
 - [x] 2.3d A rejected creator does not release the registered winner's durable row
+- [x] 2.3e A creator superseded mid-claim hands its epoch to the registered winner; unrelated rows are untouched
 - [x] 2.4 Route-level regression through POST /v1/responses: captive predecessor release lands late and is fenced out
 - [x] 2.5 Existing claim/takeover suites pass unchanged (DRAINING rejection, account-change fencing, process-epoch semantics)
 

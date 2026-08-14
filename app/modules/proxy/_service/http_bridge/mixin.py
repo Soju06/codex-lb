@@ -2336,7 +2336,7 @@ class _HTTPBridgeMixin(
                 await release_selected_account_lease()
                 complete_failed_handoff()
                 raise
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (aiohttp.ClientError, asyncio.TimeoutError) as transport_exc:
                 if selected_is_preferred and _remaining_budget_seconds(deadline) > 0:
                     if retry_same_account_once:
                         retry_same_account_once = False
@@ -2346,7 +2346,7 @@ class _HTTPBridgeMixin(
                     continue
                 await release_selected_account_lease()
                 complete_failed_handoff()
-                raise
+                raise _http_bridge_reconnect_connect_failure(transport_exc, required_preferred_account_id)
             except asyncio.CancelledError:
                 session.closed = True
                 await release_selected_account_lease()

@@ -2514,12 +2514,14 @@ def _http_bridge_reconnect_selection_failure(
 
 
 def _http_bridge_reconnect_connect_failure(
-    exc: ProxyResponseError,
+    exc: BaseException,
     required_preferred_account_id: str | None,
 ) -> ProxyResponseError:
     if required_preferred_account_id is not None:
         return _http_bridge_previous_response_owner_unavailable_error()
-    return exc
+    if isinstance(exc, ProxyResponseError):
+        return exc
+    raise exc
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:

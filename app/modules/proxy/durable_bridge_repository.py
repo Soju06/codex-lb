@@ -653,8 +653,33 @@ class DurableBridgeRepository:
                         contended = True
                         continue
                     raise
-                await self._session.refresh(record)
-                return _to_snapshot_required(record)
+                # Same reason the CAS path builds its own snapshot: another
+                # same-instance claimant can advance this brand-new row before
+                # a refresh runs, and returning that epoch would hand two
+                # claimants the same fence.
+                inserted_id = record.id
+                return DurableBridgeSessionSnapshot(
+                    id=inserted_id,
+                    session_key_kind=session_key_kind,
+                    session_key_value=session_key_value,
+                    session_key_hash=session_key_hash,
+                    api_key_scope=api_key_scope,
+                    owner_instance_id=instance_id,
+                    owner_process_epoch=owner_process_epoch,
+                    owner_epoch=1,
+                    lease_expires_at=lease_expires_at,
+                    state=HttpBridgeSessionState.ACTIVE,
+                    account_id=account_id,
+                    model=model,
+                    service_tier=service_tier,
+                    latest_turn_state=latest_turn_state,
+                    latest_response_id=latest_response_id,
+                    latest_input_item_count=None,
+                    latest_input_full_fingerprint=None,
+                    latest_pending_tool_calls=None,
+                    last_seen_at=now,
+                    closed_at=None,
+                )
 
             state_closed = existing.state == HttpBridgeSessionState.CLOSED
             owner_absent = existing.owner_instance_id is None

@@ -27264,3 +27264,56 @@ async def test_renew_still_evicts_when_another_local_session_holds_the_slot(
     assert exc_info.value.status_code == 409
     assert loser.durable_owner_epoch == 3
     assert loser.closed is True
+
+
+@pytest.mark.asyncio
+async def test_settle_failed_creation_spares_a_replacement_that_has_not_registered_yet() -> None:
+    """A replacement that has claimed but not yet published its session is as
+    much the winner as a registered one: releasing here would close the row
+    beneath it, and it would then register with an older epoch and be fenced
+    out on its first renewal (issue #1695)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-inflight-winner", None)
+    stale_creator = _make_bridge_session(key_value="sid-inflight-stale")
+    stale_creator.key = key
+    stale_creator.durable_session_id = "durable-inflight"
+    stale_creator.durable_owner_epoch = 6
+    replacement_future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    service._http_bridge_inflight_sessions[key] = replacement_future
+
+    superseded = await http_bridge_helpers_module._settle_failed_http_bridge_creation(
+        service,
+        key,
+        inflight_future=None,
+        created_session=stale_creator,
+        exc=RuntimeError("registration lost"),
+    )
+
+    # No session is registered yet, but the replacement owns the inflight slot.
+    assert service._http_bridge_sessions.get(key) is None
+    assert superseded is True
+    # The replacement's future is left intact for it to resolve.
+    assert service._http_bridge_inflight_sessions.get(key) is replacement_future
+    replacement_future.cancel()
+
+
+@pytest.mark.asyncio
+async def test_settle_failed_creation_releases_when_nothing_replaced_it() -> None:
+    """With no registered session and no in-flight replacement, the creator
+    still owns the row and must release it rather than leak it."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-sole-creator", None)
+    sole_creator = _make_bridge_session(key_value="sid-sole-creator")
+    sole_creator.key = key
+    sole_creator.durable_session_id = "durable-sole"
+    sole_creator.durable_owner_epoch = 2
+
+    superseded = await http_bridge_helpers_module._settle_failed_http_bridge_creation(
+        service,
+        key,
+        inflight_future=None,
+        created_session=sole_creator,
+        exc=RuntimeError("upstream failed"),
+    )
+
+    assert superseded is False

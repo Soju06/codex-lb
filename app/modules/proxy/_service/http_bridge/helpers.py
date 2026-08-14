@@ -801,6 +801,7 @@ async def _settle_failed_http_bridge_creation(
     """
     async with service._http_bridge_lock:
         current_future = service._http_bridge_inflight_sessions.get(key)
+        replacement_in_flight = current_future is not None and current_future is not inflight_future
         if current_future is inflight_future:
             service._http_bridge_inflight_sessions.pop(key, None)
             if inflight_future is not None and not inflight_future.done():
@@ -810,8 +811,14 @@ async def _settle_failed_http_bridge_creation(
                     inflight_future.set_exception(exc)
                     inflight_future.exception()
         registered_session = service._http_bridge_sessions.get(key)
-        superseded = registered_session is not None and registered_session is not created_session
-        if superseded and created_session is not None:
+        # A replacement that has claimed but not yet published its session is
+        # just as much the winner as a registered one: releasing here would
+        # close the row beneath it, and it would then register with an older
+        # epoch and be fenced out on its first renewal (issue #1695).
+        superseded = replacement_in_flight or (
+            registered_session is not None and registered_session is not created_session
+        )
+        if superseded and registered_session is not None and created_session is not None:
             # Eviction can still land DURING the claim, so this creator may
             # have advanced the shared row's epoch past the session that won
             # the slot, fencing the winner's own renewals. Both sessions are

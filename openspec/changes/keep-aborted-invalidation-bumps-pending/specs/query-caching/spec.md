@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Cache invalidation bumps and polling are resilient and observable
-`bump()` MUST retry transient write failures (including SQLite "database is locked") with a short backoff; on final failure it MUST log at ERROR with the namespace, increment `codex_lb_cache_invalidation_bump_failures_total{namespace}`, and MUST NOT fail the originating mutation. Coalesced (`request_bump`) namespaces MUST remain pending and be retried on subsequent poll cycles until a bump succeeds — including when the write aborts rather than merely failing; an aborted write MUST restore the pending marker regardless of whether the database had already accepted its commit — cancellation reaching the commit after the database accepted it — MUST also restore the namespace: a redundant bump only re-runs idempotent invalidation callbacks on peers, whereas dropping an unconfirmed write would leave them stale until the fallback TTL — and a `request_bump` arriving while a flush for the same namespace is already awaiting its bump MUST be preserved and produce a later bump. When any invalidation callback for a namespace fails, the poller MUST NOT acknowledge the observed version and MUST re-run that namespace's callbacks on subsequent poll cycles until they succeed. The poller MUST escalate consecutive poll failures above debug level after a bounded count (WARNING after 3, ERROR after 10) and increment `codex_lb_cache_invalidation_poll_failures_total`.
+`bump()` MUST retry transient write failures (including SQLite "database is locked") with a short backoff; on final failure it MUST log at ERROR with the namespace, increment `codex_lb_cache_invalidation_bump_failures_total{namespace}`, and MUST NOT fail the originating mutation. Coalesced (`request_bump`) namespaces MUST remain pending and be retried on subsequent poll cycles until a bump succeeds, including when the write aborts rather than merely failing: an aborted write MUST restore the pending marker regardless of whether the database had already accepted its commit. A `request_bump` arriving while a flush for the same namespace is already awaiting its bump MUST be preserved and produce a later bump. When any invalidation callback for a namespace fails, the poller MUST NOT acknowledge the observed version and MUST re-run that namespace's callbacks on subsequent poll cycles until they succeed. The poller MUST escalate consecutive poll failures above debug level after a bounded count (WARNING after 3, ERROR after 10) and increment `codex_lb_cache_invalidation_poll_failures_total`.
 
 #### Scenario: Bump failure under database lock is observable and does not fail the mutation
 
@@ -42,9 +42,9 @@
 - **WHEN** that write aborts — cancelled or raised — before the database accepts its commit
 - **THEN** the namespace is restored to the pending set for a later cycle, and no version is written
 
-#### Scenario: An ambiguous abort prefers a redundant bump over a lost one
+#### Scenario: An abort after the commit was accepted still restores the namespace
 
 - **GIVEN** a bump write aborts — cancelled, or the driver raises — after the database accepted its commit but before completion is reported
-- **WHEN** the namespace is restored and flushed on a later cycle
-- **THEN** the namespace is still restored and bumped on a later cycle
-- **AND** the resulting redundant version increment is accepted rather than dropping the namespace
+- **WHEN** the abort is handled
+- **THEN** the namespace is restored to the pending set and bumped on a later cycle
+- **AND** the resulting duplicate version increment is accepted

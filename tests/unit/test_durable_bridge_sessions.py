@@ -3388,3 +3388,82 @@ async def test_durable_bridge_claim_survives_a_release_committing_mid_claim(
     assert successor.owner_instance_id == "instance-a"
     assert successor.state == HttpBridgeSessionState.ACTIVE
     assert successor.owner_epoch == predecessor.owner_epoch + 1
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_concurrent_successor_claims_serialize_on_the_epoch_cas(
+    coordinator: DurableBridgeSessionCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two successor claims can both read epoch N (with_for_update is a no-op
+    on SQLite). Without the compare-and-set, both would write N+1 and both
+    believe they own the row with colliding fences. The loser must retry
+    against fresh state and land on a distinct, higher epoch."""
+    predecessor = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-cas",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    import app.modules.proxy.durable_bridge_repository as repository_module
+
+    real_writer_section = repository_module.sqlite_writer_section
+    competitor_epochs: list[int] = []
+    injected = False
+
+    @contextlib.asynccontextmanager
+    async def writer_section_with_competing_claim():
+        nonlocal injected
+        if not injected:
+            injected = True
+            # A competing successor claim commits between this claim's SELECT
+            # and its CAS write.
+            competitor = await coordinator.claim_live_session(
+                session_key_kind="session_header",
+                session_key_value="sid-cas",
+                api_key_id=None,
+                instance_id="instance-a",
+                owner_process_epoch="test-process",
+                lease_ttl_seconds=60.0,
+                account_id="acc-1",
+                model="gpt-5.4",
+                service_tier=None,
+                latest_turn_state=None,
+                latest_response_id=None,
+                allow_takeover=False,
+            )
+            competitor_epochs.append(competitor.owner_epoch)
+        async with real_writer_section():
+            yield
+
+    monkeypatch.setattr(repository_module, "sqlite_writer_section", writer_section_with_competing_claim)
+
+    loser_turned_winner = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-cas",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=False,
+    )
+
+    assert competitor_epochs == [predecessor.owner_epoch + 1]
+    # The raced claim lost the CAS, retried against fresh state, and landed on
+    # its own distinct epoch above the competitor's.
+    assert loser_turned_winner.owner_instance_id == "instance-a"
+    assert loser_turned_winner.owner_epoch == competitor_epochs[0] + 1

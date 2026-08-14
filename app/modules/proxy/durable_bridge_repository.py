@@ -694,11 +694,26 @@ class DurableBridgeRepository:
                     values["latest_input_full_fingerprint"] = None
                     values["latest_pending_tool_calls_json"] = None
             async with sqlite_writer_section():
+                # Compare-and-set on the epoch read above: SQLite's
+                # with_for_update is a no-op, so two successor claims can both
+                # read epoch N; without the guard both would write N+1 and both
+                # believe they own the row with colliding fences. The loser's
+                # update matches zero rows and retries against fresh state.
+                result = await self._session.execute(
+                    update(HttpBridgeSessionRecord)
+                    .where(
+                        HttpBridgeSessionRecord.id == existing.id,
+                        HttpBridgeSessionRecord.owner_epoch == existing.owner_epoch,
+                    )
+                    .values(**values)
+                )
+                if result.rowcount == 0:
+                    await self._session.rollback()
+                    if attempt == 0:
+                        continue
+                    raise RuntimeError("Failed to claim durable bridge session after retry")
                 if account_changed:
                     await self._clear_aliases_for_session(existing.id)
-                await self._session.execute(
-                    update(HttpBridgeSessionRecord).where(HttpBridgeSessionRecord.id == existing.id).values(**values)
-                )
                 await self._session.commit()
             await self._session.refresh(existing)
             return _to_snapshot_required(existing)

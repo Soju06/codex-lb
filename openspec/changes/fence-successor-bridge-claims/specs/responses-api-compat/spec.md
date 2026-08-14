@@ -2,7 +2,7 @@
 
 ### Requirement: Durable bridge claims fence out the retiring predecessor
 
-A successful `claim_live_session` over an existing durable row MUST advance the owner epoch, including when the claiming instance already owns the row, so fenced updates issued by the predecessor local session — its release and any outstanding renewals — no-op after the claim instead of racing the successor. The claim's write MUST be authoritative: it MUST set every ownership field (owner, process epoch, owner epoch, lease, state, account) unconditionally, so a concurrent write committing between the claim's read and its commit cannot survive into the claim's result. A claim that returns successfully MUST reflect the claimant as the live owner.
+A successful `claim_live_session` over an existing durable row MUST advance the owner epoch, including when the claiming instance already owns the row, so fenced updates issued by the predecessor local session — its release and any outstanding renewals — no-op after the claim instead of racing the successor. The claim's write MUST be authoritative: it MUST set every ownership field (owner, process epoch, owner epoch, lease, state, account) unconditionally, so a concurrent write committing between the claim's read and its commit cannot survive into the claim's result. A claim that returns successfully MUST reflect the claimant as the live owner. Concurrent claims over the same row MUST serialize on the epoch: the write MUST land only if the epoch still matches the claim's read, and a losing claim MUST retry against fresh state, so two claimants can never hold colliding fences.
 
 #### Scenario: A successor claim fences the predecessor's release
 
@@ -16,6 +16,12 @@ A successful `claim_live_session` over an existing durable row MUST advance the 
 - **WHEN** the claim commits
 - **THEN** the claim's result reflects the claimant as the live owner with the advanced epoch
 - **AND** the request proceeds instead of failing with `bridge_instance_mismatch`
+
+#### Scenario: Racing successor claims cannot share an epoch
+
+- **GIVEN** two successor claims that both read the same owner epoch before either writes
+- **WHEN** both commit
+- **THEN** they land on distinct epochs, with the loser retrying against fresh state
 
 #### Scenario: Foreign-claim rejection is unchanged
 

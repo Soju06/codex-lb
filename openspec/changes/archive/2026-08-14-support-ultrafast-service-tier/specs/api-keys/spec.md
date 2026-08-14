@@ -15,4 +15,3 @@ The dashboard API key CRUD surface MUST accept and persist `ultrafast` as a cano
 - **GIVEN** an account model advertises the `ultrafast` service tier
 - **WHEN** a request uses an API key whose enforced service tier is `ultrafast`
 - **THEN** the upstream request carries `service_tier: "ultrafast"`
-

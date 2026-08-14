@@ -33,4 +33,3 @@ OpenAI documents `ultrafast` as an access-controlled processing tier currently a
 - [An entitled account's catalog does not advertise `ultrafast`] → The existing explicit-tier routing error remains visible instead of silently selecting an ineligible account.
 - [OpenAI later publishes distinct Ultrafast pricing] → Add the published rates in a focused pricing change before claiming separate cost accuracy.
 - [Dashboard-visible option requires review evidence] → Include before and after screenshots in the PR body as required by the simplicity gates.
-

@@ -13,4 +13,3 @@ Responses-compatible routes MUST accept the canonical `ultrafast` service tier a
 
 - **WHEN** upstream completes a request with `response.service_tier: "ultrafast"`
 - **THEN** the actual and billable request-log tiers are `ultrafast`
-

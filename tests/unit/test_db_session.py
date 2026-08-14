@@ -1008,3 +1008,56 @@ async def test_sqlite_long_write_watchdog_does_not_blame_a_victim_waiting_for_th
     finally:
         await victim_engine.dispose()
         await holder_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_long_write_watchdog_includes_a_slow_transaction_end_in_the_hold(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """ConnectionEvents.commit/rollback fire before the DBAPI call, and a
+    wedged rollback is exactly the holder this watchdog hunts. The report is
+    deferred to the first proof the transaction ended (next begin on the
+    connection, or pool checkin), so the wedge itself is inside the measured
+    hold."""
+    monkeypatch.setattr(session_module, "_SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS", 0.15)
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'slow-end.db'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    session_module._install_sqlite_long_write_watchdog(engine.sync_engine)
+
+    # A commit whose DBAPI call itself stalls: the event fires, then the
+    # "driver" spends longer than the threshold before the transaction is over.
+    real_commit_events = []
+
+    @sa_event.listens_for(engine.sync_engine, "commit")
+    def _stall_after_mark(conn) -> None:
+        # Runs after the watchdog's own commit listener marked the pending
+        # report; the sleep stands in for a wedged DBAPI commit/rollback.
+        real_commit_events.append(True)
+        import time as _time
+
+        _time.sleep(0.2)
+
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        caplog.clear()
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        with caplog.at_level(logging.WARNING, logger=session_module.__name__):
+            async with factory() as session:
+                await session.execute(sa_text("DELETE FROM accounts"))
+                await session.commit()
+
+        records = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "sqlite_long_write_transaction" in record.getMessage()
+        ]
+        assert real_commit_events, "the stalling commit listener must have run"
+        assert records, "a hold whose transaction end itself stalls must still be reported"
+        assert "outcome=commit" in records[0].getMessage()
+    finally:
+        await engine.dispose()

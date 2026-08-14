@@ -206,17 +206,12 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
             info["sqlite_write_task"] = _current_task_name_best_effort()
         info["sqlite_last_write_statement"] = preview
 
-    def _report_and_reset(conn: object, *, outcome: str) -> None:
-        info = getattr(conn, "info", None)
-        if info is None:
+    def _finalize_pending_report(info: dict[str, object]) -> None:
+        pending = info.pop("sqlite_write_pending_report", None)
+        if not isinstance(pending, tuple):
             return
-        started_at = info.pop("sqlite_write_started_at", None)
-        first_statement = info.pop("sqlite_first_write_statement", None)
-        last_statement = info.pop("sqlite_last_write_statement", None)
-        task_name = info.pop("sqlite_write_task", None)
-        if started_at is None:
-            return
-        held_seconds = time.monotonic() - started_at
+        started_at, outcome, first_statement, last_statement, task_name = pending
+        held_seconds = time.monotonic() - float(started_at)
         if held_seconds < _SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS:
             return
         logger.warning(
@@ -229,13 +224,43 @@ def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
             last_statement,
         )
 
+    def _mark_transaction_ending(conn: object, *, outcome: str) -> None:
+        # ConnectionEvents.commit/rollback fire BEFORE the DBAPI call, and a
+        # wedged rollback is exactly the holder this watchdog hunts — reporting
+        # here would exclude the wedge itself from the measured hold. Stash the
+        # report and finalize it at the first proof the DBAPI transaction ended:
+        # the connection's next transaction beginning, or the connection going
+        # back to the pool.
+        info = getattr(conn, "info", None)
+        if info is None:
+            return
+        started_at = info.pop("sqlite_write_started_at", None)
+        first_statement = info.pop("sqlite_first_write_statement", None)
+        last_statement = info.pop("sqlite_last_write_statement", None)
+        task_name = info.pop("sqlite_write_task", None)
+        if started_at is None:
+            return
+        info["sqlite_write_pending_report"] = (started_at, outcome, first_statement, last_statement, task_name)
+
     @event.listens_for(engine, "commit")
-    def _report_on_commit(conn: object) -> None:
-        _report_and_reset(conn, outcome="commit")
+    def _mark_on_commit(conn: object) -> None:
+        _mark_transaction_ending(conn, outcome="commit")
 
     @event.listens_for(engine, "rollback")
-    def _report_on_rollback(conn: object) -> None:
-        _report_and_reset(conn, outcome="rollback")
+    def _mark_on_rollback(conn: object) -> None:
+        _mark_transaction_ending(conn, outcome="rollback")
+
+    @event.listens_for(engine, "begin")
+    def _finalize_on_next_begin(conn: object) -> None:
+        info = getattr(conn, "info", None)
+        if info is not None:
+            _finalize_pending_report(info)
+
+    @event.listens_for(engine, "checkin")
+    def _finalize_on_checkin(dbapi_connection: object, connection_record: object) -> None:
+        info = getattr(connection_record, "info", None)
+        if info is not None:
+            _finalize_pending_report(info)
 
 
 def _create_main_engine(url: str) -> AsyncEngine:

@@ -549,6 +549,14 @@ async def lifespan(app: FastAPI):
                     await proxy_service.reconcile_durable_http_bridge_ownership()
                 except Exception:
                     logger.warning("HTTP bridge durable ownership reconciliation failed", exc_info=True)
+            # The idle sweep is otherwise only reached from the request path, so
+            # a replica that stops receiving bridge requests would keep its idle
+            # sessions' upstream WebSockets open until restart (issue #1354).
+            if proxy_service is not None and hasattr(proxy_service, "prune_idle_http_bridge_sessions"):
+                try:
+                    await proxy_service.prune_idle_http_bridge_sessions()
+                except Exception:
+                    logger.warning("HTTP bridge idle sweep failed", exc_info=True)
             await refresh_cap_partition(svc.list_active, iid)
 
     async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:

@@ -26975,3 +26975,47 @@ async def test_http_bridge_eventless_timeout_signal_drains_after_repeated_sessio
     await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
     await http_bridge_upstream_events_module._record_http_bridge_account_timeout_signal(service, session)
     record_errors.assert_awaited_once_with(account, 2)
+
+
+@pytest.mark.asyncio
+async def test_prune_idle_http_bridge_sessions_evicts_without_request_traffic() -> None:
+    """The idle sweep is otherwise only reached from the request path, so a
+    replica that stops taking bridge requests would keep idle sessions'
+    upstream WebSockets open until restart (issue #1354)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    idle = _make_bridge_session(key_value="idle-no-traffic")
+    idle.last_used_at = time.monotonic() - (idle.idle_ttl_seconds + 60.0)
+    fresh = _make_bridge_session(key_value="fresh-no-traffic")
+    fresh.last_used_at = time.monotonic()
+    service._http_bridge_sessions[idle.key] = idle
+    service._http_bridge_sessions[fresh.key] = fresh
+
+    pruned_count = await service.prune_idle_http_bridge_sessions()
+    await asyncio.gather(*service._background_cleanup_tasks)
+
+    assert pruned_count == 1
+    assert idle.key not in service._http_bridge_sessions
+    assert fresh.key in service._http_bridge_sessions
+    assert fresh.closed is False
+
+
+@pytest.mark.asyncio
+async def test_prune_idle_http_bridge_sessions_spares_sessions_with_pending_work() -> None:
+    """The sweep reuses _prune_http_bridge_sessions_locked, so a session with
+    in-flight work keeps its own lifecycle even past the idle TTL."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    busy = _make_bridge_session(key_value="busy-no-traffic", queued_request_count=1)
+    busy.last_used_at = time.monotonic() - (busy.idle_ttl_seconds + 60.0)
+    service._http_bridge_sessions[busy.key] = busy
+
+    assert await service.prune_idle_http_bridge_sessions() == 0
+    assert busy.key in service._http_bridge_sessions
+    assert busy.closed is False
+
+
+@pytest.mark.asyncio
+async def test_prune_idle_http_bridge_sessions_is_a_noop_on_an_empty_registry() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    assert await service.prune_idle_http_bridge_sessions() == 0
+    assert not service._background_cleanup_tasks

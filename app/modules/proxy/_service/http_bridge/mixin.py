@@ -1663,6 +1663,21 @@ class _HTTPBridgeMixin(
                 sessions_to_close.append(session)
         return sessions_to_close
 
+    async def prune_idle_http_bridge_sessions(self) -> int:
+        """Run the idle sweep off the request path (issue #1354).
+
+        The sweep is otherwise reached only from
+        ``_get_or_create_http_bridge_session``, so a replica that stops taking
+        bridge requests keeps idle sessions' upstream WebSockets open until
+        restart. Heartbeat-driven, so it runs without traffic or leadership.
+        """
+        async with self._http_bridge_lock:
+            pruned_sessions = self._prune_http_bridge_sessions_locked()
+        if not pruned_sessions:
+            return 0
+        self._schedule_http_bridge_session_closes(pruned_sessions, reason="idle_sweep")
+        return len(pruned_sessions)
+
     _close_http_bridge_session = _helpers_close_http_bridge_session
 
     async def _create_http_bridge_session(

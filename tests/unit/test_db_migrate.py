@@ -2314,6 +2314,8 @@ def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_
                 ).scalar_one()
                 is None
             )
+    finally:
+        engine.dispose()
 
 
 def test_http_bridge_operation_migrations_round_trip_existing_rows_and_rebuild_sqlite_defaults(

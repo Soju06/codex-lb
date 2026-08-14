@@ -1638,6 +1638,39 @@ def _make_http_bridge_session_header_fallback_key(
     )
 
 
+def _turn_keys(
+    headers: Mapping[str, str],
+    api_key: ApiKeyData | None,
+    requested_key: _HTTPBridgeSessionKey,
+    fallback_key: _HTTPBridgeSessionKey | None,
+) -> tuple[str | None, _HTTPBridgeSessionKey | None]:
+    thread_key = _codex_backend_identity(headers).thread_selection_key
+    thread_fallback_key = (
+        _HTTPBridgeSessionKey("thread_header", thread_key, api_key.id if api_key is not None else None)
+        if thread_key is not None
+        else None
+    )
+    incoming_session_key = None if thread_fallback_key is not None else _sticky_key_from_session_header(headers)
+    initial_session_key = (
+        fallback_key
+        or thread_fallback_key
+        or (requested_key if requested_key.affinity_kind == "session_header" else None)
+    )
+    return incoming_session_key, initial_session_key
+
+
+def _alias_fallback_key(
+    incoming_session_key: str | None,
+    initial_session_key: _HTTPBridgeSessionKey | None,
+    api_key_id: str | None,
+) -> _HTTPBridgeSessionKey | None:
+    if initial_session_key is not None:
+        return initial_session_key
+    if incoming_session_key is None:
+        return None
+    return _HTTPBridgeSessionKey("session_header", incoming_session_key, api_key_id)
+
+
 async def _http_bridge_should_wait_for_registration(
     self,
     key: _HTTPBridgeSessionKey,

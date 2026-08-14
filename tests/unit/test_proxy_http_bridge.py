@@ -27199,3 +27199,68 @@ async def test_settle_failed_creation_leaves_an_unrelated_winner_epoch_alone() -
         is True
     )
     assert winner.durable_owner_epoch == 9
+
+
+@pytest.mark.asyncio
+async def test_renew_adopts_a_same_instance_epoch_advance_for_the_registered_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A creator superseded mid-claim advances the row's epoch under this
+    instance. The session still holding the registry slot legitimately owns the
+    key, so its renewal must adopt the epoch — evicting would 409 the owner
+    (issue #1695)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    registered = _make_bridge_session(key_value="sid-adopt")
+    registered.durable_session_id = "durable-adopt"
+    registered.durable_owner_epoch = 3
+    service._http_bridge_sessions[registered.key] = registered
+    renew_live_session = AsyncMock(
+        return_value=SimpleNamespace(
+            owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=4,
+            session_id="durable-adopt",
+        )
+    )
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(renew_live_session=renew_live_session))
+    schedule_closes = Mock()
+    monkeypatch.setattr(service, "_schedule_http_bridge_session_closes", schedule_closes)
+
+    await http_bridge_helpers_module._renew_durable_http_bridge_lease(service, registered)
+
+    assert registered.durable_owner_epoch == 4
+    assert registered.closed is False
+    assert service._http_bridge_sessions[registered.key] is registered
+    schedule_closes.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_renew_still_evicts_when_another_local_session_holds_the_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that lost the registry slot to a different local session is a
+    genuine ownership loss and must still be evicted with the 409 contract."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    loser = _make_bridge_session(key_value="sid-evict")
+    loser.durable_session_id = "durable-evict"
+    loser.durable_owner_epoch = 3
+    winner = _make_bridge_session(key_value="sid-evict-winner")
+    winner.key = loser.key
+    service._http_bridge_sessions[loser.key] = winner
+    renew_live_session = AsyncMock(
+        return_value=SimpleNamespace(
+            owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=4,
+            session_id="durable-evict",
+        )
+    )
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(renew_live_session=renew_live_session))
+    monkeypatch.setattr(service, "_schedule_http_bridge_session_closes", Mock())
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await http_bridge_helpers_module._renew_durable_http_bridge_lease(service, loser)
+
+    assert exc_info.value.status_code == 409
+    assert loser.durable_owner_epoch == 3
+    assert loser.closed is True

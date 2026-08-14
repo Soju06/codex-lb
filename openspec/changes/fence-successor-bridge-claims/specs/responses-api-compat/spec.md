@@ -2,7 +2,7 @@
 
 ### Requirement: Durable bridge claims fence out the retiring predecessor
 
-A successful `claim_live_session` over an existing durable row MUST advance the owner epoch, including when the claiming instance already owns the row, so fenced updates issued by the predecessor local session — its release and any outstanding renewals — no-op after the claim instead of racing the successor. The claim's write MUST be authoritative: it MUST set every ownership field (owner, process epoch, owner epoch, lease, state, account) unconditionally, so a concurrent write committing between the claim's read and its commit cannot survive into the claim's result. A claim that returns successfully MUST reflect the claimant as the live owner. Concurrent claims over the same row MUST serialize on the epoch: the write MUST land only if the epoch still matches the claim's read, and a losing claim MUST retry against fresh state (within a bounded budget), so two claimants can never hold colliding fences. The snapshot a claim returns MUST be the state that claim itself wrote — not a post-commit re-read, which a later claim's commit could have already overwritten with its own epoch.
+A successful `claim_live_session` over an existing durable row MUST advance the owner epoch, including when the claiming instance already owns the row, so fenced updates issued by the predecessor local session — its release and any outstanding renewals — no-op after the claim instead of racing the successor. The claim's write MUST be authoritative: it MUST set every ownership field (owner, process epoch, owner epoch, lease, state, account) unconditionally, so a concurrent write committing between the claim's read and its commit cannot survive into the claim's result. A claim that returns successfully MUST reflect the claimant as the live owner. Concurrent claims over the same row MUST serialize on the epoch: the write MUST land only if the epoch still matches the claim's read, and a losing claim MUST retry against fresh state (within a bounded budget), so two claimants can never hold colliding fences. A claim that loses to a concurrent writer MUST revalidate its takeover permission against the fresh read rather than reusing the caller's pre-claim decision, so a loser cannot steal the winner's now-live lease; a live foreign owner then fails closed and the real owner is reported. The snapshot a claim returns MUST be the state that claim itself wrote — not a post-commit re-read, which a later claim's commit could have already overwritten with its own epoch.
 
 #### Scenario: A successor claim fences the predecessor's release
 
@@ -22,6 +22,12 @@ A successful `claim_live_session` over an existing durable row MUST advance the 
 - **GIVEN** two successor claims that both read the same owner epoch before either writes
 - **WHEN** both commit
 - **THEN** they land on distinct epochs, with the loser retrying against fresh state
+
+#### Scenario: A losing claimant does not steal the winner's lease
+
+- **GIVEN** two replicas recovering the same released row, both permitted to take over
+- **WHEN** one wins and the other re-reads the winner's now-live lease
+- **THEN** the loser fails closed and reports the winner as owner instead of claiming the row
 
 #### Scenario: Foreign-claim rejection is unchanged
 

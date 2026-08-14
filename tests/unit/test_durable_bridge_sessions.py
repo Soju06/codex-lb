@@ -3467,3 +3467,89 @@ async def test_durable_bridge_concurrent_successor_claims_serialize_on_the_epoch
     # its own distinct epoch above the competitor's.
     assert loser_turned_winner.owner_instance_id == "instance-a"
     assert loser_turned_winner.owner_epoch == competitor_epochs[0] + 1
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_cas_loser_does_not_steal_a_foreign_winners_live_lease(
+    coordinator: DurableBridgeSessionCoordinator,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two replicas recovering the same released row both enter with takeover
+    permission decided against that released state. Once one wins the CAS, the
+    loser re-reads a live foreign ACTIVE lease — reusing the stale permission
+    would steal it. The loser must fail closed and report the real owner, which
+    the bridge surfaces as the cross-replica retry response."""
+    released = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-foreign-cas",
+        api_key_id=None,
+        instance_id="instance-old",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    # The previous owner released: both recovering replicas legitimately see a
+    # takeover-eligible row.
+    await coordinator.release_live_session(
+        session_id=released.session_id,
+        instance_id="instance-old",
+        owner_epoch=released.owner_epoch,
+        draining=False,
+    )
+
+    import app.modules.proxy.durable_bridge_repository as repository_module
+
+    real_writer_section = repository_module.sqlite_writer_section
+    injected = False
+    winner_epoch: list[int] = []
+
+    @contextlib.asynccontextmanager
+    async def writer_section_with_foreign_winner():
+        nonlocal injected
+        if not injected:
+            injected = True
+            winner = await coordinator.claim_live_session(
+                session_key_kind="session_header",
+                session_key_value="sid-foreign-cas",
+                api_key_id=None,
+                instance_id="instance-b",
+                owner_process_epoch="test-process",
+                lease_ttl_seconds=60.0,
+                account_id="acc-1",
+                model="gpt-5.4",
+                service_tier=None,
+                latest_turn_state=None,
+                latest_response_id=None,
+                allow_takeover=True,
+            )
+            winner_epoch.append(winner.owner_epoch)
+        async with real_writer_section():
+            yield
+
+    monkeypatch.setattr(repository_module, "sqlite_writer_section", writer_section_with_foreign_winner)
+
+    loser = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-foreign-cas",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    assert winner_epoch, "the foreign winner must have claimed first"
+    # The loser reports the winner as owner instead of stealing the live lease.
+    assert loser.owner_instance_id == "instance-b"
+    assert loser.owner_epoch == winner_epoch[0]
+    assert loser.state == HttpBridgeSessionState.ACTIVE

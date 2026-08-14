@@ -600,6 +600,15 @@ class DurableBridgeRepository:
         force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeSessionSnapshot:
         session_key_hash = durable_bridge_hash(session_key_value)
+        # ``allow_takeover`` was decided by the caller against a pre-claim
+        # lookup. Once another claimant has demonstrably written this row under
+        # us (lost CAS, or lost insert race), that decision is stale: the row
+        # we re-read may now carry the winner's live lease, and reusing the
+        # permission would let the loser steal it. Revalidate from the fresh
+        # read instead — a live foreign owner then fails closed exactly like a
+        # non-takeover claim, which surfaces as the correct cross-replica
+        # "retry to reach the correct replica" response.
+        contended = False
         # Bounded retry budget shared by the insert race (IntegrityError) and
         # the epoch CAS: every round has a winner, so a loser converges after
         # at most one fresh read per concurrent claimant.
@@ -641,6 +650,7 @@ class DurableBridgeRepository:
                 except IntegrityError:
                     await self._session.rollback()
                     if attempt < _CLAIM_CAS_ATTEMPTS - 1:
+                        contended = True
                         continue
                     raise
                 await self._session.refresh(record)
@@ -655,8 +665,9 @@ class DurableBridgeRepository:
                 live_owned_draining = (
                     existing.state == HttpBridgeSessionState.DRAINING and not lease_expired and not owner_absent
                 )
+                takeover_permitted = allow_takeover and not contended
                 if live_owned_draining or (
-                    not allow_takeover and not lease_expired and not owner_absent and not state_closed
+                    not takeover_permitted and not lease_expired and not owner_absent and not state_closed
                 ):
                     return _to_snapshot_required(existing)
             # Every claim advances the owner epoch, including a same-owner
@@ -717,6 +728,7 @@ class DurableBridgeRepository:
                 if not bool(getattr(result, "rowcount", 0)):
                     await self._session.rollback()
                     if attempt < _CLAIM_CAS_ATTEMPTS - 1:
+                        contended = True
                         continue
                     raise RuntimeError("Failed to claim durable bridge session after retry")
                 if account_changed:

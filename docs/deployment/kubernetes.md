@@ -24,8 +24,8 @@ Under the default `CODEX_LB_PROXY_ACCOUNT_CAPS_SCOPE=partitioned`, `CODEX_LB_PRO
 
 Practical consequences:
 
-- Size a positive cap for the total per-account concurrency you want across the cluster; adding replicas re-partitions it rather than raising it. Disconnect-heavy or agent workloads typically want `~8 × replicas`.
-- On an initialized deployment the caps live in **dashboard settings** (Settings → routing), which override the environment values — raising the env var and restarting pods changes nothing once a dashboard value is persisted. Change the cap in the dashboard, or keep it unset there so the environment default applies.
+- Size a positive cap for the total per-account concurrency you want across the cluster; adding replicas re-partitions it rather than raising it — except when the cap is smaller than the replica count, where the floor of 1 makes the aggregate equal the replica count and grow with each added replica. Disconnect-heavy or agent workloads typically want `~8 × replicas`.
+- On an initialized deployment the caps live in **dashboard settings** (Settings → routing), which override the environment values — raising the env var and restarting pods changes nothing once the deployment is initialized. Change the cap from the dashboard; the environment values only seed the initial dashboard row.
 - `CODEX_LB_PROXY_ACCOUNT_STREAM_RECOVERY_RESERVE` (default 1) is subtracted from each replica's share at selection time, so small shares feel it disproportionately: a share of 2 leaves 1 slot for new selection.
 - Persistent `account_stream_cap` errors with idle replicas are the undersizing signature; raise the cap first.
 - Run one process per pod (`workers_per_instance` stays 1): shares are partitioned across ring members, and worker processes inside one pod would silently multiply the share.

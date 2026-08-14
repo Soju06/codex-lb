@@ -866,21 +866,25 @@ async def test_aborted_bump_is_retried_by_the_running_poller(db_setup, monkeypat
 
     poller = CacheInvalidationPoller(SessionLocal, poll_interval_seconds=0.01)
 
+    retry_settled = asyncio.Event()
+
     async def failing_then_real(ns: str) -> bool:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise RuntimeError("driver exploded")
-        return await real_bump(poller, ns)
+        result = await real_bump(poller, ns)
+        # Signal only after bump() fully returns: the committed row can become
+        # visible while the shielded session cleanup is still running, and
+        # stopping the poller at that instant would cancel the retry mid-flight.
+        retry_settled.set()
+        return result
 
     monkeypatch.setattr(poller, "bump", failing_then_real)
     poller.request_bump(namespace)
     await poller.start()
     try:
-        for _ in range(200):
-            if await _namespace_version(namespace) is not None:
-                break
-            await asyncio.sleep(0.01)
+        await asyncio.wait_for(retry_settled.wait(), timeout=5.0)
     finally:
         await poller.stop()
 

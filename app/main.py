@@ -137,6 +137,31 @@ def _ensure_web_asset_mime_types() -> None:
 _ensure_web_asset_mime_types()
 
 
+async def run_http_bridge_heartbeat_maintenance(proxy_service: Any) -> None:
+    """Per-replica bridge upkeep driven by the ring heartbeat.
+
+    Both passes are request-independent by design: durable ownership must be
+    reconciled even on a replica nothing is routing to, and the idle sweep is
+    otherwise only reached from ``_get_or_create_http_bridge_session``, so a
+    replica that stops taking bridge requests would keep its idle sessions'
+    upstream WebSockets open until restart (issue #1354). Each pass is isolated
+    so one failing cannot skip the other or stop the heartbeat.
+    """
+    if proxy_service is None:
+        return
+    for attribute, failure_message in (
+        ("reconcile_durable_http_bridge_ownership", "HTTP bridge durable ownership reconciliation failed"),
+        ("prune_idle_http_bridge_sessions", "HTTP bridge idle sweep failed"),
+    ):
+        pass_callable = getattr(proxy_service, attribute, None)
+        if pass_callable is None:
+            continue
+        try:
+            await pass_callable()
+        except Exception:
+            logger.warning(failure_message, exc_info=True)
+
+
 def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
     if task.cancelled():
         return
@@ -543,20 +568,7 @@ async def lifespan(app: FastAPI):
                 await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
             except Exception:
                 logger.warning("Ring heartbeat failed", exc_info=True)
-            proxy_service = getattr(app.state, "proxy_service", None)
-            if proxy_service is not None and hasattr(proxy_service, "reconcile_durable_http_bridge_ownership"):
-                try:
-                    await proxy_service.reconcile_durable_http_bridge_ownership()
-                except Exception:
-                    logger.warning("HTTP bridge durable ownership reconciliation failed", exc_info=True)
-            # The idle sweep is otherwise only reached from the request path, so
-            # a replica that stops receiving bridge requests would keep its idle
-            # sessions' upstream WebSockets open until restart (issue #1354).
-            if proxy_service is not None and hasattr(proxy_service, "prune_idle_http_bridge_sessions"):
-                try:
-                    await proxy_service.prune_idle_http_bridge_sessions()
-                except Exception:
-                    logger.warning("HTTP bridge idle sweep failed", exc_info=True)
+            await run_http_bridge_heartbeat_maintenance(getattr(app.state, "proxy_service", None))
             await refresh_cap_partition(svc.list_active, iid)
 
     async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:

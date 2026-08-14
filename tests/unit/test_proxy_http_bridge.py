@@ -27019,3 +27019,45 @@ async def test_prune_idle_http_bridge_sessions_is_a_noop_on_an_empty_registry() 
 
     assert await service.prune_idle_http_bridge_sessions() == 0
     assert not service._background_cleanup_tasks
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_maintenance_runs_both_bridge_passes() -> None:
+    """The ring heartbeat is what makes these request-independent. Asserting the
+    sweep only through a direct call would still pass if the wiring were
+    removed, leaving the quiet-replica leak (issue #1354)."""
+    from app.main import run_http_bridge_heartbeat_maintenance
+
+    proxy_service_double = SimpleNamespace(
+        reconcile_durable_http_bridge_ownership=AsyncMock(return_value=0),
+        prune_idle_http_bridge_sessions=AsyncMock(return_value=0),
+    )
+
+    await run_http_bridge_heartbeat_maintenance(proxy_service_double)
+
+    proxy_service_double.reconcile_durable_http_bridge_ownership.assert_awaited_once()
+    proxy_service_double.prune_idle_http_bridge_sessions.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_maintenance_isolates_a_failing_pass() -> None:
+    """A failing reconcile must not skip the sweep, and neither may stop the
+    heartbeat loop."""
+    from app.main import run_http_bridge_heartbeat_maintenance
+
+    proxy_service_double = SimpleNamespace(
+        reconcile_durable_http_bridge_ownership=AsyncMock(side_effect=RuntimeError("durable read failed")),
+        prune_idle_http_bridge_sessions=AsyncMock(return_value=0),
+    )
+
+    await run_http_bridge_heartbeat_maintenance(proxy_service_double)
+
+    proxy_service_double.prune_idle_http_bridge_sessions.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_maintenance_tolerates_a_missing_service_or_pass() -> None:
+    from app.main import run_http_bridge_heartbeat_maintenance
+
+    await run_http_bridge_heartbeat_maintenance(None)
+    await run_http_bridge_heartbeat_maintenance(SimpleNamespace())

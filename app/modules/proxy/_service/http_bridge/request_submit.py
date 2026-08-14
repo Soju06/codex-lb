@@ -223,7 +223,6 @@ _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS = 2.0
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
-_HTTP_BRIDGE_SAME_ANCHOR_PRECREATED_MAX_REPLAYS = 1
 _NO_SECURITY_WORK_AUTHORIZED_ACCOUNTS_CODE = "no_security_work_authorized_accounts"
 _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work, but no account is marked as authorized for "
@@ -343,23 +342,6 @@ def _http_bridge_client_full_history_recovery_error() -> OpenAIErrorEnvelope:
     )
     payload["error"]["param"] = "previous_response_id"
     return payload
-
-
-def _http_bridge_can_replay_same_anchor_before_created(request_state: _WebSocketRequestState) -> bool:
-    if not request_state.request_text:
-        return False
-    if request_state.missing_response_created_retry_count >= _HTTP_BRIDGE_SAME_ANCHOR_PRECREATED_MAX_REPLAYS:
-        return False
-    return (
-        request_state.previous_response_id is not None
-        and request_state.response_id is None
-        and request_state.awaiting_response_created
-        and request_state.response_event_count == 0
-        and request_state.last_downstream_sequence_number is None
-        and not request_state.downstream_visible
-        and not request_state.upstream_model_output_seen
-        and not request_state.file_required_preferred_account
-    )
 
 
 async def _rollback_http_bridge_recovery_turn_state_registration(
@@ -2979,7 +2961,6 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
-        allow_same_anchor_before_created: bool = False,
     ) -> bool:
         clean_close_retry_max_count = self._http_bridge_clean_close_retry_max_count()
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
@@ -2987,16 +2968,8 @@ class _HTTPBridgeRequestSubmitMixin:
             key=session.key.affinity_key,
         )
 
-        hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
-
         def request_is_retryable(request_state: _WebSocketRequestState) -> bool:
             if _websocket_request_can_replay_before_visible_output(request_state):
-                return True
-            if (
-                allow_same_anchor_before_created
-                and hard_owner_bound
-                and _http_bridge_can_replay_same_anchor_before_created(request_state)
-            ):
                 return True
             if (
                 clean_close_retry_max_count <= 0
@@ -3018,7 +2991,6 @@ class _HTTPBridgeRequestSubmitMixin:
         fresh_hard_request_account_switch_candidate = False
         proof_gated_continuity_replay_candidate = False
         server_anchored_replay_candidate = False
-        eventless_same_anchor_replay_candidate = False
         if session.key.strength == "hard":
             async with session.pending_lock:
                 retryable_candidates = [
@@ -3044,21 +3016,12 @@ class _HTTPBridgeRequestSubmitMixin:
                         and candidate.replay_count == 0
                     )
                     server_anchored_replay_candidate = _http_bridge_server_anchored_replay_enabled(candidate)
-                    eventless_same_anchor_replay_candidate = (
-                        allow_same_anchor_before_created
-                        and hard_owner_bound
-                        and _http_bridge_can_replay_same_anchor_before_created(candidate)
-                        and not (
-                            candidate.fresh_upstream_request_is_retry_safe and candidate.fresh_upstream_request_text
-                        )
-                    )
         if not await self._http_bridge_precreated_retry_allowed(
             session,
             allow_fresh_hard_account_switch=fresh_hard_request_account_switch_candidate,
             allow_proof_gated_continuity_replay=(
                 proof_gated_continuity_replay_candidate or server_anchored_replay_candidate
             ),
-            allow_eventless_same_anchor_replay=eventless_same_anchor_replay_candidate,
         ):
             return False
 
@@ -3066,6 +3029,7 @@ class _HTTPBridgeRequestSubmitMixin:
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
         )
+        hard_owner_bound = _http_bridge_key_strength(session.key) == "hard"
         async with session.pending_lock:
             if request_state is not None:
                 if (
@@ -3086,24 +3050,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     return False
                 request_state = retryable_requests[0]
             model_fallback_replay = request_state.precreated_replay_reason == _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
-            eventless_same_anchor_replay = (
-                allow_same_anchor_before_created
-                and hard_owner_bound
-                and _http_bridge_can_replay_same_anchor_before_created(request_state)
-                and not (
-                    request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-                )
-            )
-            if (
-                request_state.previous_response_id is not None
-                and not (
-                    request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-                )
-                and not (
-                    allow_same_anchor_before_created
-                    and hard_owner_bound
-                    and _http_bridge_can_replay_same_anchor_before_created(request_state)
-                )
+            if request_state.previous_response_id is not None and not (
+                request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
             ):
                 # Once a continuation is pending upstream, reconnecting without
                 # replay cannot complete the current request, while replaying it
@@ -3203,16 +3151,10 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state.clean_close_retry_close_generation = close_generation
             if additional_clean_close_retry:
                 request_state.clean_close_replay_count += 1
-            if eventless_same_anchor_replay:
-                request_state.missing_response_created_retry_count += 1
         retry_jitter_seconds = (
             self._http_bridge_clean_close_retry_jitter_seconds() if additional_clean_close_retry else 0.0
         )
-        retry_event = (
-            "retry_precreated_same_anchor"
-            if eventless_same_anchor_replay
-            else ("retry_precreated_clean_close" if additional_clean_close_retry else "retry_precreated")
-        )
+        retry_event = "retry_precreated_clean_close" if additional_clean_close_retry else "retry_precreated"
         _log_http_bridge_event(
             retry_event,
             session.key,

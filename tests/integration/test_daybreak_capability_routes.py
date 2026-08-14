@@ -291,6 +291,26 @@ async def test_daybreak_json_routes_reject_capability_before_body_validation(
     assert response.json()["error"]["code"] == "invalid_api_key"
 
 
+@pytest.mark.asyncio
+async def test_daybreak_capability_does_not_bypass_api_firewall(async_client: AsyncClient) -> None:
+    add_response = await async_client.post("/api/firewall/ips", json={"ipAddress": "10.20.30.40"})
+    assert add_response.status_code == 200
+    key = await _create_api_key("Daybreak firewall")
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={
+            "Authorization": f"Bearer {key}",
+            **_CAPABILITY_HEADERS,
+            "Content-Type": "application/json",
+        },
+        content=b"{",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ip_forbidden"
+
+
 _RESET_CREDIT_CONSUME_CASES = [
     pytest.param(
         "/v1/reset-credit",

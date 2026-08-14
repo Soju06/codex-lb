@@ -59,6 +59,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_retry_circuit_attempt_for_pending_requests,
     _log_http_bridge_event,
     _normalize_http_bridge_error_event,
     _record_http_bridge_stuck_retire,
@@ -136,6 +137,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _event_type_from_payload,
     _HTTPBridgeCompletedDeliveryScope,
+    _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeSession,
     _pop_websocket_deferred_reasoning_downstream_texts,
     _record_response_event,
@@ -210,6 +212,7 @@ _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     120.0,
 )
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_LEASE_REFRESH_INTERVAL_SECONDS = 10.0
+_UNSET_HTTP_BRIDGE_RETRY_CIRCUIT_ATTEMPT = object()
 
 # A single missing response.created is not proof that an account is bad: the
 # upstream may have accepted the request while the transport was silent. Only
@@ -910,6 +913,9 @@ class _HTTPBridgeUpstreamEventsMixin:
         upstream_close_code: int | None = None,
         response_events_seen: int | None = None,
         transport_classification: str | None = None,
+        retry_circuit_attempt: _HTTPBridgeResponseCreateAttempt | None | object = (
+            _UNSET_HTTP_BRIDGE_RETRY_CIRCUIT_ATTEMPT
+        ),
     ) -> bool:
         session.closed = True
         async with session.pending_lock:
@@ -924,6 +930,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 default=0,
             )
             pending_request_states = list(session.pending_requests)
+        if retry_circuit_attempt is _UNSET_HTTP_BRIDGE_RETRY_CIRCUIT_ATTEMPT:
+            retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(pending_request_states)
+        retry_circuit_attempt_kwargs = (
+            {"retry_circuit_attempt": retry_circuit_attempt}
+            if isinstance(retry_circuit_attempt, _HTTPBridgeResponseCreateAttempt)
+            else {}
+        )
         # The #1534 wedge shape: a reattached stream that streamed response
         # events whose ``response.created`` was never assigned. The eventless
         # watchdog and the durable-anchor clear both key on
@@ -1041,10 +1054,17 @@ class _HTTPBridgeUpstreamEventsMixin:
                         None,
                     )
                 if failed_pending_count > 0 and retry_circuit_detail is not None:
-                    consecutive_failures = await self._record_http_bridge_retry_circuit_failure(
-                        session,
-                        detail=retry_circuit_detail,
-                    )
+                    if isinstance(retry_circuit_attempt, _HTTPBridgeResponseCreateAttempt):
+                        consecutive_failures = await self._record_http_bridge_retry_circuit_failure(
+                            session,
+                            detail=retry_circuit_detail,
+                            attempt=retry_circuit_attempt,
+                        )
+                    else:
+                        consecutive_failures = await self._record_http_bridge_retry_circuit_failure(
+                            session,
+                            detail=retry_circuit_detail,
+                        )
                     poison_after_deferred_failures = bool(
                         retry_circuit_detail == "stream_idle_timeout"
                         and observed_response_events == 0
@@ -1059,6 +1079,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             session,
                             detail="repeated_zero_event_idle_timeout",
                             response_events_seen=observed_response_events,
+                            **retry_circuit_attempt_kwargs,
                         )
                         force_retire = True
                     else:
@@ -1091,6 +1112,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         retry_circuit_detail="clean_close",
                         response_events_seen=observed_response_events,
                         retired_request_count=failed_pending_count,
+                        **retry_circuit_attempt_kwargs,
                     )
                 else:
                     await self._retire_stale_pending_http_bridge_session(
@@ -1104,6 +1126,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         # strike. The deferred/poison branch records its own
                         # strike above and intentionally does not pass it.
                         retired_request_count=failed_pending_count,
+                        **retry_circuit_attempt_kwargs,
                     )
         return force_retire or session.admission_waiter_count == 0
 
@@ -1204,6 +1227,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 ]
                                 if not expired_request_states:
                                     continue
+                                expired_retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(
+                                    expired_request_states
+                                )
                                 pending_count = len(session.pending_requests)
                                 # A delta-only request has no other way to
                                 # convey prior context once its anchor is
@@ -1261,6 +1287,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                     penalize_account=False,
                                     retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                     force_retire=True,
+                                    retry_circuit_attempt=expired_retry_circuit_attempt,
                                 )
                                 break
                             # A successfully cancelled receive cannot deliver
@@ -1306,9 +1333,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 penalize_account=False,
                                 retire_detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
                                 force_retire=True,
+                                retry_circuit_attempt=expired_retry_circuit_attempt,
                             )
                         break
 
+                    async with session.pending_lock:
+                        retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(
+                            tuple(session.pending_requests)
+                        )
                     if receive_task is not None:
                         receive_cancelled = await _cancel_http_bridge_reader_child(
                             receive_task,
@@ -1326,6 +1358,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             session,
                             error_code=receive_timeout.error_code,
                             error_message=receive_timeout.error_message,
+                            retry_circuit_attempt=retry_circuit_attempt,
                         )
                     break
 

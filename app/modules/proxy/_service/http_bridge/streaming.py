@@ -86,6 +86,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
     _http_bridge_requires_cluster_registration,
+    _http_bridge_retry_circuit_attempt_for_pending_requests,
     _http_bridge_runtime_config,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
@@ -3995,6 +3996,9 @@ class _HTTPBridgeStreamingMixin:
                         if not completed_delivery_in_progress:
                             keepalive_count += 1
                         if not completed_delivery_in_progress and keepalive_count >= max_keepalive_count:
+                            timed_out_retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(
+                                (request_state,)
+                            )
                             if not response_started:
                                 retried = False
                                 if not circuit_keepalive_waiting:
@@ -4185,10 +4189,17 @@ class _HTTPBridgeStreamingMixin:
                                             if keepalive_event is not None:
                                                 yield keepalive_event
                                             continue
-                                        await self._record_http_bridge_retry_circuit_failure(
-                                            session,
-                                            detail="stream_idle_timeout",
-                                        )
+                                        if timed_out_retry_circuit_attempt is None:
+                                            await self._record_http_bridge_retry_circuit_failure(
+                                                session,
+                                                detail="stream_idle_timeout",
+                                            )
+                                        else:
+                                            await self._record_http_bridge_retry_circuit_failure(
+                                                session,
+                                                detail="stream_idle_timeout",
+                                                attempt=timed_out_retry_circuit_attempt,
+                                            )
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                             stream_idle_timeout_total.labels(surface="http_bridge").inc()
                                         logger.info(

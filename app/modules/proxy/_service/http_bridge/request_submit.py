@@ -83,6 +83,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_retry_circuit_attempt_for_pending_requests,
     _log_http_bridge_event,
     _record_continuity_fail_closed,
     _record_http_bridge_prewarm_outcome,
@@ -144,6 +145,7 @@ from app.modules.proxy._service.support import (
     _clear_websocket_request_error_overrides,
     _copy_websocket_route_metadata_from_session,
     _event_type_from_payload,
+    _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeSession,
     _request_log_client_fields,
     _websocket_request_can_replay_before_visible_output,
@@ -355,6 +357,9 @@ async def _send_http_bridge_request_text_with_archive_id(
         on_send_started()
     token = set_request_id(request_state.archive_request_id)
     try:
+        request_state.response_create_attempt_count += 1
+        attempt = _HTTPBridgeResponseCreateAttempt(ordinal=request_state.response_create_attempt_count)
+        request_state.response_create_attempt = attempt
         request_state.response_create_sent_at = _service_time().monotonic()
         session.upstream_reader_wakeup.set()
         try:
@@ -363,7 +368,9 @@ async def _send_http_bridge_request_text_with_archive_id(
             # A failed or cancelled send is settled by its caller. Disarm the
             # owner watchdog before lifecycle ownership is released so the
             # reader cannot race that cleanup and settle the request twice.
-            request_state.response_create_sent_at = None
+            attempt.disarmed = True
+            if request_state.response_create_attempt is attempt:
+                request_state.response_create_sent_at = None
             session.upstream_reader_wakeup.set()
             raise
     finally:
@@ -2624,12 +2631,20 @@ class _HTTPBridgeRequestSubmitMixin:
                 stale_requests.append(request_state)
         if not stale_requests:
             return
+        retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(tuple(stale_requests))
         # A stale gate holder that streamed response events without ever
         # receiving ``response.created`` proves the reattach wedge (#1534)
         # even when the session itself survives with other active requests.
         _record_http_bridge_quarantine_wedged_pending(self, session, stale_requests)
         if response_events_seen == 0:
-            await self._record_http_bridge_retry_circuit_failure(session, detail=detail)
+            if retry_circuit_attempt is None:
+                await self._record_http_bridge_retry_circuit_failure(session, detail=detail)
+            else:
+                await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=detail,
+                    attempt=retry_circuit_attempt,
+                )
         await self._fail_pending_websocket_requests(
             account=session.account,
             account_id_value=session.account.id,
@@ -2699,6 +2714,7 @@ class _HTTPBridgeRequestSubmitMixin:
         retry_circuit_detail: str | None = None,
         response_events_seen: int | None = None,
         retired_request_count: int | None = None,
+        retry_circuit_attempt: _HTTPBridgeResponseCreateAttempt | None = None,
     ) -> None:
         async with session.pending_lock:
             retired_request_states = list(session.pending_requests)
@@ -2730,6 +2746,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     ),
                     default=0,
                 )
+            if retry_circuit_attempt is None:
+                retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(retired_request_states)
         # Direct retirement (for example the all-stale stuck-gate path, where
         # the wedged reattach is the only pending request) cancels the reader
         # and fails the pendings without passing the partial-cleanup hook or
@@ -2748,10 +2766,17 @@ class _HTTPBridgeRequestSubmitMixin:
         # that handoff, genuine pre-response failures disappear from circuit
         # accounting while idle closes and request failures look identical.
         if retired_request_count > 0 and response_events_seen == 0:
-            await self._record_http_bridge_retry_circuit_failure(
-                session,
-                detail=retry_circuit_detail or detail,
-            )
+            if isinstance(retry_circuit_attempt, _HTTPBridgeResponseCreateAttempt):
+                await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=retry_circuit_detail or detail,
+                    attempt=retry_circuit_attempt,
+                )
+            else:
+                await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=retry_circuit_detail or detail,
+                )
         session.closed = True
         async with self._http_bridge_lock:
             if self._http_bridge_sessions.get(session.key) is session:

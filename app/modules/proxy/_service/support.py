@@ -769,6 +769,14 @@ class _DeferredAccountBackoffTracker:
     current_lifecycle: _DeferredAccountBackoffLifecycle | None = None
 
 
+@dataclass(eq=False, slots=True)
+class _HTTPBridgeResponseCreateAttempt:
+    ordinal: int
+    disarmed: bool = False
+    response_observed: bool = False
+    retry_circuit_failure_recorded: bool = False
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -791,6 +799,8 @@ class _WebSocketRequestState:
     # send. Retries replace this value so admission wait and prior attempts do
     # not age a fresh send into the eventless owner deadline.
     response_create_sent_at: float | None = None
+    response_create_attempt_count: int = 0
+    response_create_attempt: _HTTPBridgeResponseCreateAttempt | None = None
     bridge_queue_wait_started_at: float | None = None
     # Monotonic deadline of the original bridge request budget. Retry and
     # recovery paths re-prepare request states with a fresh started_at, so
@@ -1304,6 +1314,9 @@ def _clear_websocket_deferred_reasoning_downstream_texts(request_state: _WebSock
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
+    attempt = request_state.response_create_attempt
+    if attempt is not None:
+        attempt.response_observed = True
     request_state.last_upstream_activity_at = time.monotonic()
     if event_type in {"response.failed", "response.incomplete"}:
         return

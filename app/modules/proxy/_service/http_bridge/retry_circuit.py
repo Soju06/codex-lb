@@ -9,7 +9,7 @@ import anyio
 
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
 from app.modules.proxy._service.observability import _hash_identifier
-from app.modules.proxy._service.support import _HTTPBridgeSession
+from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt, _HTTPBridgeSession
 from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,26 @@ def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: A
     service._http_bridge_retry_circuit_loaded_keys = set()
     service._http_bridge_retry_circuit_persisted_keys = set()
     service._http_bridge_retry_circuit_lock = anyio.Lock()
+
+
+def _record_http_bridge_retry_circuit_duplicate_suppressed(
+    session: _HTTPBridgeSession,
+    *,
+    attempt: _HTTPBridgeResponseCreateAttempt,
+    consecutive_failures: int,
+    detail: str,
+) -> None:
+    if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
+        http_bridge_retry_circuit_total.labels(outcome="duplicate_suppressed").inc()
+    logger.info(
+        "http_bridge_retry_circuit event=duplicate_suppressed bridge_kind=%s bridge_key=%s "
+        "failures=%s detail=%s attempt=%s",
+        session.key.affinity_kind,
+        _hash_identifier(session.key.affinity_key),
+        consecutive_failures,
+        detail,
+        attempt.ordinal,
+    )
 
 
 class _HTTPBridgeRetryCircuitMixin:
@@ -354,10 +374,27 @@ class _HTTPBridgeRetryCircuitMixin:
         session: _HTTPBridgeSession,
         *,
         detail: str,
+        attempt: _HTTPBridgeResponseCreateAttempt | None = None,
     ) -> int | None:
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
             return None
+
+        scoped_attempt = attempt
+        if scoped_attempt is not None:
+            if scoped_attempt.retry_circuit_failure_recorded:
+                async with self._http_bridge_retry_circuit_lock:
+                    current_state = self._http_bridge_retry_circuits.get(session.key)
+                    consecutive_failures = current_state.consecutive_failures if current_state is not None else 0
+                _record_http_bridge_retry_circuit_duplicate_suppressed(
+                    session,
+                    attempt=scoped_attempt,
+                    consecutive_failures=consecutive_failures,
+                    detail=detail,
+                )
+                return consecutive_failures
+            if scoped_attempt.disarmed or scoped_attempt.response_observed:
+                return None
 
         await self._load_http_bridge_retry_circuit(session)
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
@@ -365,35 +402,58 @@ class _HTTPBridgeRetryCircuitMixin:
         max_backoff = max(base_backoff, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS)
         clean_close_max_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS)
         now = time.monotonic()
+        duplicate_suppressed = False
+        consecutive_failures = 0
+        state: _HTTPBridgeRetryCircuitState | None = None
         async with self._http_bridge_retry_circuit_lock:
-            state = self._http_bridge_retry_circuits.setdefault(
-                session.key,
-                _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
+            if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
+                state = self._http_bridge_retry_circuits.get(session.key)
+                consecutive_failures = state.consecutive_failures if state is not None else 0
+                duplicate_suppressed = True
+            elif scoped_attempt is not None and (scoped_attempt.disarmed or scoped_attempt.response_observed):
+                return None
+            else:
+                state = self._http_bridge_retry_circuits.setdefault(
+                    session.key,
+                    _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
+                )
+                state.last_touched_monotonic = now
+                state.last_failure_monotonic = now
+                state.half_open_until = 0.0
+                if scoped_attempt is not None:
+                    scoped_attempt.retry_circuit_failure_recorded = True
+                state.consecutive_failures += 1
+                consecutive_failures = state.consecutive_failures
+                state.last_detail = detail
+                if state.consecutive_failures >= threshold:
+                    backoff = min(
+                        max_backoff,
+                        base_backoff * (2 ** min(state.consecutive_failures - threshold, 30)),
+                    )
+                    if detail == "clean_close":
+                        backoff = min(backoff, clean_close_max_backoff)
+                    state.cooldown_until = max(state.cooldown_until, now + backoff)
+                    if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
+                        http_bridge_retry_circuit_total.labels(outcome="opened").inc()
+                    logger.warning(
+                        "http_bridge_retry_circuit event=opened bridge_kind=%s bridge_key=%s "
+                        "failures=%s cooldown_seconds=%.1f detail=%s",
+                        session.key.affinity_kind,
+                        _hash_identifier(session.key.affinity_key),
+                        state.consecutive_failures,
+                        backoff,
+                        detail,
+                    )
+        if duplicate_suppressed:
+            assert scoped_attempt is not None
+            _record_http_bridge_retry_circuit_duplicate_suppressed(
+                session,
+                attempt=scoped_attempt,
+                consecutive_failures=consecutive_failures,
+                detail=detail,
             )
-            state.last_touched_monotonic = now
-            state.last_failure_monotonic = now
-            state.half_open_until = 0.0
-            state.consecutive_failures += 1
-            state.last_detail = detail
-            if state.consecutive_failures >= threshold:
-                backoff = min(
-                    max_backoff,
-                    base_backoff * (2 ** min(state.consecutive_failures - threshold, 30)),
-                )
-                if detail == "clean_close":
-                    backoff = min(backoff, clean_close_max_backoff)
-                state.cooldown_until = max(state.cooldown_until, now + backoff)
-                if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
-                    http_bridge_retry_circuit_total.labels(outcome="opened").inc()
-                logger.warning(
-                    "http_bridge_retry_circuit event=opened bridge_kind=%s bridge_key=%s "
-                    "failures=%s cooldown_seconds=%.1f detail=%s",
-                    session.key.affinity_kind,
-                    _hash_identifier(session.key.affinity_key),
-                    state.consecutive_failures,
-                    backoff,
-                    detail,
-                )
+            return consecutive_failures
+        assert state is not None
         await self._persist_http_bridge_retry_circuit(session, state)
         async with self._http_bridge_retry_circuit_lock:
             if self._http_bridge_retry_circuits.get(session.key) is state:

@@ -126,6 +126,7 @@ from app.modules.proxy._service.support import (
     _REQUEST_TRANSPORT_HTTP,
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _http_bridge_session_supports_service_tier,
+    _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _WebSocketRequestState,
@@ -749,6 +750,45 @@ def _http_bridge_eventless_precreated_deadline(
         float(stuck_gate_retire_after_seconds),
         _HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS,
     )
+
+
+def _http_bridge_retry_circuit_attempt_for_pending_requests(
+    request_states: Sequence[_WebSocketRequestState],
+) -> _HTTPBridgeResponseCreateAttempt | None:
+    eligible_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
+    recorded_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
+    settled_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
+    for request_state in request_states:
+        attempt = getattr(request_state, "response_create_attempt", None)
+        if attempt is None:
+            continue
+        if attempt.retry_circuit_failure_recorded:
+            recorded_attempts.append(attempt)
+            continue
+        if attempt.disarmed or attempt.response_observed:
+            settled_attempts.append(attempt)
+            continue
+        if (
+            request_state.transport != _REQUEST_TRANSPORT_HTTP
+            or request_state.skip_request_log
+            or request_state.response_create_sent_at is None
+            or request_state.response_id is not None
+            or request_state.latency_response_created_ms is not None
+            or request_state.response_event_count != 0
+            or request_state.downstream_visible
+        ):
+            continue
+        eligible_attempts.append(attempt)
+
+    for attempts in (eligible_attempts, recorded_attempts, settled_attempts):
+        candidate: _HTTPBridgeResponseCreateAttempt | None = None
+        for attempt in attempts:
+            if candidate is not None and candidate is not attempt:
+                return None
+            candidate = attempt
+        if candidate is not None:
+            return candidate
+    return None
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:

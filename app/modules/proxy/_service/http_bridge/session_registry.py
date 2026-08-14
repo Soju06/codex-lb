@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from typing import Any
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import Settings
@@ -73,6 +74,21 @@ def _requires_durable_recovery_alias_serialization(session: _HTTPBridgeSession) 
 
 
 class _HTTPBridgeSessionRegistryMixin:
+    async def prune_idle_http_bridge_sessions(self: Any) -> int:
+        """Run the idle sweep off the request path (issue #1354).
+
+        The sweep is otherwise reached only from
+        ``_get_or_create_http_bridge_session``, so a replica that stops taking
+        bridge requests keeps idle sessions' upstream WebSockets open until
+        restart. Heartbeat-driven, so it runs without traffic or leadership.
+        """
+        async with self._http_bridge_lock:
+            pruned_sessions = self._prune_http_bridge_sessions_locked()
+        if not pruned_sessions:
+            return 0
+        self._schedule_http_bridge_session_closes(pruned_sessions, reason="idle_sweep")
+        return len(pruned_sessions)
+
     async def _register_http_bridge_turn_state(
         self: _HTTPBridgeServiceProtocol,
         session: _HTTPBridgeSession,

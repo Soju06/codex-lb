@@ -1,6 +1,6 @@
 ## 1. Sweep entry point
 
-- [x] 1.1 Add `prune_idle_http_bridge_sessions()` to the HTTP bridge mixin: take the bridge lock, reuse `_prune_http_bridge_sessions_locked`, and schedule closes via `_schedule_http_bridge_session_closes` with reason `idle_sweep`
+- [x] 1.1 Add `prune_idle_http_bridge_sessions()` to the bridge session-registry mixin (mixin.py is at its architecture line ratchet): take the bridge lock, reuse `_prune_http_bridge_sessions_locked`, and schedule closes via `_schedule_http_bridge_session_closes` with reason `idle_sweep`
 
 ## 2. Heartbeat wiring
 

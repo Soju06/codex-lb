@@ -834,6 +834,13 @@ async def _settle_failed_http_bridge_creation(
                 and claimed_epoch is not None
                 and registered_session.durable_session_id == claimed_id
                 and (registered_epoch is None or claimed_epoch > registered_epoch)
+                # Only when both sessions selected the same account: a claim
+                # rewrites the row's account_id and clears continuity aliases,
+                # so handing the epoch across an account change would leave the
+                # winner renewing and dispatching on a row bound to a different
+                # account. Fail closed there instead — the winner's renewal is
+                # fenced, it is evicted, and the request retries cleanly.
+                and created_session.account.id == registered_session.account.id
             ):
                 registered_session.durable_owner_epoch = claimed_epoch
         return superseded
@@ -2191,6 +2198,10 @@ async def _renew_durable_http_bridge_lease(
         lookup.owner_instance_id == current_instance
         and lookup.owner_process_epoch == http_bridge_owner_process_epoch()
         and lookup.owner_epoch > session.durable_owner_epoch
+        # A claim rewrites the row's account_id, so an advance that moved the
+        # row to another account is a real ownership change for this session,
+        # not a superseded creator: never adopt across it.
+        and lookup.account_id == session.account.id
         and service._http_bridge_sessions.get(session.key) is session
     ):
         # THIS process advanced the epoch while this session still holds the

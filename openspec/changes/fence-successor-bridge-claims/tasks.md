@@ -20,6 +20,7 @@
 - [x] 2.3f A fenced renewal adopts a same-instance advance when registered, and still evicts when a different session holds the slot
 - [x] 2.3g A replacement holding only the in-flight slot is protected; a sole creator still releases
 - [x] 2.3h A newer process incarnation sharing the instance ID still fences the predecessor out
+- [x] 2.3i Neither adoption nor handover crosses an account change; the session is evicted instead
 - [x] 2.4 Route-level regression through POST /v1/responses: captive predecessor release lands late and is fenced out
 - [x] 2.5 Existing claim/takeover suites pass unchanged (DRAINING rejection, account-change fencing, process-epoch semantics)
 

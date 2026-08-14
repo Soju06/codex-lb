@@ -27221,6 +27221,7 @@ async def test_renew_adopts_a_same_instance_epoch_advance_for_the_registered_ses
             owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
             owner_process_epoch=http_bridge_owner_process_epoch(),
             owner_epoch=4,
+            account_id="acc-bridge",
             session_id="durable-adopt",
         )
     )
@@ -27255,6 +27256,7 @@ async def test_renew_still_evicts_when_another_local_session_holds_the_slot(
             owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
             owner_process_epoch=http_bridge_owner_process_epoch(),
             owner_epoch=4,
+            account_id="acc-bridge",
             session_id="durable-evict",
         )
     )
@@ -27342,6 +27344,7 @@ async def test_renew_evicts_when_a_newer_process_incarnation_advanced_the_epoch(
             # Same instance ID, different incarnation.
             owner_process_epoch="successor-process-epoch",
             owner_epoch=4,
+            account_id="acc-bridge",
             session_id="durable-restart",
         )
     )
@@ -27354,3 +27357,68 @@ async def test_renew_evicts_when_a_newer_process_incarnation_advanced_the_epoch(
     assert exc_info.value.status_code == 409
     assert old_process_session.durable_owner_epoch == 3
     assert old_process_session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_renew_does_not_adopt_an_epoch_advance_that_moved_the_row_to_another_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claim rewrites the row's account_id and clears continuity aliases, so
+    an advance that moved the row to another account is a real ownership change
+    for this session — adopting would keep it dispatching on a row bound to a
+    different account (issue #1695)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    session = _make_bridge_session(key_value="sid-account-moved")
+    session.durable_session_id = "durable-account-moved"
+    session.durable_owner_epoch = 3
+    service._http_bridge_sessions[session.key] = session
+    renew_live_session = AsyncMock(
+        return_value=SimpleNamespace(
+            owner_instance_id=_make_app_settings().http_responses_session_bridge_instance_id,
+            owner_process_epoch=http_bridge_owner_process_epoch(),
+            owner_epoch=4,
+            account_id="acc-other",
+            session_id="durable-account-moved",
+        )
+    )
+    monkeypatch.setattr(service, "_durable_bridge", SimpleNamespace(renew_live_session=renew_live_session))
+    monkeypatch.setattr(service, "_schedule_http_bridge_session_closes", Mock())
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await http_bridge_helpers_module._renew_durable_http_bridge_lease(service, session)
+
+    assert exc_info.value.status_code == 409
+    assert session.durable_owner_epoch == 3
+    assert session.closed is True
+
+
+@pytest.mark.asyncio
+async def test_settle_failed_creation_does_not_hand_an_epoch_across_an_account_change() -> None:
+    """Handing the epoch across an account change would leave the winner
+    renewing a row the stale creator rebound to a different account."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = proxy_service._HTTPBridgeSessionKey("turn_state_header", "sid-account-handover", None)
+    winner = _make_bridge_session(key_value="sid-account-handover-winner")
+    winner.key = key
+    winner.durable_session_id = "durable-account-handover"
+    winner.durable_owner_epoch = 4
+    winner.account = cast(Any, SimpleNamespace(id="acc-winner", status=AccountStatus.ACTIVE, plan_type="plus"))
+    stale_creator = _make_bridge_session(key_value="sid-account-handover-stale")
+    stale_creator.key = key
+    stale_creator.durable_session_id = "durable-account-handover"
+    stale_creator.durable_owner_epoch = 5
+    stale_creator.account = cast(Any, SimpleNamespace(id="acc-stale", status=AccountStatus.ACTIVE, plan_type="plus"))
+    service._http_bridge_sessions[key] = winner
+
+    superseded = await http_bridge_helpers_module._settle_failed_http_bridge_creation(
+        service,
+        key,
+        inflight_future=None,
+        created_session=stale_creator,
+        exc=RuntimeError("registration lost"),
+    )
+
+    assert superseded is True
+    # Epoch NOT handed over: the winner is fenced, evicted, and retries clean.
+    assert winner.durable_owner_epoch == 4

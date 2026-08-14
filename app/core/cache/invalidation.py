@@ -284,8 +284,16 @@ class CacheInvalidationPoller:
             # later bump instead of being coalesced into the version already
             # being written.
             self._pending_bumps.discard(namespace)
-            if not await self.bump(namespace):
+            try:
+                if not await self.bump(namespace):
+                    self._pending_bumps.add(namespace)
+            except BaseException:
+                # Includes CancelledError, which ``stop()`` raises in this task
+                # by design: without restoring the marker the namespace whose
+                # write was in flight is neither written nor pending, so a
+                # mutation that already committed never reaches peer replicas.
                 self._pending_bumps.add(namespace)
+                raise
 
     async def _poll_once(self) -> bool:
         """Flush pending bumps and reconcile observed versions once.

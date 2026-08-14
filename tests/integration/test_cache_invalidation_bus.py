@@ -387,6 +387,55 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_bump_survives_a_cancelled_flush(db_setup, monkeypatch) -> None:
+    """The marker is cleared before the write is awaited, so a cancelled write
+    must restore it. stop() cancels the polling task by design, so without the
+    restore a mutation that already committed is neither written nor pending
+    and never reaches peer replicas."""
+    namespace = "test_flush_cancelled"
+    started = asyncio.Event()
+
+    async def never_finishes(ns: str) -> bool:
+        started.set()
+        await asyncio.Event().wait()
+        return True
+
+    poller = CacheInvalidationPoller(SessionLocal)
+    monkeypatch.setattr(poller, "bump", never_finishes)
+    poller.request_bump(namespace)
+
+    flush_task = asyncio.create_task(poller._flush_pending_bumps())
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    assert namespace not in poller._pending_bumps, "marker is cleared before the write, by design"
+
+    flush_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await flush_task
+
+    assert namespace in poller._pending_bumps
+    assert await _namespace_version(namespace) is None
+
+
+@pytest.mark.asyncio
+async def test_pending_bump_survives_a_raising_flush(db_setup, monkeypatch) -> None:
+    """Same contract for a write that raises rather than returning False."""
+    namespace = "test_flush_raised"
+
+    async def raises(ns: str) -> bool:
+        raise RuntimeError("driver exploded")
+
+    poller = CacheInvalidationPoller(SessionLocal)
+    monkeypatch.setattr(poller, "bump", raises)
+    poller.request_bump(namespace)
+
+    with pytest.raises(RuntimeError, match="driver exploded"):
+        await poller._flush_pending_bumps()
+
+    assert namespace in poller._pending_bumps
+    assert await _namespace_version(namespace) is None
+
+
+@pytest.mark.asyncio
 async def test_pending_coalesced_bump_flushes_after_recovery(db_setup) -> None:
     namespace = "test_pending_flush"
     # First cycle: bump retries (3 attempts) and the poll read both fail.

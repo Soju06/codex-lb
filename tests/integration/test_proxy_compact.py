@@ -336,6 +336,30 @@ async def test_proxy_compact_strips_tool_fields_before_upstream(async_client, mo
 
 
 @pytest.mark.asyncio
+async def test_proxy_compact_rejects_preexisting_compaction_trigger(async_client, monkeypatch):
+    async def fake_compact(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("compact should not be called when input already contains compaction_trigger")
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "compact this turn",
+            "input": [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+        },
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["code"] == "invalid_request_error"
+    assert error["param"] == "input"
+
+
+@pytest.mark.asyncio
 async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_before_ordinary_tail(
     async_client, monkeypatch
 ):

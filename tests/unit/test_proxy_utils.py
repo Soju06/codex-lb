@@ -10117,6 +10117,120 @@ async def test_compact_responses_starts_upstream_timer_after_image_inlining(monk
 
 
 @pytest.mark.asyncio
+async def test_compact_responses_stream_success_skips_legacy_completion_log(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        upstream_compact_timeout_seconds = 30.0
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+
+    completion_calls: list[dict[str, object]] = []
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        *,
+        session,
+        route,
+        codex_client,
+        route_trace,
+        allow_direct_egress,
+        raise_for_status,
+        codex_lb_account_id,
+        upstream_stream_transport_override,
+    ):
+        del (
+            payload,
+            headers,
+            access_token,
+            account_id,
+            session,
+            route,
+            codex_client,
+            route_trace,
+            allow_direct_egress,
+            raise_for_status,
+            codex_lb_account_id,
+            upstream_stream_transport_override,
+        )
+        yield 'data: {"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"enc_ok"}}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_stream_compact","status":"completed"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(
+        proxy_module,
+        "_maybe_log_upstream_request_complete",
+        lambda **kwargs: completion_calls.append(kwargs),
+    )
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    result = await proxy_module.compact_responses(
+        payload,
+        headers={},
+        access_token="token",
+        account_id="acc_1",
+        session=cast(proxy_module.aiohttp.ClientSession, _CompactSession(_JsonCompactResponse({"object": "unused"}))),
+        use_responses_stream_compaction=True,
+    )
+
+    assert result.id == "resp_stream_compact"
+    assert completion_calls == []
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_stream_404_does_not_fallback_without_route_not_implemented(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_connect_timeout_seconds = 2.0
+        upstream_compact_timeout_seconds = 30.0
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+
+    legacy_session = _CompactSession(
+        _JsonCompactResponse({"object": "response.compaction", "compaction_summary": {"encrypted_content": "legacy"}})
+    )
+
+    async def fake_stream(*args, **kwargs):
+        del args, kwargs
+        raise proxy_module.ProxyResponseError(
+            404,
+            openai_error("upstream_error", "ordinary compact 404"),
+            failure_phase="stream",
+        )
+        yield ""
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = proxy_module.ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await proxy_module.compact_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, legacy_session),
+            use_responses_stream_compaction=True,
+        )
+
+    assert exc_info.value.status_code == 404
+    assert legacy_session.calls == []
+
+
+@pytest.mark.asyncio
 async def test_compact_responses_derives_lite_http_header_from_additional_tools(monkeypatch):
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"

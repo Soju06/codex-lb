@@ -880,6 +880,17 @@ def _error_details_from_envelope(payload: OpenAIErrorEnvelope) -> tuple[str | No
     return code if isinstance(code, str) else None, message if isinstance(message, str) else None
 
 
+def _is_route_level_compact_not_implemented(exc: ProxyResponseError) -> bool:
+    if exc.status_code not in {404, 405, 501}:
+        return False
+    error_code, error_message = _error_details_from_envelope(exc.payload)
+    if error_code == "not_implemented":
+        return True
+    if not isinstance(error_message, str):
+        return False
+    return error_message.strip().lower() == "responses/compact is not implemented"
+
+
 def _error_details_from_failed_event(payload: ResponseFailedEvent) -> tuple[str | None, str | None]:
     response = payload.get("response")
     if not isinstance(response, dict):
@@ -3883,6 +3894,7 @@ class _CompactCommandTransport:
         failure_detail: str | None = None
         failure_exception_type: str | None = None
         retryable_same_contract: bool | None = None
+        legacy_attempt_started = False
         try:
             if self.use_responses_stream_compaction:
                 try:
@@ -3893,7 +3905,7 @@ class _CompactCommandTransport:
                         effective_connect_timeout=effective_connect_timeout,
                     )
                 except ProxyResponseError as exc:
-                    if exc.status_code not in {404, 405, 501}:
+                    if not _is_route_level_compact_not_implemented(exc):
                         raise
                     logger.info(
                         "Responses-stream compaction unsupported; falling back to legacy endpoint "
@@ -3901,6 +3913,7 @@ class _CompactCommandTransport:
                         exc.status_code,
                         self.account_id,
                     )
+            legacy_attempt_started = True
             _maybe_log_upstream_request_start(
                 kind="responses_compact",
                 url=url,
@@ -4215,21 +4228,22 @@ class _CompactCommandTransport:
                 failure_exception_type=failure_exception_type,
             ) from exc
         finally:
-            _maybe_log_upstream_request_complete(
-                kind="responses_compact",
-                url=url,
-                headers=upstream_headers,
-                method="POST",
-                started_at=started_at,
-                status_code=status_code,
-                error_code=error_code,
-                error_message=error_message,
-                failure_phase=failure_phase,
-                payload_object=payload_object,
-                failure_detail=failure_detail,
-                failure_exception_type=failure_exception_type,
-                retryable_same_contract=retryable_same_contract,
-            )
+            if legacy_attempt_started:
+                _maybe_log_upstream_request_complete(
+                    kind="responses_compact",
+                    url=url,
+                    headers=upstream_headers,
+                    method="POST",
+                    started_at=started_at,
+                    status_code=status_code,
+                    error_code=error_code,
+                    error_message=error_message,
+                    failure_phase=failure_phase,
+                    payload_object=payload_object,
+                    failure_detail=failure_detail,
+                    failure_exception_type=failure_exception_type,
+                    retryable_same_contract=retryable_same_contract,
+                )
 
 
 def _codex_response_status(response: Any) -> int:

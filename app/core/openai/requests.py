@@ -303,6 +303,10 @@ def _sanitize_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
     return sanitized_input
 
 
+def _contains_top_level_compaction_trigger(input_items: list[JsonValue]) -> bool:
+    return any(is_json_mapping(item) and item.get("type") == "compaction_trigger" for item in input_items)
+
+
 def _normalize_responses_input_instructions(data: JsonValue) -> JsonValue:
     if not is_json_mapping(data):
         return data
@@ -763,6 +767,8 @@ class ResponsesCompactRequest(BaseModel):
             return _sanitize_input_items(normalized)
         if is_json_list(value):
             input_items = value
+            if _contains_top_level_compaction_trigger(input_items):
+                raise ValueError("responses/compact input must not include compaction_trigger items")
             return _sanitize_input_items(input_items)
         raise ValueError("input must be a string or array")
 

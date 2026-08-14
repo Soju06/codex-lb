@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 from sqlalchemy import event as sa_event
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -877,3 +878,85 @@ async def test_relax_commit_durability_emits_set_local_for_postgresql_sessions()
     await session_module.relax_commit_durability(cast(session_module.AsyncSession, _FakeSession()))
 
     assert executed == ["SET LOCAL synchronous_commit = off"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_long_write_watchdog_reports_the_holder(tmp_path, monkeypatch, caplog) -> None:
+    """Issue #1682: a write transaction outliving the busy timeout is the
+    holder that makes every other writer surface 'database is locked'. The
+    watchdog must attribute it — duration, first/last write statement, task —
+    when it finally ends, since the stall self-recovers."""
+    monkeypatch.setattr(session_module, "_SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS", 0.0)
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'watchdog.db'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    session_module._configure_sqlite_engine(engine.sync_engine, enable_wal=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        caplog.clear()
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        with caplog.at_level(logging.WARNING, logger=session_module.__name__):
+            async with factory() as session:
+                session.add(
+                    Account(
+                        id="acc-watchdog",
+                        chatgpt_account_id="workspace-w",
+                        email="watchdog@example.com",
+                        plan_type="plus",
+                        access_token_encrypted=b"a",
+                        refresh_token_encrypted=b"r",
+                        id_token_encrypted=b"i",
+                        last_refresh=datetime(2025, 1, 1),
+                        status=AccountStatus.ACTIVE,
+                    )
+                )
+                await session.commit()
+
+        records = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "sqlite_long_write_transaction" in record.getMessage()
+        ]
+        assert records, "the watchdog must report a write transaction over the threshold"
+        message = records[0].getMessage()
+        assert "outcome=commit" in message
+        assert "INSERT INTO accounts" in message
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_long_write_watchdog_stays_silent_below_threshold_and_for_reads(tmp_path, caplog) -> None:
+    """Fast writes and read-only transactions (which never take the writer
+    slot in WAL) must not produce reports."""
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'quiet.db'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    session_module._configure_sqlite_engine(engine.sync_engine, enable_wal=True)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        caplog.clear()
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        with caplog.at_level(logging.WARNING, logger=session_module.__name__):
+            async with factory() as session:
+                (await session.execute(sa_text("SELECT count(*) FROM accounts"))).scalar_one()
+                await session.commit()
+            async with factory() as session:
+                await session.execute(sa_text("DELETE FROM accounts"))
+                await session.commit()
+
+        assert not [
+            record
+            for record in caplog.records
+            if record.levelno >= logging.WARNING and "sqlite_long_write_transaction" in record.getMessage()
+        ]
+    finally:
+        await engine.dispose()

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from enum import StrEnum
 from pathlib import Path
@@ -33,6 +34,22 @@ logger = logging.getLogger(__name__)
 
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQLITE_BUSY_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_MS / 1000
+# A write transaction holding SQLite's single writer slot past the busy
+# timeout is exactly the holder that makes every other writer surface
+# "database is locked" (issue #1682); the watchdog below reports it with the
+# statements it ran, since the stall is nondeterministic and self-recovers.
+_SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS
+_SQLITE_WRITE_STATEMENT_PREFIXES = (
+    "insert",
+    "update",
+    "delete",
+    "replace",
+    "create",
+    "drop",
+    "alter",
+    "vacuum",
+)
+_SQLITE_WATCHDOG_STATEMENT_PREVIEW_CHARS = 300
 
 # PostgreSQL pool checkout timeout and connection recycle window. Fixed
 # application constants (issue #1340): recycle keeps pooled connections
@@ -135,6 +152,85 @@ def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
             cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
         finally:
             cursor.close()
+
+    _install_sqlite_long_write_watchdog(engine)
+
+
+def _current_task_name_best_effort() -> str:
+    # Sync engine events run inside the greenlet driving the async engine on
+    # the event loop thread, so the owning task is normally visible; never let
+    # diagnostics raise into the query path.
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return "<no-loop>"
+    if task is None:
+        return "<no-task>"
+    return task.get_name()
+
+
+def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
+    """Report write transactions that outlive the SQLite busy timeout.
+
+    In WAL mode a transaction takes the single writer slot at its first write
+    statement, not at BEGIN, so the window is measured from the first write to
+    commit/rollback. The report fires when the holder finally ends — the stall
+    in issue #1682 self-recovers, so identifying the holder post-hoc is the
+    point; a live sampler is not needed to attribute it.
+    """
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _track_write_statements(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        stripped = statement.lstrip().lower()
+        if not stripped.startswith(_SQLITE_WRITE_STATEMENT_PREFIXES):
+            return
+        info = getattr(conn, "info", None)
+        if info is None:
+            return
+        preview = statement[:_SQLITE_WATCHDOG_STATEMENT_PREVIEW_CHARS]
+        if "sqlite_write_started_at" not in info:
+            info["sqlite_write_started_at"] = time.monotonic()
+            info["sqlite_first_write_statement"] = preview
+            info["sqlite_write_task"] = _current_task_name_best_effort()
+        info["sqlite_last_write_statement"] = preview
+
+    def _report_and_reset(conn: object, *, outcome: str) -> None:
+        info = getattr(conn, "info", None)
+        if info is None:
+            return
+        started_at = info.pop("sqlite_write_started_at", None)
+        first_statement = info.pop("sqlite_first_write_statement", None)
+        last_statement = info.pop("sqlite_last_write_statement", None)
+        task_name = info.pop("sqlite_write_task", None)
+        if started_at is None:
+            return
+        held_seconds = time.monotonic() - started_at
+        if held_seconds < _SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS:
+            return
+        logger.warning(
+            "sqlite_long_write_transaction held_seconds=%.1f outcome=%s task=%s first_statement=%r "
+            "last_statement=%r — this writer starved every other writer past busy_timeout (issue #1682)",
+            held_seconds,
+            outcome,
+            task_name,
+            first_statement,
+            last_statement,
+        )
+
+    @event.listens_for(engine, "commit")
+    def _report_on_commit(conn: object) -> None:
+        _report_and_reset(conn, outcome="commit")
+
+    @event.listens_for(engine, "rollback")
+    def _report_on_rollback(conn: object) -> None:
+        _report_and_reset(conn, outcome="rollback")
 
 
 def _create_main_engine(url: str) -> AsyncEngine:

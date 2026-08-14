@@ -43178,7 +43178,7 @@ async def test_retry_http_bridge_precreated_request_fails_closed_when_file_owner
     assert request_state.previous_response_id == "resp_file_anchor"
     assert request_state.preferred_account_id == owner_account.id
     assert request_state.excluded_account_ids == set()
-    assert request_state.error_code_override == "no_accounts"
+    assert request_state.error_code_override == "previous_response_owner_unavailable"
 
 
 @pytest.mark.asyncio

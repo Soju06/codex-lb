@@ -585,6 +585,7 @@ class _CompactMixin:
         filtered = filter_inbound_headers(headers)
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_kind = _request_kind_from_headers(headers)
+        use_responses_stream_compaction = codex_session_affinity or request_kind == "compaction"
         request_id = get_request_id() or ensure_request_id(None)
         start = _service_time().monotonic()
         base_settings = _service_get_settings()
@@ -907,7 +908,8 @@ class _CompactMixin:
                                     "allow_direct_egress": route is None,
                                     "route_trace": route_trace,
                                     "chatgpt_account_id": account_id,
-                                    "use_responses_stream_compaction": request_kind == "compaction",
+                                    "use_responses_stream_compaction": use_responses_stream_compaction,
+                                    "codex_lb_account_id": target.id,
                                 },
                             ),
                             timeout=upstream_budget,
@@ -1547,6 +1549,14 @@ class _CompactMixin:
                             transient_exhausted = True
                             break
                         if _is_account_neutral_error_code(code):
+                            await settle_compact_usage(
+                                api_key=api_key,
+                                api_key_reservation=api_key_reservation,
+                                response=None,
+                                request_service_tier=request_service_tier,
+                            )
+                            raise
+                        if exc.failure_detail == "response_incomplete":
                             await settle_compact_usage(
                                 api_key=api_key,
                                 api_key_reservation=api_key_reservation,

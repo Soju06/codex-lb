@@ -10791,6 +10791,39 @@ async def test_service_compact_budget_bounds_unconfigured_upstream_read_timeout(
 
 
 @pytest.mark.asyncio
+async def test_service_compact_enables_stream_compaction_for_codex_affinity_without_metadata(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("affinity_compact_account")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def fake_compact(payload, headers, access_token, account_id, *, use_responses_stream_compaction=None):
+        del payload, headers, access_token, account_id
+        captured["use_responses_stream_compaction"] = use_responses_stream_compaction
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    result = await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+
+    assert result.model_extra == {"output": []}
+    assert captured["use_responses_stream_compaction"] is True
+
+
+@pytest.mark.asyncio
 async def test_service_compact_passes_chatgpt_account_id_to_core(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -10814,10 +10847,19 @@ async def test_service_compact_passes_chatgpt_account_id_to_core(monkeypatch):
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
     monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
 
-    async def fake_compact(payload, headers, access_token, account_id, *, chatgpt_account_id=None):
+    async def fake_compact(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        *,
+        chatgpt_account_id=None,
+        codex_lb_account_id=None,
+    ):
         del payload, headers, access_token
         captured["account_id"] = account_id
         captured["chatgpt_account_id"] = chatgpt_account_id
+        captured["codex_lb_account_id"] = codex_lb_account_id
         return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
 
     monkeypatch.setattr(proxy_service, "core_compact_responses", fake_compact)
@@ -10830,6 +10872,7 @@ async def test_service_compact_passes_chatgpt_account_id_to_core(monkeypatch):
     assert captured == {
         "account_id": "upstream_compact_account",
         "chatgpt_account_id": "upstream_compact_account",
+        "codex_lb_account_id": "local_compact_account",
     }
 
 
@@ -35433,6 +35476,70 @@ async def test_compact_responses_forwards_codex_compaction_to_upstream(monkeypat
     assert upstream.await_args.kwargs["use_responses_stream_compaction"] is True
     assert await service.drain_persistence_tasks(timeout_seconds=1)
     assert request_logs.calls[0]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_surfaces_stream_incomplete_without_account_penalty(monkeypatch):
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    sticky_sessions = AsyncMock()
+
+    class _StickyRepoContext:
+        async def __aenter__(self) -> ProxyRepositories:
+            return ProxyRepositories(
+                accounts=cast(AccountsRepository, AsyncMock()),
+                usage=cast(UsageRepository, AsyncMock()),
+                request_logs=cast(RequestLogsRepository, request_logs),
+                sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
+                api_keys=cast(ApiKeysRepository, AsyncMock()),
+                additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            )
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, lambda: _StickyRepoContext()))
+    account = _make_account("acc_compact_incomplete")
+    record_errors = AsyncMock()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service._load_balancer,
+        "select_account",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
+    monkeypatch.setattr(service, "_settle_compact_api_key_usage", AsyncMock())
+
+    async def incomplete_upstream(payload, headers, access_token, account_id, **kwargs):
+        del payload, headers, access_token, account_id, kwargs
+        raise proxy_module.ProxyResponseError(
+            502,
+            openai_error("max_output_tokens", "Responses compaction stream ended incomplete. reason=max_output_tokens"),
+            failure_phase="stream",
+            failure_detail="response_incomplete",
+        )
+
+    monkeypatch.setattr(proxy_service, "core_compact_responses", incomplete_upstream)
+
+    payload = ResponsesCompactRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": []})
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service.compact_responses(payload, {"session_id": "sid-compact"}, codex_session_affinity=True)
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert exc.failure_detail == "response_incomplete"
+    assert _proxy_error_code(exc) == "max_output_tokens"
+    service._handle_stream_error.assert_not_awaited()
+    record_errors.assert_not_awaited()
+    sticky_sessions.delete.assert_not_awaited()
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "max_output_tokens"
 
 
 @pytest.mark.asyncio

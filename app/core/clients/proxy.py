@@ -37,6 +37,7 @@ from aiohttp import hdrs
 from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT, WebSocketDataQueue
 from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
+from pydantic import ValidationError
 
 from app.core.clients.codex import (
     CodexClient,
@@ -1139,6 +1140,8 @@ async def _iter_sse_events(
     idle_timeout_seconds: float,
     max_event_bytes: int,
 ) -> AsyncIterator[str]:
+    next_chunk: asyncio.Task[bytes] | None = None
+
     async def _next_chunk() -> bytes:
         return await iterator.__anext__()
 
@@ -1156,52 +1159,62 @@ async def _iter_sse_events(
     chunk_iterator = resp.content.iter_chunked(_SSE_READ_CHUNK_SIZE)
     iterator = chunk_iterator.__aiter__()
 
-    while True:
-        next_chunk = asyncio.create_task(_next_chunk())
-        try:
-            done, _ = await asyncio.wait({next_chunk}, timeout=idle_timeout_seconds)
-            if not done:
-                await _cancel_pending_chunk(next_chunk)
-                raise StreamIdleTimeoutError()
-            chunk = await next_chunk
-        except StopAsyncIteration:
-            break
-        except asyncio.CancelledError:
-            await _cancel_pending_chunk(next_chunk)
-            raise
-
-        if not chunk:
-            continue
-
-        buffer.extend(chunk)
+    try:
         while True:
-            # `scanned` marks the prefix already known to hold no separator,
-            # so each new chunk only scans the new bytes (plus the straddle
-            # overlap). Without the cursor, a large event re-scanned the
-            # entire accumulated buffer on every read — O(n^2) byte scanning
-            # that blocked the event loop for every in-flight stream.
-            separator = _find_sse_separator(buffer, max(0, scanned - _SSE_SEPARATOR_OVERLAP))
-            if separator is None:
-                scanned = len(buffer)
-                if len(buffer) > max_event_bytes:
-                    raise StreamEventTooLargeError(len(buffer), max_event_bytes)
+            next_chunk = asyncio.create_task(_next_chunk())
+            try:
+                done, _ = await asyncio.wait({next_chunk}, timeout=idle_timeout_seconds)
+                if not done:
+                    await _cancel_pending_chunk(next_chunk)
+                    next_chunk = None
+                    raise StreamIdleTimeoutError()
+                chunk = await next_chunk
+                next_chunk = None
+            except StopAsyncIteration:
                 break
-            index, separator_len = separator
-            event_end = index + separator_len
-            raw_event = bytes(buffer[:event_end])
-            del buffer[:event_end]
-            scanned = 0
+            except asyncio.CancelledError:
+                await _cancel_pending_chunk(next_chunk)
+                next_chunk = None
+                raise
 
-            if len(raw_event) > max_event_bytes:
-                raise StreamEventTooLargeError(len(raw_event), max_event_bytes)
+            if not chunk:
+                continue
 
-            if raw_event.strip():
-                yield raw_event.decode("utf-8", errors="replace")
+            buffer.extend(chunk)
+            while True:
+                # `scanned` marks the prefix already known to hold no separator,
+                # so each new chunk only scans the new bytes (plus the straddle
+                # overlap). Without the cursor, a large event re-scanned the
+                # entire accumulated buffer on every read — O(n^2) byte scanning
+                # that blocked the event loop for every in-flight stream.
+                separator = _find_sse_separator(buffer, max(0, scanned - _SSE_SEPARATOR_OVERLAP))
+                if separator is None:
+                    scanned = len(buffer)
+                    if len(buffer) > max_event_bytes:
+                        raise StreamEventTooLargeError(len(buffer), max_event_bytes)
+                    break
+                index, separator_len = separator
+                event_end = index + separator_len
+                raw_event = bytes(buffer[:event_end])
+                del buffer[:event_end]
+                scanned = 0
 
-    if buffer:
-        if len(buffer) > max_event_bytes:
-            raise StreamEventTooLargeError(len(buffer), max_event_bytes)
-        yield bytes(buffer).decode("utf-8", errors="replace")
+                if len(raw_event) > max_event_bytes:
+                    raise StreamEventTooLargeError(len(raw_event), max_event_bytes)
+
+                if raw_event.strip():
+                    yield raw_event.decode("utf-8", errors="replace")
+
+        if buffer:
+            if len(buffer) > max_event_bytes:
+                raise StreamEventTooLargeError(len(buffer), max_event_bytes)
+            yield bytes(buffer).decode("utf-8", errors="replace")
+    finally:
+        if next_chunk is not None:
+            await _cancel_pending_chunk(next_chunk)
+        close_iterator = getattr(chunk_iterator, "aclose", None)
+        if callable(close_iterator):
+            await close_iterator()
 
 
 async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str | None]:
@@ -1398,6 +1411,7 @@ def _normalize_sse_event_block(event_block: str) -> str:
 
 def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
     event_type = payload.get("type")
+    status_value = payload.get("status")
     if isinstance(event_type, str) and event_type in _SSE_EVENT_TYPE_ALIASES:
         normalized = dict(payload)
         normalized["type"] = _SSE_EVENT_TYPE_ALIASES[event_type]
@@ -1413,6 +1427,8 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
             error_param=detail.get("param"),
         )
         _copy_quota_error_metadata(event["response"]["error"], detail)
+        if isinstance(status_value, int) and not isinstance(status_value, bool):
+            event["status"] = status_value
         return cast(dict[str, JsonValue], event)
     if event_type == "error":
         message = _extract_upstream_message(payload) or "Upstream websocket error"
@@ -1426,14 +1442,34 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
             normalized_code = "upstream_error"
         return cast(
             dict[str, JsonValue],
-            response_failed_event(
+            _response_failed_event_with_optional_status(
                 normalized_code,
                 message,
                 error_type=error_type if isinstance(error_type, str) and error_type != "error" else "server_error",
                 response_id=get_request_id(),
+                status=status_value,
             ),
         )
     return payload
+
+
+def _response_failed_event_with_optional_status(
+    code: str,
+    message: str,
+    *,
+    error_type: str,
+    response_id: str | None,
+    status: JsonValue,
+) -> ResponseFailedEvent | dict[str, JsonValue]:
+    event = response_failed_event(
+        code,
+        message,
+        error_type=error_type,
+        response_id=response_id,
+    )
+    if isinstance(status, int) and not isinstance(status, bool):
+        event["status"] = status
+    return cast(dict[str, JsonValue], event)
 
 
 def _normalize_stream_payload_for_http_block(
@@ -2897,43 +2933,46 @@ async def _stream_responses_with_session(
                     yield event_block
                     return
 
-                async for event_block in _iter_sse_events(
-                    cast(SSEResponse, resp),
-                    effective_idle_timeout,
-                    settings.max_sse_event_bytes,
-                ):
-                    last_stream_activity_at = time.monotonic()
-                    event_block = _normalize_sse_event_block(event_block)
-                    event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
-                        event_block,
-                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                async with contextlib.aclosing(
+                    _iter_sse_events(
+                        cast(SSEResponse, resp),
+                        effective_idle_timeout,
+                        settings.max_sse_event_bytes,
                     )
-                    event = parse_sse_event(event_block)
-                    if event:
-                        if event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES or (
-                            event.type == "error" and not enforce_openai_sdk_contract
+                ) as upstream_events:
+                    async for event_block in upstream_events:
+                        last_stream_activity_at = time.monotonic()
+                        event_block = _normalize_sse_event_block(event_block)
+                        event_block, normalized_event_type = _normalize_stream_payload_for_http_block(
+                            event_block,
+                            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                        )
+                        event = parse_sse_event(event_block)
+                        if event:
+                            if event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES or (
+                                event.type == "error" and not enforce_openai_sdk_contract
+                            ):
+                                seen_terminal = True
+                        elif isinstance(normalized_event_type, str) and (
+                            normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
+                            or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
                         ):
                             seen_terminal = True
-                    elif isinstance(normalized_event_type, str) and (
-                        normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
-                        or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
-                    ):
-                        seen_terminal = True
-                    archive_text(
-                        direction="server_to_codex",
-                        kind="responses",
-                        transport="http",
-                        text=event_block,
-                        account_id=account_id,
-                        method="POST",
-                        url=url,
-                        status_code=status_code,
-                        headers=current_headers,
-                        extra={"event_format": "sse"},
-                    )
-                    yield event_block
-                    if seen_terminal:
-                        break
+                        archive_text(
+                            direction="server_to_codex",
+                            kind="responses",
+                            transport="http",
+                            text=event_block,
+                            account_id=account_id,
+                            method="POST",
+                            url=url,
+                            status_code=status_code,
+                            headers=current_headers,
+                            extra={"event_format": "sse"},
+                        )
+                        yield event_block
+                        if seen_terminal:
+                            break
                 return
             finally:
                 if owns_codex_client:
@@ -3569,6 +3608,7 @@ async def compact_responses(
     chatgpt_account_id: str | None = None,
     allow_direct_egress: bool = True,
     use_responses_stream_compaction: bool = False,
+    codex_lb_account_id: str | None = None,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
         transport = _CompactCommandTransport(
@@ -3583,6 +3623,7 @@ async def compact_responses(
             chatgpt_account_id=chatgpt_account_id,
             allow_direct_egress=allow_direct_egress,
             use_responses_stream_compaction=use_responses_stream_compaction,
+            codex_lb_account_id=codex_lb_account_id,
         )
         return await transport.execute()
 
@@ -3600,6 +3641,7 @@ class _CompactCommandTransport:
     chatgpt_account_id: str | None = None
     allow_direct_egress: bool = False
     use_responses_stream_compaction: bool = False
+    codex_lb_account_id: str | None = None
 
     async def _execute_responses_stream_compaction(
         self,
@@ -3627,8 +3669,50 @@ class _CompactCommandTransport:
         stream_payload_dict["input"] = [*input_value, {"type": "compaction_trigger"}]
         stream_payload_dict["stream"] = True
         stream_payload_dict["store"] = False
-        stream_payload = ResponsesRequest.model_validate(stream_payload_dict)
+        if stream_payload_dict.get("conversation") and stream_payload_dict.get("previous_response_id"):
+            error = openai_error(
+                "invalid_request_error",
+                "Provide either 'conversation' or 'previous_response_id', not both.",
+                error_type="invalid_request_error",
+            )
+            error["error"]["param"] = "previous_response_id"
+            raise ProxyResponseError(
+                400,
+                error,
+                failure_phase="validation",
+            )
+        try:
+            stream_payload = ResponsesRequest.model_validate(stream_payload_dict)
+        except ValidationError as exc:
+            error = openai_error(
+                "invalid_request_error",
+                str(exc),
+                error_type="invalid_request_error",
+            )
+            errors = exc.errors()
+            if errors:
+                loc = errors[0].get("loc")
+                if isinstance(loc, tuple) and loc:
+                    param = loc[-1]
+                    if isinstance(param, str):
+                        error["error"]["param"] = param
+            raise ProxyResponseError(
+                400,
+                error,
+                failure_phase="validation",
+            ) from exc
         stream_payload_dict = stream_payload.to_payload()
+        try:
+            validate_compact_input_wire_budget(stream_payload_dict)
+        except ClientPayloadError as exc:
+            error = openai_error(
+                exc.code or "invalid_request_error",
+                str(exc),
+                error_type=exc.error_type or "invalid_request_error",
+            )
+            if exc.param is not None:
+                error["error"]["param"] = exc.param
+            raise ProxyResponseError(400, error, failure_phase="validation") from exc
 
         compaction_items: list[JsonObject] = []
         completed_response: JsonObject | None = None
@@ -3643,7 +3727,7 @@ class _CompactCommandTransport:
             route_trace=self.route_trace,
             allow_direct_egress=self.allow_direct_egress,
             raise_for_status=True,
-            codex_lb_account_id=self.account_id,
+            codex_lb_account_id=self.codex_lb_account_id,
             upstream_stream_transport_override="http",
         )
         with override_stream_timeouts(
@@ -3651,22 +3735,23 @@ class _CompactCommandTransport:
             idle_timeout_seconds=compact_timeout_seconds,
             total_timeout_seconds=compact_timeout_seconds,
         ):
-            async for event_block in stream:
-                event_payload = parse_sse_data_json(event_block)
-                if event_payload is None:
-                    continue
-                event_type = event_payload.get("type")
-                if event_type == "response.output_item.done":
-                    item = event_payload.get("item")
-                    if isinstance(item, dict) and item.get("type") in {"compaction", "compaction_summary"}:
-                        compaction_items.append(dict(item))
-                elif event_type == "response.completed":
-                    response = event_payload.get("response")
-                    if isinstance(response, dict):
-                        completed_response = dict(response)
-                    break
-                elif event_type in {"response.failed", "response.incomplete", "error"}:
-                    raise _proxy_response_error_from_stream_event(event_payload)
+            async with contextlib.aclosing(stream):
+                async for event_block in stream:
+                    event_payload = parse_sse_data_json(event_block)
+                    if event_payload is None:
+                        continue
+                    event_type = event_payload.get("type")
+                    if event_type == "response.output_item.done":
+                        item = event_payload.get("item")
+                        if isinstance(item, dict) and item.get("type") in {"compaction", "compaction_summary"}:
+                            compaction_items.append(dict(item))
+                    elif event_type == "response.completed":
+                        response = event_payload.get("response")
+                        if isinstance(response, dict):
+                            completed_response = dict(response)
+                        break
+                    elif event_type in {"response.failed", "response.incomplete", "error"}:
+                        raise _proxy_response_error_from_stream_event(event_payload)
 
         if completed_response is None:
             raise ProxyResponseError(
@@ -3716,6 +3801,9 @@ class _CompactCommandTransport:
         response_status = completed_response.get("status")
         if isinstance(response_status, str) and response_status:
             result["status"] = response_status
+        service_tier = completed_response.get("service_tier")
+        if isinstance(service_tier, str) and service_tier:
+            result["service_tier"] = service_tier
         usage = completed_response.get("usage")
         if isinstance(usage, dict):
             result["usage"] = dict(usage)
@@ -3794,26 +3882,6 @@ class _CompactCommandTransport:
         failure_detail: str | None = None
         failure_exception_type: str | None = None
         retryable_same_contract: bool | None = None
-        _maybe_log_upstream_request_start(
-            kind="responses_compact",
-            url=url,
-            headers=upstream_headers,
-            method="POST",
-            payload_summary=_summarize_json_payload(payload_dict),
-            payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
-            if "upstream_payload" in settings.trace_channels
-            else None,
-        )
-        archive_json(
-            direction="codex_to_server",
-            kind="compact",
-            transport="http",
-            payload=payload_dict,
-            account_id=self.account_id,
-            method="POST",
-            url=url,
-            headers=upstream_headers,
-        )
         try:
             if self.use_responses_stream_compaction:
                 try:
@@ -3832,6 +3900,26 @@ class _CompactCommandTransport:
                         exc.status_code,
                         self.account_id,
                     )
+            _maybe_log_upstream_request_start(
+                kind="responses_compact",
+                url=url,
+                headers=upstream_headers,
+                method="POST",
+                payload_summary=_summarize_json_payload(payload_dict),
+                payload_json=json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
+                if "upstream_payload" in settings.trace_channels
+                else None,
+            )
+            archive_json(
+                direction="codex_to_server",
+                kind="compact",
+                transport="http",
+                payload=payload_dict,
+                account_id=self.account_id,
+                method="POST",
+                url=url,
+                headers=upstream_headers,
+            )
             if self.route is not None:
                 owns_codex_client = self.codex_client is None
                 active_codex_client = self.codex_client or CodexClient(create_codex_session())
@@ -4155,6 +4243,10 @@ def _proxy_response_error_from_stream_event(event_payload: Mapping[str, JsonValu
     response_value = event_payload.get("response")
     if isinstance(response_value, dict) and isinstance(response_value.get("error"), dict):
         error_value = response_value["error"]
+    status_value = event_payload.get("status")
+    event_status_code: int | None = None
+    if isinstance(status_value, int) and not isinstance(status_value, bool):
+        event_status_code = status_value
     if isinstance(error_value, dict):
         message = error_value.get("message")
         error_type = error_value.get("type")
@@ -4165,29 +4257,36 @@ def _proxy_response_error_from_stream_event(event_payload: Mapping[str, JsonValu
         }
         if isinstance(code, str):
             detail["code"] = code
+        param = error_value.get("param")
+        if isinstance(param, str):
+            detail["param"] = param
+        _copy_quota_error_metadata(detail, error_value)
         return ProxyResponseError(
-            502,
+            event_status_code or 502,
             {"error": detail},
             failure_phase="stream",
             failure_detail=detail["message"],
+            upstream_status_code=event_status_code,
         )
     if event_payload.get("type") == "response.incomplete":
         message = "Upstream Responses compaction stream ended incomplete."
+        code = "response_incomplete"
         if isinstance(response_value, dict):
             incomplete_details = response_value.get("incomplete_details")
             if isinstance(incomplete_details, dict):
                 reason = incomplete_details.get("reason")
                 if isinstance(reason, str) and reason:
+                    code = reason
                     message = f"{message} reason={reason}"
         return ProxyResponseError(
             502,
             openai_error(
-                "upstream_error",
+                code,
                 message,
                 error_type="server_error",
             ),
             failure_phase="stream",
-            failure_detail=message,
+            failure_detail="response_incomplete",
         )
     return ProxyResponseError(
         502,

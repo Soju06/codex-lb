@@ -1,14 +1,14 @@
 """add model source subscription fallback
 
 Revision ID: 20260807_163500_add_model_source_subscription_fallback
-Revises: 20260806_020000_add_usage_history_bulk_covering_indexes
+Revises: 20260806_000000_add_anonymous_telemetry
 """
 
 import sqlalchemy as sa
 from alembic import op
 
 revision = "20260807_163500_add_model_source_subscription_fallback"
-down_revision = "20260806_020000_add_usage_history_bulk_covering_indexes"
+down_revision = "20260806_000000_add_anonymous_telemetry"
 branch_labels = None
 depends_on = None
 

@@ -57,6 +57,7 @@ describe("DashboardOverviewSchema", () => {
           cachedInputTokens: 300,
           errorRate: 0.02,
           errorCount: 10,
+          cancelledCount: 3,
           topError: null,
         },
         comparison: {
@@ -81,6 +82,7 @@ describe("DashboardOverviewSchema", () => {
 
     expect(parsed.accounts).toHaveLength(0);
     expect(parsed.summary.comparison?.previous.requests).toBe(250);
+    expect(parsed.summary.metrics?.cancelledCount).toBe(3);
   });
 
   it("drops legacy request_logs field from parse result", () => {

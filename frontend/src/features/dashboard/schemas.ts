@@ -64,6 +64,7 @@ const DashboardMetricsSchema = z.object({
   cachedInputTokens: z.number().nullable(),
   errorRate: z.number().nullable(),
   errorCount: z.number().nullable(),
+  cancelledCount: z.number().int().nonnegative().nullable().optional(),
   topError: z.string().nullable(),
   conversations: z.number().int().nullable().optional().default(null),
   conversationRequests: z.number().int().nonnegative().optional().default(0),

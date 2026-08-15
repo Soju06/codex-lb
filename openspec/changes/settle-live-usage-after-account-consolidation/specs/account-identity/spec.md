@@ -2,7 +2,7 @@
 
 ### Requirement: Duplicate consolidation preserves a recoverable canonical identity
 
-Identity reconciliation MUST preserve the upstream ChatGPT account id on the canonical row, reparent existing account-owned usage history to that row, and remove selected duplicate rows when it consolidates duplicate local accounts under the existing email and workspace-slot policy. Reconciliation MUST NOT consolidate distinct real-email account slots solely to make an upstream identity unique.
+Identity reconciliation MUST preserve the upstream ChatGPT account id on the canonical row, reparent existing account-owned usage history to that row, and remove selected duplicate rows when it consolidates duplicate local accounts under the existing email and workspace-slot policy. Reconciliation MUST NOT consolidate distinct real-email account slots solely to make an upstream identity unique. On PostgreSQL, every account insertion, replacement, token/metadata identity update, duplicate consolidation, and deletion that changes upstream-identity membership MUST acquire the same transaction-scoped upstream-identity advisory lock as live-usage settlement before row or fold-state locks and hold it through commit. An old-to-new membership move MUST acquire both stable identity lock keys in canonical sorted order.
 
 #### Scenario: Same-slot duplicate leaves one upstream-resolvable canonical row
 

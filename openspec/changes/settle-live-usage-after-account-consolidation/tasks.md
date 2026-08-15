@@ -13,6 +13,9 @@
 - [x] 1.4 Capture the focused failing-first command and RED output before any
   production edit; do not use sleeps, polling delays, retries, or a background
   consumer timing race.
+- [x] 1.5 Add a deterministic two-session PostgreSQL regression that pauses at
+  exact transaction events and proves consolidation cannot reparent before a
+  snapshot append and then cascade-delete that append.
 
 ## 2. Publication ownership envelope
 
@@ -29,7 +32,9 @@
   current row matching the captured upstream identity.
 - [x] 3.2 Protect owner resolution through persistence and write all represented
   windows atomically so the item settles once under one account on SQLite and
-  PostgreSQL.
+  PostgreSQL; use one shared transaction-scoped upstream-identity lock across
+  settlement, ordinary/slot upserts, replacement, rotation, metadata update,
+  consolidation, and deletion before row/fold locks.
 - [x] 3.3 Keep ambiguous/missing ownership serving-safe and logged; do not alter
   account consolidation policy, queue overflow, throttling, or retry behavior.
 - [x] 3.4 Add no Alembic revision, model column, setting, or API schema change.
@@ -42,6 +47,9 @@
 - [x] 4.2 Run diagnostics on every changed Python file and the affected backend
   lint/type/test gates on both supported database paths where registered.
 - [x] 4.3 Run `openspec validate settle-live-usage-after-account-consolidation --strict`.
+- [x] 4.4 Run the deterministic PostgreSQL race repeatedly plus lock-routing,
+  identity, live-ingest, snapshot, and HTTP publication regressions after the
+  shared lock implementation is complete.
 
 ## 5. Authenticated QA and cleanup
 

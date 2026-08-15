@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.dml import Delete
 
 from app.core.crypto import TokenEncryptor
 from app.core.usage import live_hub
@@ -11,8 +16,10 @@ from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import SessionLocal
+from app.modules.accounts import repository as accounts_repository_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.usage import live_ingest
+from app.modules.usage import repository as usage_repository_module
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -308,6 +315,288 @@ async def test_live_ingestor_settles_snapshot_after_duplicate_account_consolidat
     assert secondary.used_percent == pytest.approx(snapshot.secondary.used_percent)
     assert secondary.window_minutes == snapshot.secondary.window_minutes
     assert secondary.reset_at == snapshot.secondary.reset_at
+
+
+@pytest.mark.asyncio
+async def test_postgresql_live_ingest_serializes_identity_membership_through_snapshot_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+) -> None:
+    del db_setup
+    bind = SessionLocal.kw["bind"]
+    if bind.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL transaction-lock regression")
+
+    canonical_id = "acc_live_pg_canonical"
+    duplicate_id = "acc_live_pg_duplicate"
+    upstream_id = "workspace-live-pg-consolidated"
+    email = "live-pg-consolidated@example.com"
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(
+            _make_account(canonical_id, email, chatgpt_account_id=upstream_id),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _make_account(duplicate_id, email, chatgpt_account_id=upstream_id),
+            merge_by_email=False,
+        )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.publish(
+        _snapshot(),
+        account_id=duplicate_id,
+        chatgpt_account_id=upstream_id,
+    )
+    queued = ingestor._queue.get_nowait()
+
+    settlement_commit_started = asyncio.Event()
+    release_settlement_commit = asyncio.Event()
+    writer_lock_attempted = asyncio.Event()
+    writer_before_delete = asyncio.Event()
+    release_writer_delete = asyncio.Event()
+    settlement_lock_keys: list[int] = []
+    writer_lock_keys: list[int] = []
+    settlement_session = SessionLocal()
+    writer_session = SessionLocal()
+    settlement_task: asyncio.Task[None] | None = None
+    writer_task: asyncio.Task[Account] | None = None
+
+    def _lock_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> int:
+        parameters = args[0] if args else kwargs.get("params")
+        assert isinstance(parameters, dict)
+        lock_key = parameters["lock_key"]
+        assert isinstance(lock_key, int)
+        return lock_key
+
+    settlement_execute = settlement_session.execute
+
+    async def _settlement_execute(statement: Any, *args: Any, **kwargs: Any):
+        if "pg_advisory_xact_lock" in str(statement):
+            settlement_lock_keys.append(_lock_key(args, kwargs))
+        return await settlement_execute(statement, *args, **kwargs)
+
+    settlement_commit = settlement_session.commit
+
+    async def _settlement_commit() -> None:
+        settlement_commit_started.set()
+        await asyncio.wait_for(release_settlement_commit.wait(), timeout=5.0)
+        await settlement_commit()
+
+    writer_execute = writer_session.execute
+
+    async def _writer_execute(statement: Any, *args: Any, **kwargs: Any):
+        if "pg_advisory_xact_lock" in str(statement):
+            writer_lock_keys.append(_lock_key(args, kwargs))
+            writer_lock_attempted.set()
+        if isinstance(statement, Delete) and statement.table.name == Account.__tablename__:
+            writer_before_delete.set()
+            await asyncio.wait_for(release_writer_delete.wait(), timeout=5.0)
+        return await writer_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(settlement_session, "execute", _settlement_execute)
+    monkeypatch.setattr(settlement_session, "commit", _settlement_commit)
+    monkeypatch.setattr(writer_session, "execute", _writer_execute)
+
+    @asynccontextmanager
+    async def _settlement_session() -> AsyncIterator[AsyncSession]:
+        yield settlement_session
+
+    monkeypatch.setattr(live_ingest, "get_background_session", _settlement_session)
+
+    try:
+        settlement_task = asyncio.create_task(ingestor._ingest(queued))
+        await asyncio.wait_for(settlement_commit_started.wait(), timeout=5.0)
+
+        writer_task = asyncio.create_task(
+            AccountsRepository(writer_session).upsert(
+                _make_account("acc_live_pg_reauth", email, chatgpt_account_id=upstream_id),
+                merge_by_email=False,
+                merge_by_chatgpt_identity=True,
+            )
+        )
+        await asyncio.wait_for(writer_lock_attempted.wait(), timeout=5.0)
+
+        if settlement_lock_keys:
+            assert writer_lock_keys[0] == settlement_lock_keys[0]
+            release_settlement_commit.set()
+            await asyncio.wait_for(settlement_task, timeout=5.0)
+            release_writer_delete.set()
+        else:
+            await asyncio.wait_for(writer_before_delete.wait(), timeout=5.0)
+            release_settlement_commit.set()
+            await asyncio.wait_for(settlement_task, timeout=5.0)
+            release_writer_delete.set()
+        saved = await asyncio.wait_for(writer_task, timeout=5.0)
+        assert saved.id == canonical_id
+    finally:
+        release_settlement_commit.set()
+        release_writer_delete.set()
+        for task in (settlement_task, writer_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (settlement_task, writer_task) if task is not None),
+            return_exceptions=True,
+        )
+        await settlement_session.rollback()
+        await writer_session.rollback()
+        await settlement_session.close()
+        await writer_session.close()
+
+    async with SessionLocal() as session:
+        accounts = list((await session.execute(select(Account).order_by(Account.id))).scalars().all())
+        rows = list((await session.execute(select(UsageHistory).order_by(UsageHistory.id))).scalars().all())
+    assert [account.id for account in accounts] == [canonical_id]
+    assert [row.account_id for row in rows] == [canonical_id, canonical_id]
+    assert {row.window for row in rows} == {"primary", "secondary"}
+
+
+@pytest.mark.asyncio
+async def test_postgresql_live_ingest_waits_for_identity_consolidation_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+) -> None:
+    del db_setup
+    bind = SessionLocal.kw["bind"]
+    if bind.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL transaction-lock regression")
+
+    canonical_id = "acc_live_pg_writer_first_canonical"
+    duplicate_id = "acc_live_pg_writer_first_duplicate"
+    upstream_id = "workspace-live-pg-writer-first"
+    email = "live-pg-writer-first@example.com"
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_make_account(canonical_id, email, chatgpt_account_id=upstream_id), merge_by_email=False)
+        await repo.upsert(_make_account(duplicate_id, email, chatgpt_account_id=upstream_id), merge_by_email=False)
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.publish(_snapshot(), account_id=duplicate_id, chatgpt_account_id=upstream_id)
+    queued = ingestor._queue.get_nowait()
+
+    writer_commit_started = asyncio.Event()
+    release_writer_commit = asyncio.Event()
+    settlement_lock_attempted = asyncio.Event()
+    writer_session = SessionLocal()
+    writer_commit = writer_session.commit
+    real_settlement_lock = usage_repository_module.lock_postgresql_account_identities
+    writer_task: asyncio.Task[Account] | None = None
+    settlement_task: asyncio.Task[None] | None = None
+
+    async def _writer_commit() -> None:
+        writer_commit_started.set()
+        await asyncio.wait_for(release_writer_commit.wait(), timeout=5.0)
+        await writer_commit()
+
+    async def _observed_settlement_lock(session: AsyncSession, identities):
+        settlement_lock_attempted.set()
+        return await real_settlement_lock(session, identities)
+
+    monkeypatch.setattr(writer_session, "commit", _writer_commit)
+    monkeypatch.setattr(usage_repository_module, "lock_postgresql_account_identities", _observed_settlement_lock)
+
+    try:
+        writer_task = asyncio.create_task(
+            AccountsRepository(writer_session).upsert(
+                _make_account("acc_live_pg_writer_first_reauth", email, chatgpt_account_id=upstream_id),
+                merge_by_email=False,
+                merge_by_chatgpt_identity=True,
+            )
+        )
+        await asyncio.wait_for(writer_commit_started.wait(), timeout=5.0)
+
+        settlement_task = asyncio.create_task(ingestor._ingest(queued))
+        await asyncio.wait_for(settlement_lock_attempted.wait(), timeout=5.0)
+        assert not settlement_task.done()
+
+        release_writer_commit.set()
+        saved = await asyncio.wait_for(writer_task, timeout=5.0)
+        await asyncio.wait_for(settlement_task, timeout=5.0)
+        assert saved.id == canonical_id
+    finally:
+        release_writer_commit.set()
+        for task in (writer_task, settlement_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (writer_task, settlement_task) if task is not None),
+            return_exceptions=True,
+        )
+        await writer_session.rollback()
+        await writer_session.close()
+
+    async with SessionLocal() as session:
+        accounts = list((await session.execute(select(Account).order_by(Account.id))).scalars().all())
+        rows = list((await session.execute(select(UsageHistory).order_by(UsageHistory.id))).scalars().all())
+    assert [account.id for account in accounts] == [canonical_id]
+    assert [row.account_id for row in rows] == [canonical_id, canonical_id]
+    assert {row.window for row in rows} == {"primary", "secondary"}
+
+
+@pytest.mark.asyncio
+async def test_postgresql_opposite_identity_moves_use_one_sorted_lock_order(
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+) -> None:
+    del db_setup
+    bind = SessionLocal.kw["bind"]
+    if bind.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL transaction-lock regression")
+
+    first = _make_account("acc_identity_move_a", "identity-move-a@example.com", chatgpt_account_id="workspace-a")
+    second = _make_account("acc_identity_move_b", "identity-move-b@example.com", chatgpt_account_id="workspace-b")
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(first, merge_by_email=False)
+        await repo.upsert(second, merge_by_email=False)
+
+    real_identity_lock = accounts_repository_module.lock_postgresql_account_identities
+    arrival_guard = asyncio.Lock()
+    both_arrived = asyncio.Event()
+    arrival_count = 0
+
+    async def _synchronized_identity_lock(session: AsyncSession, identities):
+        nonlocal arrival_count
+        async with arrival_guard:
+            arrival_count += 1
+            if arrival_count == 2:
+                both_arrived.set()
+        await asyncio.wait_for(both_arrived.wait(), timeout=5.0)
+        return await real_identity_lock(session, identities)
+
+    monkeypatch.setattr(accounts_repository_module, "lock_postgresql_account_identities", _synchronized_identity_lock)
+
+    async def _move(account: Account, incoming_identity: str) -> bool:
+        async with SessionLocal() as session:
+            return await AccountsRepository(session).rotate_tokens(
+                account.id,
+                account.access_token_encrypted,
+                account.refresh_token_encrypted,
+                account.id_token_encrypted,
+                utcnow(),
+                expected_refresh_token_encrypted=account.refresh_token_encrypted,
+                chatgpt_account_id=incoming_identity,
+            )
+
+    moved_first, moved_second = await asyncio.wait_for(
+        asyncio.gather(_move(first, "workspace-b"), _move(second, "workspace-a")),
+        timeout=5.0,
+    )
+    assert moved_first is True
+    assert moved_second is True
+
+    async with SessionLocal() as session:
+        identities = {
+            account_id: chatgpt_account_id
+            for account_id, chatgpt_account_id in (
+                await session.execute(select(Account.id, Account.chatgpt_account_id))
+            ).all()
+        }
+    assert identities == {
+        first.id: "workspace-b",
+        second.id: "workspace-a",
+    }
 
 
 @pytest.mark.asyncio

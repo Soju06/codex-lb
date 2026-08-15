@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
+from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
 from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.db.sqlite_utils import sqlite_db_path_from_url
@@ -695,6 +696,12 @@ class UsageRepository:
                     # waits until the snapshot commit, so the chosen FK owner
                     # cannot disappear between SELECT and INSERT.
                     await self._session.execute(text("BEGIN IMMEDIATE"))
+                else:
+                    # Account identity writers take this same transaction lock
+                    # before changing membership. Holding it through the append
+                    # prevents consolidation from reparenting history, then
+                    # deleting an owner whose new snapshot arrived in between.
+                    await lock_postgresql_account_identities(self._session, (chatgpt_account_id,))
 
                 resolved_account_id: str | None = None
                 if account_id is not None:

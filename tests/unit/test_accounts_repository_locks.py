@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 import app.modules.accounts.repository as repository_module
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
+from app.db.account_identity_lock import account_identity_lock_key, lock_postgresql_account_identities
 from app.db.models import Account, AccountStatus
 from app.modules.accounts.repository import AccountsRepository
 
@@ -46,13 +48,34 @@ def _make_postgres_repo(monkeypatch: pytest.MonkeyPatch) -> tuple[AccountsReposi
 
     repo = AccountsRepository(session)
 
-    recorded: dict[str, list[str]] = {"identity": [], "email": []}
+    recorded: dict[str, list[str]] = {"upstream": [], "identity": [], "email": [], "order": []}
 
     async def fake_identity_lock(key: str) -> None:
         recorded["identity"].append(key)
+        recorded["order"].append(f"identity:{key}")
 
     async def fake_email_lock(email: str) -> None:
         recorded["email"].append(email)
+        recorded["order"].append(f"email:{email}")
+
+    async def fake_upstream_identity_locks(account: Account, *, include_email: bool) -> frozenset[str]:
+        del include_email
+        if account.chatgpt_account_id:
+            recorded["upstream"].append(account.chatgpt_account_id)
+            recorded["order"].append(f"upstream:{account.chatgpt_account_id}")
+            return frozenset((account.chatgpt_account_id,))
+        return frozenset()
+
+    async def fake_candidates_are_locked(
+        account: Account,
+        *,
+        include_email: bool,
+        locked_identities: frozenset[str],
+    ) -> bool:
+        del account
+        del include_email
+        del locked_identities
+        return True
 
     async def fake_merge_by_email_enabled() -> bool:  # only used when merge_by_email is None
         return True
@@ -76,9 +99,13 @@ def _make_postgres_repo(monkeypatch: pytest.MonkeyPatch) -> tuple[AccountsReposi
     monkeypatch.setattr(repo, "_dialect_name", lambda: "postgresql")
     monkeypatch.setattr(repo, "_acquire_postgresql_identity_lock", fake_identity_lock)
     monkeypatch.setattr(repo, "_acquire_postgresql_merge_lock", fake_email_lock)
+    monkeypatch.setattr(repo, "_lock_postgresql_upsert_identity_candidates", fake_upstream_identity_locks)
+    monkeypatch.setattr(repo, "_postgresql_upsert_identity_candidates_are_locked", fake_candidates_are_locked)
     monkeypatch.setattr(repo, "_merge_by_email_enabled", fake_merge_by_email_enabled)
     monkeypatch.setattr(repo, "_account_by_chatgpt_identity", fake_account_by_chatgpt_identity)
+    monkeypatch.setattr(repo, "_account_by_slot_identity", AsyncMock(return_value=None))
     monkeypatch.setattr(repo, "_single_account_by_email", fake_single_account_by_email)
+    monkeypatch.setattr(repo, "_single_unknown_workspace_account_by_email", fake_single_account_by_email)
     monkeypatch.setattr(repo, "_next_available_account_id", fake_next_available_account_id)
 
     return repo, recorded
@@ -88,6 +115,19 @@ def _make_result(value: str | None = "acc") -> MagicMock:
     result = MagicMock()
     result.scalar_one_or_none.return_value = value
     return result
+
+
+@pytest.mark.asyncio
+async def test_postgresql_upstream_identity_locks_use_existing_namespace_in_sorted_order() -> None:
+    session = MagicMock()
+    session.get_bind.return_value.dialect.name = "postgresql"
+    session.execute = AsyncMock()
+
+    lock_keys = await lock_postgresql_account_identities(session, ("workspace-z", None, "workspace-a", "workspace-z"))
+
+    expected = tuple(sorted((account_identity_lock_key("workspace-a"), account_identity_lock_key("workspace-z"))))
+    assert lock_keys == expected
+    assert [call.args[1]["lock_key"] for call in session.execute.await_args_list] == list(expected)
 
 
 @pytest.mark.asyncio
@@ -183,9 +223,10 @@ async def test_upsert_takes_identity_lock_even_when_merge_by_email_enabled(monke
 
     await repo.upsert(account, merge_by_email=True, merge_by_chatgpt_identity=True)
 
-    assert recorded["identity"] == ["chatgpt:chatgpt_xyz"], (
-        "identity lock must be acquired even when merge_by_email is True"
+    assert recorded["upstream"] == ["chatgpt_xyz"], (
+        "upstream identity lock must be acquired even when merge_by_email is True"
     )
+    assert recorded["identity"] == []
     assert recorded["email"] == ["a@example.com"], "email lock must still be acquired when merge_by_email is True"
 
 
@@ -200,7 +241,8 @@ async def test_upsert_takes_identity_lock_when_merge_by_email_disabled(monkeypat
 
     await repo.upsert(account, merge_by_email=False, merge_by_chatgpt_identity=True)
 
-    assert recorded["identity"] == ["chatgpt:chatgpt_zzz"]
+    assert recorded["upstream"] == ["chatgpt_zzz"]
+    assert recorded["identity"] == []
     assert recorded["email"] == []
 
 
@@ -216,6 +258,7 @@ async def test_upsert_falls_back_to_id_lock_without_identity(monkeypatch):
 
     await repo.upsert(account, merge_by_email=False, merge_by_chatgpt_identity=False)
 
+    assert recorded["upstream"] == []
     assert recorded["identity"] == ["acc_c"]
     assert recorded["email"] == []
 
@@ -231,5 +274,71 @@ async def test_upsert_email_only_when_identity_not_in_play(monkeypatch):
 
     await repo.upsert(account, merge_by_email=True, merge_by_chatgpt_identity=False)
 
-    assert recorded["identity"] == [], "no identity lock when merge_by_chatgpt_identity is False"
+    assert recorded["upstream"] == ["chatgpt_qqq"]
+    assert recorded["identity"] == []
     assert recorded["email"] == ["d@example.com"]
+    assert recorded["order"] == ["upstream:chatgpt_qqq", "email:d@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_ordinary_identity_upsert_uses_upstream_membership_lock(monkeypatch):
+    repo, recorded = _make_postgres_repo(monkeypatch)
+    account = _stub_account("acc_e", "e@example.com", chatgpt_id="chatgpt_ordinary")
+
+    await repo.upsert(account, merge_by_email=False, merge_by_chatgpt_identity=False)
+
+    assert recorded["upstream"] == ["chatgpt_ordinary"]
+    assert recorded["order"] == ["upstream:chatgpt_ordinary"]
+
+
+@pytest.mark.asyncio
+async def test_account_slot_upsert_locks_upstream_before_slot_keys(monkeypatch):
+    repo, recorded = _make_postgres_repo(monkeypatch)
+    account = _stub_account("acc_slot", "slot@example.com", chatgpt_id="chatgpt_slot")
+    account.workspace_id = "workspace-slot"
+
+    await repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
+
+    assert recorded["upstream"] == ["chatgpt_slot"]
+    assert recorded["order"][0] == "upstream:chatgpt_slot"
+    assert all(item.startswith("identity:") for item in recorded["order"][1:])
+
+
+@pytest.mark.asyncio
+async def test_local_identity_writers_lock_old_and_incoming_membership(monkeypatch):
+    repo, _recorded = _make_postgres_repo(monkeypatch)
+    existing = _stub_account("acc_writer", "writer@example.com", chatgpt_id="chatgpt_old")
+    membership_locks: list[tuple[str, str | None]] = []
+    cast(Any, repo.session.execute).return_value = _make_result("acc_writer")
+
+    async def fake_membership_lock(account_id: str, incoming: str | None) -> Account:
+        membership_locks.append((account_id, incoming))
+        return existing
+
+    monkeypatch.setattr(repo, "_lock_postgresql_account_identity_membership", fake_membership_lock)
+    monkeypatch.setattr(repo, "_apply_account_replacement", AsyncMock())
+    monkeypatch.setattr(repository_module, "lock_fold_state", AsyncMock())
+    monkeypatch.setattr(repository_module, "mirror_account_soft_delete_into_time_rollups", AsyncMock())
+
+    await repo.replace_reauthorized(
+        existing.id,
+        _stub_account("incoming", existing.email, chatgpt_id="chatgpt_new"),
+    )
+    assert await repo.rotate_tokens(
+        existing.id,
+        b"access",
+        b"refresh",
+        b"id",
+        utcnow(),
+        expected_refresh_token_encrypted=b"expected",
+        chatgpt_account_id="chatgpt_new",
+    )
+    assert await repo.update_account_metadata(existing.id, chatgpt_account_id="chatgpt_new")
+    assert await repo.delete(existing.id)
+
+    assert membership_locks == [
+        (existing.id, "chatgpt_new"),
+        (existing.id, "chatgpt_new"),
+        (existing.id, "chatgpt_new"),
+        (existing.id, None),
+    ]

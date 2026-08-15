@@ -30,6 +30,8 @@ export type ModelSourceFormValues = z.infer<typeof modelSourceFormSchema>;
 export type ModelSourceDraft = {
   supportsChatCompletions: boolean;
   supportsResponses: boolean;
+  isSubscriptionFallback: boolean;
+  fallbackModel: string;
   supportsAudioTranscriptions: boolean;
   supportsStreaming: boolean;
   supportsTools: boolean;
@@ -46,6 +48,8 @@ export type ModelSourceDraft = {
 export const initialModelSourceDraft: ModelSourceDraft = {
   supportsChatCompletions: true,
   supportsResponses: false,
+  isSubscriptionFallback: false,
+  fallbackModel: "",
   supportsAudioTranscriptions: false,
   supportsStreaming: true,
   supportsTools: false,
@@ -166,6 +170,8 @@ export function draftFromSource(source: ModelSource): ModelSourceDraft {
   return {
     supportsChatCompletions: source.supportsChatCompletions,
     supportsResponses: source.supportsResponses,
+    isSubscriptionFallback: source.isSubscriptionFallback,
+    fallbackModel: source.fallbackModel ?? "",
     supportsAudioTranscriptions: source.supportsAudioTranscriptions,
     supportsStreaming: firstModel?.supportsStreaming ?? true,
     supportsTools: firstModel?.supportsTools ?? false,

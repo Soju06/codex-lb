@@ -46,6 +46,14 @@ class ModelSourcesService:
 
     async def create_source(self, payload: ModelSourceCreateRequest) -> ModelSourceResponse:
         model_rows = _model_inputs_to_rows(payload.models)
+        fallback_model = _normalize_optional_model_slug(payload.fallback_model)
+        _validate_fallback_configuration(
+            is_subscription_fallback=payload.is_subscription_fallback,
+            is_enabled=True,
+            supports_responses=payload.supports_responses,
+            fallback_model=fallback_model,
+            models=model_rows,
+        )
         row = ModelSource(
             id=f"src_{uuid.uuid4().hex}",
             name=_normalize_name(payload.name),
@@ -56,12 +64,16 @@ class ModelSourcesService:
             health_status=MODEL_SOURCE_HEALTH_UNKNOWN,
             supports_chat_completions=payload.supports_chat_completions,
             supports_responses=payload.supports_responses,
+            is_subscription_fallback=payload.is_subscription_fallback,
+            fallback_model=fallback_model,
             supports_audio_transcriptions=payload.supports_audio_transcriptions,
             timeout_seconds=payload.timeout_seconds,
             max_concurrency=payload.max_concurrency,
             models=model_rows,
         )
         try:
+            if row.is_subscription_fallback:
+                await self._repository.clear_subscription_fallback(except_source_id=row.id, commit=False)
             created = await self._repository.create(row, commit=True)
         except Exception:
             await self._repository.rollback()
@@ -86,6 +98,10 @@ class ModelSourcesService:
             row.supports_chat_completions = payload.supports_chat_completions
         if "supports_responses" in fields and payload.supports_responses is not None:
             row.supports_responses = payload.supports_responses
+        if "is_subscription_fallback" in fields and payload.is_subscription_fallback is not None:
+            row.is_subscription_fallback = payload.is_subscription_fallback
+        if "fallback_model" in fields:
+            row.fallback_model = _normalize_optional_model_slug(payload.fallback_model)
         if "supports_audio_transcriptions" in fields and payload.supports_audio_transcriptions is not None:
             row.supports_audio_transcriptions = payload.supports_audio_transcriptions
         if "timeout_seconds" in fields:
@@ -93,10 +109,23 @@ class ModelSourcesService:
         if "max_concurrency" in fields:
             row.max_concurrency = payload.max_concurrency
 
+        replacement_models = (
+            _model_inputs_to_rows(payload.models) if "models" in fields and payload.models is not None else None
+        )
+        _validate_fallback_configuration(
+            is_subscription_fallback=row.is_subscription_fallback,
+            is_enabled=row.is_enabled,
+            supports_responses=row.supports_responses,
+            fallback_model=row.fallback_model,
+            models=replacement_models if replacement_models is not None else row.models,
+        )
+
         models_replaced = False
         try:
-            if "models" in fields and payload.models is not None:
-                await self._repository.replace_models(row, _model_inputs_to_rows(payload.models), commit=False)
+            if row.is_subscription_fallback:
+                await self._repository.clear_subscription_fallback(except_source_id=row.id, commit=False)
+            if replacement_models is not None:
+                await self._repository.replace_models(row, replacement_models, commit=False)
                 models_replaced = True
             await self._repository.commit()
         except Exception:
@@ -140,6 +169,33 @@ def _normalize_model_slug(value: str) -> str:
     if not model:
         raise ModelSourceValidationError("Model source model name is required")
     return model
+
+
+def _normalize_optional_model_slug(value: str | None) -> str | None:
+    if value is None:
+        return None
+    model = value.strip()
+    return model or None
+
+
+def _validate_fallback_configuration(
+    *,
+    is_subscription_fallback: bool,
+    is_enabled: bool,
+    supports_responses: bool,
+    fallback_model: str | None,
+    models: list[ModelSourceModel],
+) -> None:
+    if not is_subscription_fallback:
+        return
+    if not is_enabled:
+        raise ModelSourceValidationError("Subscription fallback model source must be enabled")
+    if not supports_responses:
+        raise ModelSourceValidationError("Subscription fallback model source must support Responses API")
+    if fallback_model is None:
+        return
+    if not any(model.model == fallback_model and model.is_enabled for model in models):
+        raise ModelSourceValidationError(f"Fallback model '{fallback_model}' must be an enabled model on the source")
 
 
 def _validate_raw_metadata_json(value: str | None) -> str | None:
@@ -223,6 +279,8 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         health_status=row.health_status,
         supports_chat_completions=row.supports_chat_completions,
         supports_responses=row.supports_responses,
+        is_subscription_fallback=row.is_subscription_fallback,
+        fallback_model=row.fallback_model,
         supports_audio_transcriptions=row.supports_audio_transcriptions,
         timeout_seconds=row.timeout_seconds,
         max_concurrency=row.max_concurrency,

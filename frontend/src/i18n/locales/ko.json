@@ -1410,5 +1410,9 @@
   "upstreamProxy.toasts.poolUpdateFailed": "Pool 업데이트 실패",
   "upstreamProxy.validation.hostRequired": "Host는 필수입니다",
   "upstreamProxy.validation.nameRequired": "이름은 필수입니다",
-  "upstreamProxy.validation.portInvalid": "1부터 65535 사이의 port를 입력하세요"
+  "upstreamProxy.validation.portInvalid": "1부터 65535 사이의 port를 입력하세요",
+  "modelSources.fields.subscriptionFallback": "구독 폴백으로 사용",
+  "modelSources.fields.subscriptionFallbackDescription": "적격한 모든 ChatGPT 계정이 업스트림 사용량 한도에 도달한 경우에만 사용됩니다.",
+  "modelSources.fields.fallbackModelOverride": "폴백 모델 재정의(선택 사항)",
+  "modelSources.fields.fallbackModelPlaceholder": "요청된 모델을 유지하려면 비워 두세요"
 }

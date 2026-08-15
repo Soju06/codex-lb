@@ -2690,7 +2690,7 @@ async def stream_responses(
                 publish_live_usage(
                     parse_rate_limit_event_text(event_block),
                     account_id=codex_lb_account_id,
-                    chatgpt_account_id=None if codex_lb_account_id else account_id,
+                    chatgpt_account_id=account_id,
                 )
             yield event_block
 
@@ -2861,7 +2861,7 @@ async def _stream_responses_with_session(
                     publish_live_usage(
                         parse_rate_limit_headers(getattr(raw_resp, "headers", None)),
                         account_id=codex_lb_account_id,
-                        chatgpt_account_id=None if codex_lb_account_id else account_id,
+                        chatgpt_account_id=account_id,
                     )
                 if resp.status >= 400:
                     if raise_for_status:
@@ -2955,7 +2955,7 @@ async def _stream_responses_with_session(
                 publish_live_usage(
                     parse_rate_limit_headers(getattr(resp, "headers", None)),
                     account_id=codex_lb_account_id,
-                    chatgpt_account_id=None if codex_lb_account_id else account_id,
+                    chatgpt_account_id=account_id,
                 )
             if resp.status >= 400:
                 if raise_for_status:

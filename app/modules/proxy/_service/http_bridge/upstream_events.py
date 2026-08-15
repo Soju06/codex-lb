@@ -1337,6 +1337,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         publish_live_usage(
                             parse_rate_limit_event_text(message.text),
                             account_id=session.account.id,
+                            chatgpt_account_id=session.account.chatgpt_account_id,
                         )
                     await self._process_http_bridge_upstream_text(session, message.text)
                     if await self._retire_http_bridge_after_drain_if_ready(session):

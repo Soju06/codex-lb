@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from sqlalchemy import select
 
 from app.core.crypto import TokenEncryptor
 from app.core.usage import live_hub
@@ -41,6 +42,21 @@ def _snapshot() -> LiveRateLimitSnapshot:
         credits_unlimited=False,
         credits_balance=7.5,
     )
+
+
+async def _usage_rows_for(*account_ids: str) -> list[UsageHistory]:
+    async with SessionLocal() as session:
+        return list(
+            (
+                await session.execute(
+                    select(UsageHistory)
+                    .where(UsageHistory.account_id.in_(account_ids))
+                    .order_by(UsageHistory.account_id, UsageHistory.window, UsageHistory.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
 
 
 async def _wait_for_rows(account_id: str, *, timeout: float = 5.0) -> tuple[UsageHistory | None, UsageHistory | None]:
@@ -234,22 +250,115 @@ async def test_live_ingestor_normalizes_monthly_only_snapshots(db_setup) -> None
 
 
 @pytest.mark.asyncio
+async def test_live_ingestor_settles_snapshot_after_duplicate_account_consolidation(db_setup) -> None:
+    del db_setup
+    canonical_id = "acc_live_consolidated"
+    duplicate_id = "acc_live_consolidated__copy"
+    upstream_id = "workspace-live-consolidated"
+    email = "live-consolidated@example.com"
+
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(
+            _make_account(canonical_id, email, chatgpt_account_id=upstream_id),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _make_account(duplicate_id, email, chatgpt_account_id=upstream_id),
+            merge_by_email=False,
+        )
+
+    snapshot = _snapshot()
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.publish(
+        snapshot,
+        account_id=duplicate_id,
+        chatgpt_account_id=upstream_id,
+    )
+    queued = ingestor._queue.get_nowait()
+
+    async with SessionLocal() as session:
+        saved = await AccountsRepository(session).upsert(
+            _make_account("acc_live_consolidated_reauth", email, chatgpt_account_id=upstream_id),
+            merge_by_email=False,
+            merge_by_chatgpt_identity=True,
+        )
+        assert saved.id == canonical_id
+        assert await session.get(Account, duplicate_id) is None
+
+    await ingestor._ingest(queued)
+
+    rows = await _usage_rows_for(canonical_id, duplicate_id)
+    assert [row.account_id for row in rows] == [canonical_id, canonical_id]
+    primary_rows = [row for row in rows if row.window == "primary"]
+    secondary_rows = [row for row in rows if row.window == "secondary"]
+    assert len(primary_rows) == 1
+    assert len(secondary_rows) == 1
+
+    primary = primary_rows[0]
+    secondary = secondary_rows[0]
+    assert snapshot.primary is not None
+    assert snapshot.secondary is not None
+    assert primary.used_percent == pytest.approx(snapshot.primary.used_percent)
+    assert primary.window_minutes == snapshot.primary.window_minutes
+    assert primary.reset_at == snapshot.primary.reset_at
+    assert primary.credits_has == snapshot.credits_has
+    assert primary.credits_unlimited == snapshot.credits_unlimited
+    assert primary.credits_balance == pytest.approx(snapshot.credits_balance)
+    assert secondary.used_percent == pytest.approx(snapshot.secondary.used_percent)
+    assert secondary.window_minutes == snapshot.secondary.window_minutes
+    assert secondary.reset_at == snapshot.secondary.reset_at
+
+
+@pytest.mark.asyncio
+async def test_live_ingestor_prefers_valid_local_owner_over_upstream_fallback(db_setup) -> None:
+    del db_setup
+    local_id = "acc_live_valid_local"
+    sibling_id = "acc_live_valid_local_sibling"
+    upstream_id = "workspace-live-shared"
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(
+            _make_account(local_id, "live-valid-local@example.com", chatgpt_account_id=upstream_id),
+            merge_by_email=False,
+        )
+        await repo.upsert(
+            _make_account(sibling_id, "live-valid-sibling@example.com", chatgpt_account_id=upstream_id),
+            merge_by_email=False,
+        )
+
+    snapshot = _snapshot()
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.publish(snapshot, account_id=local_id, chatgpt_account_id=upstream_id)
+    queued = ingestor._queue.get_nowait()
+
+    await ingestor._ingest(queued)
+
+    rows = await _usage_rows_for(local_id, sibling_id)
+    assert len(rows) == 2
+    assert {row.account_id for row in rows} == {local_id}
+    assert {row.window for row in rows} == {"primary", "secondary"}
+
+
+@pytest.mark.asyncio
 async def test_live_ingestor_resolves_chatgpt_account_id(db_setup) -> None:
     del db_setup
+    account_id = "acc_live_resolved"
     async with SessionLocal() as session:
         await AccountsRepository(session).upsert(
-            _make_account("acc_live_resolved", "live-resolved@example.com", chatgpt_account_id="workspace-live-1")
+            _make_account(account_id, "live-resolved@example.com", chatgpt_account_id="workspace-live-1")
         )
 
     ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
-    ingestor.start()
-    try:
-        ingestor.publish(_snapshot(), chatgpt_account_id="workspace-live-1")
-        primary, secondary = await _wait_for_rows("acc_live_resolved")
-    finally:
-        await ingestor.stop()
+    ingestor.publish(_snapshot(), chatgpt_account_id="workspace-live-1")
+    queued = ingestor._queue.get_nowait()
 
-    assert primary is not None and secondary is not None
+    await ingestor._ingest(queued)
+
+    rows = await _usage_rows_for(account_id)
+    assert len(rows) == 2
+    assert {row.account_id for row in rows} == {account_id}
+    assert {row.window for row in rows} == {"primary", "secondary"}
 
 
 @pytest.mark.asyncio

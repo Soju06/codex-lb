@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from threading import RLock
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from anyio import to_thread
-from sqlalchemy import Integer, and_, delete, func, literal_column, or_, select, true, tuple_
+from sqlalchemy import Integer, and_, delete, func, literal_column, or_, select, text, true, tuple_
 from sqlalchemy import cast as sqlalchemy_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +48,31 @@ class UsageWindowWrite:
     credits_has: bool | None = None
     credits_unlimited: bool | None = None
     credits_balance: float | None = None
+
+
+def _account_snapshot_entries(
+    account_id: str,
+    windows: Collection[UsageWindowWrite],
+    *,
+    recorded_at: datetime | None = None,
+) -> list[UsageHistory]:
+    captured_at = recorded_at or utcnow()
+    return [
+        UsageHistory(
+            account_id=account_id,
+            used_percent=window.used_percent,
+            input_tokens=None,
+            output_tokens=None,
+            window=window.window,
+            reset_at=window.reset_at,
+            window_minutes=window.window_minutes,
+            credits_has=window.credits_has,
+            credits_unlimited=window.credits_unlimited,
+            credits_balance=window.credits_balance,
+            recorded_at=captured_at,
+        )
+        for window in windows
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,23 +660,7 @@ class UsageRepository:
         """Persist one account's standard usage windows atomically."""
         if not windows:
             return []
-        captured_at = recorded_at or utcnow()
-        entries = [
-            UsageHistory(
-                account_id=account_id,
-                used_percent=window.used_percent,
-                input_tokens=None,
-                output_tokens=None,
-                window=window.window,
-                reset_at=window.reset_at,
-                window_minutes=window.window_minutes,
-                credits_has=window.credits_has,
-                credits_unlimited=window.credits_unlimited,
-                credits_balance=window.credits_balance,
-                recorded_at=captured_at,
-            )
-            for window in windows
-        ]
+        entries = _account_snapshot_entries(account_id, windows, recorded_at=recorded_at)
         try:
             async with sqlite_writer_section():
                 # Telemetry write: this transaction only appends usage-history
@@ -663,6 +672,60 @@ class UsageRepository:
             await self._session.rollback()
             raise
         return entries
+
+    async def settle_live_account_snapshot(
+        self,
+        *,
+        account_id: str | None,
+        chatgpt_account_id: str | None,
+        windows: Collection[UsageWindowWrite],
+        should_skip: Callable[[str], bool],
+    ) -> str | None:
+        """Resolve a live snapshot owner and atomically persist its windows."""
+        if not windows:
+            return None
+
+        try:
+            async with sqlite_writer_section():
+                bind = self._session.get_bind()
+                dialect_name = bind.dialect.name if bind is not None else "sqlite"
+                if dialect_name == "sqlite":
+                    # Acquire SQLite's database-wide writer slot before owner
+                    # lookup. Consolidation then commits before this lookup or
+                    # waits until the snapshot commit, so the chosen FK owner
+                    # cannot disappear between SELECT and INSERT.
+                    await self._session.execute(text("BEGIN IMMEDIATE"))
+
+                resolved_account_id: str | None = None
+                if account_id is not None:
+                    local_stmt = select(Account.id).where(Account.id == account_id)
+                    if dialect_name == "postgresql":
+                        local_stmt = local_stmt.with_for_update()
+                    resolved_account_id = await self._session.scalar(local_stmt)
+
+                if resolved_account_id is None and chatgpt_account_id:
+                    upstream_stmt = select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)
+                    if dialect_name == "postgresql":
+                        upstream_stmt = upstream_stmt.with_for_update()
+                    matches = list((await self._session.execute(upstream_stmt)).scalars().all())
+                    if len(matches) == 1:
+                        resolved_account_id = matches[0]
+
+                if resolved_account_id is None or should_skip(resolved_account_id):
+                    await self._session.rollback()
+                    return None
+
+                entries = _account_snapshot_entries(resolved_account_id, windows)
+                # Telemetry write: this transaction only locks the owner and
+                # appends usage-history rows, so it may skip synchronous WAL
+                # flush just like add_account_snapshot().
+                await relax_commit_durability(self._session)
+                self._session.add_all(entries)
+                await self._session.commit()
+        except BaseException:
+            await self._session.rollback()
+            raise
+        return resolved_account_id
 
     async def aggregate_since(
         self,

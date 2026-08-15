@@ -29,7 +29,11 @@ from app.core.balancer.logic import (
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, StickySessionKind, UsageHistory
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
+from app.modules.proxy.affinity import (
+    _AffinityPolicy,
+    _codex_backend_identity,
+    _codex_session_selection_key,
+)
 from app.modules.proxy.cap_partitioning import CapPartition
 from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState, effective_account_concurrency_caps
 from app.modules.proxy.repo_bundle import ProxyRepositories
@@ -3021,6 +3025,45 @@ async def test_first_codex_thread_initializes_process_preference_once_for_later_
         (first_thread_key, first_account_id, StickySessionKind.PROMPT_CACHE),
         (sibling_thread_key, first_account_id, StickySessionKind.PROMPT_CACHE),
     ]
+
+
+@pytest.mark.asyncio
+async def test_required_file_owner_does_not_rewrite_existing_thread_row() -> None:
+    balancer, thread_owner, file_owner, sticky_repo = _make_cap_spillover_balancer("file-pin-thread")
+    assert file_owner is not None
+    process_session = "file-pin-process"
+    thread_key = _codex_backend_identity(
+        {"session-id": process_session, "thread-id": "file-pin-thread"}
+    ).thread_selection_key
+    assert thread_key is not None
+    sticky_repo.account_ids_by_key = {thread_key: thread_owner.id}
+    preferred = _AffinityPolicy.preferred_owner_sticky_inputs(
+        thread_key,
+        StickySessionKind.PROMPT_CACHE,
+        False,
+        300,
+        "thread_header",
+        process_session,
+    )
+
+    selected = await balancer.select_account(
+        sticky_key=preferred[0],
+        sticky_kind=preferred[1],
+        reallocate_sticky=preferred[2],
+        sticky_max_age_seconds=preferred[3],
+        sticky_source=preferred[4],
+        legacy_sticky_key=preferred[5],
+        required_account_id=file_owner.id,
+        required_account_is_ownership_constraint=True,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == file_owner.id
+    assert sticky_repo.account_ids_by_key == {thread_key: thread_owner.id}
+    assert sticky_repo.upserts == []
+    await balancer.release_account_lease(selected.lease)
 
 
 @pytest.mark.asyncio

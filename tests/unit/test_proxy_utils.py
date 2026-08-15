@@ -38130,7 +38130,10 @@ async def test_select_account_with_budget_keeps_thread_seed_for_first_exact_owne
     select_account.assert_awaited_once()
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["required_account_id"] == owner.id
-    assert select_account.await_args.kwargs["sticky_key"] == thread_policy.selection_key
+    assert select_account.await_args.kwargs["sticky_key"] is None
+    assert select_account.await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
+    assert select_account.await_args.kwargs["sticky_source"] == "thread_header"
+    assert select_account.await_args.kwargs["legacy_sticky_key"] == "process-first-exact-owner"
     assert select_account.await_args.kwargs["sticky_seed_key"] == process_key
     assert select_account.await_args.kwargs["sticky_seed_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
 

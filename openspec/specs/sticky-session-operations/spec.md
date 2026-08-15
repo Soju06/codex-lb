@@ -332,6 +332,14 @@ A nonblank `conversation` without a dedicated resolved owner MUST proceed only w
 - **THEN** account B is treated as the required owner
 - **AND** the process-session mapping is neither consulted as an owner nor rewritten
 
+#### Scenario: File-pinned request owner overrides thread locality
+
+- **GIVEN** a request carries a `thread-id` whose bounded mapping points to account A
+- **AND** its `input_file.file_id` is durably pinned to account B
+- **WHEN** the request is routed
+- **THEN** account B is treated as the required owner
+- **AND** the thread mapping is neither consulted as an owner nor rewritten
+
 #### Scenario: Conflicting hard owners fail closed
 
 - **GIVEN** a turn state, previous response, bridge, or input file resolves to account A

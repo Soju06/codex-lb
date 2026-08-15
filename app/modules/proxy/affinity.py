@@ -142,7 +142,7 @@ class _AffinityPolicy:
         _CodexSessionSource | None,
         str | None,
     ]:
-        if sticky_source != "session_header":
+        if sticky_source not in {"session_header", "thread_header"}:
             return (
                 sticky_key,
                 sticky_kind,
@@ -151,10 +151,11 @@ class _AffinityPolicy:
                 sticky_source,
                 legacy_sticky_key,
             )
-        # A resolved response/file/bridge owner bypasses the new soft row, but
-        # the raw compatibility row still has to be checked for conflicting
-        # legacy hard ownership. Selection receives no writable sticky key, so
-        # a raw miss cannot manufacture or rebind a mapping. The caller also
+        # A resolved response/file/bridge owner bypasses the current-Codex
+        # soft row (process-session or thread PROMPT_CACHE). The raw
+        # compatibility row still has to be checked for conflicting legacy
+        # hard ownership. Selection receives no writable sticky key, so a
+        # raw miss cannot manufacture or rebind a mapping. The caller also
         # deliberately omits any broader process seed in this exact-owner path.
         return None, StickySessionKind.CODEX_SESSION, False, sticky_max_age_seconds, sticky_source, legacy_sticky_key
 

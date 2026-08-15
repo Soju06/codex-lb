@@ -18113,6 +18113,91 @@ async def test_http_bridge_security_retry_legacy_conflict_precedes_durable_claim
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_replacement_uses_legacy_continuity_source_for_raw_row() -> None:
+    rejected_account = _make_account("acc_bridge_thread_restart_owner")
+    authorized_account = _make_account("acc_bridge_thread_restart_replacement")
+    sticky_sessions = AsyncMock()
+    seen_sources: list[str | None] = []
+
+    async def legacy_owner_for_source(
+        _key: str,
+        *,
+        kind: StickySessionKind,
+        max_age_seconds: int | None = None,
+        continuity_source: str | None = None,
+    ) -> str | None:
+        del kind, max_age_seconds
+        seen_sources.append(continuity_source)
+        return rejected_account.id if continuity_source == "thread_header" else None
+
+    sticky_sessions.get_account_id.side_effect = legacy_owner_for_source
+
+    class _TrackingRepoContext:
+        def __init__(self) -> None:
+            self._repos = ProxyRepositories(
+                accounts=cast(AccountsRepository, AsyncMock()),
+                usage=cast(UsageRepository, AsyncMock()),
+                request_logs=cast(RequestLogsRepository, _RequestLogsRecorder()),
+                sticky_sessions=cast(StickySessionsRepository, sticky_sessions),
+                api_keys=cast(ApiKeysRepository, AsyncMock()),
+                additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+            )
+
+        async def __aenter__(self) -> ProxyRepositories:
+            return self._repos
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    service = proxy_service.ProxyService(_TrackingRepoContext)
+    replacement_upstream = AsyncMock()
+    affinity = proxy_service._AffinityPolicy(
+        key="thread-restart-rebind",
+        kind=StickySessionKind.PROMPT_CACHE,
+        codex_session_source="thread_header",
+        legacy_codex_session_key="process-restart-rebind",
+        legacy_continuity_source="session_header",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("thread_header", "thread-restart-rebind", None),
+        headers={"session_id": "process-restart-rebind", "thread-id": "thread-restart-rebind"},
+        affinity=affinity,
+        request_model="gpt-5.1",
+        account=rejected_account,
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=1.0,
+        idle_ttl_seconds=300.0,
+        durable_session_id="durable-thread-restart-rebind",
+        durable_owner_epoch=2,
+    )
+    durable_claim = AsyncMock()
+    service._claim_durable_http_bridge_session = durable_claim
+
+    await service._claim_http_bridge_replacement_before_swap(
+        session,
+        account_id=authorized_account.id,
+        upstream=replacement_upstream,
+        release_selected_account_lease=AsyncMock(),
+        owner_rebind_affinity=affinity,
+    )
+
+    assert seen_sources == ["session_header"]
+    sticky_sessions.get_account_id.assert_awaited_once_with(
+        "process-restart-rebind",
+        kind=StickySessionKind.CODEX_SESSION,
+        max_age_seconds=None,
+        continuity_source="session_header",
+    )
+    durable_claim.assert_awaited_once()
+    replacement_upstream.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_security_retry_restores_codex_affinity_and_turn_aliases_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

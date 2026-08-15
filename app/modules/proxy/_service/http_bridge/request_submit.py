@@ -3599,7 +3599,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         # remains durable hard ownership.
                         kind=StickySessionKind.CODEX_SESSION,
                         max_age_seconds=None,
-                        continuity_source=owner_rebind_affinity.codex_session_source,
+                        continuity_source=(owner_rebind_affinity.legacy_continuity_source or "session_header"),
                     )
                 if legacy_owner_id is not None and legacy_owner_id != account_id:
                     raise ProxyResponseError(

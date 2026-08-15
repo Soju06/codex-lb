@@ -771,7 +771,6 @@ def _http_bridge_retry_circuit_attempt_for_pending_requests(
         if (
             request_state.transport != _REQUEST_TRANSPORT_HTTP
             or request_state.skip_request_log
-            or request_state.response_create_sent_at is None
             or request_state.response_id is not None
             or request_state.latency_response_created_ms is not None
             or request_state.response_event_count != 0

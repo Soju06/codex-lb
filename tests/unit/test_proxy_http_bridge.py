@@ -22501,15 +22501,14 @@ async def test_http_bridge_stream_and_reader_count_one_eventless_send_once(
     session.upstream = cast(UpstreamWebSocket, upstream)
     service._http_bridge_sessions[session.key] = session
     settings = _make_app_settings(
-        sse_keepalive_interval_seconds=0.005,
+        sse_keepalive_interval_seconds=0.02,
         stream_idle_timeout_seconds=0.3,
         http_responses_session_bridge_request_budget_seconds=1.0,
-        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.02,
+        http_responses_session_bridge_stuck_gate_retire_after_seconds=0.005,
     )
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(http_bridge_streaming_module, "_stream_keepalive_max_count", lambda: 1)
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
-    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     monkeypatch.setattr(service, "_write_request_log", AsyncMock())
     persist_retry_circuit = AsyncMock(return_value=None)
@@ -22550,6 +22549,23 @@ async def test_http_bridge_stream_and_reader_count_one_eventless_send_once(
     request_state.response_create_sent_at = None
     request_state.response_create_gate = None
     request_state.response_create_gate_acquired = False
+    reader_retry_started = asyncio.Event()
+    release_reader_retry = asyncio.Event()
+
+    async def retry_precreated(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        restart_reader: bool = False,
+    ) -> bool:
+        if restart_reader:
+            await asyncio.wait_for(reader_retry_started.wait(), timeout=0.5)
+            return False
+        request_state.response_create_sent_at = None
+        reader_retry_started.set()
+        await asyncio.wait_for(release_reader_retry.wait(), timeout=0.5)
+        return False
+
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
 
     reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
     await asyncio.wait_for(upstream.first_receive_started.wait(), timeout=0.5)
@@ -22562,8 +22578,11 @@ async def test_http_bridge_stream_and_reader_count_one_eventless_send_once(
         downstream_turn_state=None,
     )
     try:
-        terminal = await asyncio.wait_for(anext(stream), timeout=1.0)
+        terminal_task = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(reader_retry_started.wait(), timeout=1.0)
+        terminal = await asyncio.wait_for(terminal_task, timeout=1.0)
         assert '"code":"stream_idle_timeout"' in terminal
+        release_reader_retry.set()
         await asyncio.wait_for(reader_task, timeout=1.0)
 
         state = cast(Any, service)._http_bridge_retry_circuits[session.key]
@@ -22573,6 +22592,7 @@ async def test_http_bridge_stream_and_reader_count_one_eventless_send_once(
         assert request_state.response_create_attempt.retry_circuit_failure_recorded is True
         assert persist_retry_circuit.await_count == 1
     finally:
+        release_reader_retry.set()
         if not reader_task.done():
             reader_task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -23649,6 +23669,10 @@ async def test_http_bridge_retry_send_network_failure_is_neutral_and_not_replaye
         request_text='{"type":"response.create","model":"gpt-5.4","input":"hello"}',
         transport="http",
     )
+    first_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    request_state.response_create_attempt_count = 1
+    request_state.response_create_attempt = first_attempt
+    request_state.response_create_sent_at = time.monotonic()
     session = _make_bridge_session(
         key_value="bridge-retry-send-network",
         pending_requests=deque([request_state]),
@@ -23692,10 +23716,14 @@ async def test_http_bridge_retry_send_network_failure_is_neutral_and_not_replaye
             "error_code": "proxy_network_unavailable",
             "error_message": "Codex upstream websocket send failed: OSError",
             "penalize_account": False,
+            "retry_circuit_attempt": first_attempt,
         }
     ]
     assert request_state.replay_count == 1
     retry_send.assert_awaited_once()
+    assert request_state.response_create_attempt is not first_attempt
+    assert request_state.response_create_attempt is not None
+    assert request_state.response_create_attempt.disarmed is True
     assert session.closed is True
 
 
@@ -24805,6 +24833,15 @@ def test_http_bridge_retry_circuit_attempt_selection_prefers_one_eventless_owner
     assert (
         http_bridge_helpers_module._http_bridge_retry_circuit_attempt_for_pending_requests((responded,))
         is responded_attempt
+    )
+
+    reconnecting = _make_eventless_http_bridge_owner(request_id="req-attempt-reconnecting")
+    reconnecting_attempt = proxy_support_module._HTTPBridgeResponseCreateAttempt(ordinal=1)
+    reconnecting.response_create_attempt = reconnecting_attempt
+    reconnecting.response_create_sent_at = None
+    assert (
+        http_bridge_helpers_module._http_bridge_retry_circuit_attempt_for_pending_requests((reconnecting,))
+        is reconnecting_attempt
     )
 
     other_eventless = _make_eventless_http_bridge_owner(request_id="req-attempt-other-eventless")

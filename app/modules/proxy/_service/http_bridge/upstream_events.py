@@ -1138,8 +1138,12 @@ class _HTTPBridgeUpstreamEventsMixin:
         relay_upstream = session.upstream
         receive_task: asyncio.Task[UpstreamWebSocketMessage] | None = None
         wakeup_task: asyncio.Task[bool] | None = None
+        reader_failure_retry_circuit_attempt: _HTTPBridgeResponseCreateAttempt | None | object = (
+            _UNSET_HTTP_BRIDGE_RETRY_CIRCUIT_ATTEMPT
+        )
         try:
             while True:
+                reader_failure_retry_circuit_attempt = _UNSET_HTTP_BRIDGE_RETRY_CIRCUIT_ATTEMPT
                 # Clear before taking the deadline snapshot. A send before the
                 # clear is represented by its timestamp; a send after it leaves
                 # the event set and wakes the persistent receive wait below.
@@ -1230,6 +1234,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 expired_retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(
                                     expired_request_states
                                 )
+                                reader_failure_retry_circuit_attempt = expired_retry_circuit_attempt
                                 pending_count = len(session.pending_requests)
                                 # A delta-only request has no other way to
                                 # convey prior context once its anchor is
@@ -1341,6 +1346,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(
                             tuple(session.pending_requests)
                         )
+                        reader_failure_retry_circuit_attempt = retry_circuit_attempt
                     if receive_task is not None:
                         receive_cancelled = await _cancel_http_bridge_reader_child(
                             receive_task,
@@ -1382,7 +1388,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
                     )
-                    retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(
+                    reader_failure_retry_circuit_attempt = _http_bridge_retry_circuit_attempt_for_pending_requests(
                         tuple(session.pending_requests)
                     )
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
@@ -1425,7 +1431,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             if close_classification is not None
                             else "websocket_transport_error"
                         ),
-                        retry_circuit_attempt=retry_circuit_attempt,
+                        retry_circuit_attempt=reader_failure_retry_circuit_attempt,
                         penalize_account=(
                             not account_neutral and not (message.kind == "close" and close_classification == "clean")
                         ),
@@ -1450,6 +1456,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             error_code = exc.error_code if isinstance(exc, UpstreamWebSocketTransportError) else "stream_incomplete"
             account_neutral = is_account_neutral_websocket_error_code(error_code)
+            retry_circuit_attempt_kwargs = (
+                {"retry_circuit_attempt": reader_failure_retry_circuit_attempt}
+                if reader_failure_retry_circuit_attempt is not _UNSET_HTTP_BRIDGE_RETRY_CIRCUIT_ATTEMPT
+                else {}
+            )
             async with session.lifecycle_lock:
                 if not (
                     session.liveness_settlement_owner == "send"
@@ -1466,6 +1477,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             else "HTTP bridge upstream reader crashed before response.completed"
                         ),
                         penalize_account=not account_neutral,
+                        **retry_circuit_attempt_kwargs,
                         # Preserve ordinary crash handoff behavior, but never hand
                         # a heartbeat-expired socket to an admission waiter.
                         **({"force_retire": True} if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE else {}),

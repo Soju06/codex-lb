@@ -817,6 +817,27 @@ class LoadBalancer:
                     error_message=error_message,
                     error_code=selection_error_code,
                 )
+            if (
+                selected_snapshot is not None
+                and selected_lease is not None
+                and sticky_seed_key is not None
+                and sticky_seed_kind is not None
+                and sticky_seed_account_id is None
+            ):
+                # Required-owner selection bypasses the thread row, but a
+                # first-ever process preference still has to land so later
+                # unpinned siblings inherit that exact owner.
+                try:
+                    async with self._repo_factory() as repos:
+                        await repos.sticky_sessions.insert_if_absent(
+                            sticky_seed_key,
+                            selected_snapshot.id,
+                            sticky_seed_kind,
+                        )
+                except BaseException:
+                    await self.release_account_lease(selected_lease)
+                    selected_lease = None
+                    raise
         else:
             sticky_outcome = await run_sticky_selection_path(
                 self,

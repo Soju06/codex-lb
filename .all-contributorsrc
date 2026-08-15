@@ -1262,9 +1262,16 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "sakthimaran-venom",
+      "name": "Sakthimaran",
+      "avatar_url": "https://avatars.githubusercontent.com/u/233523816?v=4",
+      "profile": "https://github.com/sakthimaran-venom",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
-  ],
-  "contributorsPerLine": 7,
-  "linkToUsage": false,
-  "commitType": "docs"
+  ]
 }

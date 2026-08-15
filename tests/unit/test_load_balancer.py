@@ -2428,7 +2428,11 @@ async def test_sticky_selection_falls_back_from_usage_limited_account() -> None:
     }
     repos = _usage_limit_test_repositories([limited, available], usage)
     repos.sticky_sessions.get_account_id_and_abandonment = AsyncMock(
-        return_value=SimpleNamespace(account_id=limited.id, continuity_abandoned=False)
+        return_value=SimpleNamespace(
+            account_id=limited.id,
+            continuity_abandoned=False,
+            abandoned_account_id=None,
+        )
     )
     balancer = LoadBalancer(repo_factory=lambda: repos)
 

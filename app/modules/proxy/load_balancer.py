@@ -532,6 +532,7 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         sticky_source: _CodexSessionSource | None = None,
         legacy_sticky_key: str | None = None,
+        legacy_continuity_source: _CodexSessionSource | None = None,
         sticky_seed_key: str | None = None,
         sticky_seed_kind: StickySessionKind | None = None,
         spill_bare_session_on_account_cap: bool = False,
@@ -731,10 +732,11 @@ class LoadBalancer:
                     # Raw rows may be historical turn-state ownership. The
                     # bounded thread TTL must never age out that hard evidence.
                     max_age_seconds=None,
-                    # This key is the process-session compatibility row.
-                    # Thread-header requests still consult it as that row,
-                    # so session_header-scoped abandonment must hide it.
-                    continuity_source="session_header",
+                    # Process-session raw text is session_header even when
+                    # request locality is thread_header. Thread-only raw keys
+                    # keep thread_header so a session_header tombstone cannot
+                    # hide a distinct thread owner.
+                    continuity_source=legacy_continuity_source or "session_header",
                 )
             legacy_existing_account_id = legacy_owner_lookup.account_id
             abandoned_account_id = legacy_owner_lookup.abandoned_account_id

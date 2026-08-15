@@ -43,6 +43,7 @@ class _AffinitySelectionKwargs(TypedDict):
     reallocate_sticky: bool
     sticky_source: _CodexSessionSource | None
     legacy_sticky_key: str | None
+    legacy_continuity_source: _CodexSessionSource | None
     sticky_seed_key: str | None
     sticky_seed_kind: StickySessionKind | None
     spill_bare_session_on_account_cap: bool
@@ -69,6 +70,10 @@ class _AffinityPolicy:
     # compatibility lookup explicit instead of trying to reconstruct it from
     # the new opaque thread key.
     legacy_codex_session_key: str | None = None
+    # Interpretation used when consulting that raw key. Process-session text
+    # is session_header even on a thread-scoped request; a thread-only raw
+    # key stays thread_header so a session_header tombstone cannot hide it.
+    legacy_continuity_source: _CodexSessionSource | None = None
     # A previously unseen thread should inherit the healthy process preference
     # once, then persist its own bounded row. This is never ownership: a
     # missing process default may be initialized once by insert-if-absent, but
@@ -109,6 +114,9 @@ class _AffinityPolicy:
             "reallocate_sticky": self.reallocate_sticky,
             "sticky_source": self.codex_session_source,
             "legacy_sticky_key": self.legacy_selection_key,
+            "legacy_continuity_source": (
+                None if self.legacy_selection_key is None else (self.legacy_continuity_source or "session_header")
+            ),
             "sticky_seed_key": self.seed_selection_key,
             "sticky_seed_kind": self.seed_selection_kind,
             "spill_bare_session_on_account_cap": self.spill_on_account_cap,
@@ -433,6 +441,7 @@ def _thread_codex_session_affinity(
         max_age_seconds=max_age_seconds,
         codex_session_source="thread_header",
         legacy_codex_session_key=legacy_key,
+        legacy_continuity_source=("session_header" if identity.process_session is not None else "thread_header"),
         seed_selection_key=(
             _codex_session_selection_key(identity.process_session) if identity.process_session is not None else None
         ),

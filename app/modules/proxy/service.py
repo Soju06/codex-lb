@@ -1084,6 +1084,7 @@ class ProxyService(
                     reallocate_sticky=affinity.reallocate_sticky,
                     sticky_source=affinity.codex_session_source,
                     legacy_sticky_key=affinity.legacy_selection_key,
+                    legacy_continuity_source=affinity.legacy_continuity_source,
                     sticky_seed_key=affinity.seed_selection_key,
                     sticky_seed_kind=affinity.seed_selection_kind,
                     sticky_max_age_seconds=affinity.max_age_seconds,
@@ -1702,6 +1703,7 @@ class ProxyService(
         reallocate_sticky: bool = False,
         sticky_source: _CodexSessionSource | None = None,
         legacy_sticky_key: str | None = None,
+        legacy_continuity_source: _CodexSessionSource | None = None,
         sticky_seed_key: str | None = None,
         sticky_seed_kind: StickySessionKind | None = None,
         spill_bare_session_on_account_cap: bool = False,
@@ -1862,6 +1864,7 @@ class ProxyService(
                         sticky_max_age_seconds=preferred_sticky_inputs[3],
                         sticky_source=preferred_sticky_inputs[4],
                         legacy_sticky_key=preferred_sticky_inputs[5],
+                        legacy_continuity_source=legacy_continuity_source,
                         # Exact ownership chooses the account; a first-ever thread
                         # still seeds atomically without overwriting a process default.
                         sticky_seed_key=sticky_seed_key,
@@ -1924,6 +1927,7 @@ class ProxyService(
                     reallocate_sticky=reallocate_sticky,
                     sticky_source=sticky_source,
                     legacy_sticky_key=legacy_sticky_key,
+                    legacy_continuity_source=legacy_continuity_source,
                     sticky_seed_key=sticky_seed_key,
                     sticky_seed_kind=sticky_seed_kind,
                     spill_bare_session_on_account_cap=_AffinityPolicy.cap_spillover_allowed(

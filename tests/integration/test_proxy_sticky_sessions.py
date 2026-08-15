@@ -23,7 +23,7 @@ from app.modules.proxy._service.realtime_live import (
     _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
     realtime_call_affinity_key,
 )
-from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -399,6 +399,164 @@ async def test_codex_goal_restart_retires_unavailable_legacy_owner_and_stays_on_
         None if rows[raw_session].continuity_abandoned_at is not None else rows[raw_session].account_id
     )
     assert legacy_replica_owner == owner_id
+
+
+@pytest.mark.asyncio
+async def test_codex_goal_restart_with_thread_id_retires_unavailable_legacy_owner_and_stays_on_replacement(
+    async_client,
+    monkeypatch,
+):
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    _install_proxy_settings_cache(monkeypatch, sticky_threads_enabled=False)
+    owner_id = await _import_account(
+        async_client,
+        "acc_goal_restart_thread_owner",
+        "goal-restart-thread-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_goal_restart_thread_replacement",
+        "goal-restart-thread-replacement@example.com",
+    )
+    raw_session = "goal-restart-thread-session"
+    thread_id = "goal-restart-thread"
+    headers = {"session_id": raw_session, "thread-id": thread_id}
+    thread_key = _codex_backend_identity(headers).thread_selection_key
+    assert thread_key is not None
+
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=owner_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=replacement_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        seen.append(account_id)
+        yield f'data: {{"type":"response.completed","response":{{"id":"resp_goal_thread_{len(seen)}"}}}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    restart_payload = {
+        "model": "gpt-5.1",
+        "instructions": "Continue the existing task.",
+        "input": [
+            {
+                "role": "developer",
+                "content": ('<codex_internal_context source="goal">\nContinue working toward the active thread goal.'),
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+        "stream": True,
+    }
+
+    healthy_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=restart_payload,
+        headers=headers,
+    )
+    assert healthy_response.status_code == 200
+    assert seen == ["acc_goal_restart_thread_owner"]
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner_id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.commit()
+
+    restart_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=restart_payload,
+        headers=headers,
+    )
+    assert restart_response.status_code == 200
+    assert seen == ["acc_goal_restart_thread_owner", "acc_goal_restart_thread_replacement"]
+
+    follow_up_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "continue", "input": [], "stream": True},
+        headers=headers,
+    )
+    assert follow_up_response.status_code == 200
+    assert seen == [
+        "acc_goal_restart_thread_owner",
+        "acc_goal_restart_thread_replacement",
+        "acc_goal_restart_thread_replacement",
+    ]
+
+    turn_state_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "continue", "input": [], "stream": True},
+        headers={"x-codex-turn-state": raw_session},
+    )
+    assert turn_state_response.status_code == 502
+    assert turn_state_response.json()["error"]["code"] == "turn_state_owner_unavailable"
+    assert seen == [
+        "acc_goal_restart_thread_owner",
+        "acc_goal_restart_thread_replacement",
+        "acc_goal_restart_thread_replacement",
+    ]
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        raw_row = (
+            await session.execute(
+                select(StickySession).where(
+                    StickySession.key == raw_session,
+                    StickySession.kind == StickySessionKind.CODEX_SESSION,
+                )
+            )
+        ).scalar_one()
+        thread_row = (
+            await session.execute(
+                select(StickySession).where(
+                    StickySession.key == thread_key,
+                    StickySession.kind == StickySessionKind.PROMPT_CACHE,
+                )
+            )
+        ).scalar_one()
+        session_header_lookup = await repo.get_account_id_and_abandonment(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="session_header",
+        )
+        thread_legacy_lookup = await repo.get_account_id_and_abandonment(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="thread_header",
+        )
+        turn_state_owner = await repo.get_account_id(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="turn_state",
+        )
+    assert raw_row.account_id == owner_id
+    assert raw_row.continuity_abandonment_scope == "session_header"
+    assert thread_row.account_id == replacement_id
+    assert session_header_lookup.account_id is None
+    assert session_header_lookup.continuity_abandoned is True
+    assert thread_legacy_lookup.account_id == owner_id
+    assert turn_state_owner == owner_id
 
 
 @pytest.mark.asyncio

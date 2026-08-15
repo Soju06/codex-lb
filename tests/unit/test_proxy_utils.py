@@ -10531,8 +10531,10 @@ def test_goal_restart_affinity_can_abandon_only_legacy_session_owner():
     assert thread_policy.codex_session_source == "thread_header"
     assert thread_policy.abandon_unavailable_legacy_owner is True
     assert thread_policy.legacy_selection_key == "goal-restart-session"
+    assert thread_policy.legacy_continuity_source == "session_header"
     assert thread_only_policy.codex_session_source == "thread_header"
     assert thread_only_policy.abandon_unavailable_legacy_owner is False
+    assert thread_only_policy.legacy_continuity_source == "thread_header"
     assert turn_state_policy.codex_session_source == "turn_state"
     assert turn_state_policy.abandon_unavailable_legacy_owner is False
 

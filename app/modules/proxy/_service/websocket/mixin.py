@@ -3476,6 +3476,7 @@ class _WebSocketMixin:
                     reallocate_sticky=reallocate_sticky,
                     sticky_source=request_state.affinity_policy.codex_session_source,
                     legacy_sticky_key=request_state.affinity_policy.legacy_selection_key,
+                    legacy_continuity_source=request_state.affinity_policy.legacy_continuity_source,
                     sticky_seed_key=request_state.affinity_policy.seed_selection_key,
                     sticky_seed_kind=request_state.affinity_policy.seed_selection_kind,
                     spill_bare_session_on_account_cap=request_state.affinity_policy.spill_on_account_cap,

@@ -666,6 +666,7 @@
   "dashboard.quotaLabels.weekly": "Weekly",
   "dashboard.requestStatus.error": "오류",
   "dashboard.requestStatus.ok": "정상",
+  "dashboard.requestStatus.cancelled": "취소됨",
   "dashboard.requestStatus.quota": "Quota",
   "dashboard.requestStatus.rate_limit": "Rate limit",
   "dashboard.requestDetails.clientIp": "Client IP",

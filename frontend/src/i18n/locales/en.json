@@ -666,6 +666,7 @@
   "dashboard.quotaLabels.weekly": "Weekly",
   "dashboard.requestStatus.error": "Error",
   "dashboard.requestStatus.ok": "OK",
+  "dashboard.requestStatus.cancelled": "Cancelled",
   "dashboard.requestStatus.quota": "Quota",
   "dashboard.requestStatus.rate_limit": "Rate limit",
   "dashboard.requestDetails.clientIp": "Client IP",

@@ -666,6 +666,7 @@
   "dashboard.quotaLabels.weekly": "每周",
   "dashboard.requestStatus.error": "错误",
   "dashboard.requestStatus.ok": "正常",
+  "dashboard.requestStatus.cancelled": "已取消",
   "dashboard.requestStatus.quota": "Quota",
   "dashboard.requestStatus.rate_limit": "Rate limit",
   "dashboard.requestDetails.clientIp": "客户端 IP",

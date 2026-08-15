@@ -181,6 +181,55 @@ describe("RecentRequestsTable", () => {
     expect(writeText).toHaveBeenCalledWith(longError);
   });
 
+  it("renders cancelled requests with a distinct non-error badge", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-cancelled",
+            planType: "plus",
+            apiKeyName: "Key Cancelled",
+            apiKeyId: "key-cancelled",
+            requestId: "req-cancelled",
+            conversationId: null,
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            ...NULL_USERAGENT_METADATA,
+            status: "cancelled",
+            errorCode: "client_disconnected",
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            outputTokensRaw: 0,
+            reasoningTokens: null,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 10,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
+          },
+        ]}
+      />,
+    );
+
+    const badge = screen.getByText("Cancelled");
+
+    expect(badge).toHaveClass("bg-sky-500/15");
+    expect(badge).not.toHaveClass("bg-zinc-500/15");
+  });
+
   it("shows TTFT and output-token TPS beside tokens", () => {
     render(
       <RecentRequestsTable

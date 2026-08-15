@@ -5751,6 +5751,7 @@ async def test_select_codex_control_account_without_budget_uses_balancer(monkeyp
         reallocate_sticky=False,
         sticky_source=None,
         legacy_sticky_key=None,
+        legacy_continuity_source=None,
         sticky_seed_key=None,
         sticky_seed_kind=None,
         sticky_max_age_seconds=123,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -325,3 +327,79 @@ async def test_non_quota_selection_failure_does_not_use_fallback(
     response_payload = cast(dict[str, object], failed["response"])
     error = cast(dict[str, object], response_payload["error"])
     assert error["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_stream_usage_exhaustion_after_startup_probe_still_uses_fallback() -> None:
+    async def late_usage_limit_stream():
+        yield (
+            'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_original",'
+            '"object":"response","status":"in_progress","output":[]}}\n\n'
+        )
+        await asyncio.sleep(0)
+        raise proxy_api_module.ProxyResponseError(
+            429,
+            proxy_api_module.openai_error(
+                "usage_limit_reached",
+                "No eligible subscription account is available",
+                error_type="usage_limit_reached",
+            ),
+        )
+        yield ""  # pragma: no cover
+
+    async def fake_fallback_response():
+        async def body():
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_subscription_fallback_delayed",'
+                b'"object":"response","status":"completed","output":[]}}\n\n'
+            )
+            yield b"data: [DONE]\n\n"
+
+        return proxy_api_module.StreamingResponse(body(), media_type="text/event-stream")
+
+    stream = proxy_api_module._normalize_public_responses_stream(
+        proxy_api_module._stream_response_error_events(
+            late_usage_limit_stream(),
+            owns_reservation=False,
+            reservation=None,
+            subscription_fallback_response_factory=fake_fallback_response,
+        )
+    )
+    response_text = "".join([line async for line in stream])
+
+    assert "resp_subscription_fallback_delayed" in response_text
+    assert "response.failed" not in response_text
+
+
+@pytest.mark.asyncio
+async def test_prepare_subscription_fallback_failure_releases_reservation(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[object] = []
+    reservation = SimpleNamespace(reservation_id="resv-fallback-prepare-failure")
+
+    async def fake_enforce(*_args, **_kwargs):
+        return reservation
+
+    async def fake_headers(*_args, **_kwargs):
+        return {}
+
+    async def fake_prepare(*_args, **_kwargs):
+        raise RuntimeError("fallback prepare failed")
+
+    async def fake_release(reservation_to_release):
+        released.append(reservation_to_release)
+
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", fake_enforce)
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_with_reservation_cleanup", fake_headers)
+    monkeypatch.setattr(proxy_api_module, "_prepare_subscription_fallback", fake_prepare)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation", fake_release)
+
+    with pytest.raises(RuntimeError, match="fallback prepare failed"):
+        await async_client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.4", "input": "hello", "stream": False},
+        )
+
+    assert released == [reservation]

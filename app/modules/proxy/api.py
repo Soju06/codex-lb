@@ -4229,6 +4229,42 @@ def _is_usage_limit_proxy_error(exc: ProxyResponseError | OpenAIErrorEnvelopeMod
     return error is not None and (error.code == USAGE_LIMIT_REACHED or error.type == USAGE_LIMIT_REACHED)
 
 
+async def _yield_response_as_public_stream(response: Response) -> AsyncIterator[str]:
+    if isinstance(response, StreamingResponse):
+        async for chunk in response.body_iterator:
+            if isinstance(chunk, bytes):
+                yield chunk.decode("utf-8")
+            else:
+                yield chunk
+        return
+
+    body = response.body
+    if isinstance(body, bytes):
+        raw_payload = json.loads(body.decode("utf-8")) if body else {}
+    elif isinstance(body, str):
+        raw_payload = json.loads(body) if body else {}
+    else:
+        raw_payload = {}
+    envelope = _parse_error_envelope(raw_payload if isinstance(raw_payload, dict) else {})
+    error = envelope.error
+    yield format_sse_event(
+        response_failed_event(
+            error.code if error and error.code else "upstream_error",
+            error.message if error and error.message else "Upstream error",
+            error.type if error and error.type else "server_error",
+            error_param=error.param if error else None,
+        )
+    )
+
+
+def _is_synthetic_response_created_line(line: str) -> bool:
+    return (
+        line.startswith("event: response.created")
+        or '"type":"response.created"' in line
+        or '"type": "response.created"' in line
+    )
+
+
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
@@ -5228,9 +5264,14 @@ async def _stream_responses(
                 await _release_reservation(reservation)
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = _CapacityStartupReadyEvent()
-    fallback = await _prepare_subscription_fallback(
-        context, payload, effective_headers, api_key, require_streaming=True
-    )
+    try:
+        fallback = await _prepare_subscription_fallback(
+            context, payload, effective_headers, api_key, require_streaming=True
+        )
+    except Exception:
+        if owns_reservation:
+            await _release_reservation(reservation)
+        raise
     payload.stream = True
 
     def build_response_stream() -> AsyncIterator[str]:
@@ -5398,6 +5439,21 @@ async def _stream_responses(
             owns_reservation=owns_reservation,
             reservation=reservation,
             recovery_stream_factory=recovery_stream_factory,
+            subscription_fallback_response_factory=(
+                (
+                    lambda: _source_responses_response(
+                        request,
+                        fallback.payload,
+                        source=fallback.source,
+                        api_key=api_key,
+                        rate_limit_headers={**turn_state_headers, **rate_limit_headers},
+                        reservation_override=reservation,
+                        reuse_reservation=True,
+                    )
+                )
+                if fallback is not None
+                else None
+            ),
             allow_client_full_history_once=bridge_recovery_eligible,
             require_durable_recovery_fence=bridge_recovery_eligible,
         ),
@@ -5481,7 +5537,13 @@ async def _collect_responses(
         if downstream_turn_state is not None
         else {}
     )
-    fallback = await _prepare_subscription_fallback(context, payload, request.headers, api_key, require_streaming=False)
+    try:
+        fallback = await _prepare_subscription_fallback(
+            context, payload, request.headers, api_key, require_streaming=False
+        )
+    except Exception:
+        await _release_reservation(reservation)
+        raise
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -6568,17 +6630,29 @@ async def _stream_response_error_events(
     owns_reservation: bool,
     reservation: ApiKeyUsageReservationData | None,
     recovery_stream_factory: Callable[[], AsyncIterator[str]] | None = None,
+    subscription_fallback_response_factory: Callable[[], Awaitable[Response]] | None = None,
     allow_client_full_history_once: bool = False,
     require_durable_recovery_fence: bool = False,
 ) -> AsyncIterator[str]:
-    saw_downstream_event = False
+    saw_substantive_downstream_event = False
     try:
         async for line in stream:
-            if line.startswith("data:") or line.startswith("event:"):
-                saw_downstream_event = True
+            if (line.startswith("data:") or line.startswith("event:")) and not _is_synthetic_response_created_line(
+                line
+            ):
+                saw_substantive_downstream_event = True
             yield line
     except ProxyResponseError as exc:
         error_code = exc.payload.get("error", {}).get("code") if isinstance(exc.payload, dict) else None
+        if (
+            subscription_fallback_response_factory is not None
+            and not saw_substantive_downstream_event
+            and error_code == USAGE_LIMIT_REACHED
+        ):
+            fallback_response = await subscription_fallback_response_factory()
+            async for line in _yield_response_as_public_stream(fallback_response):
+                yield line
+            return
         indefinite_recovery = (
             get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
             == "server_indefinite_recovery"
@@ -6587,7 +6661,7 @@ async def _stream_response_error_events(
             recovery_stream_factory is not None
             and indefinite_recovery
             and (not require_durable_recovery_fence or getattr(exc, "http_bridge_durable_recovery_eligible", False))
-            and not saw_downstream_event
+            and not saw_substantive_downstream_event
             and error_code
             in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
         ):
@@ -6600,11 +6674,13 @@ async def _stream_response_error_events(
                 await asyncio.sleep(retry_delay)
                 try:
                     retry_stream = recovery_stream_factory()
-                    retry_saw_downstream_event = False
+                    retry_saw_substantive_downstream_event = False
                     async for line in retry_stream:
-                        if line.startswith("data:") or line.startswith("event:"):
-                            retry_saw_downstream_event = True
-                            saw_downstream_event = True
+                        if (
+                            line.startswith("data:") or line.startswith("event:")
+                        ) and not _is_synthetic_response_created_line(line):
+                            retry_saw_substantive_downstream_event = True
+                            saw_substantive_downstream_event = True
                         yield line
                     return
                 except ProxyResponseError as retry_exc:
@@ -6619,7 +6695,7 @@ async def _stream_response_error_events(
                             "upstream_request_timeout",
                             "upstream_unavailable",
                         }
-                        or retry_saw_downstream_event
+                        or retry_saw_substantive_downstream_event
                         or (
                             require_durable_recovery_fence
                             and not getattr(retry_exc, "http_bridge_durable_recovery_eligible", False)

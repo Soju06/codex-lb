@@ -4,15 +4,17 @@
 
 Metric surfaces that expose an error count MUST also expose the window's
 cancelled count as an additive field: the dashboard overview metrics
-(`cancelledCount`), the usage summary metrics (`cancelled7d`), the reports
-daily rows (`cancelled_count`) and summary (`total_cancelled`), and the fleet
-pressure metrics (`cancelledCount`). The dashboard overview cancelled total
+(`cancelledCount`), the usage summary metrics (`cancelled7d`), the raw Reports
+backend daily rows (`cancelled_count`) and summary (`total_cancelled`), and the
+fleet pressure metrics (`cancelledCount`). The dashboard overview cancelled total
 MUST be sourced from the demand quarter rollup (status grain) for the folded
 segment plus the raw tail, so it stays accurate across history already folded
 without the hourly `cancelled_count` measure.
 
-The Reports frontend MUST preserve parsed `summary.totalCancelled` and parsed
-`daily[].cancelledCount` values from the reports response. A daily row
+The Reports dashboard API MUST serialize the raw backend `total_cancelled` and
+`cancelled_count` fields as `summary.totalCancelled` and
+`daily[].cancelledCount`, respectively. The Reports frontend MUST preserve
+those parsed camelCase values from the reports response. A daily row
 synthesized to fill a missing date in the selected range MUST set
 `cancelledCount` to `0`. The Reports summary and daily table MUST visibly show
 the cancellation values with localized labels, and the Reports CSV export MUST
@@ -31,8 +33,8 @@ exported request and error values.
 #### Scenario: Reports preserve and display cancellation values
 
 - **GIVEN** a reports response whose summary has `totalRequests=4`,
-  `totalCancelled=2`, and `totalErrors=1` and whose daily row has
-  `requestCount=4`, `cancelledCount=2`, and `errorCount=1`
+  `totalCancelled=2`, and `totalErrors=1` and whose frontend daily row has
+  `requests=4`, `cancelledCount=2`, and `errorCount=1`
 - **WHEN** the Reports frontend parses and displays the response
 - **THEN** the parsed summary has `totalCancelled=2` and the parsed daily row
   has `cancelledCount=2`

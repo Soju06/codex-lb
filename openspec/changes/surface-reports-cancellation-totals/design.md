@@ -2,7 +2,7 @@
 
 ## Context
 
-The reports backend already exposes cancellation data as `summary.totalCancelled` and `daily[].cancelledCount`. The frontend's strict response schemas omit both properties, so parsing strips the values before the report model reaches rendering and export. The date-range completion path also creates synthetic daily rows without a cancellation field. As a result, cancellation data is absent from the summary, daily table, and downloaded CSV despite being available at the system boundary.
+The raw Reports backend models define cancellation data as `ReportSummary.total_cancelled` and `DailyReportRow.cancelled_count`. Dashboard API serialization exposes those fields as `summary.totalCancelled` and `daily[].cancelledCount`, which are also the names consumed by the frontend. The frontend's strict response schemas omit both camelCase properties, so parsing strips the values before the report model reaches rendering and export. The date-range completion path also creates synthetic daily rows without a cancellation field. As a result, cancellation data is absent from the summary, daily table, and downloaded CSV despite being available at the system boundary.
 
 This change is limited to the Reports frontend. The existing `usage-error-metrics` specification remains the owner of request terminal classification and cancellation accounting.
 
@@ -51,4 +51,4 @@ Visible labels and the CSV header will use the Reports translation namespace. En
 
 ## Example
 
-Given a report response with `totalRequests: 4`, `totalCancelled: 2`, and `totalErrors: 1`, plus a daily row with `requestCount: 4`, `cancelledCount: 2`, and `errorCount: 1`, parsing preserves all six values. The summary visibly shows Requests 4, Cancelled 2, and Errors 1; the daily table shows the same breakdown; and the localized CSV contains a cancellation column with value `2`. A missing date synthesized into the selected range displays and exports cancellation value `0`.
+Given a parsed frontend report response with `totalRequests: 4`, `totalCancelled: 2`, and `totalErrors: 1`, plus a daily row with `requests: 4`, `cancelledCount: 2`, and `errorCount: 1`, parsing preserves all six values. The summary visibly shows Requests 4, Cancelled 2, and Errors 1; the daily table shows the same breakdown; and the localized CSV contains a cancellation column with value `2`. A missing date synthesized into the selected range displays and exports cancellation value `0`.

@@ -607,6 +607,124 @@ async def test_postgresql_live_ingest_waits_for_identity_consolidation_commit(
 
 
 @pytest.mark.asyncio
+async def test_postgresql_live_ingest_recovers_when_current_identity_reconciliation_wins_owner_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+) -> None:
+    del db_setup
+    bind = SessionLocal.kw["bind"]
+    if bind.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL selected-owner lock regression")
+
+    canonical_id = "acc_live_pg_current_identity_canonical"
+    selected_id = "acc_live_pg_current_identity_selected"
+    queued_identity = "workspace-live-pg-current-before"
+    current_identity = "workspace-live-pg-current-after"
+    email = "live-pg-current-identity@example.com"
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(
+            _make_account(canonical_id, email, chatgpt_account_id=current_identity),
+            merge_by_email=False,
+        )
+        selected = await repo.upsert(
+            _make_account(selected_id, email, chatgpt_account_id=queued_identity),
+            merge_by_email=False,
+        )
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingestor.publish(
+        _snapshot(),
+        account_id=selected_id,
+        chatgpt_account_id=queued_identity,
+    )
+    queued = ingestor._queue.get_nowait()
+
+    async with SessionLocal() as session:
+        moved = await AccountsRepository(session).rotate_tokens(
+            selected.id,
+            selected.access_token_encrypted,
+            selected.refresh_token_encrypted,
+            selected.id_token_encrypted,
+            utcnow(),
+            expected_refresh_token_encrypted=selected.refresh_token_encrypted,
+            chatgpt_account_id=current_identity,
+        )
+        assert moved is True
+
+    reconciliation_commit_started = asyncio.Event()
+    release_reconciliation_commit = asyncio.Event()
+    settlement_local_lookup_started = asyncio.Event()
+    settlement_session = SessionLocal()
+    reconciliation_session = SessionLocal()
+    settlement_task: asyncio.Task[None] | None = None
+    reconciliation_task: asyncio.Task[Account] | None = None
+    settlement_execute = settlement_session.execute
+    reconciliation_commit = reconciliation_session.commit
+
+    async def _settlement_execute(statement: Any, *args: Any, **kwargs: Any):
+        sql = str(statement)
+        if sql.startswith("SELECT accounts.id, accounts.chatgpt_account_id") and "WHERE accounts.id =" in sql:
+            settlement_local_lookup_started.set()
+        return await settlement_execute(statement, *args, **kwargs)
+
+    async def _reconciliation_commit() -> None:
+        reconciliation_commit_started.set()
+        await asyncio.wait_for(release_reconciliation_commit.wait(), timeout=5.0)
+        await reconciliation_commit()
+
+    monkeypatch.setattr(settlement_session, "execute", _settlement_execute)
+    monkeypatch.setattr(reconciliation_session, "commit", _reconciliation_commit)
+
+    @asynccontextmanager
+    async def _settlement_session() -> AsyncIterator[AsyncSession]:
+        yield settlement_session
+
+    monkeypatch.setattr(live_ingest, "get_background_session", _settlement_session)
+
+    try:
+        reconciliation_task = asyncio.create_task(
+            AccountsRepository(reconciliation_session).upsert(
+                _make_account("acc_live_pg_current_identity_reauth", email, chatgpt_account_id=current_identity),
+                merge_by_email=False,
+                merge_by_chatgpt_identity=True,
+            )
+        )
+        await asyncio.wait_for(reconciliation_commit_started.wait(), timeout=5.0)
+
+        settlement_task = asyncio.create_task(ingestor._ingest(queued))
+        await asyncio.wait_for(settlement_local_lookup_started.wait(), timeout=5.0)
+        assert not settlement_task.done()
+
+        release_reconciliation_commit.set()
+        saved = await asyncio.wait_for(reconciliation_task, timeout=5.0)
+        await asyncio.wait_for(settlement_task, timeout=5.0)
+        assert saved.id == canonical_id
+    finally:
+        release_reconciliation_commit.set()
+        for task in (settlement_task, reconciliation_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (settlement_task, reconciliation_task) if task is not None),
+            return_exceptions=True,
+        )
+        await settlement_session.rollback()
+        await reconciliation_session.rollback()
+        await settlement_session.close()
+        await reconciliation_session.close()
+
+    async with SessionLocal() as session:
+        accounts = list((await session.execute(select(Account).order_by(Account.id))).scalars().all())
+        rows = list((await session.execute(select(UsageHistory).order_by(UsageHistory.id))).scalars().all())
+    assert [account.id for account in accounts] == [canonical_id]
+    assert [account.chatgpt_account_id for account in accounts] == [current_identity]
+    assert [row.account_id for row in rows] == [canonical_id, canonical_id]
+    assert {row.window for row in rows} == {"primary", "secondary"}
+    assert {row.used_percent for row in rows} == {33.0, 44.0}
+
+
+@pytest.mark.asyncio
 async def test_postgresql_opposite_identity_moves_use_one_sorted_lock_order(
     monkeypatch: pytest.MonkeyPatch,
     db_setup,

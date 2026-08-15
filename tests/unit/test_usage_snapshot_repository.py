@@ -35,10 +35,17 @@ async def test_postgresql_settlement_lookups_compile_for_no_key_update(
 ) -> None:
     session = MagicMock()
     session.get_bind.return_value.dialect.name = "postgresql"
-    session.scalar = AsyncMock(return_value=None)
-    upstream_result = MagicMock()
-    upstream_result.scalars.return_value.all.return_value = ["acc_current"]
-    session.execute = AsyncMock(return_value=upstream_result)
+    observed_result = MagicMock()
+    observed_result.one_or_none.return_value = MagicMock(
+        id="acc_current",
+        chatgpt_account_id="workspace-current",
+    )
+    locked_result = MagicMock()
+    locked_result.one_or_none.return_value = MagicMock(
+        id="acc_current",
+        chatgpt_account_id="workspace-current",
+    )
+    session.execute = AsyncMock(side_effect=[observed_result, locked_result])
     session.add_all = MagicMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
@@ -53,10 +60,10 @@ async def test_postgresql_settlement_lookups_compile_for_no_key_update(
     )
 
     assert resolved == "acc_current"
-    local_stmt = session.scalar.await_args_list[0].args[0]
-    upstream_stmt = session.execute.await_args_list[0].args[0]
-    assert "FOR NO KEY UPDATE" in str(local_stmt.compile(dialect=postgresql.dialect()))
-    assert "FOR NO KEY UPDATE" in str(upstream_stmt.compile(dialect=postgresql.dialect()))
+    observed_stmt = session.execute.await_args_list[0].args[0]
+    locked_stmt = session.execute.await_args_list[1].args[0]
+    assert "FOR NO KEY UPDATE" not in str(observed_stmt.compile(dialect=postgresql.dialect()))
+    assert "FOR NO KEY UPDATE" in str(locked_stmt.compile(dialect=postgresql.dialect()))
 
 
 def _account(account_id: str) -> Account:

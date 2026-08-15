@@ -16,6 +16,9 @@
 - [x] 1.5 Add a deterministic two-session PostgreSQL regression that pauses at
   exact transaction events and proves consolidation cannot reparent before a
   snapshot append and then cascade-delete that append.
+- [x] 1.6 Add both legal PostgreSQL interleavings for queued identity `X` when
+  the selected local owner currently belongs to `Y`, including the causal RED
+  where `Y` reconciliation wins the owner row and deletes it before lookup.
 
 ## 2. Publication ownership envelope
 
@@ -38,6 +41,9 @@
 - [x] 3.3 Keep ambiguous/missing ownership serving-safe and logged; do not alter
   account consolidation policy, queue overflow, throttling, or retry behavior.
 - [x] 3.4 Add no Alembic revision, model column, setting, or API schema change.
+- [x] 3.5 Roll back before bounded relock of the canonical captured/current
+  identity set, reselect and revalidate ownership, and raise a typed terminal
+  error on a second identity change without fabricating a null lock key.
 
 ## 4. Automated verification
 
@@ -50,6 +56,9 @@
 - [x] 4.4 Run the deterministic PostgreSQL race repeatedly plus lock-routing,
   identity, live-ingest, snapshot, and HTTP publication regressions after the
   shared lock implementation is complete.
+- [x] 4.5 Run the selected-owner identity race in both transaction orders and
+  the focused no-relock, one-relock, terminal-change, rollback, sorted-lock,
+  and null-identity unit coverage.
 
 ## 5. Authenticated QA and cleanup
 

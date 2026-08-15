@@ -51,6 +51,10 @@ class UsageWindowWrite:
     credits_balance: float | None = None
 
 
+class LiveSnapshotOwnerIdentityRelockError(RuntimeError):
+    """The selected live-snapshot owner's identity changed twice."""
+
+
 def _account_snapshot_entries(
     account_id: str,
     windows: Collection[UsageWindowWrite],
@@ -674,6 +678,72 @@ class UsageRepository:
             raise
         return entries
 
+    async def _resolve_postgresql_live_snapshot_owner(
+        self,
+        account_id: str | None,
+        chatgpt_account_id: str | None,
+    ) -> str | None:
+        locked_identities = (chatgpt_account_id,)
+        fallback_identity = chatgpt_account_id
+        relocked = False
+
+        while True:
+            await lock_postgresql_account_identities(self._session, locked_identities)
+            locked_identity_values = frozenset(identity for identity in locked_identities if identity)
+            identity_to_relock: str | None = None
+
+            if account_id is not None:
+                # Read before taking the row lock so MVCC preserves the
+                # current recovery identity even when its writer has already
+                # deleted the local row but not committed yet.
+                observed = (
+                    await self._session.execute(
+                        select(Account.id, Account.chatgpt_account_id).where(Account.id == account_id)
+                    )
+                ).one_or_none()
+                if observed is not None:
+                    observed_identity = observed.chatgpt_account_id
+                    if observed_identity and observed_identity not in locked_identity_values:
+                        identity_to_relock = observed_identity
+                    else:
+                        locked = (
+                            await self._session.execute(
+                                select(Account.id, Account.chatgpt_account_id)
+                                .where(Account.id == account_id)
+                                .with_for_update(key_share=True)
+                            )
+                        ).one_or_none()
+                        if locked is not None:
+                            if locked.chatgpt_account_id and locked.chatgpt_account_id not in locked_identity_values:
+                                identity_to_relock = locked.chatgpt_account_id
+                            else:
+                                return locked.id
+
+            if identity_to_relock is not None:
+                if relocked:
+                    raise LiveSnapshotOwnerIdentityRelockError(
+                        "Live snapshot owner identity changed during PostgreSQL relock"
+                    )
+                # Release the first lock before adding another identity; the
+                # shared helper can then reacquire the full set in canonical
+                # order without inverting an account writer's lock order.
+                await self._session.rollback()
+                fallback_identity = identity_to_relock
+                locked_identities = (chatgpt_account_id, identity_to_relock)
+                relocked = True
+                continue
+
+            if fallback_identity:
+                upstream_stmt = (
+                    select(Account.id)
+                    .where(Account.chatgpt_account_id == fallback_identity)
+                    .with_for_update(key_share=True)
+                )
+                matches = list((await self._session.execute(upstream_stmt)).scalars().all())
+                if len(matches) == 1:
+                    return matches[0]
+            return None
+
     async def settle_live_account_snapshot(
         self,
         *,
@@ -696,27 +766,28 @@ class UsageRepository:
                     # waits until the snapshot commit, so the chosen FK owner
                     # cannot disappear between SELECT and INSERT.
                     await self._session.execute(text("BEGIN IMMEDIATE"))
+                    resolved_account_id = None
+                    if account_id is not None:
+                        resolved_account_id = await self._session.scalar(
+                            select(Account.id).where(Account.id == account_id)
+                        )
+                    if resolved_account_id is None and chatgpt_account_id:
+                        matches = list(
+                            (
+                                await self._session.execute(
+                                    select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)
+                                )
+                            )
+                            .scalars()
+                            .all()
+                        )
+                        if len(matches) == 1:
+                            resolved_account_id = matches[0]
                 else:
-                    # Account identity writers take this same transaction lock
-                    # before changing membership. Holding it through the append
-                    # prevents consolidation from reparenting history, then
-                    # deleting an owner whose new snapshot arrived in between.
-                    await lock_postgresql_account_identities(self._session, (chatgpt_account_id,))
-
-                resolved_account_id: str | None = None
-                if account_id is not None:
-                    local_stmt = select(Account.id).where(Account.id == account_id)
-                    if dialect_name == "postgresql":
-                        local_stmt = local_stmt.with_for_update(key_share=True)
-                    resolved_account_id = await self._session.scalar(local_stmt)
-
-                if resolved_account_id is None and chatgpt_account_id:
-                    upstream_stmt = select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)
-                    if dialect_name == "postgresql":
-                        upstream_stmt = upstream_stmt.with_for_update(key_share=True)
-                    matches = list((await self._session.execute(upstream_stmt)).scalars().all())
-                    if len(matches) == 1:
-                        resolved_account_id = matches[0]
+                    resolved_account_id = await self._resolve_postgresql_live_snapshot_owner(
+                        account_id,
+                        chatgpt_account_id,
+                    )
 
                 if resolved_account_id is None or should_skip(resolved_account_id):
                     await self._session.rollback()

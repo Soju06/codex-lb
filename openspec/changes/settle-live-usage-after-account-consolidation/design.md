@@ -69,10 +69,19 @@ Owner selection and the atomic append of all represented usage windows belong
 to one serialized write operation. SQLite acquires `BEGIN IMMEDIATE` before
 lookup and keeps its database-wide writer serialization through commit.
 PostgreSQL first acquires the existing transaction-scoped advisory-lock
-namespace keyed by the captured upstream identity, before either the local or
-fallback lookup, and then holds `FOR NO KEY UPDATE` on the selected owner
-through the append. That lock blocks deletion and key-changing writes without
-blocking the `KEY SHARE` lock taken by concurrent foreign-key inserts.
+namespace keyed by the captured upstream identity before owner lookup. It then
+reads the local owner's current identity without a row lock. When that current
+non-null identity is not covered, settlement rolls back to release the initial
+lock, reacquires the captured/current identities through the shared canonical
+sort, and reselects the owner. This rollback is required: acquiring the current
+identity while retaining the captured lock could invert the account-writer lock
+order. If reconciliation wins the current-identity lock and deletes the local
+row, settlement uses the last observed current identity as the unique fallback.
+The reselected owner is held `FOR NO KEY UPDATE` through the append. That row
+lock blocks deletion and key-changing writes without blocking the `KEY SHARE`
+lock taken by concurrent foreign-key inserts. One relock is allowed; a second
+identity change raises a typed terminal error, and null identities add no lock
+key.
 
 Every PostgreSQL writer that can add, replace, move, consolidate, or delete an
 `Account.chatgpt_account_id` membership acquires that same upstream lock and
@@ -93,7 +102,8 @@ waiting indefinitely; it performs no polling or retry.
 
 This ordering gives both legal interleavings the same outcome: a snapshot
 committed before consolidation is included when history is reparented, while a
-snapshot consumed after consolidation resolves and writes directly to `C`.
+snapshot whose current-identity reconciliation wins first relocks and writes
+directly to `C` after the local duplicate disappears.
 The per-account fingerprint is evaluated against the selected current owner,
 and the successful-write marker is updated only after the atomic append. One
 queued item therefore cannot write once to stale `D` and again to `C`.
@@ -145,11 +155,12 @@ and temporary artifacts will be removed after capture.
   reconciliation requires a non-null incoming identity and selects duplicates
   by equality to it. If the local row is already stale, no upstream fallback can
   be recovered; genuinely upstream-less callers retain that serving-safe drop.
-- **Settlement races consolidation.** A selected-row lock alone permits a
-  consolidator to reparent history before waiting to delete that row, then
-  cascade-delete a snapshot inserted while it waited. SQLite writer
-  serialization and the shared PostgreSQL upstream-identity transaction lock
-  close the whole membership critical section on both supported databases.
+- **Settlement races consolidation.** A selected-row lock protects a snapshot
+  when settlement wins the row, but a current-identity consolidator can win
+  first and delete the local owner while settlement holds only the stale
+  captured-identity lock. SQLite writer serialization and PostgreSQL's bounded
+  rollback/relock close both transaction orderings without acquiring locks out
+  of canonical order.
 - **Atomic append changes failure granularity.** If one represented window
   cannot be stored, none of that snapshot's windows commit. This is preferable
   to a partial snapshot and supports exactly-once settlement.

@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.dml import Delete
 
+from app.core.clients import proxy as core_proxy
 from app.core.crypto import TokenEncryptor
+from app.core.openai.requests import ResponsesRequest
 from app.core.usage import live_hub
 from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
 from app.core.utils.time import utcnow
@@ -318,6 +320,83 @@ async def test_live_ingestor_settles_snapshot_after_duplicate_account_consolidat
 
 
 @pytest.mark.asyncio
+async def test_sse_publication_tap_settles_queued_duplicate_snapshot_under_canonical_account(
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+) -> None:
+    del db_setup
+    canonical_id = "acc_live_sse_canonical"
+    duplicate_id = "acc_live_sse_duplicate"
+    upstream_id = "workspace-live-sse"
+    email = "live-sse@example.com"
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        await repo.upsert(_make_account(canonical_id, email, chatgpt_account_id=upstream_id), merge_by_email=False)
+        await repo.upsert(_make_account(duplicate_id, email, chatgpt_account_id=upstream_id), merge_by_email=False)
+
+    rate_limit_event = (
+        'data: {"type":"codex.rate_limits","rate_limits":'
+        '{"primary":{"used_percent":33,"window_minutes":300,"reset_at":1700000300},'
+        '"secondary":{"used_percent":44,"window_minutes":10080,"reset_at":1700604800}}}\n\n'
+    )
+
+    @asynccontextmanager
+    async def _fake_http_session(_session):
+        yield cast(Any, object())
+
+    async def _fake_upstream_stream(**kwargs):
+        assert kwargs["account_id"] == upstream_id
+        assert kwargs["codex_lb_account_id"] == duplicate_id
+        yield rate_limit_event
+
+    monkeypatch.setattr(core_proxy, "lease_http_session", _fake_http_session)
+    monkeypatch.setattr(core_proxy, "_stream_responses_with_session", _fake_upstream_stream)
+
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=0.0)
+    ingest_completed = asyncio.Event()
+    ingest_snapshot = ingestor._ingest
+
+    async def _observed_ingest(item: live_ingest._QueuedSnapshot) -> None:
+        await ingest_snapshot(item)
+        ingest_completed.set()
+
+    monkeypatch.setattr(ingestor, "_ingest", _observed_ingest)
+    live_hub.register_live_usage_publisher(ingestor.publish)
+    try:
+        events = [
+            event
+            async for event in core_proxy.stream_responses(
+                ResponsesRequest(model="gpt-5.1", instructions="", input="hello", stream=True),
+                {},
+                "access-token",
+                upstream_id,
+                session=cast(Any, object()),
+                codex_lb_account_id=duplicate_id,
+            )
+        ]
+        assert events == [rate_limit_event]
+
+        async with SessionLocal() as session:
+            saved = await AccountsRepository(session).upsert(
+                _make_account("acc_live_sse_reauth", email, chatgpt_account_id=upstream_id),
+                merge_by_email=False,
+                merge_by_chatgpt_identity=True,
+            )
+            assert saved.id == canonical_id
+
+        ingestor.start()
+        await asyncio.wait_for(ingest_completed.wait(), timeout=5.0)
+    finally:
+        await ingestor.stop()
+        live_hub.register_live_usage_publisher(None)
+
+    rows = await _usage_rows_for(canonical_id, duplicate_id)
+    assert [row.account_id for row in rows] == [canonical_id, canonical_id]
+    assert {row.window for row in rows} == {"primary", "secondary"}
+    assert {row.used_percent for row in rows} == {33.0, 44.0}
+
+
+@pytest.mark.asyncio
 async def test_postgresql_live_ingest_serializes_identity_membership_through_snapshot_commit(
     monkeypatch: pytest.MonkeyPatch,
     db_setup,
@@ -353,7 +432,6 @@ async def test_postgresql_live_ingest_serializes_identity_membership_through_sna
     settlement_commit_started = asyncio.Event()
     release_settlement_commit = asyncio.Event()
     writer_lock_attempted = asyncio.Event()
-    writer_before_delete = asyncio.Event()
     release_writer_delete = asyncio.Event()
     settlement_lock_keys: list[int] = []
     writer_lock_keys: list[int] = []
@@ -390,7 +468,6 @@ async def test_postgresql_live_ingest_serializes_identity_membership_through_sna
             writer_lock_keys.append(_lock_key(args, kwargs))
             writer_lock_attempted.set()
         if isinstance(statement, Delete) and statement.table.name == Account.__tablename__:
-            writer_before_delete.set()
             await asyncio.wait_for(release_writer_delete.wait(), timeout=5.0)
         return await writer_execute(statement, *args, **kwargs)
 
@@ -407,6 +484,7 @@ async def test_postgresql_live_ingest_serializes_identity_membership_through_sna
     try:
         settlement_task = asyncio.create_task(ingestor._ingest(queued))
         await asyncio.wait_for(settlement_commit_started.wait(), timeout=5.0)
+        assert settlement_lock_keys, "settlement must take the upstream identity lock"
 
         writer_task = asyncio.create_task(
             AccountsRepository(writer_session).upsert(
@@ -417,16 +495,10 @@ async def test_postgresql_live_ingest_serializes_identity_membership_through_sna
         )
         await asyncio.wait_for(writer_lock_attempted.wait(), timeout=5.0)
 
-        if settlement_lock_keys:
-            assert writer_lock_keys[0] == settlement_lock_keys[0]
-            release_settlement_commit.set()
-            await asyncio.wait_for(settlement_task, timeout=5.0)
-            release_writer_delete.set()
-        else:
-            await asyncio.wait_for(writer_before_delete.wait(), timeout=5.0)
-            release_settlement_commit.set()
-            await asyncio.wait_for(settlement_task, timeout=5.0)
-            release_writer_delete.set()
+        assert writer_lock_keys[0] == settlement_lock_keys[0]
+        release_settlement_commit.set()
+        await asyncio.wait_for(settlement_task, timeout=5.0)
+        release_writer_delete.set()
         saved = await asyncio.wait_for(writer_task, timeout=5.0)
         assert saved.id == canonical_id
     finally:

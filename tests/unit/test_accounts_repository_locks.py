@@ -11,7 +11,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
 from app.db.account_identity_lock import account_identity_lock_key, lock_postgresql_account_identities
 from app.db.models import Account, AccountStatus
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.accounts.repository import AccountIdentityRelockError, AccountsRepository
 
 
 def _stub_account(account_id: str, email: str, chatgpt_id: str | None = None) -> Account:
@@ -43,6 +43,7 @@ def _make_postgres_repo(monkeypatch: pytest.MonkeyPatch) -> tuple[AccountsReposi
     session.execute = AsyncMock()
     session.commit = AsyncMock()
     session.refresh = AsyncMock()
+    session.rollback = AsyncMock()
     session.add = MagicMock()
     session.get = AsyncMock(return_value=None)
 
@@ -127,7 +128,23 @@ async def test_postgresql_upstream_identity_locks_use_existing_namespace_in_sort
 
     expected = tuple(sorted((account_identity_lock_key("workspace-a"), account_identity_lock_key("workspace-z"))))
     assert lock_keys == expected
-    assert [call.args[1]["lock_key"] for call in session.execute.await_args_list] == list(expected)
+    assert session.execute.await_args_list[0].args[1] == {"timeout": "30000ms"}
+    assert [call.args[1]["lock_key"] for call in session.execute.await_args_list[1:]] == list(expected)
+
+
+@pytest.mark.asyncio
+async def test_postgresql_upstream_identity_lock_failure_rolls_back_and_propagates() -> None:
+    session = MagicMock()
+    session.get_bind.return_value.dialect.name = "postgresql"
+    lock_error = RuntimeError("injected lock timeout")
+    session.execute = AsyncMock(side_effect=[MagicMock(), lock_error])
+    session.rollback = AsyncMock()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await lock_postgresql_account_identities(session, ("workspace-timeout",))
+
+    assert exc_info.value is lock_error
+    session.rollback.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -302,6 +319,83 @@ async def test_account_slot_upsert_locks_upstream_before_slot_keys(monkeypatch):
     assert recorded["upstream"] == ["chatgpt_slot"]
     assert recorded["order"][0] == "upstream:chatgpt_slot"
     assert all(item.startswith("identity:") for item in recorded["order"][1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slot_upsert", [False, True])
+async def test_identity_candidate_revalidation_restarts_once_then_succeeds(monkeypatch, slot_upsert: bool):
+    repo, _recorded = _make_postgres_repo(monkeypatch)
+    account = _stub_account("acc_retry", "retry@example.com", chatgpt_id="chatgpt_retry")
+    candidates_are_locked = AsyncMock(side_effect=[False, True])
+    monkeypatch.setattr(repo, "_postgresql_upsert_identity_candidates_are_locked", candidates_are_locked)
+
+    if slot_upsert:
+        saved = await repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
+    else:
+        saved = await repo.upsert(account, merge_by_email=False)
+
+    assert saved is account
+    assert candidates_are_locked.await_count == 2
+    assert cast(Any, repo.session.rollback).await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slot_upsert", [False, True])
+async def test_identity_candidate_revalidation_raises_typed_error_after_second_change(
+    monkeypatch,
+    slot_upsert: bool,
+):
+    repo, _recorded = _make_postgres_repo(monkeypatch)
+    account = _stub_account("acc_terminal", "terminal@example.com", chatgpt_id="chatgpt_terminal")
+    monkeypatch.setattr(
+        repo,
+        "_postgresql_upsert_identity_candidates_are_locked",
+        AsyncMock(side_effect=[False, False]),
+    )
+
+    with pytest.raises(AccountIdentityRelockError):
+        if slot_upsert:
+            await repo.upsert_account_slot(account, preserve_unknown_workspace_duplicates=False)
+        else:
+            await repo.upsert(account, merge_by_email=False)
+
+    assert cast(Any, repo.session.rollback).await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_local_identity_membership_relocks_after_observed_identity_changes(monkeypatch):
+    session = MagicMock()
+    changed = _stub_account("acc_relock", "relock@example.com", chatgpt_id="chatgpt_changed")
+    session.scalar = AsyncMock(side_effect=["chatgpt_old", changed, "chatgpt_changed", changed])
+    session.rollback = AsyncMock()
+    repo = AccountsRepository(session)
+    identity_locks = AsyncMock()
+    monkeypatch.setattr(repository_module, "lock_postgresql_account_identities", identity_locks)
+
+    locked = await repo._lock_postgresql_account_identity_membership("acc_relock", "chatgpt_incoming")
+
+    assert locked is changed
+    assert [call.args[1] for call in identity_locks.await_args_list] == [
+        ("chatgpt_old", "chatgpt_incoming"),
+        ("chatgpt_changed", "chatgpt_incoming"),
+    ]
+    session.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_local_identity_membership_raises_typed_error_after_second_change(monkeypatch):
+    session = MagicMock()
+    changed_once = _stub_account("acc_relock", "relock@example.com", chatgpt_id="chatgpt_changed")
+    changed_twice = _stub_account("acc_relock", "relock@example.com", chatgpt_id="chatgpt_changed_again")
+    session.scalar = AsyncMock(side_effect=["chatgpt_old", changed_once, "chatgpt_changed", changed_twice])
+    session.rollback = AsyncMock()
+    repo = AccountsRepository(session)
+    monkeypatch.setattr(repository_module, "lock_postgresql_account_identities", AsyncMock())
+
+    with pytest.raises(AccountIdentityRelockError):
+        await repo._lock_postgresql_account_identity_membership("acc_relock", "chatgpt_incoming")
+
+    assert session.rollback.await_count == 2
 
 
 @pytest.mark.asyncio

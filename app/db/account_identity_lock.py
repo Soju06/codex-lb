@@ -6,6 +6,8 @@ from hashlib import sha256
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+_POSTGRES_ACCOUNT_IDENTITY_LOCK_TIMEOUT_MS = 30_000
+
 
 def advisory_lock_key(scope: str, value: str) -> int:
     digest = sha256(f"{scope}:{value}".encode("utf-8")).digest()
@@ -34,9 +36,21 @@ async def lock_postgresql_account_identities(
             }
         )
     )
-    for lock_key in lock_keys:
-        await session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": lock_key},
-        )
+    try:
+        if lock_keys:
+            # Match the database layer's existing 30-second contention budget.
+            # Transaction-local scope bounds every subsequent lock in this unit
+            # of work and PostgreSQL restores it at transaction end.
+            await session.execute(
+                text("SELECT set_config('lock_timeout', :timeout, true)"),
+                {"timeout": f"{_POSTGRES_ACCOUNT_IDENTITY_LOCK_TIMEOUT_MS}ms"},
+            )
+        for lock_key in lock_keys:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+    except BaseException:
+        await session.rollback()
+        raise
     return lock_keys

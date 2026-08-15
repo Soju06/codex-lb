@@ -70,7 +70,9 @@ to one serialized write operation. SQLite acquires `BEGIN IMMEDIATE` before
 lookup and keeps its database-wide writer serialization through commit.
 PostgreSQL first acquires the existing transaction-scoped advisory-lock
 namespace keyed by the captured upstream identity, before either the local or
-fallback lookup, and then row-locks the selected owner through the append.
+fallback lookup, and then holds `FOR NO KEY UPDATE` on the selected owner
+through the append. That lock blocks deletion and key-changing writes without
+blocking the `KEY SHARE` lock taken by concurrent foreign-key inserts.
 
 Every PostgreSQL writer that can add, replace, move, consolidate, or delete an
 `Account.chatgpt_account_id` membership acquires that same upstream lock and
@@ -84,7 +86,10 @@ once. Upsert candidate changes use the same bounded rollback/restart before any
 mutation. Membership re-reads use PostgreSQL `FOR NO KEY UPDATE`, which
 stabilizes identity changes while remaining compatible with the `KEY SHARE`
 locks taken by concurrent fold rollup foreign-key inserts; deletion upgrades
-its lock only after acquiring the fold-state lock.
+its lock only after acquiring the fold-state lock. The shared helper applies a
+transaction-local 30-second PostgreSQL lock timeout before advisory acquisition,
+so request and background transactions propagate lock contention instead of
+waiting indefinitely; it performs no polling or retry.
 
 This ordering gives both legal interleavings the same outcome: a snapshot
 committed before consolidation is included when history is reparented, while a
@@ -99,8 +104,11 @@ The fallback reuses the existing unique-upstream resolution rule. Distinct
 real-email slots sharing one ChatGPT workspace remain distinct and ambiguous;
 the change does not merge them or choose one. Duplicate reconciliation keeps
 its current email/workspace candidate filters and canonical selection. It only
-needs to leave the canonical row's existing upstream identity intact, which it
-already does.
+runs when the incoming upstream identity is non-null, and its duplicate query
+requires `Account.chatgpt_account_id == incoming_identity`; an identity-less
+local row therefore cannot be selected or deleted as an identity-reconciliation
+duplicate. It only needs to leave the canonical row's existing upstream
+identity intact, which it already does.
 
 This choice rejects two alternatives: always preferring upstream identity
 could cross account slots even while the serving local row is valid, and
@@ -109,13 +117,15 @@ shared-workspace account-slot contract.
 
 ### D4: Deterministic regression and authenticated surface QA
 
-The regression test will capture a queued item for `D` with the shared upstream
-identity, synchronously complete reconciliation to `C`, and then invoke the
-ingestion step directly. It will subscribe to no timers, start no consumer
-loop, and use no sleep, polling delay, or retry. Database assertions will prove
-one row per represented window under `C`, no row under `D`, and no duplicate
-snapshot. Separate controls prove that an existing local id wins and that an
-upstream-only item still resolves uniquely.
+The deterministic transaction regression captures a queued item for `D` with
+the shared upstream identity and coordinates independent PostgreSQL sessions at
+exact lock and commit events, with no sleep, polling delay, or retry. Database
+assertions prove one row per represented window under `C`, no row under `D`,
+and no duplicate snapshot in both transaction orderings. A composition test
+also drives the real proxied SSE publication tap through the live hub and
+background consumer after consolidation, awaiting the exact settlement event
+with a bounded timeout. Separate controls prove that an existing local id wins
+and that an upstream-only item still resolves uniquely.
 
 Manual QA will use an isolated database and authenticated backend, execute a
 literal `curl -i` request to `GET /api/accounts`, and verify HTTP 200, one
@@ -129,9 +139,12 @@ and temporary artifacts will be removed after capture.
 - **Shared upstream id remains ambiguous.** A stale item can still be dropped
   when multiple real-email slots survive. This is deliberate: preserving slot
   ownership is safer than attributing usage to the wrong account.
-- **Captured upstream identity can be absent.** A stale local-only item cannot
-  be recovered. Publication call sites that know both identities are therefore
-  updated together; genuinely upstream-less callers retain current behavior.
+- **Captured upstream identity can be absent.** Publication preserves the valid
+  local id together with the nullable upstream field, so valid-local settlement
+  still succeeds. Identity reconciliation cannot delete that identity-less row:
+  reconciliation requires a non-null incoming identity and selects duplicates
+  by equality to it. If the local row is already stale, no upstream fallback can
+  be recovered; genuinely upstream-less callers retain that serving-safe drop.
 - **Settlement races consolidation.** A selected-row lock alone permits a
   consolidator to reparent history before waiting to delete that row, then
   cascade-delete a snapshot inserted while it waited. SQLite writer

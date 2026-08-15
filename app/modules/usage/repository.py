@@ -707,13 +707,13 @@ class UsageRepository:
                 if account_id is not None:
                     local_stmt = select(Account.id).where(Account.id == account_id)
                     if dialect_name == "postgresql":
-                        local_stmt = local_stmt.with_for_update()
+                        local_stmt = local_stmt.with_for_update(key_share=True)
                     resolved_account_id = await self._session.scalar(local_stmt)
 
                 if resolved_account_id is None and chatgpt_account_id:
                     upstream_stmt = select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)
                     if dialect_name == "postgresql":
-                        upstream_stmt = upstream_stmt.with_for_update()
+                        upstream_stmt = upstream_stmt.with_for_update(key_share=True)
                     matches = list((await self._session.execute(upstream_stmt)).scalars().all())
                     if len(matches) == 1:
                         resolved_account_id = matches[0]

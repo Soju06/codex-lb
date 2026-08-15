@@ -74,6 +74,10 @@ class AccountIdentityConflictError(Exception):
         )
 
 
+class AccountIdentityRelockError(RuntimeError):
+    """Raised after identity membership changes across both bounded lock attempts."""
+
+
 class AccountsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -232,7 +236,9 @@ class AccountsRepository:
             ):
                 await self._session.rollback()
                 if _identity_lock_attempt >= 1:
-                    raise RuntimeError("Account identity candidates changed during PostgreSQL upsert locking")
+                    raise AccountIdentityRelockError(
+                        "Account identity candidates changed during PostgreSQL upsert locking"
+                    )
                 return await self._upsert_unlocked(
                     account,
                     merge_by_email=merge_by_email,
@@ -382,7 +388,9 @@ class AccountsRepository:
             ):
                 await self._session.rollback()
                 if _identity_lock_attempt >= 1:
-                    raise RuntimeError("Account identity candidates changed during PostgreSQL slot locking")
+                    raise AccountIdentityRelockError(
+                        "Account identity candidates changed during PostgreSQL slot locking"
+                    )
                 return await self._upsert_account_slot_unlocked(
                     account,
                     preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
@@ -1115,7 +1123,7 @@ class AccountsRepository:
             return locked_account
         await self._session.rollback()
         if second_attempt:
-            raise RuntimeError("Account identity changed during PostgreSQL membership lock acquisition")
+            raise AccountIdentityRelockError("Account identity changed during PostgreSQL membership lock acquisition")
         return await self._lock_postgresql_account_identity_membership(
             account_id,
             incoming_chatgpt_account_id,

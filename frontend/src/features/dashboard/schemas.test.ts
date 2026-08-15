@@ -197,6 +197,11 @@ describe("RequestLogsResponseSchema", () => {
           connectionRequestKind: "prewarm",
           model: "gpt-5.1",
           transport: "websocket",
+          upstreamProxyRouteMode: "account_bound",
+          upstreamProxyPoolId: "pool-1",
+          upstreamProxyEndpointId: "endpoint-1",
+          upstreamProxyFallbackUsed: true,
+          upstreamProxyFailClosedReason: null,
           useragent: "Mozilla/5.0",
           useragentGroup: "Mozilla",
           clientIp: "203.0.113.7",
@@ -237,6 +242,11 @@ describe("RequestLogsResponseSchema", () => {
     expect(parsed.requests[0]?.connectionRequestKind).toBe("prewarm");
     expect(parsed.requests[0]?.planType).toBe("plus");
     expect(parsed.requests[0]?.transport).toBe("websocket");
+    expect(parsed.requests[0]?.upstreamProxyRouteMode).toBe("account_bound");
+    expect(parsed.requests[0]?.upstreamProxyPoolId).toBe("pool-1");
+    expect(parsed.requests[0]?.upstreamProxyEndpointId).toBe("endpoint-1");
+    expect(parsed.requests[0]?.upstreamProxyFallbackUsed).toBe(true);
+    expect(parsed.requests[0]?.upstreamProxyFailClosedReason).toBeNull();
     expect(parsed.requests[0]?.useragent).toBe("Mozilla/5.0");
     expect(parsed.requests[0]?.useragentGroup).toBe("Mozilla");
     expect(parsed.requests[0]?.clientIp).toBe("203.0.113.7");

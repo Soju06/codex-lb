@@ -124,6 +124,11 @@ describe("RecentRequestsTable", () => {
             ...NULL_FAILURE_METADATA,
             ...NULL_USERAGENT_METADATA,
             upstreamTransport: "auto",
+            upstreamProxyRouteMode: "account_bound",
+            upstreamProxyPoolId: "pool-1",
+            upstreamProxyEndpointId: "endpoint-1",
+            upstreamProxyFallbackUsed: true,
+            upstreamProxyFailClosedReason: "no_healthy_endpoint",
              tokens: 1200,
              inputTokens: 1000,
              outputTokens: 200,
@@ -163,6 +168,16 @@ describe("RecentRequestsTable", () => {
     expect(within(dialog).getByText("rate_limit_exceeded")).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
     expect(within(dialog).getByText("1.0 s")).toBeInTheDocument();
+    expect(within(dialog).getByText("Route mode")).toBeInTheDocument();
+    expect(within(dialog).getByText("account_bound")).toBeInTheDocument();
+    expect(within(dialog).getByText("Proxy pool")).toBeInTheDocument();
+    expect(within(dialog).getByText("pool-1")).toBeInTheDocument();
+    expect(within(dialog).getByText("Proxy endpoint")).toBeInTheDocument();
+    expect(within(dialog).getByText("endpoint-1")).toBeInTheDocument();
+    expect(within(dialog).getByText("Same-pool fallback")).toBeInTheDocument();
+    expect(within(dialog).getByText("Used")).toBeInTheDocument();
+    expect(within(dialog).getByText("Fail-closed reason")).toBeInTheDocument();
+    expect(within(dialog).getByText("no_healthy_endpoint")).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy Request ID" }));

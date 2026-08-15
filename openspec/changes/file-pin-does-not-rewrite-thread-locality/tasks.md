@@ -9,6 +9,9 @@
       and keeps the process seed / raw legacy key.
 - [x] 2.2 Assert an existing thread row is not upserted when a file
       pin is the required owner.
+- [x] 2.3 Cover the same file-pin plus existing-thread case through
+      `/backend-api/codex/responses`, including the later unpinned
+      thread turn and process-seed sibling.
 
 ## 3. Validation
 

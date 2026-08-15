@@ -24,9 +24,11 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth.refresh import RefreshError
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import ProxyResponseError
-from app.db.models import FileAccountPin
+from app.db.models import FileAccountPin, StickySessionKind
 from app.db.session import SessionLocal
+from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
 from app.modules.proxy.file_pin_repository import FileAccountPinRepository
+from app.modules.proxy.sticky_repository import StickySessionsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -53,11 +55,12 @@ def _make_auth_json(account_id: str, email: str) -> dict:
     }
 
 
-async def _import_account(async_client, account_id: str, email: str) -> None:
+async def _import_account(async_client, account_id: str, email: str) -> str:
     auth_json = _make_auth_json(account_id, email)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    return response.json()["accountId"]
 
 
 @pytest.mark.asyncio
@@ -863,6 +866,112 @@ async def test_v1_responses_file_id_pin_overrides_prompt_cache_key(async_client,
     )
     resolved = await service._resolve_file_account_for_responses(payload, {})
     assert resolved is not None
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_file_pin_does_not_rewrite_existing_thread_row(
+    async_client,
+    monkeypatch,
+):
+    from app.dependencies import get_proxy_service_for_app
+
+    thread_owner_chatgpt_id = "acc_file_pin_thread_owner"
+    file_owner_chatgpt_id = "acc_file_pin_file_owner"
+    thread_owner_id = await _import_account(
+        async_client,
+        thread_owner_chatgpt_id,
+        "file-pin-thread-owner@example.com",
+    )
+    file_owner_id = await _import_account(
+        async_client,
+        file_owner_chatgpt_id,
+        "file-pin-file-owner@example.com",
+    )
+    process_session = "file-pin-process"
+    thread_headers = {"session-id": process_session, "thread-id": "file-pin-thread"}
+    sibling_headers = {"session-id": process_session, "thread-id": "file-pin-sibling"}
+    thread_key = _codex_backend_identity(thread_headers).thread_selection_key
+    sibling_key = _codex_backend_identity(sibling_headers).thread_selection_key
+    process_key = _codex_session_selection_key(process_session)
+    assert thread_key is not None
+    assert sibling_key is not None
+
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            thread_key,
+            thread_owner_id,
+            kind=StickySessionKind.PROMPT_CACHE,
+        )
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    await service._pin_file_account("file_thread_locality", file_owner_id)
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del payload, headers, access_token, kwargs
+        seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_file_pin_thread"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    pinned_response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers=thread_headers,
+        json={
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Read the file."},
+                        {"type": "input_file", "file_id": "file_thread_locality"},
+                    ],
+                }
+            ],
+            "stream": True,
+        },
+    )
+    assert pinned_response.status_code == 200
+    assert seen == [file_owner_chatgpt_id]
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        assert await repo.get_account_id(thread_key, kind=StickySessionKind.PROMPT_CACHE) == thread_owner_id
+        assert await repo.get_account_id(process_key, kind=StickySessionKind.CODEX_SESSION) == file_owner_id
+        assert await repo.get_account_id(sibling_key, kind=StickySessionKind.PROMPT_CACHE) is None
+
+    unpinned_response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers=thread_headers,
+        json={
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": "Continue without the file.",
+            "stream": True,
+        },
+    )
+    assert unpinned_response.status_code == 200
+    assert seen == [file_owner_chatgpt_id, thread_owner_chatgpt_id]
+
+    sibling_response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers=sibling_headers,
+        json={
+            "model": "gpt-5.2",
+            "instructions": "You are a helpful assistant.",
+            "input": "Sibling thread without a file.",
+            "stream": True,
+        },
+    )
+    assert sibling_response.status_code == 200
+    assert seen == [file_owner_chatgpt_id, thread_owner_chatgpt_id, file_owner_chatgpt_id]
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        assert await repo.get_account_id(thread_key, kind=StickySessionKind.PROMPT_CACHE) == thread_owner_id
+        assert await repo.get_account_id(process_key, kind=StickySessionKind.CODEX_SESSION) == file_owner_id
+        assert await repo.get_account_id(sibling_key, kind=StickySessionKind.PROMPT_CACHE) == file_owner_id
 
 
 @pytest.mark.asyncio

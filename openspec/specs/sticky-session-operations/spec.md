@@ -66,6 +66,34 @@ A later security-authorized bridge replacement that revalidates a raw legacy row
 - **THEN** the process-session restart may select account B
 - **AND** an explicit turn-state lookup of the same text remains hard-bound to account A
 
+#### Scenario: Goal restart with process session and thread-id abandons the unavailable raw owner
+
+- **GIVEN** a process-session identifier has a raw legacy `codex_session` mapping to account A
+- **AND** account A is paused, rate-limited, or quota-exceeded
+- **AND** account B is eligible
+- **AND** the request also carries a distinct `thread-id`
+- **WHEN** Codex sends the recognized goal-continuation marker with an account-neutral self-contained full resend and no other continuity dependency
+- **THEN** the proxy marks the still-current raw mapping to account A abandoned only for process-session interpretation
+- **AND** it routes the restarted turn to account B
+- **AND** subsequent same-thread continuity remains on account B
+
+#### Scenario: Thread-id on a goal restart cannot erase colliding explicit turn-state ownership
+
+- **GIVEN** a raw legacy `codex_session` row was written as explicit turn-state ownership for account A
+- **AND** a later request carries the same text as a process-session header plus a distinct `thread-id`
+- **WHEN** a marked self-contained goal restart abandons that text for process-session interpretation
+- **THEN** the restart may select account B
+- **AND** an explicit turn-state lookup of the same text remains hard-bound to account A
+
+#### Scenario: Account-dependent thread-scoped restart stays fail-closed
+
+- **GIVEN** a process-session identifier has a raw legacy mapping to unavailable account A
+- **AND** the request carries a distinct `thread-id`
+- **AND** the body has a previous response, conversation, file pin, or unresolved tool state
+- **WHEN** the request is selected
+- **THEN** the request fails closed on account A
+- **AND** the raw mapping is neither deleted nor rebound
+
 #### Scenario: Source-qualified retirement fails closed on an older replica
 
 - **GIVEN** a current replica marks a raw account A mapping abandoned only for `session_header` interpretation

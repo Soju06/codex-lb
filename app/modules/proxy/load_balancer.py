@@ -731,7 +731,10 @@ class LoadBalancer:
                     # Raw rows may be historical turn-state ownership. The
                     # bounded thread TTL must never age out that hard evidence.
                     max_age_seconds=None,
-                    continuity_source=sticky_source,
+                    # This key is the process-session compatibility row.
+                    # Thread-header requests still consult it as that row,
+                    # so session_header-scoped abandonment must hide it.
+                    continuity_source="session_header",
                 )
             legacy_existing_account_id = legacy_owner_lookup.account_id
             abandoned_account_id = legacy_owner_lookup.abandoned_account_id

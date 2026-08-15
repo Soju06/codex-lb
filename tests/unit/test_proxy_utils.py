@@ -10506,8 +10506,33 @@ def test_goal_restart_affinity_can_abandon_only_legacy_session_owner():
         sticky_threads_enabled=False,
     )
 
+    thread_policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={
+            "session_id": "goal-restart-session",
+            "thread-id": "goal-restart-thread",
+        },
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+    thread_only_policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={"thread-id": "goal-restart-thread"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
     assert policy.codex_session_source == "session_header"
     assert policy.abandon_unavailable_legacy_owner is True
+    assert thread_policy.codex_session_source == "thread_header"
+    assert thread_policy.abandon_unavailable_legacy_owner is True
+    assert thread_policy.legacy_selection_key == "goal-restart-session"
+    assert thread_only_policy.codex_session_source == "thread_header"
+    assert thread_only_policy.abandon_unavailable_legacy_owner is False
     assert turn_state_policy.codex_session_source == "turn_state"
     assert turn_state_policy.abandon_unavailable_legacy_owner is False
 
@@ -10568,6 +10593,25 @@ def test_goal_restart_affinity_preserves_owner_for_account_dependent_payloads(
         sticky_threads_enabled=False,
     )
 
+    assert policy.abandon_unavailable_legacy_owner is False
+
+
+def test_goal_restart_affinity_preserves_owner_for_account_dependent_thread_payloads():
+    payload = _goal_restart_payload(previous_response_id="resp_owner")
+
+    policy = proxy_service._sticky_key_for_responses_request(
+        payload,
+        headers={
+            "session_id": "goal-restart-session",
+            "thread-id": "goal-restart-thread",
+        },
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        openai_cache_affinity_max_age_seconds=300,
+        sticky_threads_enabled=False,
+    )
+
+    assert policy.codex_session_source == "thread_header"
     assert policy.abandon_unavailable_legacy_owner is False
 
 

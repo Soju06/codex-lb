@@ -511,7 +511,7 @@ async def run_sticky_selection_path(
             abandon_unavailable_legacy_owner
             and hard_sticky
             and sticky_existing_is_legacy
-            and sticky_source == "session_header"
+            and sticky_source in {"session_header", "thread_header"}
             and legacy_sticky_key is not None
             and isinstance(sticky_existing_account_id, str)
             and legacy_owner_in_effective_policy_scope

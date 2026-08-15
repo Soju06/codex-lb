@@ -735,10 +735,15 @@ def _sticky_key_for_responses_request(
     else:
         policy = _AffinityPolicy()
     if (
-        # Only typed process-session provenance can represent the legacy row
-        # this escape hatch targets. An explicit turn-state header stays hard
-        # even when a client includes the same goal marker.
-        policy.codex_session_source == "session_header"
+        # The raw row this escape hatch retires is the process-session key.
+        # Current Codex also sends thread-id, so locality source is often
+        # thread_header; that must not hide the process-session exception.
+        # An explicit turn-state header stays hard even with the same marker.
+        policy.codex_session_source in {"session_header", "thread_header"}
+        and (
+            policy.codex_session_source == "session_header"
+            or _codex_backend_identity(headers).process_session is not None
+        )
         and _request_allows_unavailable_legacy_owner_abandonment(payload)
     ):
         policy = replace(policy, abandon_unavailable_legacy_owner=True)

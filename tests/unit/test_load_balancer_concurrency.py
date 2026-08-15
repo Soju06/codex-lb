@@ -3127,6 +3127,54 @@ async def test_goal_restart_does_not_repin_retired_owner_from_stale_selection_sn
 
 
 @pytest.mark.asyncio
+async def test_goal_restart_with_thread_header_retires_unavailable_legacy_owner() -> None:
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    stale_owner = _make_account("goal-restart-thread-header-owner")
+    replacement = _make_account("goal-restart-thread-header-replacement")
+    raw_session = "goal-restart-thread-header-session"
+    thread_key = _codex_backend_identity(
+        {"session-id": raw_session, "thread-id": "goal-restart-thread"}
+    ).thread_selection_key
+    assert thread_key is not None
+    sticky_repo = _RetiringStaleOwnerStickySessionsRepository(
+        raw_key=raw_session,
+        owner_account_id=stale_owner.id,
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            _StubAccountsRepository([stale_owner, replacement]),
+            _StubUsageRepository(
+                {
+                    stale_owner.id: _usage_row(311, stale_owner.id, window="primary", reset_at=now_epoch + 300),
+                    replacement.id: _usage_row(312, replacement.id, window="primary", reset_at=now_epoch + 300),
+                },
+                {},
+            ),
+            sticky_repo,
+        )
+    )
+
+    selected = await balancer.select_account(
+        sticky_key=thread_key,
+        sticky_kind=StickySessionKind.PROMPT_CACHE,
+        sticky_source="thread_header",
+        sticky_max_age_seconds=300,
+        legacy_sticky_key=raw_session,
+        abandon_unavailable_legacy_owner=True,
+        routing_strategy="single_account",
+        lease_kind="stream",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == replacement.id
+    assert sticky_repo.tombstones == [(raw_session, stale_owner.id)]
+    assert sticky_repo.account_ids_by_key[raw_session] == stale_owner.id
+    assert sticky_repo.account_ids_by_key[thread_key] == replacement.id
+    assert all(account_id != stale_owner.id for _, account_id, _ in sticky_repo.upserts)
+    await balancer.release_account_lease(selected.lease)
+
+
+@pytest.mark.asyncio
 async def test_goal_restart_cas_loser_does_not_repin_concurrently_retired_owner() -> None:
     now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
     stale_owner = _make_account("goal-restart-cas-loser-owner")

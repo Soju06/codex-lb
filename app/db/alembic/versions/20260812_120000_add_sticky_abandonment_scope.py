@@ -1,7 +1,7 @@
 """add source scope to sticky continuity abandonment
 
 Revision ID: 20260812_120000_add_sticky_abandonment_scope
-Revises: 20260806_000000_add_anonymous_telemetry
+Revises: 20260813_000000_add_file_account_pins
 Create Date: 2026-08-12 12:00:00.000000
 """
 
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.engine import Connection
 
 revision = "20260812_120000_add_sticky_abandonment_scope"
-down_revision = "20260806_000000_add_anonymous_telemetry"
+down_revision = "20260813_000000_add_file_account_pins"
 branch_labels = None
 depends_on = None
 

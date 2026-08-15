@@ -779,7 +779,15 @@ def _make_bridge_session(
             kind=proxy_service.StickySessionKind.CODEX_SESSION,
         ),
         request_model="gpt-5.2",
-        account=cast(Any, SimpleNamespace(id="acc-bridge", status=AccountStatus.ACTIVE, plan_type="plus")),
+        account=cast(
+            Any,
+            SimpleNamespace(
+                id="acc-bridge",
+                chatgpt_account_id="workspace-bridge",
+                status=AccountStatus.ACTIVE,
+                plan_type="plus",
+            ),
+        ),
         upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
         upstream_control=proxy_service._WebSocketUpstreamControl(),
         pending_requests=pending_requests or deque(),

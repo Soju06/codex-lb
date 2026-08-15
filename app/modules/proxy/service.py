@@ -1309,25 +1309,19 @@ class ProxyService(
             pending_request_ages_seconds: list[float] | None = None
             should_retire_stuck_session = False
             stale_pending_requests_to_fail: list[_WebSocketRequestState] = []
+            retry_circuit_attempt_selection = None
             if bridge_session is not None:
                 now = time.monotonic()
-                async with bridge_session.pending_lock:
-                    pending_states = list(bridge_session.pending_requests)
-                    pending_count = len(pending_states)
-                    queued_count = bridge_session.queued_request_count
+                stale_gate_snapshot = await self._snapshot_http_bridge_stale_gate_state(bridge_session, now=now)
+                pending_states = stale_gate_snapshot.pending_states
+                pending_count = len(pending_states)
+                queued_count = stale_gate_snapshot.queued_count
+                threshold_seconds = stale_gate_snapshot.threshold_seconds
+                stale_pending_requests_to_fail = stale_gate_snapshot.stale_request_states
+                should_retire_stuck_session = stale_gate_snapshot.should_retire
+                retry_circuit_attempt_selection = stale_gate_snapshot.retry_circuit_attempt_selection
                 pending_request_ids = [state.request_log_id or state.request_id for state in pending_states]
                 pending_request_ages_seconds = [max(0.0, now - state.started_at) for state in pending_states]
-                threshold_seconds = float(
-                    getattr(get_settings(), "http_responses_session_bridge_stuck_gate_retire_after_seconds", 300.0)
-                )
-                stale_pending_requests_to_fail, should_retire_stuck_session = (
-                    self._classify_http_bridge_stale_gate_holders(
-                        pending_states,
-                        now=now,
-                        threshold_seconds=threshold_seconds,
-                        session_closed=bridge_session.closed,
-                    )
-                )
                 if not should_retire_stuck_session and any(
                     max(0.0, now - state.started_at) >= threshold_seconds for state in pending_states
                 ):
@@ -1375,6 +1369,7 @@ class ProxyService(
                     bridge_session,
                     stale_pending_requests_to_fail,
                     detail="response_create_gate_timeout_stuck_pending",
+                    retry_circuit_attempt_selection=retry_circuit_attempt_selection,
                 )
             elif bridge_session is not None and should_retire_stuck_session:
                 _record_http_bridge_stuck_retire(
@@ -1384,6 +1379,7 @@ class ProxyService(
                 await self._retire_stale_pending_http_bridge_session(
                     bridge_session,
                     detail="response_create_gate_timeout_stuck_pending",
+                    retry_circuit_attempt_selection=retry_circuit_attempt_selection,
                 )
             raise _http_bridge_startup_wait_timeout_error(
                 "http_bridge_response_create_gate",

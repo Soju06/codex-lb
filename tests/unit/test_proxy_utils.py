@@ -36172,6 +36172,7 @@ async def test_response_create_admission_stuck_gate_retire_ignores_draining_pend
         bridge_session,
         [stale_gate_holder],
         detail="response_create_gate_timeout_stuck_pending",
+        retry_circuit_attempt_selection=proxy_support._HTTPBridgeRetryCircuitAttemptSelection(kind="absent"),
     )
 
 

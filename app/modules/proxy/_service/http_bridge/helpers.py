@@ -127,6 +127,7 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _http_bridge_session_supports_service_tier,
     _HTTPBridgeResponseCreateAttempt,
+    _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _WebSocketRequestState,
@@ -752,16 +753,18 @@ def _http_bridge_eventless_precreated_deadline(
     )
 
 
-def _http_bridge_retry_circuit_attempt_for_pending_requests(
+def _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
     request_states: Sequence[_WebSocketRequestState],
-) -> _HTTPBridgeResponseCreateAttempt | None:
+) -> _HTTPBridgeRetryCircuitAttemptSelection:
     eligible_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
     recorded_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
     settled_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
+    attempt_seen = False
     for request_state in request_states:
         attempt = getattr(request_state, "response_create_attempt", None)
         if attempt is None:
             continue
+        attempt_seen = True
         if attempt.retry_circuit_failure_recorded:
             recorded_attempts.append(attempt)
             continue
@@ -779,15 +782,21 @@ def _http_bridge_retry_circuit_attempt_for_pending_requests(
             continue
         eligible_attempts.append(attempt)
 
-    for attempts in (eligible_attempts, recorded_attempts, settled_attempts):
-        candidate: _HTTPBridgeResponseCreateAttempt | None = None
+    for kind, attempts in (
+        ("eligible", eligible_attempts),
+        ("recorded", recorded_attempts),
+        ("settled", settled_attempts),
+    ):
+        unique_attempts: list[_HTTPBridgeResponseCreateAttempt] = []
         for attempt in attempts:
-            if candidate is not None and candidate is not attempt:
-                return None
-            candidate = attempt
-        if candidate is not None:
-            return candidate
-    return None
+            if not any(candidate is attempt for candidate in unique_attempts):
+                unique_attempts.append(attempt)
+        if unique_attempts:
+            return _HTTPBridgeRetryCircuitAttemptSelection(
+                kind=kind,
+                attempts=tuple(unique_attempts),
+            )
+    return _HTTPBridgeRetryCircuitAttemptSelection(kind="ineligible" if attempt_seen else "absent")
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:

@@ -34,10 +34,17 @@ unbounded process-level set.
 - Disarm that attempt when the send fails or is cancelled, and mark it observed
   when a matching upstream response lifecycle event wins the race.
 - Capture the attempt at the moment a watchdog classifies a timeout, before any
-  recovery, reconnect, or cleanup await can install a newer attempt.
-- Pass the captured attempt through all retry-circuit failure funnels.
+  pending-ownership, recovery, reconnect, or cleanup await can install a newer
+  attempt.
+- Pass an explicit absent/eligible/recorded/settled/ineligible selection through
+  all retry-circuit failure funnels so ambiguous attribution cannot become an
+  unscoped strike.
 - Atomically claim the attempt and increment the circuit under the existing
   retry-circuit lock; only the first claim performs durable persistence.
+- Let duplicate observers wait for settlement and then read the live circuit
+  count instead of caching a historical count on the attempt.
+- Mark matched response lifecycle events on the attempt even when reasoning
+  prelude delivery and ordinary event accounting are deferred.
 - Emit low-cardinality observability when a duplicate observer is suppressed.
 
 ## Impact
@@ -45,6 +52,10 @@ unbounded process-level set.
 - One eventless send contributes at most one consecutive retry-circuit failure.
 - A separately dispatched retry or replay remains a distinct eligible failure
   and can open the circuit as the second strike.
+- A delayed observer sees later independent failures or a successful clear in
+  the current circuit state without adding another strike.
+- Ambiguous multi-pending cleanup fails safe by undercounting at that boundary,
+  never by creating an unattributed failure that could double-count a send.
 - Existing circuit thresholds, cooldowns, error envelopes, account-health
   handling, continuity guards, and durable conflict merging remain unchanged.
 - No schema migration, runtime setting, or operator action is required.

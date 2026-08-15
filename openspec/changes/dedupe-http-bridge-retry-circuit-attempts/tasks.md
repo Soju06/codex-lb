@@ -9,6 +9,8 @@
 - [x] 2.2 Capture and thread the classified attempt through all retry-circuit failure paths.
 - [x] 2.3 Claim the attempt atomically with the circuit increment and suppress duplicate persistence.
 - [x] 2.4 Add low-cardinality duplicate-suppression observability without new settings or schema.
+- [x] 2.5 Represent absent, ineligible, and ambiguous attempt attribution explicitly; never use ambiguous `None` as an unscoped fallback.
+- [x] 2.6 Read live circuit state after duplicate settlement and mark deferred response lifecycle events observed without changing delivery accounting.
 
 ## 3. Coverage
 
@@ -16,6 +18,7 @@
 - [x] 3.2 Prove a new send is a new strike and a delayed observer of an old send is not.
 - [x] 3.3 Cover response-wins, send-failure/cancellation, successful reset, and multiple-pending races.
 - [x] 3.4 Preserve clean-close, continuity, owner-handoff, and durable conflict-merge coverage.
+- [x] 3.5 Cover pending-lock attempt replacement, ambiguous selection suppression, deferred reasoning observation, and live-count changes after later failures or clear.
 
 ## 4. Verification
 

@@ -3168,8 +3168,10 @@ async def test_goal_restart_with_thread_header_retires_unavailable_legacy_owner(
     assert selected.account is not None
     assert selected.account.id == replacement.id
     assert sticky_repo.tombstones == [(raw_session, stale_owner.id)]
-    assert sticky_repo.account_ids_by_key[raw_session] == stale_owner.id
-    assert sticky_repo.account_ids_by_key[thread_key] == replacement.id
+    assert sticky_repo.account_ids_by_key == {
+        raw_session: stale_owner.id,
+        thread_key: replacement.id,
+    }
     assert all(account_id != stale_owner.id for _, account_id, _ in sticky_repo.upserts)
     await balancer.release_account_lease(selected.lease)
 

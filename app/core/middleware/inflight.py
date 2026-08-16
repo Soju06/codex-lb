@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+from types import ModuleType
 
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -37,6 +38,9 @@ _IN_FLIGHT_WEBSOCKET_PATHS = frozenset(
 class InFlightMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
+        # Resolved lazily on the first request (import-cycle safety) and cached
+        # so the hot path skips the per-request sys.modules lookup.
+        self._shutdown_state: ModuleType | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         scope_type = scope["type"]
@@ -44,7 +48,9 @@ class InFlightMiddleware:
             await self.app(scope, receive, send)
             return
 
-        shutdown_state = import_module("app.core.shutdown")
+        shutdown_state = self._shutdown_state
+        if shutdown_state is None:
+            shutdown_state = self._shutdown_state = import_module("app.core.shutdown")
 
         if scope_type == "websocket":
             # Register before checking the drain barrier. A synchronous signal

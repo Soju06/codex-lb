@@ -306,8 +306,7 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
         if not task.done()
     )
     assert any(
-        "Websocket scope cleanup exceeded its cleanup budget" in message
-        and "cleanup_phase=pending_requests" in message
+        "Websocket scope cleanup exceeded its cleanup budget" in message and "cleanup_phase=pending_requests" in message
         for message in caplog.messages
     )
 

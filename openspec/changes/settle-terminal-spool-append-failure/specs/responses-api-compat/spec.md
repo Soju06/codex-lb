@@ -19,8 +19,8 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 - **WHEN** the first operation's fallback settlement stalls
 - **THEN** every selected operation receives its terminal event and end-of-stream marker first
 - **AND** sibling delivery does not wait for the first fallback settlement
-- **AND** cancellation is preserved only after every pre-delivered sibling finishes settlement and finalization
-- **AND** one sibling's finalization failure does not prevent later siblings from settling
+- **AND** cancellation is preserved as the final outcome only after every pre-delivered sibling finishes settlement and finalization
+- **AND** one sibling's finalization failure does not prevent later siblings from settling or replace pending cancellation
 
 #### Scenario: Cancellation after successful append preserves terminal delivery
 

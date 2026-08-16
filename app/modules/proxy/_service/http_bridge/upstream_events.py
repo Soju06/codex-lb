@@ -1898,7 +1898,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     await grouped_request_state.event_queue.put(grouped_event_block)
                     await grouped_request_state.event_queue.put(None)
 
-            async def persist_grouped_terminal_events() -> None:
+            async def persist_grouped_terminal_events() -> Exception | None:
+                first_error: Exception | None = None
                 try:
                     for (
                         grouped_request_state,
@@ -1924,7 +1925,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 state=grouped_operation_state,
                                 response_id=_websocket_downstream_response_id(grouped_request_state),
                             )
-                    first_finalization_error: Exception | None = None
                     for (
                         grouped_request_state,
                         _grouped_event_block,
@@ -1946,24 +1946,36 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 response_create_gate=session.response_create_gate,
                             )
                         except Exception as exc:
-                            if first_finalization_error is None:
-                                first_finalization_error = exc
-                    if first_finalization_error is not None:
-                        raise first_finalization_error
-                finally:
+                            if first_error is None:
+                                first_error = exc
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                try:
                     # Grouped terminal errors settle detached/abandoned requests
                     # (event_queue is None) with no downstream stream finalizer
                     # left to run, so release the now-idle session's account
                     # stream lease here just like the single terminal path below.
                     await self._maybe_release_idle_http_bridge_session_lease(session)
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                return first_error
 
             grouped_settlement_task = asyncio.create_task(
                 persist_grouped_terminal_events(),
                 name=f"http-bridge-grouped-terminal-settlement-{session.durable_session_id}",
             )
-            _, grouped_cancellation = await _await_task_deferring_cancellation(grouped_settlement_task)
+            grouped_error, grouped_cancellation = await _await_task_deferring_cancellation(grouped_settlement_task)
             if grouped_cancellation is not None:
+                if grouped_error is not None:
+                    logger.warning(
+                        "Grouped HTTP bridge terminal finalization failed while preserving cancellation error=%r",
+                        grouped_error,
+                    )
                 raise grouped_cancellation
+            if grouped_error is not None:
+                raise grouped_error
             return
 
         if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:

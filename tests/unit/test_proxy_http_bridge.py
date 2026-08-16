@@ -5305,10 +5305,14 @@ async def test_terminal_append_success_queues_output_before_preserving_cancellat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cancel_during_settlement", [False, True])
+@pytest.mark.parametrize(
+    ("cancel_during_settlement", "finalizer_fails"),
+    [(False, True), (True, False), (True, True)],
+)
 async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settlement(
     monkeypatch: pytest.MonkeyPatch,
     cancel_during_settlement: bool,
+    finalizer_fails: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     queues: list[asyncio.Queue[str | None]] = [asyncio.Queue(), asyncio.Queue()]
@@ -5350,7 +5354,7 @@ async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settle
         await release_settlement.wait()
 
     finalize_request = AsyncMock(
-        side_effect=None if cancel_during_settlement else [RuntimeError("first sibling finalization failed"), None]
+        side_effect=[RuntimeError("first sibling finalization failed"), None] if finalizer_fails else None
     )
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
     monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", AsyncMock())

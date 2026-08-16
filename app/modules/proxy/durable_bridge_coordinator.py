@@ -651,6 +651,7 @@ class DurableBridgeSessionCoordinator:
         instance_id: str,
         owner_epoch: int,
         state: str,
+        expected_response_id: str | None,
         response_id: str | None = None,
     ) -> bool:
         async with self._session() as session:
@@ -660,6 +661,7 @@ class DurableBridgeSessionCoordinator:
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 state=state,
+                expected_response_id=expected_response_id,
                 response_id=response_id,
             )
 

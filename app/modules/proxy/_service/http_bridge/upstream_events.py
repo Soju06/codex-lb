@@ -345,6 +345,7 @@ async def _persist_http_bridge_operation_event(
         append_terminal_batch = getattr(batcher, "append_terminal_event", None)
         if terminal and terminal_state is not None and callable(append_terminal_batch):
             instance_id = _service_get_settings().http_responses_session_bridge_instance_id
+            expected_response_id = request_state.response_id
             response_id = _websocket_downstream_response_id(request_state)
             append_result = await append_terminal_batch(
                 operation_id=operation_id,
@@ -381,6 +382,7 @@ async def _persist_http_bridge_operation_event(
                             instance_id=instance_id,
                             owner_epoch=owner_epoch,
                             state=terminal_state,
+                            expected_response_id=expected_response_id,
                             response_id=response_id,
                         )
                     else:

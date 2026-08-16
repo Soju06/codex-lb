@@ -328,6 +328,7 @@ class HttpBridgeOperationEventBatcher:
         instance_id: str,
         owner_epoch: int,
         state: str,
+        expected_response_id: str | None,
         response_id: str | None = None,
     ) -> None:
         """Settle a failed terminal append after its SSE block was queued."""
@@ -338,6 +339,7 @@ class HttpBridgeOperationEventBatcher:
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 state=state,
+                expected_response_id=expected_response_id,
                 response_id=response_id,
             )
             if not settled:

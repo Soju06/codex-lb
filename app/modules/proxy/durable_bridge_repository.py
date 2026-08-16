@@ -2018,6 +2018,7 @@ class DurableBridgeRepository:
         instance_id: str,
         owner_epoch: int,
         state: str,
+        expected_response_id: str | None,
         response_id: str | None = None,
     ) -> bool:
         """Settle only the terminal attempt whose append outcome was ambiguous."""
@@ -2034,7 +2035,12 @@ class DurableBridgeRepository:
             if owner_exists is None:
                 await self._session.rollback()
                 return False
-            response_matches = (
+            acknowledged_response_matches = (
+                HttpBridgeOperationRecord.response_id == expected_response_id
+                if expected_response_id is not None
+                else HttpBridgeOperationRecord.response_id.is_(None)
+            )
+            terminal_response_matches = (
                 HttpBridgeOperationRecord.response_id == response_id
                 if response_id is not None
                 else HttpBridgeOperationRecord.response_id.is_(None)
@@ -2044,8 +2050,10 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state.in_(("acknowledged", state)),
-                    response_matches,
+                    or_(
+                        and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
+                        and_(HttpBridgeOperationRecord.state == state, terminal_response_matches),
+                    ),
                 )
                 .values(
                     state=state,

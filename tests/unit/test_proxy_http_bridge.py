@@ -5172,6 +5172,7 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
         skip_request_log=True,
     )
     request_state.operation_id = "op-terminal-append-fallback-order"
+    request_state.replay_downstream_response_id = "resp-client-visible-replay"
     session = _make_bridge_session(
         key_value="terminal-append-fallback-order",
         pending_requests=deque([request_state]),
@@ -5182,13 +5183,17 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     settlement_started = asyncio.Event()
     release_settlement = asyncio.Event()
     settlement_finished = asyncio.Event()
+    append_kwargs: dict[str, Any] = {}
+    settlement_kwargs: dict[str, Any] = {}
 
     async def append_terminal_event(*args: Any, **kwargs: Any) -> TerminalOperationEventAppendResult:
-        del args, kwargs
+        del args
+        append_kwargs.update(kwargs)
         return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
 
     async def settle_terminal_event(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
+        del args
+        settlement_kwargs.update(kwargs)
         settlement_started.set()
         await release_settlement.wait()
         settlement_finished.set()
@@ -5214,6 +5219,9 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     )
 
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
+    assert append_kwargs["response_id"] == "resp-client-visible-replay"
+    assert settlement_kwargs["expected_response_id"] == "resp-terminal-append-fallback-order"
+    assert settlement_kwargs["response_id"] == "resp-client-visible-replay"
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
     assert persist_task.done() is False
     persist_task.cancel()

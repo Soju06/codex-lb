@@ -24,8 +24,15 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 - **GIVEN** terminal append committed its operation state before reporting an exception
 - **AND** a retry under the same owner epoch has since reset the operation to submitted
 - **WHEN** fallback settlement for the prior attempt runs
-- **THEN** the fallback is rejected by an operation-state and response identity fence
+- **THEN** the fallback is rejected by an operation-state and persisted upstream-response identity fence
 - **AND** the newer submitted attempt remains unchanged
+
+#### Scenario: Replay alias preserves the acknowledged-attempt fence
+
+- **GIVEN** a replay whose client-visible response alias differs from its persisted upstream response ID
+- **WHEN** durable terminal-event append raises
+- **THEN** fallback settlement compares the acknowledged operation against the persisted upstream response ID
+- **AND** persists the intended client-visible terminal response ID
 
 #### Scenario: Successful terminal append remains atomic and replayable
 

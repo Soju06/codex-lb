@@ -852,6 +852,41 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
             state="acknowledged",
             response_id="resp-terminal-recovery",
         )
+
+        replay_fingerprint = durable_bridge_hash("terminal-recovery-replay-alias")
+        replay_operation_id = durable_bridge_operation_id(claim.id, replay_fingerprint)
+        assert await repository.record_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=replay_fingerprint,
+            account_id="account-terminal-recovery",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            response_id="resp-client-visible-replay",
+        )
+        replay_operation = await repository.get_operation(operation_id=replay_operation_id)
+        assert replay_operation is not None
+        assert replay_operation.state == "failed"
+        assert replay_operation.response_id == "resp-client-visible-replay"
+        assert replay_operation.event_spool_complete is False
     finally:
         await session.close()
 
@@ -896,6 +931,7 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         instance_id="inst-terminal-recovery",
         owner_epoch=claim.owner_epoch,
         state="failed",
+        expected_response_id="resp-terminal-recovery",
         response_id="resp-terminal-recovery",
     )
     await asyncio.wait_for(settlement_finished.wait(), timeout=1.0)
@@ -931,6 +967,7 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         instance_id="inst-terminal-recovery",
         owner_epoch=claim.owner_epoch,
         state="failed",
+        expected_response_id="resp-terminal-recovery",
         response_id="resp-terminal-recovery",
     )
     after_stale_settlement = await recovery.get_operation(operation_id=operation_id)

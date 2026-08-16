@@ -170,6 +170,7 @@ async def test_terminal_append_failure_settles_operation() -> None:
         instance_id="instance-1",
         owner_epoch=7,
         state="failed",
+        expected_response_id="resp-upstream-1",
         response_id="resp-1",
     )
     await asyncio.wait_for(durable.update_called.wait(), timeout=1.0)
@@ -180,6 +181,7 @@ async def test_terminal_append_failure_settles_operation() -> None:
             "instance_id": "instance-1",
             "owner_epoch": 7,
             "state": "failed",
+            "expected_response_id": "resp-upstream-1",
             "response_id": "resp-1",
             "event_spool_complete": False,
         }
@@ -215,6 +217,7 @@ async def test_terminal_append_failure_reports_fenced_settlement(
         instance_id="stale-instance",
         owner_epoch=6,
         state="failed",
+        expected_response_id=None,
     )
     await asyncio.wait_for(durable.update_called.wait(), timeout=1.0)
     assert durable.updated[0]["owner_epoch"] == 6

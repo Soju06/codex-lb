@@ -8988,16 +8988,16 @@ def test_normalize_stream_event_payload_validates_error_envelope_only_for_error_
     adapter_spy = MagicMock(wraps=parsing_module._ERROR_ADAPTER)
     monkeypatch.setattr(parsing_module, "_ERROR_ADAPTER", adapter_spy)
 
-    delta_payload: dict[str, object] = {"type": "response.output_text.delta", "delta": "a"}
+    delta_payload: dict[str, Any] = {"type": "response.output_text.delta", "delta": "a"}
     assert proxy_module._normalize_stream_event_payload(delta_payload) is delta_payload
-    in_progress_payload: dict[str, object] = {"type": "response.in_progress", "response": {"id": "resp_np"}}
+    in_progress_payload: dict[str, Any] = {"type": "response.in_progress", "response": {"id": "resp_np"}}
     assert proxy_module._normalize_stream_event_payload(in_progress_payload) is in_progress_payload
     assert adapter_spy.validate_python.call_count == 0
 
-    envelope_payload: dict[str, object] = {
+    envelope_payload: dict[str, Any] = {
         "error": {"message": "quota exhausted", "type": "server_error", "code": "insufficient_quota"}
     }
-    rewritten = proxy_module._normalize_stream_event_payload(envelope_payload)
+    rewritten: Any = proxy_module._normalize_stream_event_payload(envelope_payload)
     assert adapter_spy.validate_python.call_count == 1
     assert rewritten["type"] == "response.failed"
     envelope_error = rewritten["response"]["error"]
@@ -9005,8 +9005,8 @@ def test_normalize_stream_event_payload_validates_error_envelope_only_for_error_
     assert envelope_error["code"] == proxy_module._normalize_error_code("insufficient_quota", "server_error")
     assert envelope_error["type"] == "server_error"
 
-    bare_error_payload: dict[str, object] = {"type": "error", "code": "rate_limit_exceeded", "message": "slow down"}
-    rewritten_bare = proxy_module._normalize_stream_event_payload(bare_error_payload)
+    bare_error_payload: dict[str, Any] = {"type": "error", "code": "rate_limit_exceeded", "message": "slow down"}
+    rewritten_bare: Any = proxy_module._normalize_stream_event_payload(bare_error_payload)
     assert adapter_spy.validate_python.call_count == 2
     assert rewritten_bare["type"] == "response.failed"
     bare_error = rewritten_bare["response"]["error"]

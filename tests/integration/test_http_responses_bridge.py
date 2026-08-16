@@ -9344,7 +9344,7 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_retries_when_upstream_never_acknowledges_response_create(
+async def test_v1_responses_http_bridge_retries_unanchored_request_when_upstream_never_acknowledges_response_create(
     async_client,
     monkeypatch,
 ):

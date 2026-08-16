@@ -272,7 +272,13 @@ The system SHALL keep the existing lazy on-read reset strategy for API key usage
 
 ### Requirement: RequestLog API key reference
 
-The system SHALL record the `api_key_id` in the `request_logs` table for proxy requests authenticated with an API key. The field MUST be NULL when API key auth is disabled or the request is unauthenticated.
+The system SHALL record the `api_key_id` in the `request_logs` table for proxy
+requests authenticated with an API key. The field MUST be NULL when API key
+auth is disabled or the request is unauthenticated. This applies to error rows
+as well as successes: when a shared upstream session (e.g. an HTTP-bridge
+session multiplexing requests from multiple API keys) fails its pending
+requests, each request's log row MUST be attributed to that request's own
+authenticated key.
 
 #### Scenario: Authenticated request logged
 
@@ -283,6 +289,16 @@ The system SHALL record the `api_key_id` in the `request_logs` table for proxy r
 
 - **WHEN** API key auth is disabled and a proxy request completes
 - **THEN** the `request_logs` entry has `api_key_id = NULL`
+
+#### Scenario: Bridge failure fan-out preserves per-request key attribution
+
+- **GIVEN** an HTTP-bridge session holds a pending request authenticated with
+  API key `key-123`
+- **WHEN** the session fails its pending requests (upstream close, send
+  failure, request timeout, or local terminal error)
+- **THEN** the request's `request_logs` error entry has
+  `api_key_id = "key-123"` even though the session-level failure path has no
+  single key of its own
 
 ### Requirement: Frontend API Key management
 
@@ -520,6 +536,11 @@ Usage reservation의 최종 정산(finalize 또는 release)은 요청 단위에�
 
 Reservation 생성 후 upstream API 호출에 진입하지 않고 종료되는 모든 경로에서 reservation이 release되어야 한다. `reserved` 상태로 남는 reservation이 존재하면 안 된다. 시스템은 이 동작을 SHALL 보장해야 한다.
 
+After admission commits an owned reservation, rate-limit response-header
+calculation before upstream work remains part of the early-exit cleanup window.
+If that calculation fails, the system MUST attempt to release the owned
+reservation exactly once before propagating the original header failure.
+
 #### Scenario: no_accounts 즉시 종료 시 release
 
 - **WHEN** reservation 생성 후 `_stream_with_retry()`가 사용 가능한 계정 없음(`no_accounts`)으로 즉시 종료되면
@@ -535,6 +556,17 @@ Reservation 생성 후 upstream API 호출에 진입하지 않고 종료되는 �
 
 - **WHEN** API key auth가 비활성이거나 reservation이 생성되지 않은 상태에서 요청이 종료되면
 - **THEN** 정산 로직이 안전하게 스킵되어야 하며 에러가 발생하지 않아야 한다 (SHALL)
+
+#### Scenario: Rate-limit header preparation fails after admission
+
+- **GIVEN** a limited API key has committed an owned reservation for a
+  streaming Responses, collected Responses, compact Responses, or audio
+  transcription request
+- **WHEN** rate-limit response-header calculation fails before upstream work
+  begins
+- **THEN** the reservation is released exactly once
+- **AND** its reserved quota is restored
+- **AND** the header failure propagates without starting upstream work
 
 ### Requirement: Compact 경로 예외 무관 reservation cleanup
 
@@ -1108,7 +1140,27 @@ API-key limit and usage-reporting paths used by subscription-backed requests.
 
 ### Requirement: Stream reservation settlement is detached from the response path
 
-Settling a stream API-key reservation MUST NOT block the response/stream close, with one deliberate exception: when a keyed websocket stream terminates with an account-health error, the finalizer MUST wait for the settlement to commit before the load-balancer health write (the settlement-ordering invariant), so that error path intentionally blocks on settlement. In all other cases the settlement MUST run as a tracked background task; when it fails or is cancelled, the reservation MUST still be released by the tracking fallback, and the request's finalization path MUST NOT double-release a transferred settlement. Reservations MUST continue to count toward key limits until finalized or released, so deferred settlement can never admit usage a synchronous settlement would have rejected.
+Settling a stream API-key reservation MUST NOT block the response/stream close,
+with one deliberate exception: when a keyed websocket stream terminates with an
+account-health error, the finalizer MUST wait for the settlement to commit
+before the load-balancer health write (the settlement-ordering invariant), so
+that error path intentionally blocks on settlement. If the primary settlement
+fails, the finalizer MUST wait for fallback release to commit before recording
+account health. If neither operation confirms settlement, the account-health
+write MUST remain unapplied. Tracked persistence ownership MUST remain
+registered through an ordering-sensitive fallback release, including
+cancellation before the primary coroutine starts or during that release, so
+graceful shutdown drains both phases. When the existing stream-retry path
+deliberately defers an
+account-health penalty until the same ordering-sensitive settlement, it MUST
+likewise apply neither that penalty nor an immediately following terminal health
+write unless settlement is confirmed, and it MUST NOT start a second settlement
+for the transferred reservation. In all other cases the settlement MUST run as
+a tracked background task; when it fails or is cancelled, the reservation MUST
+still be released by the tracking fallback, and the request's finalization path
+MUST NOT double-release a transferred settlement. Reservations MUST continue to
+count toward key limits until finalized or released, so deferred settlement can
+never admit usage a synchronous settlement would have rejected.
 
 #### Scenario: Response close precedes settlement completion
 
@@ -1129,10 +1181,33 @@ Settling a stream API-key reservation MUST NOT block the response/stream close, 
 - **WHEN** the finalizer settles the reservation
 - **THEN** it waits for the settlement to commit before recording the account-health error
 
+#### Scenario: Websocket health waits for fallback settlement
+
+- **GIVEN** a keyed websocket stream that terminates with an account-health error
+- **AND** its primary settlement fails
+- **WHEN** fallback release remains in progress
+- **THEN** the finalizer does not record the account-health error
+- **AND** it records the error only after fallback release commits
+
+#### Scenario: Unconfirmed websocket settlement leaves health unapplied
+
+- **GIVEN** a keyed websocket stream that terminates with an account-health error
+- **WHEN** both primary settlement and fallback release fail
+- **THEN** the finalizer does not record the account-health error
+- **AND** the upstream connection is still scheduled for reconnect and retirement
+
+#### Scenario: Unconfirmed retry settlement drops deferred health
+
+- **GIVEN** a keyed stream retry has deferred an account-health penalty until replacement selection
+- **WHEN** neither primary settlement nor fallback release confirms settlement
+- **THEN** the deferred penalty and any immediately following terminal health write remain unapplied
+- **AND** the retry path does not start a second settlement for the transferred reservation
+
 #### Scenario: Shutdown drains pending settlements
 
 - **WHEN** the service shuts down gracefully with settlements in flight
 - **THEN** shutdown waits for them up to the configured drain timeout
+- **AND** a pending ordering-sensitive fallback release remains part of that drain despite cancellation before primary startup or during fallback
 
 ### Requirement: Untrusted forwarded headers do not grant unauthenticated proxy locality
 
@@ -1255,3 +1330,76 @@ The system SHALL track `api_keys.last_used_at` through a process-local write-beh
 - **GIVEN** a settlement task that outlived the shutdown drain of persistence tasks
 - **WHEN** it records a touch after the flusher has stopped and performed its final flush
 - **THEN** the touch is flushed to the database immediately by the recording path rather than being lost at process exit
+
+### Requirement: GPT-5.6 personality pricing is recognized
+
+The system MUST recognize `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` when computing request costs. The bare `gpt-5.6` alias MUST resolve to Sol, and suffixed aliases for each personality model MUST resolve to the matching canonical pricing entry. Standard, Flex, Priority, and requests with more than 272K input tokens MUST use the published rates applicable to the model and tier.
+
+#### Scenario: Canonical GPT-5.6 models use personality-specific pricing
+
+- **WHEN** a standard-tier request completes for `gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna`
+- **THEN** the system computes cost using that model's standard input, cached-input, and output rates
+
+#### Scenario: Bare GPT-5.6 alias resolves to Sol pricing
+
+- **WHEN** a request completes for `gpt-5.6`
+- **THEN** the system resolves it to the canonical Sol pricing entry
+- **AND** the system does not use the generic `gpt-5` pricing entry
+
+#### Scenario: Suffixed GPT-5.6 model resolves to its personality price
+
+- **WHEN** a request completes for a suffixed GPT-5.6 personality model ID
+- **THEN** the system resolves it to the matching canonical Sol, Terra, or Luna pricing entry
+- **AND** the system does not use the generic `gpt-5` pricing entry
+
+#### Scenario: GPT-5.6 service tiers use published tier rates
+
+- **WHEN** a GPT-5.6 request completes with `service_tier: "flex"` or `service_tier: "priority"`
+- **THEN** the system computes cost using the published rates for that model and service tier
+
+#### Scenario: GPT-5.6 long-context request uses published uplift
+
+- **WHEN** a standard-tier or Flex GPT-5.6 request completes with more than 272K input tokens
+- **THEN** the system computes cost using the published long-context input, cached-input, and output rates for that model and tier
+
+### Requirement: API-key limit rule identities are unique
+
+The system SHALL reject an API-key create or update payload when it contains
+more than one limit rule with the same `(limit_type, limit_window,
+model_filter)` identity. Rejection MUST use the typed API-key validation error
+and MUST occur before a create request persists an API key or limit row.
+The validation message MUST identify the duplicate rule identity.
+
+#### Scenario: Duplicate rules are rejected during creation
+
+- **WHEN** an administrator submits `POST /api/api-keys` with two limit rules
+  sharing the same type, window, and model filter
+- **THEN** the API returns `400` with `invalid_api_key_payload`
+- **AND** no API key or limit row is persisted
+
+### Requirement: Stale usage-reservation reclamation enforces a hard age ceiling
+
+Stale usage-reservation reclamation MUST reclaim `reserved` reservations whose
+age exceeds a hard ceiling on creation time regardless of how recently their
+`updated_at` was refreshed. This is the backstop for orphaned reservation
+heartbeats: a leaked heartbeat task keeps touching `updated_at`, which would
+otherwise exempt its reservation from the heartbeat-based staleness cutoff
+forever. The ceiling MUST be far larger than any legitimate request lifetime
+so it can never reclaim an in-flight reservation, and reclamation past the
+ceiling MUST restore the reserved quota the same way heartbeat-based
+reclamation does.
+
+#### Scenario: Orphaned heartbeat cannot exempt a reservation forever
+
+- **GIVEN** a `reserved` usage reservation created before the hard age ceiling
+- **AND** a leaked heartbeat keeps refreshing its `updated_at`
+- **WHEN** stale usage-reservation reclamation runs
+- **THEN** the reservation is released and its reserved quota is restored
+
+#### Scenario: Fresh reservations are untouched by the ceiling
+
+- **GIVEN** a `reserved` usage reservation created within the hard age ceiling
+- **AND** its `updated_at` is current
+- **WHEN** stale usage-reservation reclamation runs
+- **THEN** the reservation stays `reserved`
+

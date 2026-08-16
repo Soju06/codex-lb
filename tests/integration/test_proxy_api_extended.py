@@ -3056,6 +3056,10 @@ async def test_proxy_stream_fails_over_after_first_event_stream_idle_timeout(asy
         assert by_account[expected_account_id_1].error_code == "stream_idle_timeout"
         assert by_account[expected_account_id_2].status == "success"
 
+    service = get_proxy_service_for_app(async_client._transport.app)
+    idle_runtime = service._load_balancer._runtime.get(expected_account_id_1)
+    assert idle_runtime is None or idle_runtime.error_count == 0
+
 
 @pytest.mark.asyncio
 async def test_proxy_stream_drops_forwarded_headers(async_client, monkeypatch):

@@ -1773,3 +1773,55 @@ async def test_conversation_presence_rollup_migration_upgrade_and_downgrade(tmp_
         assert "conversation_folded_through" in state["state_columns"]
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'file-account-pins.sqlite'}"
+    parent_revision = "20260806_000000_add_anonymous_telemetry"
+    pin_revision = "20260813_000000_add_file_account_pins"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("file_account_pins"):
+            return None
+        columns = inspector.get_columns("file_account_pins")
+        file_id_column = next(column for column in columns if column["name"] == "file_id")
+        return {
+            "columns": {column["name"] for column in columns},
+            "file_id_length": file_id_column["type"].length,
+            "primary_key": inspector.get_pk_constraint("file_account_pins")["constrained_columns"],
+            "indexes": {index["name"] for index in inspector.get_indexes("file_account_pins")},
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is None
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, pin_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {
+            "columns": {"file_id", "account_id", "expires_at"},
+            "file_id_length": None,
+            "primary_key": ["file_id"],
+            "indexes": {"ix_file_account_pins_expires_at"},
+        }
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is not None
+    finally:
+        await engine.dispose()

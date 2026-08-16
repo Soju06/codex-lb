@@ -929,30 +929,52 @@ selected value using the settings API field `preferEarlierResetWindow`.
 
 ### Requirement: Dashboard account cards show live credit state
 
-Account summary responses SHALL expose the latest upstream credit metadata for
-each account as nullable `creditsHas`, `creditsUnlimited`, and `creditsBalance`
-fields. The dashboard account schema SHALL accept those fields.
+Account summary responses SHALL expose nullable upstream purchased-credit metadata as `creditsHas`, `creditsUnlimited`, and `creditsBalance`, alongside calculated remaining subscription credits for each available quota window. Dashboard card and list views MUST present calculated subscription quota and purchased credits as separate labeled metrics and MUST NOT use one as a fallback replacement for the other.
 
-The dashboard account card SHALL render a compact Credits row. If
-`creditsUnlimited` is true, the value SHALL be `Unlimited`. Otherwise, when a
-numeric credit balance is available it SHALL render that balance. If no credit
-balance is available, the card MAY fall back to the account's remaining weekly
-or primary credit value, and SHALL render `-` when no credit value is known.
+When `creditsUnlimited` is true, the purchased-credit metric SHALL render `Unlimited`. Otherwise, it SHALL render the numeric `creditsBalance` when available and `-` when unavailable. The subscription metric SHALL select remaining credits with the following precedence: monthly credits for monthly-only accounts; secondary credits for weekly-only accounts; otherwise secondary credits when available, falling back to primary credits. It SHALL render `-` when the selected value is unavailable.
+
+The compact list SHALL sort subscription and purchased credits independently. A persisted legacy `credits` sort preference SHALL migrate to the purchased-credit sort so existing operator preferences remain valid after upgrade.
+
+#### Scenario: Zero purchased balance does not hide subscription quota
+
+- **WHEN** an account summary has `creditsBalance = 0.0`
+- **AND** `remainingCreditsSecondary = 35910.0`
+- **THEN** the dashboard shows subscription quota `35910.00`
+- **AND** separately shows purchased credits `0.00`
+
+#### Scenario: Unlimited applies only to purchased credits
+
+- **WHEN** an account summary has `creditsUnlimited = true`
+- **THEN** the purchased-credit metric shows `Unlimited`
+- **AND** the subscription metric still shows its own remaining quota value or `-`
+
+#### Scenario: Missing metrics render independently
+
+- **WHEN** an account summary has no purchased credit balance and no calculated remaining subscription credits
+- **THEN** both separately labeled metrics show `-`
 
 #### Scenario: Unlimited credits render explicitly
 
 - **WHEN** an account summary has `creditsUnlimited = true`
-- **THEN** the dashboard account card shows `Credits: Unlimited`
+- **THEN** the dashboard account card shows purchased credits as `Unlimited`
+- **AND** the subscription quota remains independently visible
 
 #### Scenario: Positive credit balance renders on the card
 
 - **WHEN** an account summary includes `creditsBalance = 1.5`
-- **THEN** the dashboard account card shows that numeric credit balance
+- **THEN** the dashboard account card shows purchased credits as `1.50`
+- **AND** does not replace the subscription quota value
 
 #### Scenario: Missing credit data renders a placeholder
 
-- **WHEN** an account summary has no credit balance and no remaining credit fallback
-- **THEN** the dashboard account card shows `Credits: -`
+- **WHEN** an account summary has no purchased credit balance and no remaining subscription credit value
+- **THEN** the dashboard account card shows `-` for both separately labeled metrics
+
+#### Scenario: Legacy credit sort remains valid
+
+- **WHEN** local dashboard preferences contain the legacy `credits` sort key
+- **THEN** the dashboard migrates it to the purchased-credit sort key
+- **AND** persists the migrated preference
 
 ### Requirement: Dashboard settings must expose upstream proxy routing controls
 The settings dashboard MUST allow operators to inspect upstream proxy routing state, enable or disable routing, choose the default proxy pool, create proxy endpoints, create proxy pools, and add endpoints to pools.
@@ -2383,3 +2405,946 @@ unchanged.
 - **GIVEN** the dashboard principal has role `admin`
 - **WHEN** the dashboard view selector opens
 - **THEN** it exposes both Request Logs and Conversations
+
+### Requirement: Dashboard routes are code-split
+
+Each dashboard route's page component MUST load lazily so the entry chunk excludes the code of pages the operator has not visited; the built entry chunk MUST NOT statically import or modulepreload page chunks.
+
+#### Scenario: Entry chunk excludes unvisited pages
+
+- **WHEN** the dashboard entry page loads
+- **THEN** only the visited route's page chunk is fetched
+- **AND** the built entry chunk neither statically imports nor modulepreloads the other pages' chunks
+
+### Requirement: Dashboard assets are fully self-hosted
+
+The dashboard MUST NOT load fonts or other render-blocking resources from external origins; all font assets ship with the build and declare `font-display: swap`.
+
+#### Scenario: No external origins in the built shell
+
+- **WHEN** the dashboard shell is built
+- **THEN** `index.html` and the emitted assets reference no external font or stylesheet origins
+
+#### Scenario: First paint proceeds without network egress
+
+- **GIVEN** a deployment without outbound internet access
+- **WHEN** an operator loads the dashboard
+- **THEN** first paint is not blocked on any external request and monospace text renders via the bundled font or the system fallback
+
+### Requirement: Dashboard supports Korean runtime locale
+
+The dashboard SHALL support Korean (`ko`) as a runtime locale in addition to
+English (`en`) and Simplified Chinese (`zh-CN`). Korean language detection SHALL
+select `ko` for browser language tags whose base language is `ko`, and the
+language switcher SHALL let users choose Korean without reloading the page.
+
+#### Scenario: First visit with a Korean browser
+
+- **WHEN** a user opens the dashboard for the first time with `navigator.language = "ko-KR"` and no persisted preference
+- **THEN** the dashboard renders the translated in-scope surface in Korean
+- **AND** `localStorage` contains `codex-lb-language=ko`
+- **AND** `document.documentElement.lang` is set to `ko`
+
+#### Scenario: User toggles Korean
+
+- **WHEN** the user activates the language switcher and selects Korean
+- **THEN** the dashboard re-renders translated strings in Korean without a full page reload
+- **AND** the selected language persists across reloads
+
+### Requirement: Dashboard feature surfaces render in the active locale
+
+Dashboard feature surfaces SHALL render user-visible copy through the active
+i18n locale, including page headings, section headings, empty states, table
+headings, filter labels, button labels, accessible labels, dialog titles,
+dialog descriptions, validation messages, and client-side toast fallback copy.
+This requirement applies to Accounts, Dashboard, API Keys, APIs, Reports,
+Automations, Firewall, Model Sources, Quota Planner, Sticky Sessions, Settings
+subsections, and shared dashboard components.
+
+The dashboard MAY keep protocol names, product names, model/API terminology,
+quota window abbreviations, and compact operational abbreviations in English
+when the English form is the clearest operator-facing label.
+
+#### Scenario: Korean feature page rendering
+
+- **WHEN** a user selects `ko`
+- **AND** opens Accounts, Dashboard, API Keys, APIs, Reports, Automations, Firewall, Model Sources, Quota Planner, Sticky Sessions, or Settings subsections
+- **THEN** user-visible labels, headings, empty states, dialog copy, accessible labels, and client-side toast fallback copy render in Korean
+- **AND** technical terms such as `API Key`, `Model`, `TOTP`, `OAuth`, `TTFT`, `TPS`, and `Fast Mode` MAY remain English where appropriate
+
+#### Scenario: Simplified Chinese feature page rendering
+
+- **WHEN** a user selects `zh-CN`
+- **AND** opens a dashboard feature page beyond the original auth/header/settings coverage
+- **THEN** newly migrated user-visible strings render in Simplified Chinese
+- **AND** the page does not fall back to English because a locale key is missing
+
+#### Scenario: Locale bundles stay in sync
+
+- **WHEN** the frontend locale bundles are compared
+- **THEN** `en`, `zh-CN`, and `ko` expose the same translation keys
+
+### Requirement: Reports endpoint rejects inverted date ranges before repository work
+
+After applying defaults for any omitted date bound, the Reports service MUST reject a `start_date` later than `end_date` before converting report boundaries or awaiting any repository operation. `GET /api/reports` MUST map that domain failure to HTTP 400 with the exact dashboard envelope `{"error":{"code":"invalid_report_date_range","message":"start_date must be on or before end_date"}}`. Valid one-day ranges and valid inclusive ranges of 730 calendar days MUST remain accepted.
+
+#### Scenario: Explicit inverted Reports range is rejected
+
+- **WHEN** an authenticated operator requests `GET /api/reports` with `start_date` later than `end_date`
+- **THEN** the endpoint returns HTTP 400
+- **AND** the response body is exactly `{"error":{"code":"invalid_report_date_range","message":"start_date must be on or before end_date"}}`
+- **AND** the Reports repository receives no call
+
+#### Scenario: Defaulted end date makes the range inverted
+
+- **WHEN** an authenticated operator requests `GET /api/reports` with an explicit `start_date` later than the defaulted current `end_date`
+- **THEN** the endpoint returns the same `invalid_report_date_range` HTTP 400 before repository work
+
+#### Scenario: Boundary-valid Reports ranges remain accepted
+
+- **WHEN** an authenticated operator requests a one-day range whose `start_date` equals `end_date`
+- **THEN** the endpoint accepts the request and reports data for that day
+- **WHEN** an authenticated operator requests an inclusive range of exactly 730 calendar days
+- **THEN** the endpoint accepts the request under the existing range limit
+
+### Requirement: Reports date controls prevent, explain, and recover from inverted ranges
+
+The `/reports` start-date input MUST use the earlier of the browser-local current day and a present end date as its native `max`, and the end-date input MUST use a present start date as its native `min` while retaining the browser-local current day as its `max`. If both values are present and the start date is later than the end date, both controls MUST expose `aria-invalid`, both MUST reference the same localized inline corrective message through an accessible description, and neither the filtered Reports query nor the relaxed Reports filter-catalog query MAY send a request. Correcting either bound so the range is ordered MUST clear the invalid state and resume each distinct Reports query with the corrected bounds.
+
+#### Scenario: Reciprocal native bounds prevent routine inverted selection
+
+- **GIVEN** `/reports` has a selected start date and end date
+- **THEN** the start-date control's `max` is the earlier of the end date and the browser-local current day
+- **AND** the end-date control's `min` is the start date
+- **AND** the end-date control's `max` remains the browser-local current day
+
+#### Scenario: Bypassed inverted input is accessible and sends no Reports request
+
+- **WHEN** typed, restored, or programmatically supplied Reports dates have a start date later than the end date
+- **THEN** both date controls expose `aria-invalid`
+- **AND** both controls reference one visible localized message that tells the operator to place the start date on or before the end date
+- **AND** no `GET /api/reports` request is sent for either Reports query
+
+#### Scenario: Retry while inverted only retries Accounts
+
+- **GIVEN** `/reports` has an inverted date range and loading account options failed
+- **WHEN** the operator activates the page-level Retry action
+- **THEN** the Accounts query sends a retry request
+- **AND** neither Reports query sends a request
+
+#### Scenario: Correcting either invalid bound resumes Reports queries
+
+- **GIVEN** `/reports` has an inverted date range and both Reports queries are disabled
+- **WHEN** the operator corrects either date bound so the start date is on or before the end date
+- **THEN** both controls clear the invalid state and accessible description
+- **AND** the corrective message is removed
+- **AND** each distinct Reports query sends one request using the corrected ordered bounds
+
+### Requirement: Dashboard overview and request-log listing fail independently
+
+The Dashboard SHALL gate overview-backed statistics, quota, projections, and account controls only on dashboard overview availability. The Request Logs section SHALL own the initial loading, terminal error, and ready states of its listing query without hiding healthy overview-backed content.
+
+When the initial request-log listing reaches a terminal error, the Request Logs section MUST remain visible, MUST render the listing error inside that section, MUST announce that error through an alert semantic local to the section, and MUST expose a keyboard-operable, accessibly named Retry action. Activating Retry MUST refetch only the request-log listing query and MUST NOT refetch or hide healthy overview-backed content.
+
+#### Scenario: Initial request-log failure preserves healthy overview
+
+- **GIVEN** dashboard overview, projections, and request-log filter options load successfully
+- **WHEN** the initial request-log listing reaches a terminal error
+- **THEN** overview statistics, quota, and account content remain rendered
+- **AND** the page-wide Dashboard loading skeleton is not rendered
+- **AND** the Request Logs section contains and announces the listing error and exposes a Retry action
+
+#### Scenario: Request-log retry recovers independently
+
+- **GIVEN** healthy overview-backed content is rendered and the initial request-log listing has failed
+- **WHEN** the listing endpoint recovers and the operator activates Retry
+- **THEN** only the request-log listing query is refetched
+- **AND** healthy overview-backed content remains visible throughout recovery
+- **AND** the recovered request-log rows render in the Request Logs section
+
+#### Scenario: Request logs load inside their section
+
+- **GIVEN** dashboard overview data is available
+- **WHEN** the initial request-log listing is still pending
+- **THEN** overview-backed content is rendered
+- **AND** the Request Logs section renders its own loading state
+- **AND** the page-wide Dashboard loading skeleton is not rendered
+
+#### Scenario: Initial overview loading keeps the existing page skeleton
+
+- **WHEN** the dashboard overview is not yet available
+- **THEN** the Dashboard renders its existing page-wide loading skeleton
+- **AND** it does not render overview-backed content prematurely
+
+### Requirement: App header brand links to dashboard
+
+The app header brand area SHALL render a `<Link to="/dashboard">` wrapping the
+logo and "Codex LB" text so that clicking the brand navigates back to the
+dashboard home page. The link SHALL preserve the existing visual layout (logo
+size, gradient background, text styling) and SHALL include keyboard
+focus-visible ring styling matching the project's existing interactive-element
+conventions.
+
+#### Scenario: Brand click navigates to dashboard
+
+- **WHEN** an operator clicks the header brand area (logo or "Codex LB" text)
+- **THEN** the SPA navigates to `/dashboard`
+
+#### Scenario: Brand link is keyboard-accessible
+
+- **WHEN** an operator tabs to the header brand
+- **THEN** the brand area receives a visible focus ring
+- **AND** pressing Enter navigates to `/dashboard`
+
+#### Scenario: Brand link preserves visual appearance
+
+- **WHEN** the header renders
+- **THEN** the logo and "Codex LB" text appear visually identical to the prior
+  non-interactive `<div>` layout
+
+### Requirement: Dashboard metrics expose conversation-bearing requests
+
+The dashboard overview response MUST expose
+`summary.metrics.conversationRequests` as the count of non-warmup request-log
+rows in the selected timeframe whose trimmed `conversation_id` is nonblank.
+The existing `requests` field MUST continue counting all non-warmup rows, and
+the existing `conversations` field MUST continue counting distinct nonblank
+conversation IDs in that timeframe.
+
+#### Scenario: Requests without conversation IDs are excluded from the new count
+
+- **GIVEN** a timeframe contains four requests with nonblank conversation IDs
+  and two requests with null or whitespace-only IDs
+- **WHEN** the dashboard overview is requested
+- **THEN** `conversationRequests` is `4`
+- **AND** `requests` includes all six non-warmup requests
+
+### Requirement: Dashboard conversation card shows the filtered average
+
+The dashboard conversation card MUST be labeled `Active Conversations` with
+the selected timeframe, and its secondary metadata MUST show `Avg req/conv`
+followed by `conversationRequests / conversations`, formatted to one decimal
+place. When `conversations` is zero, the metadata MUST show an em dash instead
+of dividing by zero.
+
+#### Scenario: Average uses only conversation-bearing requests
+
+- **GIVEN** `conversationRequests` is `5` and `conversations` is `2`
+- **WHEN** the dashboard card is rendered
+- **THEN** its metadata shows `Avg req/conv 2.5`
+
+#### Scenario: Average is safe when no conversations exist
+
+- **GIVEN** `conversationRequests` is `4` and `conversations` is `0`
+- **WHEN** the dashboard card is rendered
+- **THEN** its metadata shows `Avg req/conv —`
+
+### Requirement: Dashboard and report labels identify active conversations
+
+The dashboard and report conversation summary cards MUST use the localized
+equivalent of `Active Conversations`; their numeric values and ordering MUST
+remain unchanged. The report card MUST NOT gain the dashboard average.
+
+#### Scenario: Report uses the active-conversation label
+
+- **WHEN** the report summary cards render
+- **THEN** the conversation card label is `Active Conversations` in English
+- **AND** its numeric value remains the existing distinct conversation total
+- **AND** no `Avg req/conv` metadata is rendered on the report card
+
+### Requirement: Simplified Chinese locale bundle covers all dashboard keys
+
+The `zh-CN` locale bundle SHALL provide an entry for every user-visible i18n
+key present in the `en` bundle, so no dashboard surface falls back to English
+because of a missing key. Values MAY keep protocol names, product names,
+model/API terminology, and compact operational abbreviations in English when
+the English form is the clearest operator-facing label.
+
+#### Scenario: zh-CN rendering without English fallback
+
+- **WHEN** a user selects `zh-CN`
+- **AND** opens Accounts, Dashboard, API Keys, APIs, Reports, Automations, Firewall, Model Sources, Quota Planner, Sticky Sessions, Upstream Proxy, or Settings subsections
+- **THEN** user-visible labels, headings, empty states, dialog copy, accessible labels, and client-side toast fallback copy render through the `zh-CN` bundle
+- **AND** no string falls back to English because of a missing locale key
+- **AND** technical terms such as `API Key`, `Model`, `OAuth`, `TOTP`, `Credits`, and `Quota` MAY remain English where appropriate
+
+### Requirement: zh-CN terminology stays consistent across feature surfaces
+
+Translated `zh-CN` strings SHALL reuse established dashboard terminology for
+repeated concepts, and labels that sit inside a label group whose siblings are
+already translated SHALL render in Simplified Chinese as well.
+
+#### Scenario: Consistent wording for repeated concepts
+
+- **WHEN** a concept already has an established `zh-CN` translation on one surface (e.g. 账户消耗预测 in the settings appearance section)
+- **THEN** other surfaces referencing the same concept reuse that wording instead of introducing a synonym
+
+#### Scenario: Mixed-label groups render fully in Chinese
+
+- **WHEN** a filter group or table header contains several labels and some already render in Simplified Chinese (e.g. 状态, 类型)
+- **THEN** the remaining labels in that group render in Simplified Chinese (e.g. 触发方式) instead of falling back to English
+
+### Requirement: Dashboard numeric units stay locale-independent
+
+Dashboard quantities that use compact formatting SHALL use `K`, `M`, and `B`
+suffixes regardless of the selected interface locale so requests, tokens,
+balances, pool totals, projections, and configured thresholds remain directly
+comparable. Dashboard USD values SHALL use the `$` prefix across locales.
+
+#### Scenario: Simplified Chinese compact quantity display
+
+- **WHEN** a user selects `zh-CN`
+- **AND** views compact request, token, or credit quantities
+- **THEN** 10,200 renders as `10.2K`
+- **AND** 1,500,000 renders as `1.5M`
+- **AND** 1,500,000,000 renders as `1.5B`
+- **AND** 12 USD renders as `$12.00`
+
+### Requirement: Reports per-day averages use the inclusive local calendar window
+
+`GET /api/reports` MUST calculate `summary.avgCostPerDay` and
+`summary.avgRequestsPerDay` by dividing the current report totals by exactly
+`(end_date - start_date).days + 1`. The divisor MUST represent the selected
+inclusive local calendar-date window and MUST NOT be derived from the
+UTC-converted filter boundaries.
+
+#### Scenario: Offset-to-zero transition keeps a two-day divisor
+
+- **WHEN** an operator requests `2026-02-15` through `2026-02-16` in
+  `Africa/Casablanca` and the report totals are 60 cost units and 30 requests
+- **THEN** `avgCostPerDay` is `30`
+- **AND** `avgRequestsPerDay` is `15`
+
+#### Scenario: Offset-from-zero transition keeps a two-day divisor
+
+- **WHEN** an operator requests `2026-03-22` through `2026-03-23` in
+  `Africa/Casablanca` and the report totals are 60 cost units and 30 requests
+- **THEN** `avgCostPerDay` is `30`
+- **AND** `avgRequestsPerDay` is `15`
+
+### Requirement: Dashboard status separates service readiness from usage synchronization
+
+The fixed dashboard status bar MUST render independent `Service ready` and
+`Usage synced` signals. `Service ready` MUST use the existing `/health/ready`
+response and MUST treat a failed request or a non-`ok` status as not ready.
+`Usage synced` MUST remain derived only from the dashboard overview
+`lastSyncAt` value and MUST be fresh only while that timestamp is less than 60
+seconds old. The service-readiness signal MUST NOT use upstream account or
+provider health. The dashboard layout MUST reserve at least the status bar's
+rendered height so wrapped status rows do not cover page content.
+
+#### Scenario: Ready service with stale usage
+
+- **WHEN** `/health/ready` returns `status: "ok"`
+- **AND** `lastSyncAt` is absent or at least 60 seconds old
+- **THEN** the status bar shows the service as ready
+- **AND** independently shows usage as stale
+
+#### Scenario: Unready service with fresh usage
+
+- **WHEN** `/health/ready` fails or returns a non-`ok` status
+- **AND** `lastSyncAt` is less than 60 seconds old
+- **THEN** the status bar shows the service as not ready
+- **AND** independently shows usage as synced
+
+#### Scenario: Readiness is still being checked
+
+- **WHEN** the initial `/health/ready` request has not completed
+- **THEN** the service-readiness signal shows a checking state
+- **AND** the usage synchronization signal remains independently derived from
+  `lastSyncAt`
+
+#### Scenario: Status signals wrap onto additional rows
+
+- **WHEN** the fixed status bar grows because its signals wrap
+- **THEN** the dashboard updates its reserved bottom space to the rendered
+  status-bar height
+- **AND** the fixed status bar does not cover page content
+
+### Requirement: Dashboard conversation listing
+
+The authenticated dashboard MUST expose `GET /api/conversations`. The list
+endpoint MUST accept `limit`, `offset`, `search`, `since`, and `timeframe` query
+parameters. The server-authoritative `timeframe` parameter MUST accept `1d`,
+`7d`, or `30d`; when it is supplied, the server MUST derive the activity window
+from the shared dashboard timeframe configuration and the client MUST NOT
+substitute a browser-clock-generated `since` value. `timeframe` and `since` MUST
+not be supplied together. When `since` is omitted, the server MUST apply a
+rolling 30-day lower bound;
+explicitly older `since` values MUST be capped at that same bound, and incoming
+timezone-aware datetimes MUST be normalized to naive UTC before querying. It
+MUST aggregate eligible `request_logs` rows by the raw, non-empty
+`conversation_id` column, excluding rows whose request kind is `warmup` or
+`limit_warmup`, and rows with `deleted_at IS NOT NULL`. Production request-log
+writes MUST normalize ASCII padding and blank conversation IDs before storage;
+conversation list, facet, and detail queries MUST use raw-column
+`conversation_id` predicates and grouping rather than function-wrapped
+expressions.
+
+Search MUST be case-insensitive and match the normalized conversation ID or any
+eligible row's user-agent family. Search MUST select whole conversations first:
+after a conversation matches, aggregation MUST include all eligible rows in that
+conversation, including rows whose user-agent family or ID did not match the
+search text. The endpoint MUST derive aggregates from `request_logs` only.
+
+When `since` is provided, a conversation MUST be selected when at least one
+eligible row has `requested_at >= since`. A conversation MAY have eligible rows
+before `since` and MUST still be included when it has activity in the window.
+The grouped summary MUST aggregate all eligible rows for every selected
+conversation, so `firstRequest`, `lastRequest`, `requestCount`, token totals,
+cached-token totals, and cost MUST NOT be clipped to the window. Membership MUST
+be implemented as an in-window aggregate condition and MUST NOT use a global
+pre-window ID set or a pre-window anti-join.
+
+After page membership is selected, the account, API-key, and model facet
+queries for the returned page MUST use the same full eligible-row scope as the
+summary, restricted only by the selected page's raw `conversation_id` values.
+The facet queries MUST NOT add a `requested_at >= since` restriction after
+membership selection; facet representatives and remaining counts MUST include
+eligible history before `since` and MUST remain consistent with the full-history
+summary aggregates.
+
+The response MUST contain `conversations`, `total`, and `hasMore` pagination
+fields. Each row in `conversations` MUST contain exactly these fields and no
+response summary object:
+
+- `conversationId`: the normalized, non-empty conversation identity.
+- `firstRequest`: the earliest `requested_at` among all eligible rows in the
+  conversation.
+- `lastRequest`: the latest `requested_at` among all eligible rows in the
+  conversation.
+- `requestCount`: the number of eligible rows in the conversation.
+- `representativeAccount` and `remainingAccountCount`.
+- `apiKeyId` and `apiKeyName`.
+- `representativeModel` and `remainingModelCount`.
+- `totalTokens`.
+- `cachedInputTokens`.
+- `totalCostUsd`.
+
+The camelCase names above are the external Dashboard API JSON contract. Python
+schema, service, and repository identifiers MAY remain snake_case internally;
+internal names MUST NOT be emitted as alternate response fields.
+
+`totalTokens` MUST equal total input tokens plus total output tokens, with
+`reasoning_tokens` used for a row when `output_tokens` is null.
+`cachedInputTokens` MUST use the existing per-row clamp: null remains null;
+otherwise the cached value is clamped to `[0, input_tokens]` when input tokens
+are present. At aggregate level, null per-row values MUST NOT be converted to
+zero; when every eligible row has a null cached value, `cachedInputTokens` MUST
+be null, and otherwise it MUST equal the sum of the known clamped values.
+
+Representative account values MUST use `request_count DESC,
+latest_requested_at DESC, lexical account ASC`. List model values MUST be
+grouped by distinct model, combining all reasoning efforts for that model, and
+the representative model MUST use `request_count DESC, latest_requested_at DESC,
+model lexical ASC`. Null account values MUST be excluded from account
+candidates; if no non-null account exists, `representativeAccount` MUST be null
+and `remainingAccountCount` MUST be 0. The list MUST NOT split model values by
+`reasoning_effort`; `(model, reasoning_effort)` grouping MUST be used only for
+conversation details.
+
+Nullable and multiple-key conversations MUST be handled deterministically. Null
+API-key values MUST not be candidates; if no non-null key exists, both API-key
+fields MUST be null. When multiple distinct non-null keys exist, `apiKeyId` MUST be selected by
+`request_count DESC, latest_requested_at DESC, lexical API-key ID ASC`, and
+`apiKeyName` MUST be the corresponding existing dashboard-safe display name.
+`apiKeyName` MUST never expose a secret, hash, or plaintext key material.
+
+The list order MUST be stable: `lastRequest DESC`, then normalized
+`conversationId ASC`. Pagination MUST be applied after this ordering.
+
+#### Scenario: Pagination uses the stable list order
+
+- **GIVEN** matching conversations have different latest request times and a
+  tie exists on `lastRequest`
+- **WHEN** the client calls `GET /api/conversations?limit=10&offset=20`
+- **THEN** rows are ordered by `lastRequest DESC` and ties by normalized
+  `conversationId ASC`
+- **AND** the response starts at the 21st row in that order and reports the
+  matching total and whether another page exists
+
+#### Scenario: Blank IDs, warmups, and soft-deleted rows are excluded
+
+- **GIVEN** request logs include null IDs, whitespace-only IDs, `warmup` rows,
+  `limit_warmup` rows, soft-deleted rows, and eligible rows with non-empty IDs
+- **WHEN** the client calls `GET /api/conversations`
+- **THEN** only rows whose request kind is neither `warmup` nor `limit_warmup`,
+  which are non-soft-deleted and have non-empty normalized IDs, contribute to
+  returned conversations
+
+#### Scenario: Search selects whole conversations
+
+- **GIVEN** one eligible conversation contains a matching user-agent family on
+  one row and non-matching user-agent/ID values on other rows
+- **WHEN** the client calls `GET /api/conversations?search=opencode`
+- **THEN** that conversation is selected
+- **AND** all eligible rows in that conversation contribute to its counts,
+  tokens, cached tokens, and cost
+- **AND** rows from conversations with no matching ID or user-agent family are
+  not returned
+
+#### Scenario: List search is case-insensitive over normalized IDs and user-agent families
+
+- **GIVEN** an eligible conversation has a normalized ID and user-agent family
+  whose letters differ in case from the search text
+- **WHEN** the client calls `GET /api/conversations?search=OPENCODE`
+- **THEN** the conversation is selected when either the normalized ID or any
+  eligible row's user-agent family matches case-insensitively
+
+#### Scenario: Since filter selects conversations active in the window
+
+- **GIVEN** conversation `conv-old` has its earliest eligible row at `t-10d`
+  and a later row at `t-1d`, and conversation `conv-new` has its earliest
+  eligible row at `t-1d`
+- **WHEN** the client calls `GET /api/conversations?since=<t-7d ISO>`
+- **THEN** both `conv-new` and `conv-old` are returned
+- **AND** `conv-old` is included because it has a row inside the window even
+  though its first message predates the window
+- **AND** both conversations' summaries aggregate every eligible row, not only
+  rows at or after `since`
+
+#### Scenario: Since membership and facets share the full conversation scope
+
+- **GIVEN** a selected conversation has eligible account, API-key, and model
+  values both before and after the `since` boundary
+- **WHEN** the client calls `GET /api/conversations?since=<ISO>`
+- **THEN** `firstRequest`, `lastRequest`, `requestCount`, and summary totals
+  include all eligible rows for the conversation
+- **AND** account, API-key, and model facet counts and representatives include
+  all eligible rows in the selected conversation, including rows before `since`
+
+#### Scenario: Since filter composes with search and pagination
+
+- **GIVEN** two conversations have activity inside the `since` window and only
+  one matches the search text
+- **WHEN** the client calls `GET /api/conversations?since=<ISO>&search=opencode`
+- **THEN** only the matching conversation is returned
+- **AND** the response total and hasMore reflect the since-and-search filtered
+  set
+
+#### Scenario: List model representatives ignore reasoning effort
+
+- **GIVEN** a conversation has requests for the same model with multiple
+  reasoning-effort values and requests for another model
+- **WHEN** the client calls `GET /api/conversations`
+- **THEN** the list groups the same model's requests into one model value
+- **AND** the representative model is ordered by request count descending,
+  latest request descending, and model lexical ascending
+- **AND** the remaining model count counts distinct models, not model/effort
+  combinations
+
+#### Scenario: API-key representation is safe and deterministic
+
+- **GIVEN** a conversation has null API-key rows and multiple non-null API-key
+  values with tied counts
+- **WHEN** the client calls `GET /api/conversations`
+- **THEN** null values do not become the representative
+- **AND** the non-null representative is selected by count, latest request, and
+  lexical API-key ID
+- **AND** the response contains only the corresponding dashboard-safe name and
+  never secret, hash, or plaintext key material
+
+### Requirement: Dashboard conversation activity uses the list eligibility scope
+
+The dashboard overview conversation metrics and per-bucket conversation trend
+MUST use the same eligible `request_logs` row scope as the conversation list:
+non-empty conversation IDs, request kinds other than `warmup` and
+`limit_warmup`, and `deleted_at IS NULL`. This scope MUST apply to both the
+distinct conversation count and conversation request count in the overview
+summary and to each conversation trend bucket.
+
+#### Scenario: Soft-deleted-only conversations are absent from dashboard activity
+
+- **GIVEN** the selected timeframe contains an eligible conversation and a
+  second conversation whose only rows are soft-deleted
+- **WHEN** the client requests the conversation list and dashboard overview for
+  that timeframe
+- **THEN** the list total and summary conversation count include only the
+  eligible conversation
+- **AND** the summary conversation request count and conversation trend contain
+  no contribution from the soft-deleted-only conversation
+
+### Requirement: Conversation listing total is served from a short-TTL cache
+
+The grouped `total` returned by `GET /api/conversations` is display-only
+pagination metadata that tolerates short staleness, and the dashboard polls the
+endpoint every 30 seconds. Recomputing the grouped count over the full eligible
+`request_logs` history on every poll risks the same dashboard-induced
+database contention this repository has previously optimized away.
+
+The conversation listing total MUST be served from the same short-TTL
+per-filter-signature cache as the request-log listing total (fixed 30 s TTL
+application constant; bounded LRU-ish eviction; per-instance). The cache
+signature MUST include every dimension that changes the grouped count: `search`
+and the semantic window identity MUST be included, using
+`("timeframe", timeframe)` for server-authoritative timeframe requests and
+`("since", effective_since)` for legacy `since` requests. `limit` and `offset`
+MUST be excluded from the signature because the total is page-independent. Two
+requests with different search text or window identities MUST NOT reuse one
+another's cached total.
+
+#### Scenario: Repeated polls reuse the cached conversation total
+
+- **GIVEN** the conversation listing has computed a total for a given
+  `search` and semantic window signature
+- **WHEN** the dashboard polls the same endpoint within the TTL with the same
+  signature
+- **THEN** the grouped count MUST NOT be recomputed
+- **AND** the response total MUST equal the previously computed value
+
+#### Scenario: Different window signatures isolate cached conversation totals
+
+- **GIVEN** two listing requests differ only by their timeframe or legacy
+  `since` window
+- **WHEN** their totals are served through the cache
+- **THEN** each request MUST use its own cache entry and grouped total
+
+#### Scenario: Search participates in the conversation total cache signature
+
+- **GIVEN** two listing requests differ only by the `search` text
+- **WHEN** their totals are served through the cache
+- **THEN** each request MUST use its own cache entry and grouped total
+
+### Requirement: Conversation details
+
+The authenticated dashboard MUST expose
+`GET /api/conversations/{conversation_id}`. Detail aggregation MUST use the same
+eligible-row scope as listing: normalized non-empty IDs, rows whose request kind
+is neither `warmup` nor `limit_warmup`, and `deleted_at IS NULL`.
+
+For a matching conversation, the detail response MUST expose the conversation ID,
+`start` (earliest `requested_at`), `latest` (latest `requested_at`),
+`accountCount` (distinct non-null accounts), `totalElapsedTime`, and
+`dominantUseragentGroup`. `totalElapsedTime` MUST be
+`SUM(COALESCE(latency_ms, 0))` over all eligible rows, never the wall-clock span.
+`dominantUseragentGroup` MUST use
+`request_count DESC, latest_requested_at DESC, lexical ASC`.
+
+The response MUST include one model/effort row per distinct
+`(model, reasoning_effort)` combination. Each row MUST contain exactly:
+`modelEffort`, `reqs`, `totalElapsedTime`, `totalInputTokens`,
+`cachedInputTokens`, `totalOutputTokens`, and `totalCostUsd`. The row
+elapsed time MUST use `SUM(COALESCE(latency_ms, 0))` for that combination;
+output tokens MUST use the reasoning-token fallback; cached input MUST use the
+existing per-row clamp. No error-count or other column may be returned.
+
+The API MUST order model/effort rows by `reqs DESC`, latest request DESC, and
+lexical key ASC. It MUST NOT accept a sort query parameter. Client-side sorting
+MUST operate only on returned rows.
+
+An encoded blank path such as `GET /api/conversations/%20` MUST return the
+project-standard 404 response. An unknown non-empty conversation ID MUST also
+return the project-standard 404 response. The detail route MUST accept any
+normalized non-empty stored conversation ID, including IDs containing `/`, when
+the client percent-encodes the opaque ID as one path value.
+
+#### Scenario: Details preserve cumulative elapsed time
+
+- **GIVEN** a conversation has known latencies across multiple accounts and
+  model/effort combinations
+- **WHEN** the client calls `GET /api/conversations/conv-a`
+- **THEN** conversation `totalElapsedTime` is the sum of
+  `COALESCE(latency_ms, 0)` across eligible rows
+- **AND** each model/effort row uses the same cumulative sum over its matching
+  rows rather than the start/latest wall-clock span
+
+#### Scenario: Details exclude warmups and soft-deleted rows
+
+- **GIVEN** a conversation contains normal, `warmup`, `limit_warmup`, and
+  soft-deleted request logs
+- **WHEN** the client calls `GET /api/conversations/conv-a`
+- **THEN** the summary and every model/effort row include only rows whose request
+  kind is neither `warmup` nor `limit_warmup` and which are non-soft-deleted
+
+#### Scenario: Blank and unknown detail IDs use standard not-found behavior
+
+- **WHEN** the client calls `GET /api/conversations/%20` or requests an unknown
+  non-empty ID
+- **THEN** the API returns the standard 404 error envelope
+
+#### Scenario: Slash-containing detail IDs remain addressable
+
+- **GIVEN** an eligible conversation has the normalized ID `workspace/thread-1`
+- **WHEN** the client calls `GET /api/conversations/workspace%2Fthread-1`
+- **THEN** the API returns that conversation's details with
+  `conversationId` equal to `workspace/thread-1`
+
+### Requirement: Dashboard conversation view
+
+The dashboard MUST render Request Logs by default. The original uppercase
+section-title typography MUST be retained, and the title itself MUST be the
+single accessible Radix-style selector trigger with `ChevronDown` for Request
+Logs and Conversations. A separate selector MUST NOT render to the title's
+right. Selecting Conversations MUST persist `view=conversations` in the URL;
+selecting Request Logs MUST return to the existing request-log view.
+
+The dashboard MUST retain separate URL-backed query state for Request Logs and
+Conversations, including each view's applicable filters and pagination.
+Switching views MUST NOT reinterpret, overwrite, or clear the inactive view's
+query state, and returning to a view MUST restore its retained state.
+
+The Conversations view MUST NOT render a free-text filter input above the list.
+The view MUST render a day-range selector with exactly three options — `1d`,
+`7d`, and `30d` — placed at the top-right of the dashboard page alongside the
+refresh action and shown only while the Conversations view is active. The
+selector MUST default to `7d`. The selected value MUST be persisted in the URL
+as `conversationTimeframe`, MUST drive the list endpoint's `timeframe` query
+parameter using the same symbolic key (the server derives the effective window),
+and MUST NOT generate a browser-clock-derived `since` parameter. It MUST reset
+pagination to offset 0 on change. The selector's values and default
+MUST mirror the dashboard overview timeframe selector, with no unbounded
+"all" option. The view MUST use the list endpoint's
+established loading, error, empty, and pagination behavior.
+While Conversations is active, the dashboard overview query that supplies the
+statistics cards MUST use the active `conversationTimeframe`, including on the
+initial render when that value is restored from the URL. The independently
+retained `overviewTimeframe` MUST continue to drive the overview query when
+Request Logs is active.
+
+The conversation list MUST render exactly these columns in order: Last request,
+Conversation, Accounts, API key, Models, Tokens, Cost, and Details. Last request
+MUST use the request-log Time column's two-line time/date presentation. Accounts
+MUST resolve the representative account ID through the dashboard account
+summaries and display `displayName`, then email, then the ID as a final fallback.
+Accounts and models MUST render remaining values as a smaller muted `+ N more`
+secondary line. Tokens MUST show total tokens with cached input tokens on a
+subordinate line.
+When dashboard privacy blur is enabled, an account label resolved from an email
+fallback MUST render with the established `privacy-blur` class; display-name
+and account-ID fallback labels MUST remain unblurred.
+The API-key column MUST use `apiKeyName` only. Details MUST use the existing
+Details button treatment.
+
+The details dialog MUST render row one as conversation ID, start, and latest;
+row two as account count, total elapsed time, and dominant user-agent family;
+and a model/effort table with exactly these displayed columns, in order: Model
+(effort), Reqs, Total elapsed, Total input (with total cache as a
+subordinate/parenthetical value), Total output, and Total cost. Total cache MUST
+not be a separate displayed column. The table MUST default to Reqs descending
+and MUST support client-side sorting for every displayed column without adding a
+sort query parameter.
+The displayed conversation ID MUST NOT provide a copy action.
+
+The detail dialog MUST use the established dashboard loading state while the
+detail API is pending. Unknown or malformed conversation IDs, including a
+standard detail API 404, MUST use the standard dashboard error display and retry
+behavior. Nullable optional aggregate values MUST render the established
+em-dash or other dashboard fallback value without breaking the row or dialog.
+An empty conversation list MUST render the established dashboard empty state.
+When an empty conversation list is returned for a nonzero pagination offset, the
+Conversations view MUST retain its pagination controls so the operator can
+navigate back to the first or previous page. The initial empty state at offset
+zero MUST NOT render pagination controls.
+
+#### Scenario: Request Logs is the default and selector switches views
+
+- **WHEN** an operator opens the dashboard
+- **THEN** Request Logs is visible and active by default
+- **WHEN** the operator selects Conversations
+- **THEN** the Conversations list renders and the URL contains
+  `view=conversations`
+
+#### Scenario: Request Logs and Conversations retain independent URL query state
+
+- **GIVEN** Request Logs has active filters and pagination and Conversations has
+  different active filters and pagination retained in the URL
+- **WHEN** the operator switches between the two views
+- **THEN** each view restores its own filters and pagination
+- **AND** switching views does not reinterpret, overwrite, or clear the other
+  view's query state
+
+#### Scenario: Conversations has no free-text filter and renders the day selector
+
+- **WHEN** the operator opens the Conversations view
+- **THEN** no free-text filter input is rendered above the list
+- **AND** a day-range selector with exactly `1d`, `7d`, and `30d` options is
+  rendered at the top-right of the dashboard page alongside the refresh action
+- **AND** the selector defaults to `7d` and no unbounded "all" option is offered
+- **AND** the list renders the specified reordered columns and two-line request
+  time presentation
+- **AND** representative account IDs resolve to display name, then email, then ID
+- **AND** smaller muted `+ N more` account/model secondary lines and cached
+  tokens as a subordinate line are rendered
+
+#### Scenario: Conversation day selector persists in the URL and drives timeframe
+
+- **WHEN** the operator changes the Conversations day selector from `7d` to `30d`
+- **THEN** the URL gains `conversationTimeframe=30d` (or drops the param when the
+  default `7d` is selected)
+- **AND** the list endpoint is called with `timeframe=30d`
+- **AND** the list endpoint does not receive a browser-clock-derived `since`
+- **AND** pagination resets to offset 0
+
+#### Scenario: Conversation timeframe drives active dashboard statistics
+
+- **GIVEN** the URL restores `conversationTimeframe=30d` while
+  `overviewTimeframe` is absent or has a different value
+- **WHEN** the operator opens the Conversations view
+- **THEN** the statistics-card overview query uses the `30d` timeframe
+- **AND** the conversation list uses `timeframe=30d`
+- **AND** the independently retained overview timeframe remains unchanged
+  for the Request Logs view
+
+#### Scenario: Conversation day selector state is independent per view
+
+- **GIVEN** the Conversations day selector is set to `30d`
+- **WHEN** the operator switches to Request Logs and back to Conversations
+- **THEN** the Conversations view restores its retained `30d` selector state
+- **AND** the Request Logs view state is unaffected
+
+#### Scenario: Conversation account privacy blur applies only to email fallback
+
+- **GIVEN** dashboard privacy blur is enabled and account labels resolve using
+  display name, email fallback, and account-ID fallback values
+- **WHEN** the Conversations list renders
+- **THEN** only the email-fallback label has the established `privacy-blur` class
+- **AND** the display-name and account-ID fallback labels remain unblurred
+
+#### Scenario: The original-styled title is the only view selector
+
+- **WHEN** the list section renders
+- **THEN** its uppercase title typography is retained
+- **AND** activating the title opens the Request Logs/Conversations selector
+- **AND** no separate selector is rendered to the title's right
+
+#### Scenario: Conversation details use established loading and retry states
+
+- **WHEN** the detail API is loading for a selected conversation
+- **THEN** the dialog uses the established dashboard loading state
+- **WHEN** the detail API returns an unknown or malformed-ID error
+- **THEN** the dialog uses the standard dashboard error display with retry
+
+#### Scenario: Nullable detail aggregates use dashboard fallbacks
+
+- **GIVEN** a successful detail response contains nullable optional aggregate
+  values
+- **WHEN** the operator opens the details dialog
+- **THEN** each nullable value renders the established em-dash or dashboard
+  fallback without breaking the row or dialog
+
+#### Scenario: Empty conversation results use the existing empty state
+
+- **GIVEN** the conversation list response contains no rows
+- **WHEN** the operator opens the Conversations view
+- **THEN** the existing dashboard empty state is rendered
+
+#### Scenario: Empty later conversation pages retain pagination controls
+
+- **GIVEN** the operator is on a nonzero Conversations page and the list
+  response contains no rows
+- **WHEN** the Conversations view renders the response
+- **THEN** the existing dashboard empty state is rendered
+- **AND** pagination controls remain visible
+- **AND** the first-page and previous-page controls provide a path back to
+  earlier results
+
+#### Scenario: Details dialog has the approved layout and sorting
+
+- **WHEN** the operator opens a conversation's Details dialog
+- **THEN** row one contains conversation ID/start/latest
+- **AND** conversation ID has no copy action
+- **AND** row two contains account count/total elapsed/dominant user-agent
+- **AND** the table displays exactly Model (effort), Reqs, Total elapsed, Total
+  input (with total cache as a subordinate/parenthetical value), Total output,
+  and Total cost
+- **AND** the table initially sorts by Reqs descending
+- **AND** activating any displayed table column header reorders only the returned
+  rows client-side
+
+### Requirement: Conversation list exposes grouped request metrics
+
+`GET /api/conversations` SHALL include `requestCount` and `firstRequest` for
+every conversation. `requestCount` SHALL count all eligible request-log rows
+in that conversation, and `firstRequest` SHALL be the earliest eligible
+`requested_at`. Existing `lastRequest` SHALL remain the latest eligible
+`requested_at`.
+
+#### Scenario: A conversation aggregates request metrics
+
+- **GIVEN** one conversation has eligible requests at 10:00, 10:07, and
+  12:15
+- **WHEN** the conversation list is requested
+- **THEN** its `requestCount` is `3`
+- **AND** its `firstRequest` is the 10:00 timestamp
+- **AND** its `lastRequest` is the 12:15 timestamp
+- **AND** warmup, limit-warmup, deleted, blank-ID, and otherwise ineligible
+  rows do not affect those values
+
+### Requirement: Conversation list renders metrics and readable duration
+
+The dashboard SHALL render columns in this order: Last request, Lasted,
+Conversation, Accounts, API key, Models, Requests, Tokens, Cost, Details.
+The Lasted value SHALL use `lastRequest - firstRequest`, displaying `0s` for
+zero duration, seconds for durations under one minute, `xm ys` for durations
+under one hour, `xh ym` for durations under one day, and `xd yh` for durations
+of at least one day. The conversation-ID cell SHALL be top-aligned.
+
+#### Scenario: Duration uses two units and preserves zero
+
+- **WHEN** a row spans 2 hours and 15 minutes
+- **THEN** Lasted displays `2h 15m`
+- **WHEN** a row spans 2 days and 3 hours
+- **THEN** Lasted displays `2d 3h`
+- **WHEN** firstRequest equals lastRequest
+- **THEN** Lasted displays `0s`
+
+### Requirement: Fair-share congestion threshold is configurable from routing settings
+
+The dashboard routing settings MUST expose the API-key fair-share congestion threshold as a numeric field adjacent to the per-account capacity limits, accepting integers from 0 to 100 where 0 disables the gate, with null-inherits-environment semantics matching the per-account capacity overrides. Values outside 0-100 MUST be rejected by both the client-side validation and the settings API. The field's label, description, and validation copy MUST be localized in the en, ko, and zh-CN locale bundles.
+
+#### Scenario: Threshold round-trips through the settings API
+
+- **GIVEN** an operator sets the threshold to 80 in routing settings
+- **WHEN** the settings are saved and reloaded
+- **THEN** the field shows 80 and the settings API reports 80 as the effective value
+
+#### Scenario: Migrated null row inherits the environment default
+
+- **GIVEN** a deployment whose dashboard settings row predates the field (a migrated NULL column)
+- **AND** an environment-configured threshold
+- **WHEN** the effective settings are read
+- **THEN** the effective value inherits the environment setting
+
+#### Scenario: Out-of-range values are rejected
+
+- **GIVEN** an operator enters 101 or a negative number
+- **WHEN** they attempt to save
+- **THEN** the client blocks the save and the settings API rejects the value if submitted directly
+
+#### Scenario: Copy is localized in all three locales
+
+- **GIVEN** the dashboard language is set to en, ko, or zh-CN
+- **WHEN** routing settings render
+- **THEN** the threshold label and description display in the selected locale
+
+### Requirement: Appearance settings include date format toggle
+
+The Appearance settings section SHALL include a "Date format" toggle row with two options: "Default" and "ISO 8601". The toggle SHALL be placed between the Time format and Account rows settings. Selecting an option SHALL immediately apply the new format to applicable read-only date/time presentation text across the dashboard.
+
+#### Scenario: Default date format is selected initially
+
+- **WHEN** a user opens the Appearance settings section with no prior date format preference
+- **THEN** the "Default" option SHALL be selected (aria-pressed true)
+- **AND** applicable read-only date/time presentation text SHALL render using locale-dependent formatting
+
+#### Scenario: Switching to ISO 8601
+
+- **WHEN** the user clicks the "ISO 8601" option in the Date format row
+- **THEN** the "ISO 8601" option SHALL be selected
+- **AND** request log and conversation table cells SHALL display date on the top line in `YYYY-MM-DD` format and time on the bottom line in `HH:MM:SS` format
+- **AND** the preference persists across page reloads
+
+### Requirement: Accounts and API trend chart x-axis uses MM-DD format
+
+The x-axis tick format of the Account Trend and API Trend charts SHALL be `MM-DD` (month and day extracted from the ISO timestamp data key), matching the reports chart convention. This format SHALL be locale-independent.
+
+#### Scenario: Account trend chart x-axis ticks
+
+- **WHEN** the Account Trend chart renders with timestamp data
+- **THEN** the x-axis tick labels SHALL be in `MM-DD` format (e.g., `"08-09"`)
+
+#### Scenario: API trend chart x-axis ticks
+
+- **WHEN** the API Trend chart renders with timestamp data
+- **THEN** the x-axis tick labels SHALL be in `MM-DD` format (e.g., `"08-09"`)
+

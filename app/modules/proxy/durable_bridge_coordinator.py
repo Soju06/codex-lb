@@ -601,6 +601,7 @@ class DurableBridgeSessionCoordinator:
         event_text: str,
         max_bytes: int,
         state: str,
+        expected_recovery_dispatch_count: int = 0,
         response_id: str | None = None,
     ) -> bool:
         async with self._session() as session:
@@ -612,6 +613,7 @@ class DurableBridgeSessionCoordinator:
                 event_text=event_text,
                 max_bytes=max_bytes,
                 state=state,
+                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 response_id=response_id,
             )
 
@@ -641,6 +643,32 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+            )
+
+    async def settle_terminal_append_failure(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        state: str,
+        expected_response_id: str | None,
+        expected_recovery_dispatch_count: int = 0,
+        alternate_expected_response_id: str | None = None,
+        response_id: str | None = None,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).settle_terminal_append_failure(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                state=state,
+                expected_response_id=expected_response_id,
+                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                alternate_expected_response_id=alternate_expected_response_id,
+                response_id=response_id,
             )
 
     async def update_operation(

@@ -86,6 +86,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_needs_unanchored_handoff,
     _http_bridge_request_stage,
     _http_bridge_requires_cluster_registration,
+    _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _http_bridge_runtime_config,
     _http_bridge_should_attempt_local_bootstrap_rebind,
     _http_bridge_should_attempt_local_previous_response_recovery,
@@ -103,6 +104,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _release_http_bridge_unanchored_handoffs_for_request,
     _reserve_http_bridge_unanchored_handoff,
     _trim_http_bridge_previous_response_input_items,
+)
+from app.modules.proxy._service.http_bridge.owner_forwarding import (
+    _owner_forward_failure_allows_local_recovery,
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_session_key_quarantined,
@@ -166,6 +170,7 @@ from app.modules.proxy._service.support import (
     _is_local_account_cap_code,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
+    _signal_propagated_responses_service_cleanup_ready,
     _ttft_event_visible_at,
     _WebSocketRequestState,
 )
@@ -204,6 +209,7 @@ from app.modules.proxy._service.warmup import (
 )
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
+    _codex_backend_identity,
     _extract_model_class,
     _prompt_cache_key_from_request_model,
     _request_allows_bare_session_cap_spillover,
@@ -929,17 +935,11 @@ class _HTTPBridgeStreamingMixin:
         payload_size_estimate_bytes = len(
             json.dumps(payload.to_payload(), ensure_ascii=True, separators=(",", ":")).encode("utf-8")
         )
-        # File pins are process-local. A remote owner must trust only the
-        # origin-resolved value carried by the authenticated forward context;
-        # re-looking it up here would turn a valid cross-replica pin into a miss.
-        local_file_owner_account_id = (
-            None
-            if forwarded_file_owner_account_id is not None
-            else await self._resolve_file_account_for_responses(payload, headers)
-        )
-        rewritten_file_account_id = resolve_required_account_id(
-            ("signed forwarding context", forwarded_file_owner_account_id),
-            ("local file pin", local_file_owner_account_id),
+        rewritten_file_account_id = await self._resolve_forwarded_file_account_for_responses(
+            payload,
+            headers,
+            forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+            require_forwarded_file_owner=forwarded_request,
         )
         ws_payload_budget_bytes = _ws_transport_payload_budget_bytes(_service_get_settings())
         if runtime_config.enabled and payload_size_estimate_bytes > ws_payload_budget_bytes:
@@ -975,6 +975,7 @@ class _HTTPBridgeStreamingMixin:
                 suppress_text_done_events=suppress_text_done_events,
                 request_transport=_REQUEST_TRANSPORT_HTTP,
                 rewritten_file_account_id=rewritten_file_account_id,
+                file_account_resolution_complete=True,
                 upstream_stream_transport_override=force_upstream_stream_transport,
                 client_ip=client_ip,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
@@ -1183,7 +1184,9 @@ class _HTTPBridgeStreamingMixin:
             api_key=api_key,
         )
         sticky_key_source = "none"
-        if affinity.kind == StickySessionKind.CODEX_SESSION:
+        if affinity.codex_session_source == "thread_header":
+            sticky_key_source = "thread_header"
+        elif affinity.kind == StickySessionKind.CODEX_SESSION:
             sticky_key_source = (
                 "turn_state_header" if _sticky_key_from_turn_state_header(headers) is not None else "session_header"
             )
@@ -1227,6 +1230,13 @@ class _HTTPBridgeStreamingMixin:
             if not forwarded_request
             else None
         )
+        durable_session_header_alias = (
+            None
+            if _codex_backend_identity(headers).thread_id is not None
+            else session_header_fallback_key.affinity_key
+            if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
+            else incoming_session_header
+        )
         legacy_anchor_lookup = await _legacy_forward_anchor_lookup(
             durable_bridge=self._durable_bridge,
             bridge_session_key=bridge_session_key,
@@ -1254,11 +1264,9 @@ class _HTTPBridgeStreamingMixin:
                     session_key_value=bridge_session_key.affinity_key,
                     api_key_id=bridge_session_key.api_key_id,
                     turn_state=durable_lookup_turn_state,
-                    session_header=(
-                        session_header_fallback_key.affinity_key
-                        if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
-                        else incoming_session_header
-                    ),
+                    # A raw process alias is ambiguous when thread-id exists.
+                    # Exact turn/response aliases remain independent inputs.
+                    session_header=durable_session_header_alias,
                     previous_response_id=payload.previous_response_id,
                 )
             except ProxyResponseError:
@@ -1297,6 +1305,12 @@ class _HTTPBridgeStreamingMixin:
                         exc_info=True,
                     )
                 durable_lookup = None
+        if affinity.abandon_unavailable_legacy_owner:
+            # A verified goal restart deliberately resends all portable state.
+            # The old bridge row is therefore not additional ownership proof:
+            # promoting it to preferred_account_id below would bypass the only
+            # selection path allowed to atomically retire the raw sticky owner.
+            durable_lookup = None
         if durable_lookup is not None and durable_lookup.latest_response_id is not None:
             current_instance = _service_get_settings().http_responses_session_bridge_instance_id
             current_process_epoch = http_bridge_owner_process_epoch()
@@ -1641,6 +1655,7 @@ class _HTTPBridgeStreamingMixin:
             affinity = _AffinityPolicy()
             incoming_turn_state_header = None
             session_header_fallback_key = None
+            durable_session_header_alias = None
         owner_bound_full_resend_ignores_broad_session = (
             not forwarded_request
             and durable_full_resend_fresh_bridge_proof is not None
@@ -1655,6 +1670,7 @@ class _HTTPBridgeStreamingMixin:
             affinity = _AffinityPolicy(kind=StickySessionKind.CODEX_SESSION)
             incoming_session_header = None
             session_header_fallback_key = None
+            durable_session_header_alias = None
             _log_http_bridge_event(
                 "fresh_reattach_broad_session_owner_ignored",
                 bridge_session_key,
@@ -1925,6 +1941,12 @@ class _HTTPBridgeStreamingMixin:
                 else None
             )
             prior_operation_registered = request_state.operation_registered if preserve_operation_identity else False
+            prior_operation_attempt_generation = (
+                request_state.operation_attempt_generation if preserve_operation_identity else 0
+            )
+            prior_operation_persisted_response_id = (
+                request_state.operation_persisted_response_id if preserve_operation_identity else None
+            )
             failed_owner_id = request_state.preferred_account_id
             _log_http_bridge_event(
                 "owner_unavailable_fresh_resend",
@@ -1954,6 +1976,8 @@ class _HTTPBridgeStreamingMixin:
                 request_state.operation_fingerprint = prior_operation_fingerprint
                 request_state.operation_parent_response_id = prior_operation_parent_response_id
                 request_state.operation_registered = prior_operation_registered
+                request_state.operation_attempt_generation = prior_operation_attempt_generation
+                request_state.operation_persisted_response_id = prior_operation_persisted_response_id
                 request_state.operation_rebind_required = True
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
@@ -2044,7 +2068,9 @@ class _HTTPBridgeStreamingMixin:
                     previous_response_id=request_state.previous_response_id,
                     gateway_safe_mode=runtime_config.gateway_safe_mode,
                     allow_forward_to_owner=(
-                        not fresh_replay_excluded_account_ids and not force_local_recovery_creation
+                        not fresh_replay_excluded_account_ids
+                        and not force_local_recovery_creation
+                        and not affinity.abandon_unavailable_legacy_owner
                     ),
                     # A single-instance restart can leave an anchored durable
                     # row owned by the previous process epoch. Once the old
@@ -2160,6 +2186,8 @@ class _HTTPBridgeStreamingMixin:
                     yield line
                 return
             except ProxyResponseError as exc:
+                if not _owner_forward_failure_allows_local_recovery(exc):
+                    raise
                 if forwarded_any:
                     yield _partial_output_proxy_error_event_block(
                         exc,
@@ -2209,11 +2237,7 @@ class _HTTPBridgeStreamingMixin:
                                 session_key_value=bridge_session_key.affinity_key,
                                 api_key_id=bridge_session_key.api_key_id,
                                 turn_state=takeover_turn_state,
-                                session_header=(
-                                    session_header_fallback_key.affinity_key
-                                    if explicit_prompt_cache_key is not None and session_header_fallback_key is not None
-                                    else incoming_session_header
-                                ),
+                                session_header=durable_session_header_alias,
                                 previous_response_id=effective_payload.previous_response_id,
                             )
                         except Exception:
@@ -3420,6 +3444,8 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.operation_fingerprint = request_state.operation_fingerprint
                 retry_request_state.operation_parent_response_id = request_state.operation_parent_response_id
                 retry_request_state.operation_registered = request_state.operation_registered
+                retry_request_state.operation_attempt_generation = request_state.operation_attempt_generation
+                retry_request_state.operation_persisted_response_id = request_state.operation_persisted_response_id
                 retry_request_state.operation_rebind_required = request_state.operation_rebind_required
                 if recovery_path == "local_previous_response_error":
                     # The prior response.failed/error made the operation
@@ -3501,8 +3527,11 @@ class _HTTPBridgeStreamingMixin:
         preserve_durable_lease: bool = False,
     ) -> None:
         async with self._http_bridge_lock:
-            if self._http_bridge_sessions.get(session.key) is session:
-                self._http_bridge_sessions.pop(session.key, None)
+            # Pending settlement below may block or fail before resource close
+            # starts. Transfer canonical routing into detached lifecycle
+            # ownership first so capacity, invalidation, and shutdown continue
+            # to see the live socket and leases throughout that interval.
+            self._detach_http_bridge_session_locked(session.key, expected_session=session)
         async with session.pending_lock:
             session.queued_request_count = 0
         await self._fail_pending_websocket_requests(
@@ -3710,6 +3739,7 @@ class _HTTPBridgeStreamingMixin:
                 lifecycle = request_state.deferred_account_backoff_lifecycle
                 if lifecycle is not None:
                     lifecycle.settlement_owned = True
+                _signal_propagated_responses_service_cleanup_ready()
             except ProxyResponseError as exc:
                 if request_state.bridge_soft_capacity_reroute_allowed:
                     raise
@@ -3995,6 +4025,9 @@ class _HTTPBridgeStreamingMixin:
                         if not completed_delivery_in_progress:
                             keepalive_count += 1
                         if not completed_delivery_in_progress and keepalive_count >= max_keepalive_count:
+                            timed_out_retry_circuit_attempt_selection = (
+                                _http_bridge_retry_circuit_attempt_selection_for_pending_requests((request_state,))
+                            )
                             if not response_started:
                                 retried = False
                                 if not circuit_keepalive_waiting:
@@ -4185,9 +4218,10 @@ class _HTTPBridgeStreamingMixin:
                                             if keepalive_event is not None:
                                                 yield keepalive_event
                                             continue
-                                        await self._record_http_bridge_retry_circuit_failure(
+                                        await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
                                             session,
                                             detail="stream_idle_timeout",
+                                            selection=timed_out_retry_circuit_attempt_selection,
                                         )
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
                                             stream_idle_timeout_total.labels(surface="http_bridge").inc()

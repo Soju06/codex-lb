@@ -81,7 +81,7 @@ export default function App() {
             <Route path="/automations" element={<AutomationsPage />} />
             <Route path="/apis" element={<ApisPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/firewall" element={<Navigate to="/settings" replace />} />
+            <Route path="/firewall" element={<Navigate to="/settings?advanced=1#firewall" replace />} />
           </Route>
         </Routes>
       </AuthGate>

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.upstream_proxy.cache import get_upstream_route_cache
 from app.core.utils.time import utcnow
+from app.db.account_identity_lock import advisory_lock_key, lock_postgresql_account_identities
 from app.db.models import (
     Account,
     AccountLimitWarmup,
@@ -72,6 +72,10 @@ class AccountIdentityConflictError(Exception):
             f"Cannot overwrite account for email '{email}' because multiple matching accounts exist. "
             "Remove duplicates or enable import without overwrite."
         )
+
+
+class AccountIdentityRelockError(RuntimeError):
+    """Raised after identity membership changes across both bounded lock attempts."""
 
 
 class AccountsRepository:
@@ -197,6 +201,7 @@ class AccountsRepository:
         *,
         merge_by_email: bool | None = None,
         merge_by_chatgpt_identity: bool = False,
+        _identity_lock_attempt: int = 0,
     ) -> Account:
         dialect_name = self._dialect_name()
         sqlite_lock_acquired = False
@@ -212,27 +217,34 @@ class AccountsRepository:
             # exclusive on this dialect.
             await self._acquire_sqlite_merge_lock()
         elif dialect_name == "postgresql":
-            # Identity-keyed advisory lock must always be acquired when
-            # identity reconciliation is in play, regardless of
-            # merge_by_email. Two concurrent reauths for the same
-            # upstream chatgpt_account_id but different email claims
-            # (e.g. user changed email upstream) would otherwise take
-            # different email-scoped locks, both miss the canonical-row
-            # lookup below, and both INSERT a duplicate row for the
-            # same identity.
-            #
-            # Ordering identity-first, then email, gives a stable
-            # acquisition order across all callers so two concurrent
-            # reauths that overlap on either key serialize without
-            # deadlock.
-            identity_locked = False
-            if merge_by_chatgpt_identity and account.chatgpt_account_id:
-                await self._acquire_postgresql_identity_lock(f"chatgpt:{account.chatgpt_account_id}")
-                identity_locked = True
+            # Upstream identity membership always serializes before email
+            # locks and account row locks. This applies to ordinary imports as
+            # well as explicit identity reconciliation because either can add,
+            # replace, or remove a membership used by live-usage fallback.
+            locked_identities = await self._lock_postgresql_upsert_identity_candidates(
+                account,
+                include_email=bool(merge_by_email),
+            )
             if merge_by_email:
                 await self._acquire_postgresql_merge_lock(account.email)
-            elif not identity_locked:
+            elif not locked_identities:
                 await self._acquire_postgresql_identity_lock(account.id)
+            if not await self._postgresql_upsert_identity_candidates_are_locked(
+                account,
+                include_email=bool(merge_by_email),
+                locked_identities=locked_identities,
+            ):
+                await self._session.rollback()
+                if _identity_lock_attempt >= 1:
+                    raise AccountIdentityRelockError(
+                        "Account identity candidates changed during PostgreSQL upsert locking"
+                    )
+                return await self._upsert_unlocked(
+                    account,
+                    merge_by_email=merge_by_email,
+                    merge_by_chatgpt_identity=merge_by_chatgpt_identity,
+                    _identity_lock_attempt=_identity_lock_attempt + 1,
+                )
 
         # Identity-aware reconciliation runs before the deterministic-id
         # check so that a deactivated row whose refresh token was revoked
@@ -302,7 +314,13 @@ class AccountsRepository:
     async def replace_reauthorized(self, account_id: str, account: Account) -> Account | None:
         """Replace credentials on the exact local row selected for reauthentication."""
         async with sqlite_writer_section():
-            existing = await self._session.get(Account, account_id)
+            if self._dialect_name() == "postgresql":
+                existing = await self._lock_postgresql_account_identity_membership(
+                    account_id,
+                    account.chatgpt_account_id,
+                )
+            else:
+                existing = await self._session.get(Account, account_id)
             if existing is None:
                 return None
             await self._apply_account_replacement(existing, account)
@@ -344,6 +362,7 @@ class AccountsRepository:
         *,
         preserve_unknown_workspace_duplicates: bool | None = None,
         preserve_identity_slots: bool = False,
+        _identity_lock_attempt: int = 0,
     ) -> Account:
         if preserve_unknown_workspace_duplicates is None:
             preserve_unknown_workspace_duplicates = not await self._merge_by_email_enabled()
@@ -351,6 +370,10 @@ class AccountsRepository:
         if dialect_name == "sqlite":
             await self._acquire_sqlite_merge_lock()
         elif dialect_name == "postgresql":
+            locked_identities = await self._lock_postgresql_upsert_identity_candidates(
+                account,
+                include_email=True,
+            )
             for lock_key in sorted(
                 _slot_lock_keys(
                     account,
@@ -358,6 +381,22 @@ class AccountsRepository:
                 )
             ):
                 await self._acquire_postgresql_identity_lock(lock_key)
+            if not await self._postgresql_upsert_identity_candidates_are_locked(
+                account,
+                include_email=True,
+                locked_identities=locked_identities,
+            ):
+                await self._session.rollback()
+                if _identity_lock_attempt >= 1:
+                    raise AccountIdentityRelockError(
+                        "Account identity candidates changed during PostgreSQL slot locking"
+                    )
+                return await self._upsert_account_slot_unlocked(
+                    account,
+                    preserve_unknown_workspace_duplicates=preserve_unknown_workspace_duplicates,
+                    preserve_identity_slots=preserve_identity_slots,
+                    _identity_lock_attempt=_identity_lock_attempt + 1,
+                )
 
         existing = await self._account_by_slot_identity(account)
         if existing:
@@ -779,6 +818,10 @@ class AccountsRepository:
 
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         async with sqlite_writer_section():
+            if self._dialect_name() == "postgresql":
+                # Identity membership precedes the fold-state lock so live
+                # settlement and deletion cannot form an identity/fold cycle.
+                await self._lock_postgresql_account_identity_membership(account_id, None)
             # Serialize against fold passes before touching the account's
             # request logs: without the fold-state lock an in-flight hourly
             # slice could aggregate the pre-delete attribution but commit
@@ -843,6 +886,8 @@ class AccountsRepository:
         material at all).
         """
         async with sqlite_writer_section():
+            if self._dialect_name() == "postgresql":
+                await self._lock_postgresql_account_identity_membership(account_id, chatgpt_account_id)
             values: dict[str, bytes | datetime | str] = {
                 "access_token_encrypted": access_token_encrypted,
                 "refresh_token_encrypted": refresh_token_encrypted,
@@ -901,6 +946,8 @@ class AccountsRepository:
         no-op existence check.
         """
         async with sqlite_writer_section():
+            if self._dialect_name() == "postgresql":
+                await self._lock_postgresql_account_identity_membership(account_id, chatgpt_account_id)
             values: dict[str, str | datetime] = {}
             if plan_type is not None:
                 values["plan_type"] = plan_type
@@ -1047,6 +1094,75 @@ class AccountsRepository:
                 return matched
         return None
 
+    async def _lock_postgresql_account_identity_membership(
+        self,
+        account_id: str,
+        incoming_chatgpt_account_id: str | None,
+        *,
+        second_attempt: bool = False,
+    ) -> Account | None:
+        """Lock one row's old/new upstream memberships before mutating it."""
+        observed_identity = await self._session.scalar(
+            select(Account.chatgpt_account_id).where(Account.id == account_id)
+        )
+        await lock_postgresql_account_identities(
+            self._session,
+            (observed_identity, incoming_chatgpt_account_id),
+        )
+        locked_account = await self._session.scalar(
+            select(Account)
+            .where(Account.id == account_id)
+            # PostgreSQL FOR NO KEY UPDATE stabilizes identity membership but
+            # remains compatible with the KEY SHARE lock taken by concurrent
+            # rollup FK inserts. Deletion upgrades only after the fold lock.
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+        locked_identity = locked_account.chatgpt_account_id if locked_account is not None else None
+        if locked_identity == observed_identity:
+            return locked_account
+        await self._session.rollback()
+        if second_attempt:
+            raise AccountIdentityRelockError("Account identity changed during PostgreSQL membership lock acquisition")
+        return await self._lock_postgresql_account_identity_membership(
+            account_id,
+            incoming_chatgpt_account_id,
+            second_attempt=True,
+        )
+
+    async def _lock_postgresql_upsert_identity_candidates(
+        self,
+        account: Account,
+        *,
+        include_email: bool,
+    ) -> frozenset[str]:
+        predicates = _upsert_identity_candidate_predicates(account, include_email=include_email)
+        observed = (
+            (await self._session.execute(select(Account.chatgpt_account_id).where(or_(*predicates)))).scalars().all()
+        )
+        identities = frozenset(identity for identity in (*observed, account.chatgpt_account_id) if identity)
+        await lock_postgresql_account_identities(self._session, identities)
+        return identities
+
+    async def _postgresql_upsert_identity_candidates_are_locked(
+        self,
+        account: Account,
+        *,
+        include_email: bool,
+        locked_identities: frozenset[str],
+    ) -> bool:
+        predicates = _upsert_identity_candidate_predicates(account, include_email=include_email)
+        current = (
+            (
+                await self._session.execute(
+                    select(Account.chatgpt_account_id).where(or_(*predicates)).with_for_update(key_share=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return all(identity is None or identity in locked_identities for identity in current)
+
     def _dialect_name(self) -> str:
         return self._session.get_bind().dialect.name
 
@@ -1062,14 +1178,14 @@ class AccountsRepository:
             await self._session.execute(text("UPDATE accounts SET id = id WHERE 1 = 0"))
 
     async def _acquire_postgresql_merge_lock(self, email: str) -> None:
-        lock_key = _advisory_lock_key("merge-email", email)
+        lock_key = advisory_lock_key("merge-email", email)
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
             {"lock_key": lock_key},
         )
 
     async def _acquire_postgresql_identity_lock(self, account_id: str) -> None:
-        lock_key = _advisory_lock_key("account-id", account_id)
+        lock_key = advisory_lock_key("account-id", account_id)
         await self._session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
             {"lock_key": lock_key},
@@ -1125,6 +1241,15 @@ def _slot_lock_keys(account: Account, *, preserve_unknown_workspace_duplicates: 
     return (f"slot-local:{account.id}",)
 
 
+def _upsert_identity_candidate_predicates(account: Account, *, include_email: bool) -> list[Any]:
+    predicates = [Account.id == account.id]
+    if account.chatgpt_account_id:
+        predicates.append(Account.chatgpt_account_id == account.chatgpt_account_id)
+    if include_email and account.email:
+        predicates.append(Account.email == account.email)
+    return predicates
+
+
 def _same_unknown_workspace_identity(existing: Account, incoming: Account) -> bool:
     return (
         _workspace_slot_key(existing) is None
@@ -1176,8 +1301,3 @@ def _can_reuse_email_fallback(existing: Account, incoming: Account) -> bool:
         or not existing.chatgpt_account_id
         or existing.chatgpt_account_id == incoming.chatgpt_account_id
     )
-
-
-def _advisory_lock_key(scope: str, value: str) -> int:
-    digest = hashlib.sha256(f"{scope}:{value}".encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], byteorder="big", signed=True)

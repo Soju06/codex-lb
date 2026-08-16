@@ -1642,6 +1642,36 @@ def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:
     return texts
 
 
+def responses_input_contains_goal_continuation_context(input_value: JsonValue) -> bool:
+    """Return whether Responses input carries Codex's goal-continuation marker."""
+
+    if not is_json_list(input_value):
+        return False
+    for item in input_value:
+        if not is_json_mapping(item):
+            continue
+        for text in _compact_item_texts(item):
+            if text.lstrip().startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX):
+                return True
+    return False
+
+
+def responses_request_contains_goal_continuation_context(payload: ResponsesRequest) -> bool:
+    """Return whether a normalized request carries Codex's goal restart marker."""
+
+    # ResponsesRequest normalization lifts developer/system input messages into
+    # ``instructions``. The marker can therefore disappear from ``input`` and
+    # follow pre-existing instruction text by the time affinity is classified.
+    # Keep both locations in this check or a harmless parser refactor can
+    # silently break restart recovery while marker-preservation tests still pass.
+    instructions = payload.instructions
+    if isinstance(instructions, str) and any(
+        line.lstrip().startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX) for line in instructions.splitlines()
+    ):
+        return True
+    return responses_input_contains_goal_continuation_context(payload.input)
+
+
 def _compact_trimmed_input_with_markers(
     input_value: list[JsonValue], token_counts: list[int], selected_indices: set[int]
 ) -> list[JsonValue]:

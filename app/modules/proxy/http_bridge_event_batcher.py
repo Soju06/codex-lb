@@ -20,6 +20,15 @@ class _PendingOperationEvent:
     event_text: str
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalOperationEventAppendResult:
+    persisted: bool
+    settlement_required: bool = False
+
+    def __bool__(self) -> bool:
+        return self.persisted
+
+
 class HttpBridgeOperationEventBatcher:
     """Best-effort in-memory event buffer for the HTTP bridge.
 
@@ -240,8 +249,9 @@ class HttpBridgeOperationEventBatcher:
         event_text: str,
         max_bytes: int,
         state: str,
+        expected_recovery_dispatch_count: int = 0,
         response_id: str | None = None,
-    ) -> bool:
+    ) -> TerminalOperationEventAppendResult:
         """Drain queued events and atomically append the terminal outcome."""
         async with self._lock:
             self._contexts.setdefault(
@@ -260,7 +270,7 @@ class HttpBridgeOperationEventBatcher:
             context = self._contexts.get(operation_id)
             dropped = operation_id in self._dropped_operations
         if context is None:
-            return False
+            return TerminalOperationEventAppendResult(persisted=False)
         if dropped:
             try:
                 await self._durable_bridge.update_operation(
@@ -282,7 +292,7 @@ class HttpBridgeOperationEventBatcher:
                     self._closing_operations.discard(operation_id)
                     self._contexts.pop(operation_id, None)
                     self._dropped_operations.discard(operation_id)
-            return False
+            return TerminalOperationEventAppendResult(persisted=False)
         try:
             persisted = await self._durable_bridge.append_terminal_operation_event(
                 operation_id=operation_id,
@@ -292,21 +302,63 @@ class HttpBridgeOperationEventBatcher:
                 event_text=event_text,
                 max_bytes=max_bytes,
                 state=state,
+                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
                 response_id=response_id,
             )
-            return bool(persisted and not dropped)
+            return TerminalOperationEventAppendResult(persisted=bool(persisted and not dropped))
         except Exception:
             logger.debug(
                 "Failed to append terminal HTTP bridge event operation_id=%s",
                 operation_id,
                 exc_info=True,
             )
-            return False
+            return TerminalOperationEventAppendResult(
+                persisted=False,
+                settlement_required=True,
+            )
         finally:
             async with self._lock:
                 self._closing_operations.discard(operation_id)
                 self._contexts.pop(operation_id, None)
                 self._dropped_operations.discard(operation_id)
+
+    async def settle_terminal_event(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        state: str,
+        expected_response_id: str | None,
+        expected_recovery_dispatch_count: int = 0,
+        alternate_expected_response_id: str | None = None,
+        response_id: str | None = None,
+    ) -> None:
+        """Settle a failed terminal append after its SSE block was queued."""
+        try:
+            settled = await self._durable_bridge.settle_terminal_append_failure(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                state=state,
+                expected_response_id=expected_response_id,
+                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+                alternate_expected_response_id=alternate_expected_response_id,
+                response_id=response_id,
+            )
+            if not settled:
+                logger.warning(
+                    "Terminal HTTP bridge operation fallback settlement was fenced operation_id=%s",
+                    operation_id,
+                )
+        except Exception:
+            logger.warning(
+                "Failed to settle terminal HTTP bridge operation after event append failure operation_id=%s",
+                operation_id,
+                exc_info=True,
+            )
 
     async def flush_pending_operation(self, *, operation_id: str) -> bool:
         """Drain queued events while retaining the operation context."""

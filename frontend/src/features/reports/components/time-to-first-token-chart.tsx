@@ -12,6 +12,7 @@ import {
 import type { DailyReportRow } from "../schemas";
 import { buildContinuousDailyRows } from "../daily-series";
 import { ChartTooltip } from "./chart-tooltip";
+import { ReportChartCard } from "./report-chart-card";
 
 export type TimeToFirstTokenChartProps = {
   startDate: string;
@@ -31,9 +32,7 @@ export function TimeToFirstTokenChart({ startDate, endDate, data }: TimeToFirstT
   }));
 
   return (
-    <div className="rounded-xl border bg-card p-5">
-      <div className="text-sm font-semibold text-foreground">{t("reports.charts.timeToFirstToken")}</div>
-      <div className="mt-4 h-[200px]">
+    <ReportChartCard title={t("reports.charts.timeToFirstToken")} empty={data.length === 0}>
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={chartData} margin={{ top: 5, right: 10, left: 10, bottom: 0 }}>
             <defs>
@@ -69,7 +68,6 @@ export function TimeToFirstTokenChart({ startDate, endDate, data }: TimeToFirstT
             />
           </AreaChart>
         </ResponsiveContainer>
-      </div>
-    </div>
+    </ReportChartCard>
   );
 }

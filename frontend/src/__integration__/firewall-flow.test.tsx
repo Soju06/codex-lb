@@ -55,6 +55,7 @@ describe("firewall flow integration", () => {
 
     // Scope queries to the firewall section
     const firewallSection = firewallHeading.closest("section")!;
+    expect(firewallSection).toHaveClass("scroll-mt-16");
     const fw = within(firewallSection);
 
     await user.type(fw.getByPlaceholderText("127.0.0.1 or 2001:db8::1"), "127.0.0.1");
@@ -78,6 +79,9 @@ describe("firewall flow integration", () => {
 
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/settings");
-    expect(await screen.findByRole("button", { name: "Show advanced settings" })).toBeInTheDocument();
+    expect(window.location.search).toBe("?advanced=1");
+    expect(window.location.hash).toBe("#firewall");
+    expect(await screen.findByRole("heading", { name: "Firewall" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hide advanced settings" })).toBeInTheDocument();
   });
 });

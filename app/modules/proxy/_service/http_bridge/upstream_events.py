@@ -1889,48 +1889,58 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if grouped_request_state.event_queue is not None:
                     await grouped_request_state.event_queue.put(grouped_event_block)
                     await grouped_request_state.event_queue.put(None)
-            try:
-                for (
-                    grouped_request_state,
-                    grouped_event_block,
-                    grouped_event,
-                    grouped_payload,
-                    grouped_event_type,
-                    grouped_operation_state,
-                ) in grouped_terminal_events:
-                    await _persist_http_bridge_operation_event(
-                        self,
-                        session,
+
+            async def persist_grouped_terminal_events() -> None:
+                try:
+                    for (
                         grouped_request_state,
                         grouped_event_block,
-                        terminal=True,
-                        terminal_state=grouped_operation_state,
-                    )
-                    if grouped_operation_state is not None and grouped_operation_state != "failed":
-                        await _update_http_bridge_operation_state(
+                        grouped_event,
+                        grouped_payload,
+                        grouped_event_type,
+                        grouped_operation_state,
+                    ) in grouped_terminal_events:
+                        await _persist_http_bridge_operation_event(
                             self,
                             session,
                             grouped_request_state,
-                            state=grouped_operation_state,
-                            response_id=_websocket_downstream_response_id(grouped_request_state),
+                            grouped_event_block,
+                            terminal=True,
+                            terminal_state=grouped_operation_state,
                         )
-                    await self._finalize_websocket_request_state(
-                        grouped_request_state,
-                        account=session.account,
-                        account_id_value=session.account.id,
-                        event=grouped_event,
-                        event_type=grouped_event_type,
-                        payload=grouped_payload,
-                        api_key=grouped_request_state.api_key,
-                        upstream_control=session.upstream_control,
-                        response_create_gate=session.response_create_gate,
-                    )
-            finally:
-                # Grouped terminal errors settle detached/abandoned requests
-                # (event_queue is None) with no downstream stream finalizer
-                # left to run, so release the now-idle session's account
-                # stream lease here just like the single terminal path below.
-                await self._maybe_release_idle_http_bridge_session_lease(session)
+                        if grouped_operation_state is not None and grouped_operation_state != "failed":
+                            await _update_http_bridge_operation_state(
+                                self,
+                                session,
+                                grouped_request_state,
+                                state=grouped_operation_state,
+                                response_id=_websocket_downstream_response_id(grouped_request_state),
+                            )
+                        await self._finalize_websocket_request_state(
+                            grouped_request_state,
+                            account=session.account,
+                            account_id_value=session.account.id,
+                            event=grouped_event,
+                            event_type=grouped_event_type,
+                            payload=grouped_payload,
+                            api_key=grouped_request_state.api_key,
+                            upstream_control=session.upstream_control,
+                            response_create_gate=session.response_create_gate,
+                        )
+                finally:
+                    # Grouped terminal errors settle detached/abandoned requests
+                    # (event_queue is None) with no downstream stream finalizer
+                    # left to run, so release the now-idle session's account
+                    # stream lease here just like the single terminal path below.
+                    await self._maybe_release_idle_http_bridge_session_lease(session)
+
+            grouped_settlement_task = asyncio.create_task(
+                persist_grouped_terminal_events(),
+                name=f"http-bridge-grouped-terminal-settlement-{session.durable_session_id}",
+            )
+            _, grouped_cancellation = await _await_task_deferring_cancellation(grouped_settlement_task)
+            if grouped_cancellation is not None:
+                raise grouped_cancellation
             return
 
         if len(grouped_previous_response_request_states) == 1 and terminal_request_state is None:

@@ -985,6 +985,7 @@
   "reports.distribution.missingUserAgent": "缺少 User-Agent",
   "reports.distribution.total": "总计",
   "reports.errors.accounts": "加载账户选项失败：{{error}}",
+  "reports.errors.apiKeys": "加载 API 密钥选项失败：{{error}}",
   "reports.errors.data": "加载报表数据失败：{{error}}",
   "reports.errors.options": "加载 Model 和 User Agent 选项失败：{{error}}",
   "reports.errors.partial": "部分报表数据无法加载。请重试。",

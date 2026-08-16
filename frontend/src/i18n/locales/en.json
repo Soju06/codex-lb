@@ -987,6 +987,7 @@
   "reports.distribution.missingUserAgent": "Missing User-Agent",
   "reports.distribution.total": "Total",
   "reports.errors.accounts": "Failed to load account options: {{error}}",
+  "reports.errors.apiKeys": "Failed to load API key options: {{error}}",
   "reports.errors.data": "Failed to load report data: {{error}}",
   "reports.errors.options": "Failed to load model and user-agent options: {{error}}",
   "reports.errors.partial": "Some report data could not be loaded. Try reloading.",

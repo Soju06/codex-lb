@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { renderWithProviders } from "@/test/utils";
 import type { ReportsResponse } from "@/features/reports/schemas";
 import { listAccounts } from "@/features/accounts/api";
+import { listApiKeys } from "@/features/api-keys/api";
 import { getBrowserReportsTimeZone } from "@/features/reports/date";
 import { useReports } from "@/features/reports/hooks/use-reports";
 import { REPORT_CHART_VISIBILITY_STORAGE_KEY } from "@/features/reports/hooks/use-report-chart-visibility";
@@ -13,6 +14,10 @@ import { ReportsPage } from "./reports-page";
 
 vi.mock("@/features/accounts/api", () => ({
   listAccounts: vi.fn().mockResolvedValue({ accounts: [] }),
+}));
+
+vi.mock("@/features/api-keys/api", () => ({
+  listApiKeys: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@/features/reports/hooks/use-reports", () => ({
@@ -69,6 +74,7 @@ const EMPTY_REPORT: ReportsResponse = {
 
 const useReportsMock = vi.mocked(useReports);
 const listAccountsMock = vi.mocked(listAccounts);
+const listApiKeysMock = vi.mocked(listApiKeys);
 const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
 type UseReportsMockResult = ReturnType<typeof useReports>;
 const REPORTS_TIMEZONE_STORAGE_KEY = "codex-lb-reports-timezone";
@@ -81,9 +87,11 @@ describe("ReportsPage", () => {
   beforeEach(() => {
     useReportsMock.mockReset();
     listAccountsMock.mockReset();
+    listApiKeysMock.mockReset();
     getBrowserReportsTimeZoneMock.mockReset();
     window.localStorage.clear();
     listAccountsMock.mockResolvedValue({ accounts: [] });
+    listApiKeysMock.mockResolvedValue([]);
     getBrowserReportsTimeZoneMock.mockReturnValue("America/Los_Angeles");
   });
 
@@ -761,5 +769,33 @@ describe("ReportsPage", () => {
       }),
       "America/Los_Angeles",
     );
+  });
+
+  it("shows API key option load failures with a retry button instead of hiding empty selector silently", async () => {
+    useReportsMock.mockImplementation(() =>
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+    listApiKeysMock.mockRejectedValueOnce(
+      new Error("api keys backend timeout"),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(
+      await screen.findByText(
+        /Failed to load API key options: api keys backend timeout/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getAllByRole("button", { name: /api keys/i })
+        .find((button) => button.getAttribute("aria-haspopup") === "menu"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 });

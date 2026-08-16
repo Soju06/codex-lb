@@ -985,6 +985,7 @@
   "reports.distribution.missingUserAgent": "User-Agent 없음",
   "reports.distribution.total": "합계",
   "reports.errors.accounts": "Account 옵션을 불러오지 못했습니다: {{error}}",
+  "reports.errors.apiKeys": "API 키 옵션을 불러오지 못했습니다: {{error}}",
   "reports.errors.data": "report data를 불러오지 못했습니다: {{error}}",
   "reports.errors.options": "Model 및 User Agent 옵션을 불러오지 못했습니다: {{error}}",
   "reports.errors.partial": "일부 report data를 불러오지 못했습니다. 다시 불러오세요.",

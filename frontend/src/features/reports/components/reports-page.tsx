@@ -253,14 +253,55 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         </AlertMessage>
       ) : null}
       {sharedOptionsError ? (
-        <AlertMessage variant="error">
-          {t("reports.errors.options", { error: sharedOptionsError })}
-        </AlertMessage>
+        <div className="flex items-center justify-between gap-2">
+          <AlertMessage variant="error" className="flex-1">
+            {t("reports.errors.options", { error: sharedOptionsError })}
+          </AlertMessage>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void handleRetry();
+            }}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
       ) : null}
       {accountOptionsError ? (
-        <AlertMessage variant="error">
-          {t("reports.errors.accounts", { error: accountOptionsError })}
-        </AlertMessage>
+        <div className="flex items-center justify-between gap-2">
+          <AlertMessage variant="error" className="flex-1">
+            {t("reports.errors.accounts", { error: accountOptionsError })}
+          </AlertMessage>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void handleRetry();
+            }}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
+      ) : null}
+      {apiKeyOptionsError ? (
+        <div className="flex items-center justify-between gap-2">
+          <AlertMessage variant="error" className="flex-1">
+            {t("reports.errors.apiKeys", { error: apiKeyOptionsError })}
+          </AlertMessage>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void handleRetry();
+            }}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
       ) : null}
 
       {reportsQuery.isLoading ? (

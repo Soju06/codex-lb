@@ -21,13 +21,13 @@ The durable bridge already exposes `update_operation` with the same operation, s
 
 ## Decisions
 
-- On `append_terminal_operation_event` exception, schedule an owned background task that calls `update_operation` with the same operation ID, session ID, instance ID, owner epoch, intended terminal state, and response ID. This reuses the authoritative fenced repository operation without keeping a stalled fallback write on the terminal delivery-critical path.
-- Return `False` immediately after scheduling fallback settlement because the terminal transcript is still incomplete. Once settlement completes, recovery observes the terminal outcome but must not replay a transcript whose terminal event was not durable.
-- Log a rejected fence or fallback exception inside the owned task and do not re-raise. The terminal event has already been selected for downstream delivery, so bookkeeping failure must not replace or delay that event.
+- On `append_terminal_operation_event` exception, return an incomplete append result that explicitly requires fallback settlement. The relay queues the selected terminal SSE block before awaiting `update_operation` with the same operation ID, session ID, instance ID, owner epoch, intended terminal state, and response ID. This reuses the authoritative fenced repository operation without keeping the terminal event behind a stalled fallback write.
+- Keep fallback settlement structured in the relay task instead of detaching it. This bounds settlement concurrency to active relay operations and preserves settlement ownership through the existing request finalization order.
+- Log a rejected fence or fallback exception inside the batcher's settlement method and do not re-raise. The terminal event has already been queued for downstream delivery, so bookkeeping failure must not replace or delay that event.
 - Do not invoke fallback for ordinary `False` returns. The repository's bounded-spool overflow path already settles terminal state atomically, while a false owner fence must not be bypassed.
 
 ## Risks / Trade-offs
 
-- [A transient database failure can affect both append and fallback update] -> Run fallback settlement as an owned background task, preserve the non-blocking terminal path, and emit a warning for operator diagnosis.
+- [A transient database failure can affect both append and fallback update] -> Queue the terminal event before awaiting structured fallback settlement and emit a warning for operator diagnosis.
 - [A stale owner could attempt to settle another owner's operation] -> Pass the unchanged session/instance/epoch fence and treat rejection as non-settlement.
-- [A failed terminal append leaves no replayable terminal event] -> Keep `event_spool_complete` false and return `False`; authoritative state and transcript completeness remain separate facts.
+- [A failed terminal append leaves no replayable terminal event] -> Keep `event_spool_complete` false and report `persisted=false`; authoritative state and transcript completeness remain separate facts.

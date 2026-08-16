@@ -61,6 +61,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistrationReceipt,
 )
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
+from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission
 
@@ -5152,6 +5153,72 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
     )
 
     assert order == ["terminal"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_failure_queues_before_stalled_fallback_settlement() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-append-fallback-order",
+        response_id="resp-terminal-append-fallback-order",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-terminal-append-fallback-order"
+    session = _make_bridge_session(
+        key_value="terminal-append-fallback-order",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-terminal-append-fallback-order"
+    session.durable_owner_epoch = 3
+    settlement_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+    settlement_finished = asyncio.Event()
+
+    async def append_terminal_event(*args: Any, **kwargs: Any) -> TerminalOperationEventAppendResult:
+        del args, kwargs
+        return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
+
+    async def settle_terminal_event(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        settlement_started.set()
+        await release_settlement.wait()
+        settlement_finished.set()
+
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(
+            append_terminal_event=append_terminal_event,
+            settle_terminal_event=settle_terminal_event,
+        ),
+    )
+    event_block = 'data: {"type":"response.failed"}\n\n'
+    persist_task = asyncio.create_task(
+        http_bridge_upstream_events_module._persist_http_bridge_operation_event(
+            service,
+            session,
+            request_state,
+            event_block,
+            terminal=True,
+            terminal_state="failed",
+            terminal_event_queue=event_queue,
+        )
+    )
+
+    await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
+    assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
+    assert persist_task.done() is False
+    release_settlement.set()
+    assert await asyncio.wait_for(persist_task, timeout=1.0) is True
+    assert settlement_finished.is_set()
 
 
 @pytest.mark.asyncio

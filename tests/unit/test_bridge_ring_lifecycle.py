@@ -877,13 +877,23 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         flush_interval_seconds=60.0,
     )
 
-    assert not await batcher.append_terminal_event(
+    append_result = await batcher.append_terminal_event(
         operation_id=operation_id,
         session_id=claim.id,
         instance_id="inst-terminal-recovery",
         owner_epoch=claim.owner_epoch,
         event_text='data: {"type":"response.failed"}\n\n',
         max_bytes=1024,
+        state="failed",
+        response_id="resp-terminal-recovery",
+    )
+    assert append_result.persisted is False
+    assert append_result.settlement_required is True
+    await batcher.settle_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
         state="failed",
         response_id="resp-terminal-recovery",
     )

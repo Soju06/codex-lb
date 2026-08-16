@@ -326,23 +326,29 @@ async def _persist_http_bridge_operation_event(
     *,
     terminal: bool = False,
     terminal_state: str | None = None,
-) -> None:
-    """Spool one downstream-visible SSE block for reconnect replay."""
+    terminal_event_queue: Any | None = None,
+) -> bool:
+    """Spool one downstream-visible SSE block for reconnect replay.
+
+    Return whether terminal failure handling already queued the block.
+    """
     operation_id = getattr(request_state, "operation_id", None)
     session_id = getattr(session, "durable_session_id", None)
     owner_epoch = getattr(session, "durable_owner_epoch", None)
     batcher_enqueue = getattr(getattr(service, "_http_bridge_operation_event_batcher", None), "enqueue", None)
     append_event = getattr(getattr(service, "_durable_bridge", None), "append_operation_event", None)
     if not operation_id or session_id is None or owner_epoch is None:
-        return
+        return False
     try:
         batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
         append_terminal_batch = getattr(batcher, "append_terminal_event", None)
         if terminal and terminal_state is not None and callable(append_terminal_batch):
-            persisted = await append_terminal_batch(
+            instance_id = _service_get_settings().http_responses_session_bridge_instance_id
+            response_id = _websocket_downstream_response_id(request_state)
+            append_result = await append_terminal_batch(
                 operation_id=operation_id,
                 session_id=session_id,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 event_text=event_block,
                 max_bytes=int(
@@ -353,11 +359,36 @@ async def _persist_http_bridge_operation_event(
                     )
                 ),
                 state=terminal_state,
-                response_id=_websocket_downstream_response_id(request_state),
+                response_id=response_id,
             )
+            persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
-            return
+            settlement_required = bool(getattr(append_result, "settlement_required", False))
+            terminal_enqueued = False
+            if settlement_required:
+                if terminal_event_queue is not None:
+                    await terminal_event_queue.put(event_block)
+                    terminal_enqueued = True
+                settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
+                if callable(settle_terminal_batch):
+                    await settle_terminal_batch(
+                        operation_id=operation_id,
+                        session_id=session_id,
+                        instance_id=instance_id,
+                        owner_epoch=owner_epoch,
+                        state=terminal_state,
+                        response_id=response_id,
+                    )
+                else:
+                    await _update_http_bridge_operation_state(
+                        service,
+                        session,
+                        request_state,
+                        state=terminal_state,
+                        response_id=response_id,
+                    )
+            return terminal_enqueued
         if callable(batcher_enqueue):
             await batcher_enqueue(
                 operation_id=operation_id,
@@ -367,9 +398,9 @@ async def _persist_http_bridge_operation_event(
                 event_text=event_block,
                 terminal=terminal,
             )
-            return
+            return False
         if not callable(append_event):
-            return
+            return False
         persisted = await append_event(
             operation_id=operation_id,
             session_id=session_id,
@@ -394,11 +425,13 @@ async def _persist_http_bridge_operation_event(
                 state=terminal_state,
                 response_id=_websocket_downstream_response_id(request_state),
             )
+        return False
     except Exception:
         # The upstream result is still delivered. A reconnect can only replay
         # when every event was durably persisted, so never fail a live stream
         # because the optional spool is unavailable.
         logger.warning("Failed to persist HTTP bridge operation event operation_id=%s", operation_id, exc_info=True)
+        return False
 
 
 async def _wait_for_http_bridge_recovery_settlement_retry(
@@ -1821,16 +1854,18 @@ class _HTTPBridgeUpstreamEventsMixin:
                         reason=grouped_error_reason,
                     )
                     grouped_operation_state = _http_bridge_operation_state_for_event(grouped_event_type)
-                    await _persist_http_bridge_operation_event(
+                    grouped_terminal_enqueued = await _persist_http_bridge_operation_event(
                         self,
                         session,
                         grouped_request_state,
                         grouped_event_block,
                         terminal=True,
                         terminal_state=grouped_operation_state,
+                        terminal_event_queue=grouped_request_state.event_queue,
                     )
                     if grouped_request_state.event_queue is not None:
-                        await grouped_request_state.event_queue.put(grouped_event_block)
+                        if not grouped_terminal_enqueued:
+                            await grouped_request_state.event_queue.put(grouped_event_block)
                         await grouped_request_state.event_queue.put(None)
                     if grouped_operation_state is not None and grouped_operation_state != "failed":
                         await _update_http_bridge_operation_state(
@@ -2636,18 +2671,26 @@ class _HTTPBridgeUpstreamEventsMixin:
                     deferred_text,
                     terminal=False,
                 )
+        if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
+            for deferred_text in matched_deferred_texts:
+                await matched_event_queue.put(deferred_text)
+        matched_terminal_enqueued = False
         if matched_request_state is not None and not suppress_downstream_event:
-            await _persist_http_bridge_operation_event(
+            matched_terminal_enqueued = await _persist_http_bridge_operation_event(
                 self,
                 session,
                 matched_request_state,
                 event_block,
                 terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
                 terminal_state=matched_terminal_state,
+                terminal_event_queue=matched_event_queue,
             )
-        if matched_request_state is not None and matched_event_queue is not None and not suppress_downstream_event:
-            for deferred_text in matched_deferred_texts:
-                await matched_event_queue.put(deferred_text)
+        if (
+            matched_request_state is not None
+            and matched_event_queue is not None
+            and not suppress_downstream_event
+            and not matched_terminal_enqueued
+        ):
             await matched_event_queue.put(event_block)
 
         if terminal_request_state is None:
@@ -2669,8 +2712,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     )
                 if terminal_event_queue is not None:
                     await terminal_event_queue.put(deferred_text)
+            terminal_enqueued = False
             if not suppress_downstream_event:
-                await _persist_http_bridge_operation_event(
+                terminal_enqueued = await _persist_http_bridge_operation_event(
                     self,
                     session,
                     terminal_request_state,
@@ -2681,8 +2725,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                         if continuity_persistence_failed_after_ack and terminal_request_state is matched_request_state
                         else _http_bridge_operation_state_for_event(event_type)
                     ),
+                    terminal_event_queue=terminal_event_queue,
                 )
-            if terminal_event_queue is not None:
+            if terminal_event_queue is not None and not terminal_enqueued:
                 await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:
             await terminal_event_queue.put(None)

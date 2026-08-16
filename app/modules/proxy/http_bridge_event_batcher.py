@@ -20,6 +20,15 @@ class _PendingOperationEvent:
     event_text: str
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalOperationEventAppendResult:
+    persisted: bool
+    settlement_required: bool = False
+
+    def __bool__(self) -> bool:
+        return self.persisted
+
+
 class HttpBridgeOperationEventBatcher:
     """Best-effort in-memory event buffer for the HTTP bridge.
 
@@ -82,7 +91,6 @@ class HttpBridgeOperationEventBatcher:
         self._flush_lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
-        self._settlement_tasks: set[asyncio.Task[None]] = set()
 
     async def enqueue(
         self,
@@ -242,7 +250,7 @@ class HttpBridgeOperationEventBatcher:
         max_bytes: int,
         state: str,
         response_id: str | None = None,
-    ) -> bool:
+    ) -> TerminalOperationEventAppendResult:
         """Drain queued events and atomically append the terminal outcome."""
         async with self._lock:
             self._contexts.setdefault(
@@ -261,7 +269,7 @@ class HttpBridgeOperationEventBatcher:
             context = self._contexts.get(operation_id)
             dropped = operation_id in self._dropped_operations
         if context is None:
-            return False
+            return TerminalOperationEventAppendResult(persisted=False)
         if dropped:
             try:
                 await self._durable_bridge.update_operation(
@@ -283,7 +291,7 @@ class HttpBridgeOperationEventBatcher:
                     self._closing_operations.discard(operation_id)
                     self._contexts.pop(operation_id, None)
                     self._dropped_operations.discard(operation_id)
-            return False
+            return TerminalOperationEventAppendResult(persisted=False)
         try:
             persisted = await self._durable_bridge.append_terminal_operation_event(
                 operation_id=operation_id,
@@ -295,68 +303,52 @@ class HttpBridgeOperationEventBatcher:
                 state=state,
                 response_id=response_id,
             )
-            return bool(persisted and not dropped)
+            return TerminalOperationEventAppendResult(persisted=bool(persisted and not dropped))
         except Exception:
             logger.debug(
                 "Failed to append terminal HTTP bridge event operation_id=%s",
                 operation_id,
                 exc_info=True,
             )
-            self._schedule_terminal_settlement(
-                context=context,
-                state=state,
-                response_id=response_id,
+            return TerminalOperationEventAppendResult(
+                persisted=False,
+                settlement_required=True,
             )
-            return False
         finally:
             async with self._lock:
                 self._closing_operations.discard(operation_id)
                 self._contexts.pop(operation_id, None)
                 self._dropped_operations.discard(operation_id)
 
-    def _schedule_terminal_settlement(
+    async def settle_terminal_event(
         self,
         *,
-        context: _PendingOperationEvent,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
         state: str,
-        response_id: str | None,
+        response_id: str | None = None,
     ) -> None:
-        task = asyncio.create_task(
-            self._settle_terminal_operation(
-                context=context,
-                state=state,
-                response_id=response_id,
-            ),
-            name=f"http-bridge-terminal-settlement-{context.operation_id}",
-        )
-        self._settlement_tasks.add(task)
-        task.add_done_callback(self._settlement_tasks.discard)
-
-    async def _settle_terminal_operation(
-        self,
-        *,
-        context: _PendingOperationEvent,
-        state: str,
-        response_id: str | None,
-    ) -> None:
+        """Settle a failed terminal append after its SSE block was queued."""
         try:
             settled = await self._durable_bridge.update_operation(
-                operation_id=context.operation_id,
-                session_id=context.session_id,
-                instance_id=context.instance_id,
-                owner_epoch=context.owner_epoch,
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
                 state=state,
                 response_id=response_id,
             )
             if not settled:
                 logger.warning(
                     "Terminal HTTP bridge operation fallback settlement was fenced operation_id=%s",
-                    context.operation_id,
+                    operation_id,
                 )
         except Exception:
             logger.warning(
                 "Failed to settle terminal HTTP bridge operation after event append failure operation_id=%s",
-                context.operation_id,
+                operation_id,
                 exc_info=True,
             )
 
@@ -391,8 +383,3 @@ class HttpBridgeOperationEventBatcher:
                 await task
             except asyncio.CancelledError:
                 pass
-        settlement_tasks = list(self._settlement_tasks)
-        for settlement_task in settlement_tasks:
-            settlement_task.cancel()
-        if settlement_tasks:
-            await asyncio.gather(*settlement_tasks, return_exceptions=True)

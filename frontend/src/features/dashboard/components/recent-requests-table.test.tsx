@@ -194,6 +194,7 @@ describe("RecentRequestsTable", () => {
     );
 
     expect(screen.getByRole("table")).toHaveStyle({
+      width: `${MIN_REQUEST_LOG_COLUMN_WIDTH + 200}px`,
       minWidth: `${MIN_REQUEST_LOG_COLUMN_WIDTH + 200}px`,
     });
 
@@ -214,6 +215,26 @@ describe("RecentRequestsTable", () => {
       "account",
       200 + REQUEST_LOG_COLUMN_WIDTH_STEP,
     );
+  });
+
+  it("pins the table to the configured width sum so surplus space is not redistributed", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: 112, account: 160 }}
+        onColumnWidthChange={vi.fn()}
+      />,
+    );
+
+    // An explicit width (not merely a minimum) keeps configured column widths
+    // independent when their sum is smaller than the container.
+    expect(screen.getByRole("table")).toHaveStyle({
+      width: "272px",
+      minWidth: "272px",
+    });
   });
 
   it("renders rows with status badges and supports request details and copy actions", async () => {

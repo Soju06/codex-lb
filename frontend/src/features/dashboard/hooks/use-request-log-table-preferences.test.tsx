@@ -88,6 +88,21 @@ describe("useRequestLogTablePreferences", () => {
     expect(result.current.visibleColumns).toEqual(ALL_REQUEST_LOG_COLUMNS);
   });
 
+  it("restores default widths too when stored visibility is stale", () => {
+    window.localStorage.setItem(
+      REQUEST_LOG_TABLE_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({
+        visibleColumns: ["time", "retired-column"],
+        columnWidths: { time: 240, account: 320 },
+      }),
+    );
+
+    const { result } = renderHook(() => useRequestLogTablePreferences());
+
+    expect(result.current.visibleColumns).toEqual(ALL_REQUEST_LOG_COLUMNS);
+    expect(result.current.columnWidths).toEqual({});
+  });
+
   it("restores all columns, clears widths, and removes stored customization", () => {
     const { result } = renderHook(() => useRequestLogTablePreferences());
     act(() => {

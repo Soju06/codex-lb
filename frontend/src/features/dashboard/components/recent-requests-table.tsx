@@ -330,7 +330,7 @@ export function RecentRequestsTable({
     configuredVisibleColumns !== undefined ||
     columnWidths !== undefined ||
     onColumnWidthChange !== undefined;
-  const tableMinWidth = hasConfiguredLayout
+  const tableWidth = hasConfiguredLayout
     ? visibleColumns.reduce(
         (totalWidth, column) =>
           totalWidth +
@@ -389,7 +389,7 @@ export function RecentRequestsTable({
       <div className="relative overflow-x-auto">
         <Table
           className="w-full table-fixed"
-          style={tableMinWidth === undefined ? undefined : { minWidth: tableMinWidth }}
+          style={tableWidth === undefined ? undefined : { width: tableWidth, minWidth: tableWidth }}
         >
           <TableHeader>
             <TableRow className="hover:bg-transparent">

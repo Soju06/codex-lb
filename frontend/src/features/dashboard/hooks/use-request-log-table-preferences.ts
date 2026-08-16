@@ -45,13 +45,13 @@ function defaultPreferences(): RequestLogTablePreferences {
   };
 }
 
-function normalizeVisibleColumns(value: unknown): RequestLogColumnId[] {
+function normalizeVisibleColumns(value: unknown): RequestLogColumnId[] | null {
   if (
     !Array.isArray(value) ||
     value.length === 0 ||
     value.some((column) => !isRequestLogColumnId(column))
   ) {
-    return [...DEFAULT_REQUEST_LOG_COLUMNS];
+    return null;
   }
 
   const selected = new Set(value);
@@ -73,8 +73,14 @@ function loadPreferences(): RequestLogTablePreferences {
       visibleColumns?: unknown;
       columnWidths?: unknown;
     };
+    const visibleColumns = normalizeVisibleColumns(parsed.visibleColumns);
+    if (visibleColumns === null) {
+      // Stale or malformed visibility invalidates the whole stored layout so the
+      // dashboard restores the complete default layout, widths included.
+      return defaultPreferences();
+    }
     return {
-      visibleColumns: normalizeVisibleColumns(parsed.visibleColumns),
+      visibleColumns,
       columnWidths: normalizeColumnWidths(parsed.columnWidths),
     };
   } catch {

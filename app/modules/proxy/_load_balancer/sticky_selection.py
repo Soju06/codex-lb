@@ -40,7 +40,7 @@ from app.modules.proxy.fair_share import (
     fair_share_denial_message,
 )
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
-from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 from app.modules.quota_planner.logic import PlannerSettings, build_routing_costs
 
 # Preserve the established observability surface while implementation moves to
@@ -238,6 +238,10 @@ class StickySelectionRequest(Generic[SelectionInputsT]):
     allow_usage_exhaustion_error: bool = True
     api_key_id: str | None = None
     api_key_stream_fair_share_threshold_pct: int = 0
+    # First-iteration owner read performed by the caller inside its shared
+    # owner-lookup session (see load_balancer.select_account). Consumed exactly
+    # once; retries re-read fresh ownership evidence through a repo bundle.
+    initial_sticky_owner_lookup: StickyOwnerLookup | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,43 +358,52 @@ async def run_sticky_selection_path(
     )
     attempt = 0
     suppress_recovery_probe_candidates = False
+    pending_initial_owner_lookup = request.initial_sticky_owner_lookup
     while True:
         attempt += 1
         sticky_existing_is_legacy = isinstance(legacy_existing_account_id, str)
         if sticky_kind is not None:
             async with owner._runtime_lock:
                 pass
-            async with owner._repo_factory() as repos:
-                sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
-                    sticky_key,
-                    kind=sticky_kind,
-                    max_age_seconds=sticky_max_age_seconds,
-                    continuity_source=sticky_source,
-                )
-                sticky_existing_account_id = sticky_owner_lookup.account_id
-                # `is True` (not a truthy check): an un-configured test double
-                # for sticky_sessions may return an object whose attribute
-                # access auto-vivifies to a mock rather than a real bool, and
-                # that must fail safe as "not abandoned", the same as it
-                # always has, rather than silently bypassing the ambiguous
-                # owner check below.
-                sticky_continuity_abandoned = sticky_owner_lookup.continuity_abandoned is True
-                # ``isinstance`` for the same test-double reason as above. The
-                # deadline is only ever an optimization hint: None always
-                # falls back to today's write-on-every-request refresh
-                # behavior, and seed-needing requests never skip.
-                observed_refresh_skip_deadline = sticky_owner_lookup.refresh_skip_deadline
-                sticky_refresh_skip_deadline = (
-                    observed_refresh_skip_deadline
-                    if isinstance(observed_refresh_skip_deadline, datetime) and not seed_initialization_pending
-                    else None
-                )
-                sticky_abandoned_account_id = sticky_owner_lookup.abandoned_account_id
-                if sticky_owner_lookup.continuity_abandoned is True and isinstance(
-                    sticky_abandoned_account_id,
-                    str,
-                ):
-                    retired_legacy_owner_account_ids.add(sticky_abandoned_account_id)
+            if pending_initial_owner_lookup is not None:
+                # The caller already read this iteration's owner inside its
+                # shared owner-lookup session. Consume it exactly once so
+                # every retry (including post-reset attempts that wrap
+                # ``attempt`` back to 1) still re-reads fresh evidence.
+                sticky_owner_lookup = pending_initial_owner_lookup
+                pending_initial_owner_lookup = None
+            else:
+                async with owner._repo_factory() as repos:
+                    sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
+                        sticky_key,
+                        kind=sticky_kind,
+                        max_age_seconds=sticky_max_age_seconds,
+                        continuity_source=sticky_source,
+                    )
+            sticky_existing_account_id = sticky_owner_lookup.account_id
+            # `is True` (not a truthy check): an un-configured test double
+            # for sticky_sessions may return an object whose attribute
+            # access auto-vivifies to a mock rather than a real bool, and
+            # that must fail safe as "not abandoned", the same as it
+            # always has, rather than silently bypassing the ambiguous
+            # owner check below.
+            sticky_continuity_abandoned = sticky_owner_lookup.continuity_abandoned is True
+            # ``isinstance`` for the same test-double reason as above. The
+            # deadline is only ever an optimization hint: None always
+            # falls back to today's write-on-every-request refresh
+            # behavior, and seed-needing requests never skip.
+            observed_refresh_skip_deadline = sticky_owner_lookup.refresh_skip_deadline
+            sticky_refresh_skip_deadline = (
+                observed_refresh_skip_deadline
+                if isinstance(observed_refresh_skip_deadline, datetime) and not seed_initialization_pending
+                else None
+            )
+            sticky_abandoned_account_id = sticky_owner_lookup.abandoned_account_id
+            if sticky_owner_lookup.continuity_abandoned is True and isinstance(
+                sticky_abandoned_account_id,
+                str,
+            ):
+                retired_legacy_owner_account_ids.add(sticky_abandoned_account_id)
             if sticky_existing_is_legacy:
                 # Mixed-version replicas can create both rows on
                 # different accounts. The raw row was loaded before

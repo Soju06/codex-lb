@@ -4667,3 +4667,61 @@ async def test_fresh_thread_only_retention_without_seed_key_skips_refresh_write(
     assert sticky_repo.upserts == []
     assert sticky_repo.seeded_upserts == []
     assert sticky_repo.deleted == []
+
+
+class _LookupCountingStickyRepo(_StubStickySessionsRepository):
+    """Records every owner-lookup key so tests can pin lookup count/order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.owner_lookup_keys: list[str] = []
+
+    async def get_account_id_and_abandonment(self, *args: Any, **kwargs: Any) -> StickyOwnerLookup:
+        self.owner_lookup_keys.append(cast(str, args[0]))
+        return await super().get_account_id_and_abandonment(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_shared_owner_lookup_session_reads_each_owner_key_exactly_once() -> None:
+    """Regression for the shared owner-lookup session.
+
+    The legacy/seed/first-sticky owner reads moved into one repo bundle in
+    ``select_account``; the sticky selection loop consumes the hoisted first
+    read exactly once instead of re-reading. Each owner key must be looked up
+    exactly once, in the legacy -> seed -> sticky order, and the resolved hard
+    owner must still win selection.
+    """
+    now_epoch = int(datetime.now(tz=timezone.utc).timestamp())
+    owner = _make_account("acc-shared-owner-lookup")
+    other = _make_account("acc-shared-owner-other")
+    accounts_repo = _StubAccountsRepository([owner, other])
+    usage_repo = _StubUsageRepository(
+        primary={
+            owner.id: _usage_row(70, owner.id, window="primary", reset_at=now_epoch + 300),
+            other.id: _usage_row(71, other.id, window="primary", reset_at=now_epoch + 300),
+        },
+        secondary={},
+    )
+    sticky_repo = _LookupCountingStickyRepo()
+    sticky_repo.account_ids_by_key = {"shared-lookup-sticky": owner.id}
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    selected = await balancer.select_account(
+        sticky_key="shared-lookup-sticky",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        sticky_source="turn_state",
+        legacy_sticky_key="shared-lookup-legacy",
+        sticky_seed_key="shared-lookup-seed",
+        sticky_seed_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+    )
+
+    assert selected.account is not None
+    assert selected.account.id == owner.id
+    # get_account_id (seed) delegates to get_account_id_and_abandonment in the
+    # stub, so this also proves the seed lookup ran exactly once.
+    assert sticky_repo.owner_lookup_keys == [
+        "shared-lookup-legacy",
+        "shared-lookup-seed",
+        "shared-lookup-sticky",
+    ]

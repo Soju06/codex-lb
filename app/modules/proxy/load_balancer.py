@@ -135,7 +135,7 @@ from app.modules.usage.mappers import usage_history_to_window_row
 
 if TYPE_CHECKING:
     from app.modules.accounts.repository import AccountsRepository
-    from app.modules.proxy.sticky_repository import StickySessionsRepository
+    from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -724,42 +724,65 @@ class LoadBalancer:
         selection_resets_at: int | None = None
         legacy_existing_account_id: str | None = None
         legacy_abandoned_account_id: str | None = None
-        if legacy_sticky_key is not None:
-            async with self._repo_factory() as repos:
-                legacy_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
-                    legacy_sticky_key,
-                    kind=StickySessionKind.CODEX_SESSION,
-                    # Raw rows may be historical turn-state ownership. The
-                    # bounded thread TTL must never age out that hard evidence.
-                    max_age_seconds=None,
-                    # Process-session raw text is session_header even when
-                    # request locality is thread_header. Thread-only raw keys
-                    # keep thread_header so a session_header tombstone cannot
-                    # hide a distinct thread owner.
-                    continuity_source=legacy_continuity_source or "session_header",
-                )
-            legacy_existing_account_id = legacy_owner_lookup.account_id
-            abandoned_account_id = legacy_owner_lookup.abandoned_account_id
-            if legacy_owner_lookup.continuity_abandoned is True and isinstance(abandoned_account_id, str):
-                legacy_abandoned_account_id = abandoned_account_id
-            if required_account_id is not None and (
-                legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
-            ):
-                # The required owner came from a file/response/bridge index,
-                # while the raw row may be legacy turn-state ownership. Neither
-                # source can be discarded or rewritten to resolve a conflict.
-                return AccountSelection(
-                    account=None,
-                    error_message="Account-owned continuity sources conflict; retry the logical turn",
-                    error_code="continuity_owner_conflict",
-                )
         sticky_seed_account_id: str | None = None
-        if sticky_seed_key is not None and sticky_seed_kind is not None:
+        initial_sticky_owner_lookup: StickyOwnerLookup | None = None
+        needs_owner_lookups = (
+            legacy_sticky_key is not None
+            or (sticky_seed_key is not None and sticky_seed_kind is not None)
+            or (sticky_key is not None and sticky_kind is not None)
+        )
+        if needs_owner_lookups:
+            # One shared session serves the legacy/seed/first-sticky owner
+            # lookups. The SELECTs stay separate on purpose so the per-source
+            # predicate semantics of get_account_id_and_abandonment (tombstone
+            # visibility, max_age handling) are untouched; the saving is the
+            # 2-3 extra pool checkouts + BEGIN/COMMIT lifecycles per request.
             async with self._repo_factory() as repos:
-                sticky_seed_account_id = await repos.sticky_sessions.get_account_id(
-                    sticky_seed_key,
-                    kind=sticky_seed_kind,
-                )
+                if legacy_sticky_key is not None:
+                    legacy_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
+                        legacy_sticky_key,
+                        kind=StickySessionKind.CODEX_SESSION,
+                        # Raw rows may be historical turn-state ownership. The
+                        # bounded thread TTL must never age out that hard evidence.
+                        max_age_seconds=None,
+                        # Process-session raw text is session_header even when
+                        # request locality is thread_header. Thread-only raw keys
+                        # keep thread_header so a session_header tombstone cannot
+                        # hide a distinct thread owner.
+                        continuity_source=legacy_continuity_source or "session_header",
+                    )
+                    legacy_existing_account_id = legacy_owner_lookup.account_id
+                    abandoned_account_id = legacy_owner_lookup.abandoned_account_id
+                    if legacy_owner_lookup.continuity_abandoned is True and isinstance(abandoned_account_id, str):
+                        legacy_abandoned_account_id = abandoned_account_id
+                    if required_account_id is not None and (
+                        legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
+                    ):
+                        # The required owner came from a file/response/bridge index,
+                        # while the raw row may be legacy turn-state ownership. Neither
+                        # source can be discarded or rewritten to resolve a conflict.
+                        return AccountSelection(
+                            account=None,
+                            error_message="Account-owned continuity sources conflict; retry the logical turn",
+                            error_code="continuity_owner_conflict",
+                        )
+                if sticky_seed_key is not None and sticky_seed_kind is not None:
+                    sticky_seed_account_id = await repos.sticky_sessions.get_account_id(
+                        sticky_seed_key,
+                        kind=sticky_seed_kind,
+                    )
+                if sticky_key is not None and sticky_kind is not None:
+                    # First-iteration owner read for run_sticky_selection_path,
+                    # hoisted here so it shares this session. The selection
+                    # loop consumes it exactly once; every retry (including
+                    # post-reset attempts) still re-reads fresh ownership
+                    # evidence through its own repo bundle.
+                    initial_sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
+                        sticky_key,
+                        kind=sticky_kind,
+                        max_age_seconds=sticky_max_age_seconds,
+                        continuity_source=sticky_source,
+                    )
         # Resolve uniqueness from the model/API-key/security-scoped pool before
         # runtime health, budget, or cap filtering. Transient pressure cannot
         # prove that another candidate does not own an upstream conversation.
@@ -882,6 +905,7 @@ class LoadBalancer:
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                    initial_sticky_owner_lookup=initial_sticky_owner_lookup,
                 ),
             )
             selection_inputs = sticky_outcome.selection_inputs

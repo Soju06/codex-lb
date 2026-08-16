@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -771,7 +771,8 @@ describe("ReportsPage", () => {
     );
   });
 
-  it("shows API key option load failures with a retry button instead of hiding empty selector silently", async () => {
+  it("shows API key option load failures with a retry button and recovers when retried", async () => {
+    const user = userEvent.setup();
     useReportsMock.mockImplementation(() =>
       asUseReportsResult({
         data: EMPTY_REPORT,
@@ -780,9 +781,9 @@ describe("ReportsPage", () => {
         refetch: vi.fn(),
       }),
     );
-    listApiKeysMock.mockRejectedValueOnce(
-      new Error("api keys backend timeout"),
-    );
+    listApiKeysMock
+      .mockRejectedValueOnce(new Error("api keys backend timeout"))
+      .mockResolvedValueOnce([]);
 
     renderWithProviders(<ReportsPage />);
 
@@ -796,6 +797,15 @@ describe("ReportsPage", () => {
         .getAllByRole("button", { name: /api keys/i })
         .find((button) => button.getAttribute("aria-haspopup") === "menu"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+
+    const retryButton = screen.getByRole("button", { name: /retry/i });
+    await user.click(retryButton);
+
+    expect(listApiKeysMock).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/Failed to load API key options:/i),
+      ).not.toBeInTheDocument();
+    });
   });
 });

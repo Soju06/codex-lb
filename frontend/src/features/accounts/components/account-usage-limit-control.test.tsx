@@ -25,7 +25,8 @@ describe("AccountUsageLimitControl", () => {
     );
 
     expect(screen.getAllByText("10% maximum used · 90% reserved")).toHaveLength(1);
-    expect(screen.getByText("Off")).toBeInTheDocument();
+    expect(screen.getAllByText("Off")).toHaveLength(2);
+    expect(screen.getByRole("switch", { name: "Enable usage limit" })).not.toBeChecked();
 
     await user.click(screen.getByRole("switch", { name: "Enable usage limit" }));
     expect(onChange).toHaveBeenCalledWith(account.accountId, {

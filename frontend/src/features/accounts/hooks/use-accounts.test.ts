@@ -28,6 +28,34 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useAccounts", () => {
+  it("keeps the usage-limit mutation pending until account queries are invalidated", async () => {
+    const queryClient = createTestQueryClient();
+    let releaseInvalidation!: () => void;
+    const invalidation = new Promise<void>((resolve) => {
+      releaseInvalidation = () => resolve();
+    });
+    const invalidateSpy = vi
+      .spyOn(queryClient, "invalidateQueries")
+      .mockImplementation(() => invalidation);
+    const { result } = renderHook(() => useAccounts(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+
+    const mutationPromise = result.current.usageLimitMutation.mutateAsync({
+      accountId: "acc_primary",
+      update: { enabled: true, percent: 10 },
+    });
+
+    await waitFor(() => expect(invalidateSpy).toHaveBeenCalled());
+    expect(result.current.usageLimitMutation.isPending).toBe(true);
+
+    releaseInvalidation();
+    await mutationPromise;
+    await waitFor(() => expect(result.current.usageLimitMutation.isPending).toBe(false));
+  });
+
   it("loads accounts and invalidates related queries after mutations", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

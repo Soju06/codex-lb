@@ -29,6 +29,7 @@ export function AccountUsageLimitControl({
 }: AccountUsageLimitControlProps) {
   const { t } = useTranslation();
   const configuredPercent = account.usageLimitPercent ?? null;
+  const usageLimitEnabled = account.usageLimitEnabled ?? false;
   const [draft, setDraft] = useState(
     configuredPercent === null ? "" : formatPercent(configuredPercent),
   );
@@ -67,11 +68,11 @@ export function AccountUsageLimitControl({
           <div className="flex items-center gap-2">
             <UsageLimitStateBadge state={account.usageLimitState ?? "disabled"} />
             <span className="text-xs text-muted-foreground">
-              {t("common.states.enabled")}
+              {t(usageLimitEnabled ? "common.states.enabled" : "common.states.off")}
             </span>
             <Switch
               aria-label={t("accounts.usageLimit.enableAria")}
-              checked={account.usageLimitEnabled ?? false}
+              checked={usageLimitEnabled}
               disabled={disabled}
               onCheckedChange={(enabled) =>
                 onChange(account.accountId, {

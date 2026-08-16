@@ -211,7 +211,7 @@ export function useAccountMutations() {
       accountId: string;
       update: AccountUsageLimitUpdateRequest;
     }) => updateAccountUsageLimit(accountId, update),
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       if (data.percent === null) {
         toast.success(t("accounts.toasts.usageLimitRemoved"));
       } else {
@@ -221,7 +221,7 @@ export function useAccountMutations() {
             : t("accounts.toasts.usageLimitDisabled"),
         );
       }
-      void invalidateAccountRelatedQueries(queryClient);
+      await invalidateAccountRelatedQueries(queryClient);
     },
     onError: (error: Error) => {
       toast.error(error.message || t("accounts.toasts.usageLimitUpdateFailed"));

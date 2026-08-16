@@ -5,7 +5,7 @@ A durable HTTP-bridge operation can remain `acknowledged` after its terminal eve
 ## What Changes
 
 - Settle the operation to its intended terminal state when atomic terminal-event append raises.
-- Preserve the existing owner/session/epoch fence and leave the event spool explicitly incomplete.
+- Preserve the existing owner/session/epoch fence, reject settlement after a newer same-owner retry, and leave the event spool explicitly incomplete.
 - Keep successful terminal append behavior unchanged.
 - Add deterministic unit and production-repository recovery coverage for the failure path.
 

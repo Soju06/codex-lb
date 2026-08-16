@@ -643,6 +643,26 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
             )
 
+    async def settle_terminal_append_failure(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        state: str,
+        response_id: str | None = None,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).settle_terminal_append_failure(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                state=state,
+                response_id=response_id,
+            )
+
     async def update_operation(
         self,
         *,
@@ -652,7 +672,6 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         state: str,
         response_id: str | None = None,
-        event_spool_complete: bool | None = None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).update_operation(
@@ -662,7 +681,6 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 state=state,
                 response_id=response_id,
-                event_spool_complete=event_spool_complete,
             )
 
     async def get_operation(self, *, operation_id: str) -> DurableBridgeOperationSnapshot | None:

@@ -2010,6 +2010,53 @@ class DurableBridgeRepository:
         )
         return _to_operation_snapshot(operation) if operation is not None else None
 
+    async def settle_terminal_append_failure(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        state: str,
+        response_id: str | None = None,
+    ) -> bool:
+        """Settle only the terminal attempt whose append outcome was ambiguous."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            response_matches = (
+                HttpBridgeOperationRecord.response_id == response_id
+                if response_id is not None
+                else HttpBridgeOperationRecord.response_id.is_(None)
+            )
+            result = await self._session.execute(
+                update(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state.in_(("acknowledged", state)),
+                    response_matches,
+                )
+                .values(
+                    state=state,
+                    response_id=response_id,
+                    event_spool_complete=False,
+                    updated_at=utcnow(),
+                )
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
+
     async def update_operation(
         self,
         *,
@@ -2019,7 +2066,6 @@ class DurableBridgeRepository:
         owner_epoch: int,
         state: str,
         response_id: str | None = None,
-        event_spool_complete: bool | None = None,
     ) -> bool:
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
@@ -2037,8 +2083,6 @@ class DurableBridgeRepository:
             values: dict[str, object] = {"state": state, "updated_at": utcnow()}
             if response_id is not None:
                 values["response_id"] = response_id
-            if event_spool_complete is not None:
-                values["event_spool_complete"] = event_spool_complete
             result = await self._session.execute(
                 update(HttpBridgeOperationRecord)
                 .where(

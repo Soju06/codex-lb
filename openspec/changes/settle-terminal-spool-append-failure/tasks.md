@@ -1,12 +1,12 @@
 ## 1. Regression
 
-- [x] 1.1 Add a deterministic unit regression proving a terminal append exception settles the operation through the unchanged owner fence.
+- [x] 1.1 Add deterministic regressions proving a terminal append exception settles the operation through the unchanged owner fence without overwriting a newer same-owner retry.
 - [x] 1.2 Capture the focused regression failing before production code changes.
 
 ## 2. Implementation
 
 - [x] 2.1 Add the minimum fenced fallback settlement for terminal append exceptions without claiming spool completeness.
-- [x] 2.2 Add a production-repository process/recovery proof that a reconnect cannot observe the operation as acknowledged.
+- [x] 2.2 Add a production-repository process/recovery proof that a reconnect cannot observe the operation as acknowledged and delayed settlement cannot overwrite its retry.
 
 ## 3. Verification
 

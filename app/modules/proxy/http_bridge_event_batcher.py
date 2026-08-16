@@ -332,14 +332,13 @@ class HttpBridgeOperationEventBatcher:
     ) -> None:
         """Settle a failed terminal append after its SSE block was queued."""
         try:
-            settled = await self._durable_bridge.update_operation(
+            settled = await self._durable_bridge.settle_terminal_append_failure(
                 operation_id=operation_id,
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
                 state=state,
                 response_id=response_id,
-                event_spool_complete=False,
             )
             if not settled:
                 logger.warning(

@@ -28,6 +28,10 @@ class _FakeDurableBridge:
         self.updated.append(kwargs)
         return self.update_result
 
+    async def settle_terminal_append_failure(self, **kwargs) -> bool:
+        kwargs["event_spool_complete"] = False
+        return await self.update_operation(**kwargs)
+
 
 class _TerminalAppendFailingDurableBridge(_FakeDurableBridge):
     def __init__(self, *, append_result: bool = True, update_result: bool = True) -> None:

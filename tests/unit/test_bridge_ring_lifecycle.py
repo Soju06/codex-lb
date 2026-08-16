@@ -857,7 +857,7 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
 
     coordinator = DurableBridgeSessionCoordinator(async_session_factory)
     append_terminal_operation_event = coordinator.append_terminal_operation_event
-    update_operation = coordinator.update_operation
+    settle_terminal_append_failure = coordinator.settle_terminal_append_failure
     settlement_finished = asyncio.Event()
 
     async def fail_terminal_append(**kwargs: Any) -> bool:
@@ -866,12 +866,12 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
 
     async def track_terminal_settlement(**kwargs: Any) -> bool:
         try:
-            return await update_operation(**kwargs)
+            return await settle_terminal_append_failure(**kwargs)
         finally:
             settlement_finished.set()
 
     monkeypatch.setattr(coordinator, "append_terminal_operation_event", fail_terminal_append)
-    monkeypatch.setattr(coordinator, "update_operation", track_terminal_settlement)
+    monkeypatch.setattr(coordinator, "settle_terminal_append_failure", track_terminal_settlement)
     batcher = HttpBridgeOperationEventBatcher(
         coordinator,
         max_bytes=1024,
@@ -912,6 +912,31 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         'data: {"type":"response.created"}\n\n',
         'data: {"type":"response.failed"}\n\n',
     ]
+
+    retry = await recovery.record_operation(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        request_fingerprint=fingerprint,
+        account_id="account-terminal-recovery",
+        model="gpt-5.6",
+        parent_response_id="resp-parent",
+    )
+    assert retry is not None
+    assert retry.state == "submitted"
+    await batcher.settle_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        state="failed",
+        response_id="resp-terminal-recovery",
+    )
+    after_stale_settlement = await recovery.get_operation(operation_id=operation_id)
+    assert after_stale_settlement is not None
+    assert after_stale_settlement.state == "submitted"
+    assert after_stale_settlement.response_id is None
     await batcher.close()
 
 

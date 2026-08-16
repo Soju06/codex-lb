@@ -9443,6 +9443,7 @@ async def test_v1_responses_http_bridge_retries_unanchored_request_when_upstream
     assert silent_upstream.closed is True
     assert len(silent_upstream.sent_text) == 1
     assert len(recovered_upstream.sent_text) == 1
+    assert silent_upstream.sent_text == recovered_upstream.sent_text
 
 
 @pytest.mark.asyncio

@@ -12,4 +12,4 @@
 
 - [x] 3.1 Capture focused GREEN and adjacent warmup integration results.
 - [x] 3.2 Run strict OpenSpec validation, affected lint/type checks, and production FastAPI surface proof.
-- [ ] 3.3 Review the committed diff independently and address in-scope findings.
+- [x] 3.3 Review the committed diff independently and address in-scope findings.

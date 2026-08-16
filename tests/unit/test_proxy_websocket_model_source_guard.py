@@ -699,7 +699,7 @@ class _TurnSerializedDownstream:
 
 
 @pytest.mark.asyncio
-async def test_reuse_guard_forwards_a_pinned_input_file_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypatch: pytest.MonkeyPatch) -> None:
     """A later source-owned turn that references an uploaded file must be forwarded.
 
     The HTTP route skips source selection whenever the input references an
@@ -867,7 +867,7 @@ async def _drive_prepared_request_into_connect_guard(
 
 
 @pytest.mark.asyncio
-async def test_connect_guard_skips_input_file_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_connect_guard_skips_input_file_requests(db_setup, monkeypatch: pytest.MonkeyPatch) -> None:
     """The connect guard must not bounce a file-referencing request to HTTP.
 
     An ``input_file`` reference excludes the request from source routing on

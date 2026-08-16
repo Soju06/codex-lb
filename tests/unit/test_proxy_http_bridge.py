@@ -5267,6 +5267,7 @@ async def test_terminal_append_success_queues_output_before_preserving_cancellat
     session.durable_owner_epoch = 4
     append_started = asyncio.Event()
     release_append = asyncio.Event()
+    completed_delivery_scope = proxy_support_module._HTTPBridgeCompletedDeliveryScope(active=True)
 
     async def append_terminal_event(*args: Any, **kwargs: Any) -> TerminalOperationEventAppendResult:
         del args, kwargs
@@ -5288,6 +5289,7 @@ async def test_terminal_append_success_queues_output_before_preserving_cancellat
             terminal=True,
             terminal_state="completed",
             terminal_event_queue=event_queue,
+            terminal_delivery_scope=completed_delivery_scope,
         )
     )
 
@@ -5299,11 +5301,14 @@ async def test_terminal_append_success_queues_output_before_preserving_cancellat
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
     assert event_queue.empty()
+    assert completed_delivery_scope.terminal_enqueued is True
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_during_settlement", [False, True])
 async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settlement(
     monkeypatch: pytest.MonkeyPatch,
+    cancel_during_settlement: bool,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     queues: list[asyncio.Queue[str | None]] = [asyncio.Queue(), asyncio.Queue()]
@@ -5344,7 +5349,9 @@ async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settle
         settlement_started.set()
         await release_settlement.wait()
 
-    finalize_request = AsyncMock()
+    finalize_request = AsyncMock(
+        side_effect=None if cancel_during_settlement else [RuntimeError("first sibling finalization failed"), None]
+    )
     monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
     monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", AsyncMock())
     service._http_bridge_operation_event_batcher = cast(
@@ -5381,10 +5388,12 @@ async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settle
         assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
         assert event_queue.empty()
     assert process_task.done() is False
-    process_task.cancel()
-    assert process_task.cancelling()
+    if cancel_during_settlement:
+        process_task.cancel()
+        assert process_task.cancelling()
     release_settlement.set()
-    with pytest.raises(asyncio.CancelledError):
+    expected_error = asyncio.CancelledError if cancel_during_settlement else RuntimeError
+    with pytest.raises(expected_error):
         await asyncio.wait_for(process_task, timeout=1.0)
     assert append_calls == ["op-grouped-terminal-0", "op-grouped-terminal-1"]
     assert finalize_request.await_count == 2

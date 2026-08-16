@@ -328,6 +328,7 @@ async def _persist_http_bridge_operation_event(
     terminal: bool = False,
     terminal_state: str | None = None,
     terminal_event_queue: Any | None = None,
+    terminal_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None,
 ) -> bool:
     """Spool one downstream-visible SSE block for reconnect replay.
 
@@ -347,6 +348,17 @@ async def _persist_http_bridge_operation_event(
             instance_id = _service_get_settings().http_responses_session_bridge_instance_id
             expected_response_id = request_state.response_id
             response_id = _websocket_downstream_response_id(request_state)
+
+            async def enqueue_terminal_delivery() -> bool:
+                if terminal_event_queue is None:
+                    return False
+                await terminal_event_queue.put(event_block)
+                await terminal_event_queue.put(None)
+                if terminal_delivery_scope is not None:
+                    async with session.pending_lock:
+                        terminal_delivery_scope.terminal_enqueued = True
+                return True
+
             append_task = asyncio.create_task(
                 append_terminal_batch(
                     operation_id=operation_id,
@@ -373,10 +385,7 @@ async def _persist_http_bridge_operation_event(
             settlement_required = bool(getattr(append_result, "settlement_required", False))
             terminal_enqueued = False
             if settlement_required:
-                if terminal_event_queue is not None:
-                    await terminal_event_queue.put(event_block)
-                    await terminal_event_queue.put(None)
-                    terminal_enqueued = True
+                terminal_enqueued = await enqueue_terminal_delivery()
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
 
                 async def settle_terminal_append_failure() -> None:
@@ -406,9 +415,8 @@ async def _persist_http_bridge_operation_event(
                 _, settlement_cancellation = await _await_task_deferring_cancellation(settlement_task)
                 deferred_cancellation = deferred_cancellation or settlement_cancellation
             if deferred_cancellation is not None:
-                if terminal_event_queue is not None and not terminal_enqueued:
-                    await terminal_event_queue.put(event_block)
-                    await terminal_event_queue.put(None)
+                if not terminal_enqueued:
+                    await enqueue_terminal_delivery()
                 raise deferred_cancellation
             return terminal_enqueued
         if callable(batcher_enqueue):
@@ -1895,9 +1903,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                     for (
                         grouped_request_state,
                         grouped_event_block,
-                        grouped_event,
-                        grouped_payload,
-                        grouped_event_type,
+                        _grouped_event,
+                        _grouped_payload,
+                        _grouped_event_type,
                         grouped_operation_state,
                     ) in grouped_terminal_events:
                         await _persist_http_bridge_operation_event(
@@ -1916,17 +1924,32 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 state=grouped_operation_state,
                                 response_id=_websocket_downstream_response_id(grouped_request_state),
                             )
-                        await self._finalize_websocket_request_state(
-                            grouped_request_state,
-                            account=session.account,
-                            account_id_value=session.account.id,
-                            event=grouped_event,
-                            event_type=grouped_event_type,
-                            payload=grouped_payload,
-                            api_key=grouped_request_state.api_key,
-                            upstream_control=session.upstream_control,
-                            response_create_gate=session.response_create_gate,
-                        )
+                    first_finalization_error: Exception | None = None
+                    for (
+                        grouped_request_state,
+                        _grouped_event_block,
+                        grouped_event,
+                        grouped_payload,
+                        grouped_event_type,
+                        _grouped_operation_state,
+                    ) in grouped_terminal_events:
+                        try:
+                            await self._finalize_websocket_request_state(
+                                grouped_request_state,
+                                account=session.account,
+                                account_id_value=session.account.id,
+                                event=grouped_event,
+                                event_type=grouped_event_type,
+                                payload=grouped_payload,
+                                api_key=grouped_request_state.api_key,
+                                upstream_control=session.upstream_control,
+                                response_create_gate=session.response_create_gate,
+                            )
+                        except Exception as exc:
+                            if first_finalization_error is None:
+                                first_finalization_error = exc
+                    if first_finalization_error is not None:
+                        raise first_finalization_error
                 finally:
                     # Grouped terminal errors settle detached/abandoned requests
                     # (event_queue is None) with no downstream stream finalizer
@@ -2733,6 +2756,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 terminal=event_type in {"response.completed", "response.failed", "response.incomplete", "error"},
                 terminal_state=matched_terminal_state,
                 terminal_event_queue=matched_event_queue,
+                terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
             )
         if (
             matched_request_state is not None
@@ -2775,6 +2799,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         else _http_bridge_operation_state_for_event(event_type)
                     ),
                     terminal_event_queue=terminal_event_queue,
+                    terminal_delivery_scope=(completed_delivery_scope if completed_event_queue_claimed else None),
                 )
             if terminal_event_queue is not None and terminal_enqueued is not True:
                 await terminal_event_queue.put(event_block)

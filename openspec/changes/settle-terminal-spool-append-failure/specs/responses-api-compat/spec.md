@@ -20,12 +20,14 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 - **THEN** every selected operation receives its terminal event and end-of-stream marker first
 - **AND** sibling delivery does not wait for the first fallback settlement
 - **AND** cancellation is preserved only after every pre-delivered sibling finishes settlement and finalization
+- **AND** one sibling's finalization failure does not prevent later siblings from settling
 
 #### Scenario: Cancellation after successful append preserves terminal delivery
 
 - **GIVEN** terminal append succeeds while relay cancellation is deferred
 - **WHEN** the append result becomes available
 - **THEN** the terminal event and end-of-stream marker are queued
+- **AND** a completed-delivery scope is marked authoritative before cleanup can deactivate it
 - **AND** cancellation is preserved only after that delivery
 
 #### Scenario: Stale owner cannot settle after terminal append exception

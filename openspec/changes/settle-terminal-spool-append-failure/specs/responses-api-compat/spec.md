@@ -2,7 +2,7 @@
 
 ### Requirement: Terminal append failure preserves authoritative settlement
 
-When durable append of a terminal HTTP-bridge event raises after the operation was acknowledged, the proxy MUST attempt to persist the intended terminal operation state through the same operation, session, instance, and owner-epoch fence. The event spool MUST remain incomplete, and the persistence failure MUST NOT replace or block the terminal event already selected for downstream delivery. A rejected or failed fallback settlement MUST be logged and MUST NOT bypass the owner fence or overwrite a newer operation attempt admitted under the same owner epoch.
+When durable append of a terminal HTTP-bridge event raises after the operation was acknowledged, the proxy MUST attempt to persist the intended terminal operation state through the same operation, session, instance, and owner-epoch fence. Cancellation MUST be deferred through the append and any required fallback settlement. The event spool MUST remain incomplete, and the persistence failure MUST NOT replace or block the terminal event already selected for downstream delivery. A rejected or failed fallback settlement MUST be logged and MUST NOT bypass the owner fence or overwrite a newer operation attempt admitted under the same owner epoch.
 
 #### Scenario: Terminal append exception settles the current owner operation
 
@@ -31,7 +31,7 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 
 - **GIVEN** a replay whose client-visible response alias differs from its persisted upstream response ID
 - **WHEN** durable terminal-event append raises
-- **THEN** fallback settlement compares the acknowledged operation against the persisted upstream response ID
+- **THEN** fallback settlement compares the acknowledged or already terminal operation against the persisted upstream response ID
 - **AND** persists the intended client-visible terminal response ID
 
 #### Scenario: Successful terminal append remains atomic and replayable

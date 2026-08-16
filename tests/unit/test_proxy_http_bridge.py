@@ -5180,6 +5180,8 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     )
     session.durable_session_id = "durable-terminal-append-fallback-order"
     session.durable_owner_epoch = 3
+    append_started = asyncio.Event()
+    release_append = asyncio.Event()
     settlement_started = asyncio.Event()
     release_settlement = asyncio.Event()
     settlement_finished = asyncio.Event()
@@ -5189,6 +5191,8 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     async def append_terminal_event(*args: Any, **kwargs: Any) -> TerminalOperationEventAppendResult:
         del args
         append_kwargs.update(kwargs)
+        append_started.set()
+        await release_append.wait()
         return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
 
     async def settle_terminal_event(*args: Any, **kwargs: Any) -> None:
@@ -5218,14 +5222,17 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
         )
     )
 
+    await asyncio.wait_for(append_started.wait(), timeout=1.0)
+    persist_task.cancel()
+    assert persist_task.cancelling()
+    assert persist_task.done() is False
+    release_append.set()
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
     assert append_kwargs["response_id"] == "resp-client-visible-replay"
     assert settlement_kwargs["expected_response_id"] == "resp-terminal-append-fallback-order"
     assert settlement_kwargs["response_id"] == "resp-client-visible-replay"
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
     assert persist_task.done() is False
-    persist_task.cancel()
-    assert persist_task.cancelling()
     release_settlement.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(persist_task, timeout=1.0)

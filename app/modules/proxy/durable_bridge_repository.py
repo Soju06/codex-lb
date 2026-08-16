@@ -2052,7 +2052,10 @@ class DurableBridgeRepository:
                     HttpBridgeOperationRecord.session_id == session_id,
                     or_(
                         and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
-                        and_(HttpBridgeOperationRecord.state == state, terminal_response_matches),
+                        and_(
+                            HttpBridgeOperationRecord.state == state,
+                            or_(acknowledged_response_matches, terminal_response_matches),
+                        ),
                     ),
                 )
                 .values(

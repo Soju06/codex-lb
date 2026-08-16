@@ -347,22 +347,26 @@ async def _persist_http_bridge_operation_event(
             instance_id = _service_get_settings().http_responses_session_bridge_instance_id
             expected_response_id = request_state.response_id
             response_id = _websocket_downstream_response_id(request_state)
-            append_result = await append_terminal_batch(
-                operation_id=operation_id,
-                session_id=session_id,
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
-                event_text=event_block,
-                max_bytes=int(
-                    getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_operation_event_spool_max_bytes",
-                        2 * 1024 * 1024,
-                    )
+            append_task = asyncio.create_task(
+                append_terminal_batch(
+                    operation_id=operation_id,
+                    session_id=session_id,
+                    instance_id=instance_id,
+                    owner_epoch=owner_epoch,
+                    event_text=event_block,
+                    max_bytes=int(
+                        getattr(
+                            _service_get_settings(),
+                            "http_responses_session_bridge_operation_event_spool_max_bytes",
+                            2 * 1024 * 1024,
+                        )
+                    ),
+                    state=terminal_state,
+                    response_id=response_id,
                 ),
-                state=terminal_state,
-                response_id=response_id,
+                name=f"http-bridge-terminal-append-{operation_id}",
             )
+            append_result, deferred_cancellation = await _await_task_deferring_cancellation(append_task)
             persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
@@ -399,8 +403,9 @@ async def _persist_http_bridge_operation_event(
                     name=f"http-bridge-terminal-settlement-{operation_id}",
                 )
                 _, settlement_cancellation = await _await_task_deferring_cancellation(settlement_task)
-                if settlement_cancellation is not None:
-                    raise settlement_cancellation
+                deferred_cancellation = deferred_cancellation or settlement_cancellation
+            if deferred_cancellation is not None:
+                raise deferred_cancellation
             return terminal_enqueued
         if callable(batcher_enqueue):
             await batcher_enqueue(

@@ -1,6 +1,6 @@
 ## 1. Regression
 
-- [x] 1.1 Add deterministic regressions proving a terminal append exception settles the operation through the unchanged owner fence without overwriting a newer same-owner retry.
+- [x] 1.1 Add deterministic regressions proving a terminal append exception settles through the unchanged owner fence without overwriting a newer retry, blocking terminal EOF, or starving grouped siblings.
 - [x] 1.2 Capture the focused regression failing before production code changes.
 
 ## 2. Implementation

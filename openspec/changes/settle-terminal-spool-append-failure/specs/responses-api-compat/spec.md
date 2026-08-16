@@ -13,6 +13,20 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 - **AND** the terminal event and end-of-stream marker are queued before fallback settlement can stall
 - **AND** reconnect or recovery does not observe the operation as acknowledged work
 
+#### Scenario: Grouped failures deliver every sibling before settlement
+
+- **GIVEN** one upstream error selects terminal failures for multiple pending operations
+- **WHEN** the first operation's fallback settlement stalls
+- **THEN** every selected operation receives its terminal event and end-of-stream marker first
+- **AND** sibling delivery does not wait for the first fallback settlement
+
+#### Scenario: Cancellation after successful append preserves terminal delivery
+
+- **GIVEN** terminal append succeeds while relay cancellation is deferred
+- **WHEN** the append result becomes available
+- **THEN** the terminal event and end-of-stream marker are queued
+- **AND** cancellation is preserved only after that delivery
+
 #### Scenario: Stale owner cannot settle after terminal append exception
 
 - **GIVEN** an HTTP-bridge operation whose owner epoch has advanced

@@ -5242,6 +5242,150 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
 
 
 @pytest.mark.asyncio
+async def test_terminal_append_success_queues_output_before_preserving_cancellation() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-append-success-cancellation",
+        response_id="resp-terminal-append-success-cancellation",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.operation_id = "op-terminal-append-success-cancellation"
+    session = _make_bridge_session(
+        key_value="terminal-append-success-cancellation",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-terminal-append-success-cancellation"
+    session.durable_owner_epoch = 4
+    append_started = asyncio.Event()
+    release_append = asyncio.Event()
+
+    async def append_terminal_event(*args: Any, **kwargs: Any) -> TerminalOperationEventAppendResult:
+        del args, kwargs
+        append_started.set()
+        await release_append.wait()
+        return TerminalOperationEventAppendResult(persisted=True, settlement_required=False)
+
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(append_terminal_event=append_terminal_event),
+    )
+    event_block = 'data: {"type":"response.completed"}\n\n'
+    persist_task = asyncio.create_task(
+        http_bridge_upstream_events_module._persist_http_bridge_operation_event(
+            service,
+            session,
+            request_state,
+            event_block,
+            terminal=True,
+            terminal_state="completed",
+            terminal_event_queue=event_queue,
+        )
+    )
+
+    await asyncio.wait_for(append_started.wait(), timeout=1.0)
+    persist_task.cancel()
+    release_append.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(persist_task, timeout=1.0)
+    assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
+    assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
+    assert event_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    queues: list[asyncio.Queue[str | None]] = [asyncio.Queue(), asyncio.Queue()]
+    request_states: list[proxy_service._WebSocketRequestState] = []
+    for index, event_queue in enumerate(queues):
+        request_state = proxy_service._WebSocketRequestState(
+            request_id=f"req-grouped-terminal-{index}",
+            model="gpt-5.6-sol",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            event_queue=event_queue,
+            transport="http",
+            previous_response_id="resp-shared-grouped-terminal",
+            skip_request_log=True,
+        )
+        request_state.operation_id = f"op-grouped-terminal-{index}"
+        request_states.append(request_state)
+    session = _make_bridge_session(
+        key_value="grouped-terminal-fanout",
+        pending_requests=deque(request_states),
+        queued_request_count=2,
+    )
+    session.durable_session_id = "durable-grouped-terminal-fanout"
+    session.durable_owner_epoch = 5
+    settlement_started = asyncio.Event()
+    release_settlement = asyncio.Event()
+    append_calls: list[str] = []
+
+    async def append_terminal_event(*args: Any, **kwargs: Any) -> TerminalOperationEventAppendResult:
+        del args
+        append_calls.append(kwargs["operation_id"])
+        return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
+
+    async def settle_terminal_event(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        settlement_started.set()
+        await release_settlement.wait()
+
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+    monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", AsyncMock())
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(
+            append_terminal_event=append_terminal_event,
+            settle_terminal_event=settle_terminal_event,
+        ),
+    )
+    process_task = asyncio.create_task(
+        service._process_http_bridge_upstream_text(
+            session,
+            json.dumps(
+                {
+                    "type": "error",
+                    "status": 400,
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "previous_response_not_found",
+                        "message": "Previous response with id 'resp-shared-grouped-terminal' not found.",
+                        "param": "previous_response_id",
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        )
+    )
+
+    await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
+    assert append_calls == ["op-grouped-terminal-0"]
+    for event_queue in queues:
+        terminal_event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+        assert '"type":"response.failed"' in terminal_event
+        assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
+        assert event_queue.empty()
+    assert process_task.done() is False
+    release_settlement.set()
+    await asyncio.wait_for(process_task, timeout=1.0)
+    assert append_calls == ["op-grouped-terminal-0", "op-grouped-terminal-1"]
+
+
+@pytest.mark.asyncio
 async def test_ordinary_completed_alias_rejection_preserves_successful_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

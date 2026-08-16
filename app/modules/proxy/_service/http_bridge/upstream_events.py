@@ -406,6 +406,9 @@ async def _persist_http_bridge_operation_event(
                 _, settlement_cancellation = await _await_task_deferring_cancellation(settlement_task)
                 deferred_cancellation = deferred_cancellation or settlement_cancellation
             if deferred_cancellation is not None:
+                if terminal_event_queue is not None and not terminal_enqueued:
+                    await terminal_event_queue.put(event_block)
+                    await terminal_event_queue.put(None)
                 raise deferred_cancellation
             return terminal_enqueued
         if callable(batcher_enqueue):
@@ -1859,32 +1862,50 @@ class _HTTPBridgeUpstreamEventsMixin:
                 if is_missing_tool_output_event
                 else "stream_incomplete"
             )
-            try:
-                for grouped_request_state in grouped_previous_response_request_states:
-                    grouped_request_state.error_http_status_override = 502
+            grouped_terminal_events = []
+            for grouped_request_state in grouped_previous_response_request_states:
+                grouped_request_state.error_http_status_override = 502
+                (
+                    _grouped_downstream_text,
+                    grouped_event_block,
+                    grouped_event,
+                    grouped_payload,
+                    grouped_event_type,
+                ) = _build_stream_incomplete_terminal_event_for_request(
+                    grouped_request_state,
+                    reason=grouped_error_reason,
+                )
+                grouped_operation_state = _http_bridge_operation_state_for_event(grouped_event_type)
+                grouped_terminal_events.append(
                     (
-                        _grouped_downstream_text,
+                        grouped_request_state,
                         grouped_event_block,
                         grouped_event,
                         grouped_payload,
                         grouped_event_type,
-                    ) = _build_stream_incomplete_terminal_event_for_request(
-                        grouped_request_state,
-                        reason=grouped_error_reason,
+                        grouped_operation_state,
                     )
-                    grouped_operation_state = _http_bridge_operation_state_for_event(grouped_event_type)
-                    grouped_terminal_enqueued = await _persist_http_bridge_operation_event(
+                )
+                if grouped_request_state.event_queue is not None:
+                    await grouped_request_state.event_queue.put(grouped_event_block)
+                    await grouped_request_state.event_queue.put(None)
+            try:
+                for (
+                    grouped_request_state,
+                    grouped_event_block,
+                    grouped_event,
+                    grouped_payload,
+                    grouped_event_type,
+                    grouped_operation_state,
+                ) in grouped_terminal_events:
+                    await _persist_http_bridge_operation_event(
                         self,
                         session,
                         grouped_request_state,
                         grouped_event_block,
                         terminal=True,
                         terminal_state=grouped_operation_state,
-                        terminal_event_queue=grouped_request_state.event_queue,
                     )
-                    if grouped_request_state.event_queue is not None and grouped_terminal_enqueued is not True:
-                        await grouped_request_state.event_queue.put(grouped_event_block)
-                        await grouped_request_state.event_queue.put(None)
                     if grouped_operation_state is not None and grouped_operation_state != "failed":
                         await _update_http_bridge_operation_state(
                             self,

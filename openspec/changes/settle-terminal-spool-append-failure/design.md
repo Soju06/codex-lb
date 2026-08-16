@@ -30,7 +30,8 @@ The durable bridge exposes operation settlement under the same operation, sessio
 ## Risks / Trade-offs
 
 - [A transient database failure can affect both append and fallback update] -> Queue the terminal event and end-of-stream marker before awaiting structured fallback settlement and emit a warning for operator diagnosis.
-- [Relay cancellation can interrupt an in-flight terminal append] -> Defer cancellation through the append and any required fallback, then preserve it.
+- [Relay cancellation can interrupt an in-flight terminal append] -> Defer cancellation through the append and any required fallback, queue terminal output after a successful append, then preserve cancellation.
+- [A grouped terminal fan-out can stall on its first fallback] -> Queue every sibling terminal event and end-of-stream marker before beginning their sequential persistence work.
 - [A stale owner could attempt to settle another owner's operation] -> Pass the unchanged session/instance/epoch fence and treat rejection as non-settlement.
 - [A delayed fallback could overwrite a newer retry under the same owner] -> Require the prior attempt's acknowledged/terminal state and response identity in the update predicate.
 - [Replay aliases can differ from the upstream response identity persisted at acknowledgement] -> Carry the upstream identity as the expected CAS value separately from the client-visible terminal identity, and preserve it when no new client-visible identity is supplied.

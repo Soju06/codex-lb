@@ -739,4 +739,27 @@ describe("ReportsPage", () => {
         .find((button) => button.getAttribute("aria-haspopup") === "menu"),
     ).toBeInTheDocument();
   });
+
+  it("forwards initial apiKeyId filter to useReports hook calls", () => {
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(
+      <ReportsPage initialFilters={{ apiKeyId: ["key-123"] }} />,
+    );
+
+    expect(useReportsMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        apiKeyId: ["key-123"],
+      }),
+      "America/Los_Angeles",
+    );
+  });
 });

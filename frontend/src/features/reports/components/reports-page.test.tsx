@@ -808,4 +808,61 @@ describe("ReportsPage", () => {
       ).not.toBeInTheDocument();
     });
   });
+
+  it("exports CSV based on the filtered report dataset when API key filter is active", async () => {
+    const user = userEvent.setup();
+    const blobText = vi.fn(async () => "");
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      if (!(blob instanceof Blob)) {
+        throw new TypeError("expected Blob export payload");
+      }
+      blobText.mockImplementation(() => blob.text());
+      return "blob:daily-breakdown";
+    });
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: {
+          ...EMPTY_REPORT,
+          daily: [
+            {
+              date: "2030-01-15",
+              requests: 42,
+              conversations: 2,
+              inputTokens: 1000,
+              outputTokens: 200,
+              cachedInputTokens: 50,
+              costUsd: 0.15,
+              activeAccounts: 1,
+              errorCount: 0,
+              medianTtftMs: 0,
+              medianTps: 0,
+              medianQueueMs: 0,
+            },
+          ],
+        },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(
+      <ReportsPage
+        initialFilters={{
+          startDate: "2030-01-15",
+          endDate: "2030-01-15",
+          apiKeyId: ["key-filtered"],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /csv/i }));
+
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    const csvContent = await blobText();
+    expect(csvContent).toContain("2030-01-15,42,2,1000,200,50,0.1500,1,0");
+  });
 });

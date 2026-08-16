@@ -59,7 +59,13 @@ Launch the adversarial review as a background process.
    cat <prompt-file> | bash <skill-dir>/scripts/codex-subagent.sh --uncommitted
    ```
 2. Inform the user the review is running (~20-50 min).
-3. The script parses Codex output and returns the final review text.
+3. The script parses Codex output and returns the final review text. Review
+   rollouts intentionally remain persistent. If terminal output is lost, use
+   `codex resume --include-non-interactive` to locate the review, or
+   `codex resume <SESSION_ID>` when its ID is known. Do not add
+   `--ephemeral` to the wrapper. The wrapper also relies on the configured
+   non-interactive approval/sandbox policy because Codex CLI 0.147.0 removed
+   the historical `--full-auto` argument from `exec review`.
 
 ### Error handling
 

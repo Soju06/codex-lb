@@ -1241,6 +1241,40 @@ async def test_accounts_upsert_merge_by_chatgpt_identity_skips_without_upstream_
 
 
 @pytest.mark.asyncio
+async def test_identity_reconciliation_does_not_select_identityless_local_row_as_duplicate(db_setup):
+    async with SessionLocal() as session:
+        repo = AccountsRepository(session)
+        canonical = _make_account_with_chatgpt_id(
+            "acc_identity_canonical",
+            "identity-invariant@example.com",
+            "chatgpt_identity_invariant",
+        )
+        identityless = _make_account("acc_identityless_local", "identity-invariant@example.com")
+        await repo.upsert(canonical, merge_by_email=False)
+        await repo.upsert(identityless, merge_by_email=False)
+
+        saved = await repo.upsert(
+            _make_account_with_chatgpt_id(
+                "acc_identity_reauth",
+                "identity-invariant@example.com",
+                "chatgpt_identity_invariant",
+            ),
+            merge_by_email=False,
+            merge_by_chatgpt_identity=True,
+        )
+
+        assert saved.id == canonical.id
+        remaining = {
+            account.id: account.chatgpt_account_id
+            for account in (await session.execute(select(Account).order_by(Account.id))).scalars().all()
+        }
+        assert remaining == {
+            canonical.id: "chatgpt_identity_invariant",
+            identityless.id: None,
+        }
+
+
+@pytest.mark.asyncio
 async def test_usage_repository_aggregate(db_setup):
     async with SessionLocal() as session:
         accounts_repo = AccountsRepository(session)

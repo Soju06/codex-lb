@@ -67,7 +67,7 @@ in [`.github/CONTRIBUTING.md`](.github/CONTRIBUTING.md). The sections
 an AI assistant most often needs are:
 
 - [Merge gates](.github/CONTRIBUTING.md#merge-gates) — CI green +
-  `@codex review` clean (or findings addressed) + `mergeable=CLEAN` +
+  actionable CodeRabbit findings addressed + `mergeable=CLEAN` +
   OpenSpec change folder for behavior changes + `Fixes #N` /
   `Closes #N` for issue cover + the five simplicity rules
   (PRINCIPLES.md P1-P5; see
@@ -80,8 +80,8 @@ an AI assistant most often needs are:
   comment invoking the clause.
 
 An assistant preparing a merge MUST verify the gates against the
-actual GitHub state (status check rollup, codex review submissions,
-`mergeable` field) rather than asserting them from local history.
+actual GitHub state (status check rollup, current-head CodeRabbit review
+threads, `mergeable` field) rather than asserting them from local history.
 Local `uv run pytest` / `uv run ruff` / `codex review --base origin/main`
 are encouraged but not substitutes for the cloud gates.
 
@@ -96,12 +96,10 @@ These rules encode recurring review blockers observed across codex-lb PRs.
   examples in `context.md` or change notes, and run strict OpenSpec validation
   before calling the PR ready. Code/tests alone are not enough when OpenSpec is
   required.
-- Codex review state must come from current-head GitHub evidence. Check labels,
-  latest Codex review/comment/reaction, and GraphQL review threads before using
-  or claiming `🤖 codex: ok`. Usage-limit, environment, or missing-review
-  results mean missing evidence, not approval. Unresolved non-outdated P-level
-  Codex threads block readiness even when a top-level review comment looks
-  clean.
+- CodeRabbit review state must come from current-head GitHub evidence.
+  Unresolved, non-outdated actionable review threads block readiness until
+  their findings are fixed or explicitly addressed or dismissed in-thread;
+  a top-level summary does not override active thread evidence.
 - Proxy failover and retry patches must prove account ownership and settlement
   invariants. File-pinned requests must not cross accounts; API-key reservations
   must settle before error-health writes; excluded accounts must actually leave

@@ -1,24 +1,34 @@
 from __future__ import annotations
 
 import json
+import re
+from copy import deepcopy
 from typing import Mapping, cast
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.requests import (
     _ESTIMATED_CHARS_PER_TOKEN,
     _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
+    _UNSUPPORTED_UPSTREAM_FIELDS,
     ResponsesCompactRequest,
     ResponsesRequest,
+    _estimated_json_array_item_tokens,
     _estimated_json_tokens,
     _input_image_file_reference,
+    _sanitize_input_items,
+    _strip_unsupported_fields,
+    _trim_compact_input_for_upstream,
     extract_input_file_ids,
     extract_input_image_file_references,
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
+from tests.unit.hypothesis_strategies import json_arrays, json_directive_types, json_objects, json_values
 
 
 def test_responses_requires_instructions():
@@ -113,6 +123,56 @@ def test_known_unsupported_upstream_fields_are_stripped():
     assert "truncation" not in dumped
     assert "user" not in dumped
     assert dumped["custom_field"] == "kept"
+
+
+@given(json_arrays)
+@settings(deadline=None)
+def test_sanitize_input_items_is_idempotent_for_json(input_items):
+    original = deepcopy(input_items)
+    try:
+        sanitized = _sanitize_input_items(input_items)
+    except ValueError:
+        # Tool items without a usable call ID are deliberately rejected.
+        return
+
+    assert input_items == original
+    assert _sanitize_input_items(deepcopy(sanitized)) == sanitized
+
+
+@given(
+    role=st.sampled_from(["system", "developer"]),
+    item_type=json_directive_types,
+    extra=json_objects,
+)
+@settings(deadline=None)
+def test_sanitize_input_items_preserves_typed_directives(role, item_type, extra):
+    directive = dict(extra)
+    directive.update({"role": role, "type": item_type})
+
+    assert _sanitize_input_items([directive]) == [directive]
+
+
+@given(payload=json_objects.map(lambda value: {key: item for key, item in value.items() if key != "input"}))
+@settings(deadline=None)
+def test_strip_unsupported_fields_is_idempotent(payload):
+    payload = cast(dict[str, JsonValue], payload)
+    first = _strip_unsupported_fields(deepcopy(payload))
+    second = _strip_unsupported_fields(deepcopy(first))
+
+    assert second == first
+    assert _UNSUPPORTED_UPSTREAM_FIELDS.isdisjoint(first)
+
+
+@given(namespace=json_values)
+@settings(deadline=None)
+def test_strip_unsupported_fields_namespace_flag_controls_replayed_calls(namespace):
+    payload = cast(dict[str, JsonValue], {"input": [{"type": "function_call", "namespace": namespace}]})
+
+    preserved = _strip_unsupported_fields(deepcopy(payload), strip_replayed_tool_call_namespaces=False)
+    stripped = _strip_unsupported_fields(deepcopy(payload))
+
+    assert preserved["input"] == payload["input"]
+    assert stripped["input"] == [{"type": "function_call"}]
 
 
 def test_responses_preserves_service_tier():
@@ -1161,6 +1221,163 @@ def test_compact_many_small_items_include_array_wire_framing_in_budget():
     assert len(dumped_input) < len(input_items)
     wire_bytes = len(json.dumps(dumped_input, ensure_ascii=True, sort_keys=True).encode("utf-8"))
     assert wire_bytes <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS * _ESTIMATED_CHARS_PER_TOKEN
+
+
+@given(input_items=json_arrays)
+@settings(max_examples=30, deadline=None)
+def test_compact_trim_leaves_budget_fitting_json_unchanged(input_items):
+    if _estimated_json_tokens(input_items) > _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+        return
+
+    payload = cast(dict[str, JsonValue], {"input": deepcopy(input_items)})
+    original = deepcopy(payload["input"])
+
+    _trim_compact_input_for_upstream(payload)
+
+    assert payload["input"] == original
+
+
+@given(size=st.integers(min_value=400_000, max_value=500_000))
+@settings(max_examples=8, deadline=None)
+def test_compact_trim_keeps_budget_order_and_is_stable(size):
+    input_items = [
+        {"id": "head", "role": "user", "content": "head"},
+        {"id": "middle", "role": "assistant", "content": "x" * size},
+        {"id": "latest", "role": "user", "content": "latest"},
+    ]
+    payload = cast(dict[str, JsonValue], {"input": input_items})
+
+    _trim_compact_input_for_upstream(payload)
+    trimmed_input = cast(list[JsonValue], deepcopy(payload["input"]))
+
+    assert _estimated_json_tokens(trimmed_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+    retained_ids = [item["id"] for item in trimmed_input if isinstance(item, dict) and isinstance(item.get("id"), str)]
+    assert retained_ids == ["head", "latest"]
+
+    _trim_compact_input_for_upstream(payload)
+    assert payload["input"] == trimmed_input
+
+
+@given(size=st.integers(min_value=400_000, max_value=500_000))
+@settings(max_examples=8, deadline=None)
+def test_compact_trim_marker_accounts_for_omitted_middle_item(size):
+    input_items = [
+        {"id": "head", "role": "user", "content": "head"},
+        {"id": "middle", "role": "assistant", "content": "x" * size},
+        {"id": "latest", "role": "user", "content": "latest"},
+    ]
+    payload = cast(dict[str, JsonValue], {"input": input_items})
+
+    _trim_compact_input_for_upstream(payload)
+    trimmed_input = cast(list[JsonValue], payload["input"])
+
+    marker = next(
+        item
+        for item in trimmed_input
+        if isinstance(item, dict) and "[compact trim] Omitted " in str(item.get("content"))
+    )
+    marker_text = str(marker["content"])
+    match = re.search(r"Omitted (\d+) input items \(~(\d+) estimated tokens\)", marker_text)
+
+    assert match is not None
+    assert match.groups() == ("1", str(_estimated_json_array_item_tokens(cast(JsonValue, input_items[1]))))
+
+
+@given(
+    pair=st.sampled_from(
+        [
+            ("function_call", "function_call_output"),
+            ("custom_tool_call", "custom_tool_call_output"),
+            ("apply_patch_call", "apply_patch_call_output"),
+        ]
+    ),
+    filler_size=st.integers(min_value=300_000, max_value=400_000),
+)
+@settings(max_examples=8, deadline=None)
+def test_compact_trim_keeps_generated_tool_pairs(pair, filler_size):
+    call_type, output_type = pair
+    call = {
+        "type": call_type,
+        "name": "exec_command",
+        "call_id": "call-generated",
+        "arguments" if call_type == "function_call" else "input": "{}",
+    }
+    if call_type == "apply_patch_call":
+        call = {
+            "type": call_type,
+            "call_id": "call-generated",
+            "operation": {"patch": "noop"},
+        }
+    output = {"type": output_type, "call_id": "call-generated", "output": "result"}
+    payload = cast(
+        dict[str, JsonValue],
+        {
+            "input": [
+                {"role": "assistant", "content": "x" * filler_size},
+                call,
+                output,
+            ]
+        },
+    )
+
+    _trim_compact_input_for_upstream(payload)
+    trimmed_input = cast(list[JsonValue], payload["input"])
+
+    assert call in trimmed_input
+    assert output in trimmed_input
+    assert _estimated_json_tokens(trimmed_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+
+
+@given(anchor=st.sampled_from(["goal", "plan"]), filler_size=st.integers(350_000, 450_000))
+@settings(max_examples=8, deadline=None)
+def test_compact_trim_keeps_generated_state_anchor(anchor, filler_size):
+    anchor_text = (
+        '<codex_internal_context source="goal">continue the goal</codex_internal_context>'
+        if anchor == "goal"
+        else "<collaboration_mode># Plan Mode"
+    )
+    anchor_item = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": anchor_text}],
+    }
+    payload = cast(
+        dict[str, JsonValue],
+        {
+            "input": [
+                {"role": "user", "content": "head"},
+                {"role": "assistant", "content": "x" * filler_size},
+                anchor_item,
+                {"role": "user", "content": "latest"},
+            ]
+        },
+    )
+
+    _trim_compact_input_for_upstream(payload)
+    trimmed_input = cast(list[JsonValue], payload["input"])
+
+    assert anchor_item in trimmed_input
+    assert _estimated_json_tokens(trimmed_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+
+
+@given(size=st.integers(min_value=400_000, max_value=500_000))
+@settings(max_examples=8, deadline=None)
+def test_compact_trim_rejects_generated_oversized_latest_item(size):
+    payload = cast(
+        dict[str, JsonValue],
+        {
+            "input": [
+                {"role": "assistant", "content": "head"},
+                {"role": "user", "content": "x" * size},
+            ]
+        },
+    )
+
+    with pytest.raises(ClientPayloadError) as raised:
+        _trim_compact_input_for_upstream(payload)
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
 
 
 def test_compact_trims_oversized_input_by_estimated_tokens_with_head_tail_and_marker():

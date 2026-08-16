@@ -50,6 +50,8 @@ For `/v1/responses`, `/backend-api/codex/responses`, and compact Responses traff
 
 When an account is at either cap, new soft-affinity work MUST prefer another eligible account before returning local overload. A bare process-session mapping MAY supply soft locality only while the request is self-contained, pre-visible, and has no required owner. Account-cap spillover MUST be decided during account selection and MUST NOT switch an account after a request enters shared transport, replay, or durable bridge ownership. Hard-continuity work MUST remain on its required owner and MAY fail closed when that owner is saturated. Hard Codex ownership rows MUST bypass soft sticky fallback/reallocation so pressure cannot delete or rewrite them.
 
+An unanchored parallel fork bridge session whose payload is self-contained (no `previous_response_id`, no `conversation`, and no input file references) and whose current request context has no turn-state owner or anchored forwarding provenance carries no continuity ownership. When its preferred account is rejected by a local account cap (`account_stream_cap` or `account_response_create_cap`) during session creation, the proxy MUST drop the preferred-account hint exactly once for that request and retry account selection among eligible accounts before entering the recoverable account-capacity wait. Requests that carry any continuity owner signal MUST NOT spill and MUST keep the existing preferred-owner behavior, even when durable alias lookup resolves to an `internal_unanchored_parallel` canonical key.
+
 #### Scenario: Soft work avoids saturated account
 
 - **GIVEN** account A is at its account response-create cap
@@ -78,6 +80,27 @@ When an account is at either cap, new soft-affinity work MUST prefer another eli
 - **WHEN** that owner's account or response-create gate is saturated
 - **THEN** the request follows the existing hard bridge-capacity behavior
 - **AND** account-cap spillover does not publish a replacement bridge under the same canonical identity
+
+#### Scenario: Unanchored parallel fork spills off a capped preferred account
+
+- **GIVEN** an unanchored parallel fork bridge session creation whose payload carries no previous response, conversation, or input file reference
+- **AND** its preferred account is rejected with `account_stream_cap`
+- **AND** another eligible account is below its stream cap
+- **WHEN** session creation retries selection after dropping the preferred-account hint
+- **THEN** the fork session is created on the eligible account instead of waiting on the capped account
+
+#### Scenario: Owner-bearing fork payloads do not spill
+
+- **GIVEN** a parallel fork bridge session creation whose payload carries a `previous_response_id`
+- **WHEN** its preferred account is rejected with a local account cap
+- **THEN** the preferred-account hint is kept and the existing preferred-owner behavior applies
+
+#### Scenario: Turn-state aliases do not spill through an unanchored canonical key
+
+- **GIVEN** a request carries a turn-state alias whose durable row resolves to an `internal_unanchored_parallel` canonical key
+- **AND** that row has a latest turn state but no latest response ID
+- **WHEN** its owner account is rejected with a local account cap
+- **THEN** the preferred-account hint is kept and the request does not spill to another account
 
 ### Requirement: Local overload reasons are stable and distinguishable
 
@@ -458,3 +481,195 @@ Per-account concurrency caps are partitioned per bridge-ring replica and are cor
 - **WHEN** the process loads its settings at startup
 - **THEN** startup fails with a settings validation error naming `CODEX_LB_WORKERS_PER_INSTANCE`
 - **AND** the error states multi-worker-per-instance is not supported and directs the operator to run one worker per pod/container and scale via replicas
+
+### Requirement: Stream leases reflect in-flight turns, not session lifetime
+
+An HTTP bridge session's per-account stream lease MUST be held only while the session has in-flight work. When a session's last in-flight turn detaches — no queued requests, no admission waiters, and no pending requests — the session MUST release its account stream lease while remaining alive for reuse, so a warm idle upstream WebSocket does not occupy a per-account stream slot for its idle TTL. Cancellation MUST NOT interrupt that idle lease settlement after the lease is detached from the session. A turn admitted to a session holding no lease MUST reacquire one under normal cap admission before it is counted into the session queue, and a denied reacquisition MUST fail with the standard HTTP 429 `account_stream_cap` envelope so the recoverable capacity wait and client retry semantics apply unchanged. Reacquisition MUST carry the turn's usage-budget token estimate into the lease, matching initial bridge selection and reconnect, so capacity-weighted routing pressure continues to see turns running on reused warm sessions. The stream recovery reserve MUST NOT be consulted at reacquisition, consistent with the reserve being a selection-time reserve. Session close MUST keep its existing lease settlement; a session that already released while idle has nothing further to settle.
+
+The lease remains per-session, matching the pre-existing lease lifecycle: a session MUST hold at most one stream lease at a time, and turns queued on a session that already holds a lease MUST NOT acquire additional leases — queued turns multiplex over the session's single upstream stream, which is what the per-account stream cap bounds. If the session closes while a reacquisition is in flight, the freshly acquired lease MUST be released back rather than installed on the closed session, and the turn MUST fail with the standard closed-bridge error envelope. Cancellation MUST NOT interrupt release of that detached lease. A submit MUST be registered as in-flight work (admission waiter) atomically with its lease reacquisition, so a completed turn's finalizer running concurrently cannot observe the session as idle and release the reacquired lease before the new turn is counted into the session queue. Any failure after waiter registration and before queue admission MUST remove that waiter and settle an otherwise-idle lease. Reconnect and reacquisition MUST serialize changes to the session lease so a reconnect lease cannot be overwritten and leaked by a concurrent reacquisition. Cancellation MUST NOT interrupt settlement of a lease detached during reconnect replacement. If prewarm fails after the upstream reader closes the session and defers retirement for that admission waiter, removing the final waiter MUST retire the closed session and release its stream lease. Prewarm cancellation MUST NOT interrupt removal of the admission waiter or settlement of an otherwise-idle stream lease.
+
+#### Scenario: Finished turn returns the account's stream slot
+
+- **GIVEN** a bridge session whose only in-flight turn completes
+- **WHEN** the turn's stream finalizes and detaches
+- **THEN** the session releases its account stream lease
+- **AND** the session remains alive for reuse within its idle TTL
+
+#### Scenario: Idle sessions do not starve new admissions
+
+- **GIVEN** an account at its stream cap where some leases belong to idle sessions
+- **WHEN** those sessions' turns complete
+- **THEN** the freed slots admit new work immediately
+- **AND** the freed slots are not held until the idle sessions' TTL expiry
+
+#### Scenario: Next turn on an idle session passes cap admission
+
+- **GIVEN** an idle bridge session that released its stream lease
+- **WHEN** a new turn is admitted to that session
+- **THEN** the session reacquires a stream lease before the turn is counted into the session queue
+
+#### Scenario: Reacquisition denial uses the standard cap envelope
+
+- **GIVEN** an idle bridge session whose account is at its stream cap
+- **WHEN** a new turn's lease reacquisition is denied
+- **THEN** the turn fails with HTTP 429 and `error.code = "account_stream_cap"`
+- **AND** the recoverable account-capacity wait applies to the retry
+
+#### Scenario: Close racing reacquisition does not leak the slot
+
+- **GIVEN** an idle bridge session whose stream lease reacquisition is awaiting cap admission
+- **WHEN** the session is closed or evicted before the acquisition completes
+- **THEN** the freshly acquired lease is released back to the account
+- **AND** the turn fails with the standard closed-bridge error envelope
+
+#### Scenario: Cancellation during close-race settlement does not leak the slot
+
+- **GIVEN** a session closes while reacquisition is awaiting cap admission
+- **AND** the submit is cancelled while the freshly acquired lease is being returned
+- **WHEN** lease settlement completes
+- **THEN** cancellation propagates only after the lease is released
+
+#### Scenario: Stale finalizer cannot release a lease reacquired for a new turn
+
+- **GIVEN** a warm session whose new turn has reacquired a stream lease but is not yet counted into the session queue
+- **WHEN** a previous turn's finalizer runs its idle-release check concurrently
+- **THEN** the session is not considered idle
+- **AND** the reacquired lease is retained for the new turn
+
+#### Scenario: Failed queue admission removes its waiter
+
+- **GIVEN** a submit has registered an admission waiter before queue admission
+- **WHEN** its final lease check fails
+- **THEN** the admission waiter is removed
+- **AND** an otherwise-idle session releases its stream lease
+
+#### Scenario: Reconnect racing reacquisition retains one lease
+
+- **GIVEN** a reconnect and idle-session lease reacquisition overlap
+- **WHEN** both acquire a stream lease before either operation completes
+- **THEN** the session retains exactly one of those leases
+- **AND** the losing lease is released immediately
+
+#### Scenario: Queued turns share the session's single stream slot
+
+- **GIVEN** a bridge session that holds a stream lease for an active turn
+- **WHEN** additional turns are admitted to the session queue
+- **THEN** no additional stream leases are acquired
+- **AND** the session continues to hold exactly one stream lease
+
+#### Scenario: Prewarm failure retires a closed session after its waiter leaves
+
+- **GIVEN** a new turn has reacquired a stream lease and registered an admission waiter
+- **AND** the upstream reader closes the session during prewarm and defers retirement for that waiter
+- **WHEN** prewarm fails and the final admission waiter is removed
+- **THEN** the closed session is retired
+- **AND** its stream lease is released
+
+#### Scenario: Prewarm cancellation completes lease cleanup
+
+- **GIVEN** a new turn has reacquired a stream lease and registered an admission waiter
+- **WHEN** the downstream task is cancelled during prewarm
+- **THEN** cleanup removes the admission waiter before propagating cancellation
+- **AND** an otherwise-idle session releases its stream lease
+
+#### Scenario: Grouped terminal errors release an abandoned session's lease
+
+- **GIVEN** a bridge session whose only pending turns are detached follow-ups (no downstream consumers remain)
+- **WHEN** a grouped terminal error (for example `previous_response_not_found`) settles all of them together
+- **THEN** the session releases its account stream lease
+- **AND** the freed slot admits new work without waiting for session close or idle TTL expiry
+
+#### Scenario: Busy sessions keep their lease
+
+- **GIVEN** a bridge session with another turn still queued or pending
+- **WHEN** one of its turns detaches
+- **THEN** the session's stream lease is retained
+
+### Requirement: Stream admission applies congestion-aware per-API-key fair share
+
+When `proxy_api_key_fair_share_congestion_threshold_pct` is greater than zero, stream-lease selection MUST evaluate a per-API-key fair-share gate over the selection's candidate account set before admitting a stream. Pool capacity MUST be computed as the candidate-account count multiplied by each account's effective stream slots (`max(1, stream_limit - stream_reserve_slots)`), pool in-flight as the sum of the candidate accounts' in-flight stream leases, and both compared with integer arithmetic: the pool is congested if and only if `pool_inflight * 100 >= pool_capacity * threshold_pct`. When the pool is not congested the gate MUST admit unconditionally. When the pool is congested the gate MUST admit a key only if the key's in-flight stream count on the candidate accounts plus one does not exceed `max(2, pool_capacity // active_keys)`, where `active_keys` is the number of API keys holding at least one in-flight stream lease on the candidate accounts with the requester counted exactly once. The gate MUST NOT apply when the configured threshold is zero, when the request carries no API key, when the selection is for a reattach stage, when the lease kind is not stream, or when the effective stream limit is nonpositive; keyless streams MUST still count toward pool in-flight. The gate MUST NOT read the database and MUST evaluate under the same runtime lock that guards lease counters.
+
+#### Scenario: Disabled threshold changes no admission outcome
+
+- **GIVEN** `proxy_api_key_fair_share_congestion_threshold_pct` is 0 (the default)
+- **WHEN** any mix of API keys saturates the pool's stream slots
+- **THEN** every selection outcome is identical to the behavior before this change
+
+#### Scenario: Uncongested pool admits an already-heavy key
+
+- **GIVEN** a threshold of 80 and pool utilization below 80%
+- **AND** one key already holds more streams than `pool_capacity // active_keys`
+- **WHEN** that key requests another stream
+- **THEN** the request is admitted
+
+#### Scenario: Congested pool denies a key at or above its fair share
+
+- **GIVEN** a threshold of 80 and pool utilization at or above 80%
+- **AND** a key holding at least `max(2, pool_capacity // active_keys)` in-flight streams
+- **WHEN** that key requests another stream
+- **THEN** selection returns the stable reason `api_key_stream_fair_share` and no lease is acquired
+
+#### Scenario: Minimum guarantee admits light keys under congestion
+
+- **GIVEN** a congested pool dominated by another key's streams
+- **WHEN** a key holding fewer than two in-flight streams requests a stream
+- **THEN** the fair-share gate admits it
+
+#### Scenario: Requester is counted exactly once in the divisor
+
+- **GIVEN** a congested pool where the requester already holds in-flight streams
+- **WHEN** the fair share is computed
+- **THEN** `active_keys` counts the requester once and does not change whether the requester is currently active or newly arriving
+
+#### Scenario: Keyless requests bypass the gate but consume capacity
+
+- **GIVEN** a congested pool
+- **WHEN** a request without an API key selects an account
+- **THEN** the fair-share gate does not deny it
+- **AND** its in-flight stream counts toward pool in-flight for keyed requesters
+
+#### Scenario: Reattach-stage selection bypasses the gate
+
+- **GIVEN** a congested pool and a heavy key at its fair share
+- **WHEN** that key's reattach-stage selection resumes an existing in-flight response
+- **THEN** the fair-share gate does not deny it
+
+### Requirement: Fair-share denials reuse local capacity-wait semantics
+
+A fair-share denial MUST surface the stable local-overload reason `api_key_stream_fair_share` and MUST inherit the existing account-capacity handling: the transport layer parks the request with `waiting_for_account_capacity` keepalives and retries selection within the request budget, and a request that exhausts its budget while denied MUST receive HTTP 429 with `error.type` `rate_limit_error` and a `Retry-After` header rather than a 503. The denial message MUST state the key's in-flight count, the fair share, the pool in-flight and capacity, and the active-key count without naming other API keys.
+
+#### Scenario: Denied request parks and admits after the pool decongests
+
+- **GIVEN** a heavy key denied by the fair-share gate
+- **WHEN** enough streams release for the key to fall under its fair share or the pool to fall below the threshold
+- **THEN** a subsequent parked retry admits the request without client intervention
+
+#### Scenario: Budget exhaustion surfaces 429 with fair-share numbers
+
+- **GIVEN** a request that remains fair-share denied until its budget is exhausted
+- **WHEN** the terminal error is rendered
+- **THEN** the status is 429 with `error.type` `rate_limit_error` and a `Retry-After` header
+- **AND** the message includes the key in-flight count, fair share, pool in-flight, pool capacity, and active-key count
+
+### Requirement: Per-API-key stream accounting follows the lease lifecycle
+
+Every stream lease acquired through account selection MUST record the requesting API key, and the per-account per-key in-flight map MUST be maintained under the runtime lock across acquire, explicit release, and stale reclaim, with map entries removed when a key's count reaches zero and removed together with pruned account runtime state. Account-scoped keys MUST be measured against their scoped candidate accounts only. On the sticky selection path the gate decision MUST be re-validated in the commit lock section before the lease is acquired, so concurrent selections for one key cannot overshoot the share between the filter and commit sections; the unbound path MUST evaluate the gate and acquire the lease in a single lock section.
+
+#### Scenario: Release and stale reclaim decrement the owning key
+
+- **GIVEN** a key holding in-flight stream leases
+- **WHEN** a lease is released explicitly or reclaimed as stale
+- **THEN** that key's in-flight count decreases accordingly and its map entry is removed at zero
+
+#### Scenario: Scoped key is measured against its scoped pool
+
+- **GIVEN** a key restricted to a subset of accounts via account assignment scope
+- **WHEN** the fair-share gate evaluates its request
+- **THEN** pool capacity, pool in-flight, and the key's in-flight count are computed over the scoped candidate accounts only
+
+#### Scenario: Concurrent sticky selections cannot overshoot the share
+
+- **GIVEN** a congested pool and one key one stream below its fair share
+- **WHEN** two sticky selections for that key pass the filter-phase gate concurrently
+- **THEN** at most one acquires a lease and the other is denied at the commit re-check
+

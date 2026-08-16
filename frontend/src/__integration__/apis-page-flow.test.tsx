@@ -119,7 +119,7 @@ describe("apis page integration", () => {
 		renderWithProviders(<App />);
 
 		expect(await screen.findByRole("heading", { name: "APIs" })).toBeInTheDocument();
-		expect(await screen.findByText("No matching API keys")).toBeInTheDocument();
+		expect(await screen.findByText("No API keys yet")).toBeInTheDocument();
 		expect(screen.getByText("Select an API key")).toBeInTheDocument();
 	});
 

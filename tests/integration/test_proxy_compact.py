@@ -34,9 +34,9 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
     monkeypatch,
 ):
     """A forwarded owner must not report compact success when its sole API-key
-    usage settlement fails. The `usage_settlement_failed` error is surfaced
-    without another upstream or account-health attempt, and a fresh repository
-    releases the held quota."""
+    usage settlement fails. After cleanup-ready, the receiver keeps HTTP 200
+    and surfaces `usage_settlement_failed` on the SSE body so origin cannot
+    replay. A fresh repository still releases the held quota."""
     from app.core.config.settings import get_settings
     from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
     from app.db.models import ApiKeyUsageReservation
@@ -156,8 +156,10 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
         headers=headers,
     )
 
-    assert response.status_code == 502, response.text
-    assert response.json()["error"]["code"] == "usage_settlement_failed"
+    assert response.status_code == 200, response.text
+    assert "text/event-stream" in response.headers.get("content-type", "")
+    assert "response.failed" in response.text
+    assert "usage_settlement_failed" in response.text
     assert compact_calls == [raw_account_id]
     assert finalize_attempts == [reservation.reservation_id]
     handle_stream_error.assert_not_awaited()
@@ -1377,8 +1379,9 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
     reaches the OWNER instance via the internal bridge forward — where
     ``owns_reservation`` is false so ``compact_responses`` is the SOLE settler —
     and whose preflight budget is exhausted MUST settle (release) the API-key
-    usage reservation before raising the ``502 upstream_request_timeout``, so
-    held API-key quota is not leaked.
+    usage reservation before the forwarded stream emits the terminal
+    ``response.failed`` / ``upstream_request_timeout`` event, so held API-key
+    quota is not leaked.
 
     This drives the REAL external surface, not a handcrafted service call: it
     POSTs a signed forwarded request to the internal bridge endpoint
@@ -1390,13 +1393,15 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
     terminal ``compaction_trigger`` and calls ``compact_responses`` with
     ``owns_reservation`` false — so ``_compact_or_stream_responses``'s ``finally``
     does NOT release the reservation and ``compact_responses`` alone must settle
-    it. Pre-fix the budget-exhausted terminal raised via
-    ``_raise_proxy_budget_exhausted`` without settling (through the outer
-    ``except ProxyResponseError`` handler and the log-only ``finally``), leaving
-    the reservation row ``reserved`` (leaked held quota); post-fix the row is
-    ``released``. PR #1254 fixed the sibling transport-failure / permanent-refresh
-    preflight raises but left the budget-exhausted terminal out of scope; this
-    completes that invariant.
+    it. On this forwarded streaming surface the owner reports the failure as the
+    terminal SSE event rather than a direct JSON ``502`` envelope, but the
+    settlement invariant is the same: pre-fix the budget-exhausted terminal
+    raised via ``_raise_proxy_budget_exhausted`` without settling (through the
+    outer ``except ProxyResponseError`` handler and the log-only ``finally``),
+    leaving the reservation row ``reserved`` (leaked held quota); post-fix the
+    row is ``released``. PR #1254 fixed the sibling transport-failure /
+    permanent-refresh preflight raises but left the budget-exhausted terminal
+    out of scope; this completes that invariant.
     """
     import app.modules.proxy._service.compact as compact_module
     from app.core.config.settings import get_settings
@@ -1498,18 +1503,20 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
         headers=headers,
     )
 
-    # Budget exhaustion surfaces as a 502 upstream_request_timeout from the owner.
-    assert response.status_code == 502, response.text
-    assert response.json()["error"]["code"] == "upstream_request_timeout"
+    # On the forwarded streaming surface the owner emits a terminal SSE failure
+    # event instead of a direct JSON 502 envelope, but it still settles the
+    # reservation before that failure reaches the caller.
+    assert response.status_code == 200, response.text
+    assert "text/event-stream" in response.headers.get("content-type", "")
+    assert "response.failed" in response.text
+    assert "upstream_request_timeout" in response.text
 
-    # The forwarded reservation row was RELEASED by compact_responses (sole
-    # settler) before the terminal raised (the fix). Pre-fix it stayed "reserved"
-    # — leaked held API-key quota — because owns_reservation is false on the
-    # forwarded path so the route's finally does not release it.
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
-        assert row.status == "released", f"forwarded reservation leaked held quota; status={row.status!r}"
+        assert row.status == "released", (
+            f"forwarded receiver leaked the reservation after terminal SSE failure; status={row.status!r}"
+        )
 
 
 @pytest.mark.asyncio

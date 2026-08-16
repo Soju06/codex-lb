@@ -4,10 +4,13 @@ import base64
 import json
 
 import pytest
+from sqlalchemy import select
 from starlette.responses import JSONResponse
 
 import app.modules.proxy.api as proxy_api
 import app.modules.proxy.service as proxy_module
+from app.db.models import ApiKeyUsageReservation
+from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 
@@ -55,6 +58,33 @@ async def test_v1_chat_completions_stream(async_client, monkeypatch):
         lines = [line async for line in resp.aiter_lines() if line]
 
     assert any("chat.completion.chunk" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_omits_synthesized_tools(async_client, monkeypatch):
+    email = "chatnotools@example.com"
+    raw_account_id = "acc_chatnotools"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+
+    seen_payload: dict[str, object] = {}
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del headers, access_token, account_id, base_url, raise_for_status, kwargs
+        seen_payload.update(payload.to_payload())
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        yield 'data: {"type":"response.completed","response":{"id":"resp_chat_no_tools"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+    async with async_client.stream("POST", "/v1/chat/completions", json=payload) as resp:
+        assert resp.status_code == 200
+        _ = [line async for line in resp.aiter_lines() if line]
+
+    assert "tools" not in seen_payload
 
 
 @pytest.mark.asyncio
@@ -179,6 +209,71 @@ async def test_v1_chat_completions_non_stream_forces_stream(async_client, monkey
 
     assert observed_stream["value"] is True
     assert body["object"] == "chat.completion"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_non_stream_rate_limit_closes_stream_and_returns_429(async_client, monkeypatch):
+    # #given
+    email = "chat-nonstr-429@example.com"
+    raw_account_id = "acc_chat_nonstr_429"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    imported = await async_client.post("/api/accounts/import", files=files)
+    assert imported.status_code == 200
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings.status_code == 200
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "chat-nonstr-429",
+            "limits": [{"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 100_000}],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    async def passthrough_probe(stream, **_kwargs):
+        return stream, None
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield (
+            'data: {"type":"response.failed","response":{"error":'
+            '{"message":"limit","type":"rate_limit_error","code":"rate_limit_exceeded"}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_api, "_probe_chat_stream_startup_error", passthrough_probe)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    # #when
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    # #then
+    assert response.status_code == 429
+    body = response.json()
+    assert body["error"]["code"] == "rate_limit_exceeded"
+    async with SessionLocal() as session:
+        reservations = (
+            (await session.execute(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == key_id)))
+            .scalars()
+            .all()
+        )
+        assert len(reservations) == 1
+        assert reservations[0].status == "released"
 
 
 @pytest.mark.asyncio

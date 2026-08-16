@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from enum import StrEnum
 from typing import Any, AsyncIterator, Mapping, TypeVar
 
 import aiohttp
@@ -103,6 +104,9 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeSessionKey,
     _signal_propagated_capacity_startup_ready,
     _signal_propagated_capacity_startup_wait,
+    _signal_propagated_responses_owner_forward_dispatched,
+    _signal_propagated_responses_owner_forward_rejected,
+    _signal_propagated_responses_service_cleanup_ready,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -155,6 +159,43 @@ from app.modules.proxy.http_bridge_forwarding import (
 
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
+
+
+class _OwnerForwardOutcome(StrEnum):
+    NOT_DISPATCHED = "not_dispatched"
+    DISPATCH_AMBIGUOUS = "dispatch_ambiguous"
+    RECEIVER_ACKNOWLEDGED = "receiver_acknowledged"
+    RECEIVER_REJECTED = "receiver_rejected"
+
+
+class _OwnerForwardRequestError(ProxyResponseError):
+    def __init__(
+        self,
+        source: ProxyResponseError,
+        *,
+        outcome: _OwnerForwardOutcome,
+    ) -> None:
+        super().__init__(
+            source.status_code,
+            source.payload,
+            failure_phase=source.failure_phase,
+            retryable_same_contract=source.retryable_same_contract,
+            failure_detail=source.failure_detail,
+            failure_exception_type=source.failure_exception_type,
+            upstream_status_code=source.upstream_status_code,
+            upstream_error_code=source.upstream_error_code,
+            failed_session=source.failed_session,
+        )
+        self.outcome = outcome
+
+
+def _owner_forward_failure_allows_local_recovery(exc: ProxyResponseError) -> bool:
+    if not isinstance(exc, _OwnerForwardRequestError):
+        return True
+    return exc.outcome in {
+        _OwnerForwardOutcome.NOT_DISPATCHED,
+        _OwnerForwardOutcome.RECEIVER_REJECTED,
+    }
 
 
 def _durable_recovery_supersedes_local_session(
@@ -381,7 +422,8 @@ class _HTTPBridgeOwnerForwardingMixin:
             original_request_unanchored=(
                 recovery_forward
                 or (
-                    owner_forward.key.affinity_kind in {"session_header", "internal_unanchored_parallel"}
+                    owner_forward.key.affinity_kind
+                    in {"session_header", "thread_header", "internal_unanchored_parallel"}
                     and incoming_turn_state is None
                     and payload.previous_response_id is None
                 )
@@ -407,8 +449,32 @@ class _HTTPBridgeOwnerForwardingMixin:
             owner_check_applied=True,
         )
 
+        forward_outcome = _OwnerForwardOutcome.NOT_DISPATCHED
         forwarded_any = False
         forwarded_response_id: str | None = None
+
+        def owner_response_ready() -> None:
+            nonlocal forward_outcome
+            forward_outcome = _OwnerForwardOutcome.RECEIVER_ACKNOWLEDGED
+            _signal_propagated_capacity_startup_ready()
+            if api_key_reservation is not None:
+                # A receiver carrying the origin reservation delays its 200
+                # response until its settlement finalizer is active. Mirror
+                # that explicit handoff into the origin's startup guard.
+                _signal_propagated_responses_service_cleanup_ready()
+
+        def owner_request_dispatched() -> None:
+            nonlocal forward_outcome
+            forward_outcome = _OwnerForwardOutcome.DISPATCH_AMBIGUOUS
+            if api_key_reservation is not None:
+                _signal_propagated_responses_owner_forward_dispatched()
+
+        def owner_response_rejected() -> None:
+            nonlocal forward_outcome
+            forward_outcome = _OwnerForwardOutcome.RECEIVER_REJECTED
+            if api_key_reservation is not None:
+                _signal_propagated_responses_owner_forward_rejected()
+
         try:
             async for event_block in self._http_bridge_owner_client.stream_responses(
                 owner_endpoint=owner_forward.owner_endpoint,
@@ -416,8 +482,10 @@ class _HTTPBridgeOwnerForwardingMixin:
                 headers=forward_headers,
                 context=forward_context,
                 request_started_at=request_started_at,
+                on_request_dispatched=owner_request_dispatched,
+                on_response_rejected=owner_response_rejected,
                 on_response_wait=_signal_propagated_capacity_startup_wait,
-                on_response_ready=_signal_propagated_capacity_startup_ready,
+                on_response_ready=owner_response_ready,
             ):
                 forwarded_any = True
                 event_payload = parse_sse_data_json(event_block)
@@ -445,7 +513,7 @@ class _HTTPBridgeOwnerForwardingMixin:
             if forwarded_any:
                 yield exc.event_block
                 return
-            raise ProxyResponseError(
+            error = ProxyResponseError(
                 503,
                 openai_error(
                     "bridge_owner_unreachable",
@@ -455,7 +523,8 @@ class _HTTPBridgeOwnerForwardingMixin:
                 failure_phase="owner_forward",
                 failure_detail="relay_timeout",
                 failure_exception_type=type(exc).__name__,
-            ) from exc
+            )
+            raise _OwnerForwardRequestError(error, outcome=forward_outcome) from exc
         except ProxyResponseError as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()
@@ -480,7 +549,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                     default_message="HTTP bridge owner request failed",
                 )
                 return
-            raise
+            raise _OwnerForwardRequestError(exc, outcome=forward_outcome) from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="fail").inc()
@@ -506,7 +575,7 @@ class _HTTPBridgeOwnerForwardingMixin:
                     )
                 )
                 return
-            raise ProxyResponseError(
+            error = ProxyResponseError(
                 503,
                 openai_error(
                     "bridge_owner_unreachable",
@@ -516,7 +585,8 @@ class _HTTPBridgeOwnerForwardingMixin:
                 failure_phase="owner_forward",
                 failure_detail=str(exc) or "owner_forward_request_failed",
                 failure_exception_type=type(exc).__name__,
-            ) from exc
+            )
+            raise _OwnerForwardRequestError(error, outcome=forward_outcome) from exc
         else:
             if PROMETHEUS_AVAILABLE and bridge_owner_forward_total is not None:
                 bridge_owner_forward_total.labels(outcome="success").inc()

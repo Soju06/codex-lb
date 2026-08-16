@@ -19,12 +19,16 @@ See `openspec/specs/chat-completions-compat/spec.md` for normative requirements.
 - Oversized image data URLs (>8MB) are dropped from user inputs.
 - Audio input (`input_audio`) is not supported and is rejected.
 - Built-in Responses tools are preserved only on the Responses-shaped passthrough path; ordinary chat-message payloads keep the narrower chat tool policy.
+- Omitted top-level `tools` stay omitted on the mapped Responses payload. `default_factory=list` plus an unconditional `to_responses_request()` write used to synthesize `"tools": []` and mark the field as set, which bypassed the Responses omit path (issue #1184). An explicit client-sent `[]` is still forwarded.
 - `response_format` is translated to `text.format` with JSON schema validation.
 
 ## Failure Modes
 
 - **Upstream stream failure:** Emit an error chunk, then terminate with `data: [DONE]`.
-- **Non-stream failures:** Return an OpenAI error envelope with 5xx status.
+- **Non-stream failures:** Return an OpenAI error envelope. HTTP status follows
+  the same map as non-stream `/v1/responses` (`429` for `rate_limit_exceeded`,
+  not a blanket 502). The upstream Responses generator is closed so reservation
+  finalizers run even when the first collected event is `response.failed`.
 - **Invalid content types:** Reject with `invalid_request_error`.
 
 ## Examples

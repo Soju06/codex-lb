@@ -459,6 +459,7 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
     incomplete_reason: str | None = None
     tool_index = ToolCallIndex()
     tool_calls: list[ToolCallState] = []
+    terminal_error: ChatCompletionResult | None = None
 
     async for line in stream:
         payload = _parse_data(line)
@@ -477,6 +478,8 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
         if tool_delta is not None:
             _merge_tool_call_delta(tool_calls, tool_delta)
         if event_type in ("response.failed", "error"):
+            if terminal_error is not None:
+                continue
             error = None
             if event_type == "response.failed":
                 response = payload.get("response")
@@ -488,9 +491,10 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
                 maybe_error = payload.get("error")
                 if isinstance(maybe_error, dict):
                     error = maybe_error
-            if error is not None:
-                return _error_envelope_from_payload(error)
-            return _default_error_envelope()
+            terminal_error = _error_envelope_from_payload(error) if error is not None else _default_error_envelope()
+            continue
+        if terminal_error is not None:
+            continue
         if event_type in ("response.completed", "response.incomplete"):
             response = payload.get("response")
             if isinstance(response, dict):
@@ -500,6 +504,9 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
                 usage = _parse_usage(response.get("usage"))
                 if event_type == "response.incomplete":
                     incomplete_reason = _finish_reason_from_incomplete(response)
+
+    if terminal_error is not None:
+        return terminal_error
 
     message_content: str | None = "".join(content_parts)
     message_refusal = "".join(refusal_parts) or None

@@ -137,6 +137,57 @@ async def test_request_logs_api_returns_recent(async_client, db_setup):
 
 
 @pytest.mark.asyncio
+async def test_request_logs_api_returns_upstream_proxy_route_metadata(async_client, db_setup):
+    del db_setup
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        now = utcnow()
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_route_success",
+            model="gpt-5.1",
+            input_tokens=10,
+            output_tokens=20,
+            latency_ms=100,
+            status="success",
+            error_code=None,
+            requested_at=now - timedelta(seconds=1),
+            upstream_proxy_route_mode="account_bound",
+            upstream_proxy_pool_id="pool_route",
+            upstream_proxy_endpoint_id="endpoint_route",
+            upstream_proxy_fallback_used=True,
+        )
+        await logs_repo.add_log(
+            account_id=None,
+            request_id="req_route_fail_closed",
+            model="gpt-5.1",
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=0,
+            status="error",
+            error_code="upstream_proxy_unavailable",
+            requested_at=now,
+            upstream_proxy_route_mode="account_bound",
+            upstream_proxy_pool_id="pool_route",
+            upstream_proxy_fail_closed_reason="no_healthy_endpoint",
+        )
+
+    response = await async_client.get("/api/request-logs?limit=2")
+    assert response.status_code == 200
+    fail_closed, success = response.json()["requests"]
+    assert fail_closed["upstreamProxyRouteMode"] == "account_bound"
+    assert fail_closed["upstreamProxyPoolId"] == "pool_route"
+    assert fail_closed["upstreamProxyEndpointId"] is None
+    assert fail_closed["upstreamProxyFallbackUsed"] is None
+    assert fail_closed["upstreamProxyFailClosedReason"] == "no_healthy_endpoint"
+    assert success["upstreamProxyRouteMode"] == "account_bound"
+    assert success["upstreamProxyPoolId"] == "pool_route"
+    assert success["upstreamProxyEndpointId"] == "endpoint_route"
+    assert success["upstreamProxyFallbackUsed"] is True
+    assert success["upstreamProxyFailClosedReason"] is None
+
+
+@pytest.mark.asyncio
 async def test_request_logs_api_returns_model_source_metadata(async_client, db_setup):
     del db_setup
     async with SessionLocal() as session:

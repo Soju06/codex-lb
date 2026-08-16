@@ -333,7 +333,7 @@ async def test_quota_planner_warm_now_refuses_weekly_only_account(async_client, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "race_point",
-    ["post_claim", "post_reservation", "authorization_cancelled"],
+    ["post_claim", "post_reservation", "authorization_failed", "authorization_cancelled"],
 )
 async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
     monkeypatch: pytest.MonkeyPatch,
@@ -404,7 +404,7 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
 
             monkeypatch.setattr(service._planner, "claim_warmup_decision", claim_then_reach_limit)
 
-        if race_point == "authorization_cancelled":
+        if race_point in {"authorization_failed", "authorization_cancelled"}:
             load_fresh_standard_usage = service._load_fresh_standard_usage
             load_count = 0
 
@@ -412,7 +412,10 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
                 nonlocal load_count
                 load_count += 1
                 if load_count == 2:
-                    raise asyncio.CancelledError()
+                    if race_point == "authorization_cancelled":
+                        raise asyncio.CancelledError()
+                    if race_point == "authorization_failed":
+                        raise RuntimeError("usage authorization failed")
                 return await load_fresh_standard_usage(account_id)
 
             monkeypatch.setattr(service, "_load_fresh_standard_usage", cancel_final_authorization)
@@ -467,9 +470,18 @@ async def test_quota_planner_warm_now_final_usage_authorization_blocks_race(
 
     assert stored is not None
     assert stored.status == "skipped"
-    assert stored.reason == "account_usage_limit_reached"
+    expected_reason = (
+        "account_usage_limit_reached"
+        if race_point in {"post_claim", "post_reservation"}
+        else (
+            "account_usage_limit_authorization_cancelled"
+            if race_point == "authorization_cancelled"
+            else "account_usage_limit_authorization_failed"
+        )
+    )
+    assert stored.reason == expected_reason
     assert repeated.status == "skipped"
-    assert repeated.reason == "account_usage_limit_reached"
+    assert repeated.reason == expected_reason
     assert released_reservations == (["reservation-final-authorization"] if with_reservation else [])
 
 

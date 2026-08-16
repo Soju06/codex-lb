@@ -143,6 +143,8 @@ Account summaries SHALL expose the configured percentage, enabled flag, and eval
 
 Quota warmup planning MUST exclude an already-evaluated account state whose enabled usage-limit state is `reached` or `data_unavailable`. After atomically claiming a planned decision and acquiring any API-key reservation, execution MUST freshly load the account and its current standard primary, secondary, and monthly observations, MUST require the fresh account status to remain `active`, and MUST apply the canonical standard usage-limit evaluator and shape rules immediately before sending the synthetic probe. A missing fresh account MUST skip with reason `account_not_found`; any fresh non-active account MUST skip with reason `account_status_<status>`; and either account denial MUST release any reservation, transition the claimed decision from `executing` to `skipped`, and MUST NOT send the probe. If the authoritative usage-limit evaluation is `reached` or `data_unavailable`, execution MUST perform the same cleanup with reason `account_usage_limit_reached`. Disabled and `available` policies MUST preserve normal short-window planning and execution behavior.
 
+If the final standard-usage authorization read fails, execution MUST perform the same cleanup with reason `account_usage_limit_authorization_failed`; if that read is cancelled, it MUST use reason `account_usage_limit_authorization_cancelled` and propagate cancellation after cleanup. Neither authorization outcome MUST be persisted as `account_usage_limit_reached`.
+
 #### Scenario: Limit reached after warmup planning
 
 - **GIVEN** a synthetic warmup was planned while the account policy was available

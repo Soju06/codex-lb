@@ -43,6 +43,8 @@ WARMUP_REQUEST_KIND = "warmup"
 _SIBLING_FETCH_MARGIN_SECONDS = 5.0
 WARMUP_DEFAULT_INPUT_BUDGET = 32
 WARMUP_DEFAULT_OUTPUT_BUDGET = 8
+ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON = "account_usage_limit_authorization_failed"
+ACCOUNT_USAGE_LIMIT_AUTHORIZATION_CANCELLED_REASON = "account_usage_limit_authorization_cancelled"
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +186,7 @@ class QuotaWarmupService:
         except asyncio.CancelledError:
             await self._skip_claimed_warmup_deferring_cancellation(
                 decision_id=decision.id,
-                reason=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                reason=ACCOUNT_USAGE_LIMIT_AUTHORIZATION_CANCELLED_REASON,
                 reservation_id=reservation_id,
             )
             raise
@@ -196,7 +198,7 @@ class QuotaWarmupService:
             )
             return await self._skip_claimed_warmup_deferring_cancellation(
                 decision_id=decision.id,
-                reason=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                reason=ACCOUNT_USAGE_LIMIT_AUTHORIZATION_FAILED_REASON,
                 reservation_id=reservation_id,
             )
         authorization_reason: str | None = None
@@ -440,13 +442,24 @@ class QuotaWarmupService:
             )
         )
         cancellation: asyncio.CancelledError | None = None
-        while not cleanup.done():
+        while True:
             try:
-                await asyncio.shield(cleanup)
+                result = await asyncio.shield(cleanup)
+                break
             except asyncio.CancelledError as exc:
+                if cleanup.cancelled():
+                    if cancellation is not None:
+                        raise cancellation from exc
+                    raise
                 if cancellation is None:
                     cancellation = exc
-        result = cleanup.result()
+                current_task = asyncio.current_task()
+                if current_task is not None:
+                    current_task.uncancel()
+            except BaseException as cleanup_error:
+                if cancellation is not None:
+                    raise cancellation from cleanup_error
+                raise
         if cancellation is not None:
             raise cancellation
         return result

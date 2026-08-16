@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,8 +22,73 @@ from app.modules.quota_planner.logic import (
     simulate_pool,
 )
 from app.modules.quota_planner.repository import DemandBin, QuotaPlannerRepository, _to_db_naive_utc
+from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupExecutionResult
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_deferred_warmup_cleanup_preserves_cancellation_when_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(QuotaWarmupService)
+    cleanup_started = asyncio.Event()
+    allow_cleanup_to_fail = asyncio.Event()
+
+    async def fail_cleanup(
+        _service: QuotaWarmupService,
+        *,
+        decision_id: str,
+        reason: str,
+        reservation_id: str | None,
+    ) -> WarmupExecutionResult:
+        del decision_id, reason, reservation_id
+        cleanup_started.set()
+        await allow_cleanup_to_fail.wait()
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(QuotaWarmupService, "_skip_claimed_warmup", fail_cleanup)
+    cleanup_task = asyncio.create_task(
+        service._skip_claimed_warmup_deferring_cancellation(
+            decision_id="decision-cleanup-failure",
+            reason="account_usage_limit_authorization_cancelled",
+            reservation_id=None,
+        )
+    )
+    await cleanup_started.wait()
+    cleanup_task.cancel()
+    await asyncio.sleep(0)
+    cleanup_task.cancel()
+    allow_cleanup_to_fail.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await cleanup_task
+
+
+@pytest.mark.asyncio
+async def test_deferred_warmup_cleanup_propagates_failure_without_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = object.__new__(QuotaWarmupService)
+
+    async def fail_cleanup(
+        _service: QuotaWarmupService,
+        *,
+        decision_id: str,
+        reason: str,
+        reservation_id: str | None,
+    ) -> WarmupExecutionResult:
+        del decision_id, reason, reservation_id
+        raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(QuotaWarmupService, "_skip_claimed_warmup", fail_cleanup)
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await service._skip_claimed_warmup_deferring_cancellation(
+            decision_id="decision-cleanup-failure-no-cancel",
+            reason="account_usage_limit_authorization_failed",
+            reservation_id=None,
+        )
 
 
 def _forecast(

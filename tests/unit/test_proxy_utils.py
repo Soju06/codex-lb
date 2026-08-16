@@ -8798,7 +8798,7 @@ async def test_stream_responses_via_websocket_counts_connect_and_send_against_to
         del enforce_openai_sdk_contract
         recorded["total_timeout_seconds"] = total_timeout_seconds
         if False:
-            yield ""
+            yield "", None
 
     monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
     monkeypatch.setattr(proxy_module, "_stream_websocket_events", fake_stream_websocket_events)
@@ -8877,7 +8877,9 @@ async def test_stream_responses_via_websocket_preserves_raw_error_when_sdk_contr
     ]
 
     assert len(events) == 1
-    assert parse_sse_data_json(events[0]) == raw_payload
+    event_block, event_type = events[0]
+    assert parse_sse_data_json(event_block) == raw_payload
+    assert event_type == "error"
     assert successes == 1
     assert failures == []
 
@@ -8907,8 +8909,109 @@ async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_s
     ]
 
     assert len(events) == 1
-    assert parse_sse_data_json(events[0]) == raw_payload
+    event_block, event_type = events[0]
+    assert parse_sse_data_json(event_block) == raw_payload
+    assert event_type == "error"
     assert websocket._index == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_decodes_each_frame_once_and_skips_error_validation(monkeypatch):
+    # Regression for the parse-once requirement on the websocket hot path:
+    # each upstream frame is json-decoded exactly once in the receive loop,
+    # the relay and outer stream loops reuse the threaded event type instead
+    # of re-parsing the formatted block, and no error-envelope validation
+    # runs for non-error-shaped frames.
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+        proxy_request_budget_seconds = 75.0
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    frame_payloads = [
+        {"type": "response.created", "response": {"id": "resp_ws_once"}},
+        {"type": "response.output_text.delta", "delta": "a"},
+        {"type": "response.output_text.delta", "delta": "b"},
+        {"type": "response.completed", "response": {"id": "resp_ws_once"}},
+    ]
+    frame_texts = [json.dumps(payload, ensure_ascii=True, separators=(",", ":")) for payload in frame_payloads]
+    websocket = _WsResponse([_WsMessage(proxy_module.aiohttp.WSMsgType.TEXT, text) for text in frame_texts])
+    session = _WsSession(websocket)
+
+    loads_spy = MagicMock(wraps=json.loads)
+    monkeypatch.setattr(proxy_module.json, "loads", loads_spy)
+    parse_spy = MagicMock(wraps=proxy_module.parse_sse_data_json)
+    monkeypatch.setattr(proxy_module, "parse_sse_data_json", parse_spy)
+    error_validate_spy = MagicMock(wraps=proxy_module.parse_error_payload)
+    monkeypatch.setattr(proxy_module, "parse_error_payload", error_validate_spy)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+    )
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_ws_parse_once",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert events == [proxy_module.format_sse_event(payload) for payload in frame_payloads]
+    for text in frame_texts:
+        decode_calls = [c for c in loads_spy.call_args_list if c.args and c.args[0] == text]
+        assert len(decode_calls) == 1
+    assert parse_spy.call_count == 0
+    assert error_validate_spy.call_count == 0
+
+
+def test_normalize_stream_event_payload_validates_error_envelope_only_for_error_shaped_frames(monkeypatch):
+    # Delta frames never reach the pydantic error-envelope adapter; error
+    # frames are still validated and rewritten exactly as before.
+    from app.core.openai import parsing as parsing_module
+
+    adapter_spy = MagicMock(wraps=parsing_module._ERROR_ADAPTER)
+    monkeypatch.setattr(parsing_module, "_ERROR_ADAPTER", adapter_spy)
+
+    delta_payload: dict[str, object] = {"type": "response.output_text.delta", "delta": "a"}
+    assert proxy_module._normalize_stream_event_payload(delta_payload) is delta_payload
+    in_progress_payload: dict[str, object] = {"type": "response.in_progress", "response": {"id": "resp_np"}}
+    assert proxy_module._normalize_stream_event_payload(in_progress_payload) is in_progress_payload
+    assert adapter_spy.validate_python.call_count == 0
+
+    envelope_payload: dict[str, object] = {
+        "error": {"message": "quota exhausted", "type": "server_error", "code": "insufficient_quota"}
+    }
+    rewritten = proxy_module._normalize_stream_event_payload(envelope_payload)
+    assert adapter_spy.validate_python.call_count == 1
+    assert rewritten["type"] == "response.failed"
+    envelope_error = rewritten["response"]["error"]
+    assert envelope_error["message"] == "quota exhausted"
+    assert envelope_error["code"] == proxy_module._normalize_error_code("insufficient_quota", "server_error")
+    assert envelope_error["type"] == "server_error"
+
+    bare_error_payload: dict[str, object] = {"type": "error", "code": "rate_limit_exceeded", "message": "slow down"}
+    rewritten_bare = proxy_module._normalize_stream_event_payload(bare_error_payload)
+    assert adapter_spy.validate_python.call_count == 2
+    assert rewritten_bare["type"] == "response.failed"
+    bare_error = rewritten_bare["response"]["error"]
+    assert bare_error["code"] == proxy_module._normalize_error_code("rate_limit_exceeded", "error")
+    assert bare_error["message"] == "slow down"
 
 
 @pytest.mark.asyncio

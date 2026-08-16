@@ -60,6 +60,7 @@ from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import CompactResponsePayload, OpenAIError
 from app.core.openai.parsing import (
+    classify_event_type,
     parse_compact_response_payload,
     parse_error_payload,
 )
@@ -1401,37 +1402,42 @@ def _normalize_stream_event_payload(payload: dict[str, JsonValue]) -> dict[str, 
         normalized = dict(payload)
         normalized["type"] = _SSE_EVENT_TYPE_ALIASES[event_type]
         return normalized
-    error = parse_error_payload(payload)
-    if error is not None:
-        detail = error.model_dump(exclude_none=True)
-        event = response_failed_event(
-            _normalize_error_code(detail.get("code"), detail.get("type")),
-            detail.get("message", "Upstream websocket error"),
-            error_type=detail.get("type") or "server_error",
-            response_id=get_request_id(),
-            error_param=detail.get("param"),
-        )
-        _copy_quota_error_metadata(event["response"]["error"], detail)
-        return cast(dict[str, JsonValue], event)
-    if event_type == "error":
-        message = _extract_upstream_message(payload) or "Upstream websocket error"
-        code = payload.get("code")
-        error_type = payload.get("error_type") or payload.get("type")
-        normalized_code = _normalize_error_code(
-            code if isinstance(code, str) else None,
-            error_type if isinstance(error_type, str) else None,
-        )
-        if not isinstance(code, str) and normalized_code == "error":
-            normalized_code = "upstream_error"
-        return cast(
-            dict[str, JsonValue],
-            response_failed_event(
-                normalized_code,
-                message,
-                error_type=error_type if isinstance(error_type, str) and error_type != "error" else "server_error",
+    # Error-envelope schema validation is the only pydantic work on this hot
+    # path: classify from the parsed dict first and validate only error-shaped
+    # frames (``type == "error"`` or a top-level ``error`` envelope) so delta
+    # frames never reach the pydantic adapter.
+    if classify_event_type(payload) == "error" or isinstance(payload.get("error"), dict):
+        error = parse_error_payload(payload)
+        if error is not None:
+            detail = error.model_dump(exclude_none=True)
+            event = response_failed_event(
+                _normalize_error_code(detail.get("code"), detail.get("type")),
+                detail.get("message", "Upstream websocket error"),
+                error_type=detail.get("type") or "server_error",
                 response_id=get_request_id(),
-            ),
-        )
+                error_param=detail.get("param"),
+            )
+            _copy_quota_error_metadata(event["response"]["error"], detail)
+            return cast(dict[str, JsonValue], event)
+        if event_type == "error":
+            message = _extract_upstream_message(payload) or "Upstream websocket error"
+            code = payload.get("code")
+            error_type = payload.get("error_type") or payload.get("type")
+            normalized_code = _normalize_error_code(
+                code if isinstance(code, str) else None,
+                error_type if isinstance(error_type, str) else None,
+            )
+            if not isinstance(code, str) and normalized_code == "error":
+                normalized_code = "upstream_error"
+            return cast(
+                dict[str, JsonValue],
+                response_failed_event(
+                    normalized_code,
+                    message,
+                    error_type=error_type if isinstance(error_type, str) and error_type != "error" else "server_error",
+                    response_id=get_request_id(),
+                ),
+            )
     return payload
 
 
@@ -1807,7 +1813,12 @@ async def _stream_websocket_events(
     total_timeout_seconds: float | None,
     max_event_bytes: int,
     enforce_openai_sdk_contract: bool = True,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[tuple[str, str | None]]:
+    """Yield ``(sse_block, event_type)`` pairs.
+
+    The event type is extracted from the payload parsed once here so that
+    downstream consumers never re-decode the formatted block.
+    """
     deadline = None if total_timeout_seconds is None else time.monotonic() + total_timeout_seconds
 
     while True:
@@ -1850,9 +1861,10 @@ async def _stream_websocket_events(
         if not isinstance(payload, dict):
             continue
         normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
-        event_type = normalized.get("type")
-        yield format_sse_event(normalized)
-        if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+        raw_event_type = normalized.get("type")
+        event_type = raw_event_type if isinstance(raw_event_type, str) else None
+        yield format_sse_event(normalized), event_type
+        if event_type is not None and _is_response_stream_terminal_event_type(
             event_type,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
@@ -1866,7 +1878,8 @@ async def _stream_codex_websocket_events(
     total_timeout_seconds: float | None,
     max_event_bytes: int,
     enforce_openai_sdk_contract: bool = True,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[tuple[str, str | None]]:
+    """Yield ``(sse_block, event_type)`` pairs; see ``_stream_websocket_events``."""
     deadline = None if total_timeout_seconds is None else time.monotonic() + total_timeout_seconds
 
     while True:
@@ -1916,9 +1929,10 @@ async def _stream_codex_websocket_events(
         if not isinstance(payload, dict):
             continue
         normalized = payload if not enforce_openai_sdk_contract else _normalize_stream_event_payload(payload)
-        event_type = normalized.get("type")
-        yield format_sse_event(normalized)
-        if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+        raw_event_type = normalized.get("type")
+        event_type = raw_event_type if isinstance(raw_event_type, str) else None
+        yield format_sse_event(normalized), event_type
+        if event_type is not None and _is_response_stream_terminal_event_type(
             event_type,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         ):
@@ -1953,7 +1967,8 @@ async def _stream_responses_via_websocket(
     route_trace: UpstreamProxyRouteTrace | None = None,
     allow_direct_egress: bool = True,
     enforce_openai_sdk_contract: bool = True,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[tuple[str, str | None]]:
+    """Yield ``(sse_block, event_type)`` pairs from the upstream websocket."""
     websocket_url = _to_websocket_upstream_url(url)
     request_started_at = time.monotonic()
     request_payload = _prepare_websocket_response_create_payload(payload_dict)
@@ -2132,7 +2147,7 @@ async def _stream_responses_via_websocket(
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             )
         )
-        async for event in event_iter:
+        async for event, event_type in event_iter:
             archive_text(
                 direction="server_to_codex",
                 kind="responses",
@@ -2144,15 +2159,13 @@ async def _stream_responses_via_websocket(
                 headers=headers,
                 extra={"event_format": "sse"},
             )
-            event_payload = parse_sse_data_json(event)
-            event_type = event_payload.get("type") if event_payload is not None else None
-            if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+            if event_type is not None and _is_response_stream_terminal_event_type(
                 event_type,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             ):
                 seen_terminal = True
                 await _record_lifecycle_success()
-            yield event
+            yield event, event_type
         if not seen_terminal:
             await _record_lifecycle_failure(aiohttp.ClientError("Upstream websocket closed without terminal event"))
     except Exception as exc:
@@ -3104,7 +3117,7 @@ async def _stream_responses_with_session(
     try:
         if transport == "websocket":
             try:
-                async for event_block in _stream_responses_via_websocket(
+                async for event_block, event_type in _stream_responses_via_websocket(
                     payload_dict=payload_dict,
                     url=url,
                     headers=upstream_headers,
@@ -3122,9 +3135,7 @@ async def _stream_responses_with_session(
                 ):
                     if status_code is None:
                         status_code = 101
-                    event_payload = parse_sse_data_json(event_block)
-                    event_type = event_payload.get("type") if event_payload is not None else None
-                    if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+                    if event_type is not None and _is_response_stream_terminal_event_type(
                         event_type,
                         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                     ):

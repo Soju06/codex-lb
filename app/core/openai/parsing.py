@@ -17,6 +17,37 @@ _ERROR_ADAPTER = TypeAdapter(OpenAIErrorEnvelope)
 _RESPONSE_ADAPTER = TypeAdapter(OpenAIResponsePayload)
 _COMPACT_RESPONSE_ADAPTER = TypeAdapter(CompactResponsePayload)
 
+# Stream lifecycle frames are the only events whose validated model fields the
+# proxy consumes (usage settlement, error normalization, response-id capture).
+# Hot streaming paths validate only these frames and classify everything else
+# from the already-parsed payload dict via ``classify_event_type``.
+_LIFECYCLE_EVENT_TYPES = frozenset(
+    {
+        "response.created",
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+        "error",
+    }
+)
+
+
+def classify_event_type(payload: JsonValue | None) -> str | None:
+    """Classify an SSE event type from an already-parsed payload dict.
+
+    Mirrors the dict branch of the proxy's ``_event_type_from_payload``:
+    a string ``type`` field wins; a typeless payload carrying a dict
+    ``error`` classifies as ``"error"``. No pydantic validation is run.
+    """
+    if not isinstance(payload, dict):
+        return None
+    payload_type = payload.get("type")
+    if isinstance(payload_type, str):
+        return payload_type
+    if isinstance(payload.get("error"), dict):
+        return "error"
+    return None
+
 
 def parse_sse_event(line: str) -> OpenAIEvent | None:
     return parse_sse_event_payload(parse_sse_data_json(line))

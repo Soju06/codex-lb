@@ -9,7 +9,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import _LIFECYCLE_EVENT_TYPES, classify_event_type, parse_sse_event
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
@@ -198,3 +198,30 @@ def test_extract_sse_data_joins_crlf_multiline_data():
     block = "data: line1\r\ndata: line2\rdata: line3\n\n"
 
     assert extract_sse_data(block) == "line1\nline2\nline3"
+
+
+def test_classify_event_type_prefers_string_type_field():
+    assert classify_event_type({"type": "response.output_text.delta", "delta": "x"}) == "response.output_text.delta"
+
+
+def test_classify_event_type_maps_typeless_error_payload_to_error():
+    assert classify_event_type({"error": {"message": "boom"}, "status": 400}) == "error"
+
+
+def test_classify_event_type_rejects_non_dict_and_typeless_payloads():
+    assert classify_event_type(None) is None
+    assert classify_event_type([1, 2, 3]) is None
+    assert classify_event_type({"type": 42}) is None
+    assert classify_event_type({"delta": "x"}) is None
+
+
+def test_lifecycle_event_types_cover_terminal_and_created_frames():
+    assert _LIFECYCLE_EVENT_TYPES == frozenset(
+        {
+            "response.created",
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+            "error",
+        }
+    )

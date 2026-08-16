@@ -71,7 +71,12 @@ from app.core.errors import (
 from app.core.exceptions import AppError, ProxyAuthError
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import OpenAIEvent
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import (
+    _LIFECYCLE_EVENT_TYPES,
+    classify_event_type,
+    parse_sse_event,
+    parse_sse_event_payload,
+)
 from app.core.openai.requests import (
     ResponsesRequest,
 )
@@ -5043,18 +5048,13 @@ class _WebSocketMixin:
     ) -> str:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        event_block = f"data: {text}\n\n"
-        payload = parse_sse_data_json(event_block)
-        if payload is None:
-            try:
-                raw_payload = json.loads(text)
-            except json.JSONDecodeError:
-                raw_payload = None
-            if isinstance(raw_payload, dict):
-                payload = cast(dict[str, JsonValue], raw_payload)
-                event_block = format_sse_event(payload)
-        event = parse_sse_event(event_block)
-        event_type = _event_type_from_payload(event, payload)
+        try:
+            raw_payload = json.loads(text)
+        except json.JSONDecodeError:
+            raw_payload = None
+        payload = cast(dict[str, JsonValue], raw_payload) if isinstance(raw_payload, dict) else None
+        event_type = classify_event_type(payload)
+        event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
@@ -5079,10 +5079,14 @@ class _WebSocketMixin:
             message=error_message,
         )
         previous_response_id_hint = _facade()._previous_response_id_from_not_found_message(error_message)
+        # The returned event block is unused here; the rewrite helper rebuilds
+        # its own canonical block on the (rare) changed path, so avoid the
+        # per-frame ``format_sse_event`` re-encode and pass the raw framing.
         text, payload, event, event_type, _event_block = rewrite_parallel_tool_call_text(
             text,
             payload,
-            event_block=format_sse_event(payload) if payload is not None else f"data: {text}\n\n",
+            event_block=f"data: {text}\n\n",
+            event=event,
         )
 
         async with pending_lock:
@@ -5166,8 +5170,10 @@ class _WebSocketMixin:
                     request_state.suppress_next_created_downstream = False
                     upstream_control.suppress_downstream_event = True
                 if payload is not None:
-                    payload = _rewrite_websocket_downstream_response_id(payload, request_state)
-                    text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+                    rewritten_payload = _rewrite_websocket_downstream_response_id(payload, request_state)
+                    if rewritten_payload is not payload:
+                        payload = rewritten_payload
+                        text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
                     sequence_number = payload.get("sequence_number")
                     if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
                         upstream_control.downstream_sequence_request_state = request_state

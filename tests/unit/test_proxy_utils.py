@@ -46233,3 +46233,219 @@ def test_compact_account_neutral_replay_payload_accepts_canonical_lite_full_rese
     replay = proxy_compact_service._compact_account_neutral_replay_payload(payload)
     assert replay is not None
     assert getattr(replay, "previous_response_id", None) is None
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_validates_only_lifecycle_frames_and_settles_usage(monkeypatch):
+    # Delta frames must skip pydantic validation entirely (event=None) while
+    # lifecycle frames keep it, with byte-identical SSE output and unchanged
+    # usage settlement from the validated response.completed frame.
+    from app.modules.proxy import tool_call_dedupe
+    from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_lifecycle_only_validation")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    mixin_validate = MagicMock(wraps=streaming_mixin_module.parse_sse_event_payload)
+    monkeypatch.setattr(streaming_mixin_module, "parse_sse_event_payload", mixin_validate)
+    dedupe_validate = MagicMock(wraps=tool_call_dedupe.parse_sse_event_payload)
+    monkeypatch.setattr(tool_call_dedupe, "parse_sse_event_payload", dedupe_validate)
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.created","response":{"id":"resp_lifecycle_only"}}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"a"}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"b"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_lifecycle_only",'
+            '"usage":{"input_tokens":3,"output_tokens":5,'
+            '"input_tokens_details":{"cached_tokens":2},'
+            '"output_tokens_details":{"reasoning_tokens":1}}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-lifecycle-only"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    # Only the created + completed lifecycle frames are validated; the two
+    # deltas are classified from the parsed dict and never re-validated by
+    # the parallel-tool-call rewrite either.
+    assert mixin_validate.call_count == 2
+    assert dedupe_validate.call_count == 0
+    # SSE output stays byte-identical to the canonical re-encode.
+    assert chunks[1] == 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"a"}\n\n'
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["request_id"] == "resp_lifecycle_only"
+    assert request_logs.calls[0]["input_tokens"] == 3
+    assert request_logs.calls[0]["output_tokens"] == 5
+    assert request_logs.calls[0]["cached_input_tokens"] == 2
+    assert request_logs.calls[0]["reasoning_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_rewrites_terminal_error_after_unvalidated_deltas(monkeypatch):
+    # A bare upstream ``error`` frame after unvalidated deltas must still be
+    # rewritten to a terminal response.failed under the SDK contract and
+    # settle as an error.
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_lifecycle_error_rewrite")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.created","response":{"id":"resp_lifecycle_err"}}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"a"}\n\n'
+        yield 'data: {"type":"error","message":"upstream exploded"}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-lifecycle-error"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"]["message"] == "upstream exploded"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_validates_only_lifecycle_frames(monkeypatch):
+    # Websocket relay: response.created keeps validated response-id
+    # assignment, deltas skip validation and are relayed with their original
+    # bytes when no response-id rewrite applies, and response.completed still
+    # hands a validated usage-bearing event to finalization.
+    from app.core.openai.models import OpenAIEvent
+    from app.modules.proxy import tool_call_dedupe
+    from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
+
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_lifecycle_validation")
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    ws_validate = MagicMock(wraps=websocket_mixin_module.parse_sse_event_payload)
+    monkeypatch.setattr(websocket_mixin_module, "parse_sse_event_payload", ws_validate)
+    dedupe_validate = MagicMock(wraps=tool_call_dedupe.parse_sse_event_payload)
+    monkeypatch.setattr(tool_call_dedupe, "parse_sse_event_payload", dedupe_validate)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_lifecycle_validation",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([request_state])
+    pending_lock = anyio.Lock()
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    response_create_gate = asyncio.Semaphore(0)
+
+    async def relay(text: str) -> str:
+        return await service._process_upstream_websocket_text(
+            text,
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=pending_lock,
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=response_create_gate,
+        )
+
+    created_text = json.dumps(
+        {"type": "response.created", "response": {"id": "resp_ws_lifecycle", "status": "in_progress"}},
+        separators=(",", ":"),
+    )
+    await relay(created_text)
+    assert request_state.response_id == "resp_ws_lifecycle"
+    assert ws_validate.call_count == 1
+
+    delta_text = json.dumps(
+        {
+            "type": "response.output_text.delta",
+            "response_id": "resp_ws_lifecycle",
+            "sequence_number": 3,
+            "delta": "hello",
+        },
+        separators=(",", ":"),
+    )
+    downstream_delta = await relay(delta_text)
+    assert ws_validate.call_count == 1
+    assert dedupe_validate.call_count == 0
+    assert downstream_delta == delta_text
+    finalize_request_state.assert_not_awaited()
+
+    completed_text = json.dumps(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_ws_lifecycle",
+                "status": "completed",
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            },
+        },
+        separators=(",", ":"),
+    )
+    await relay(completed_text)
+    assert ws_validate.call_count == 2
+    finalize_request_state.assert_awaited_once()
+    finalize_call = finalize_request_state.await_args
+    assert finalize_call is not None
+    assert finalize_call.kwargs["event_type"] == "response.completed"
+    completed_event = finalize_call.kwargs["event"]
+    assert isinstance(completed_event, OpenAIEvent)
+    assert completed_event.response is not None
+    assert completed_event.response.usage is not None
+    assert completed_event.response.usage.input_tokens == 11
+    assert completed_event.response.usage.output_tokens == 7

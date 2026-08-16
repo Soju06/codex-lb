@@ -39,7 +39,11 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.errors import response_failed_event
 from app.core.openai.models import OpenAIEvent
-from app.core.openai.parsing import parse_sse_event_payload
+from app.core.openai.parsing import (
+    _LIFECYCLE_EVENT_TYPES,
+    classify_event_type,
+    parse_sse_event_payload,
+)
 from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
@@ -138,7 +142,6 @@ from app.modules.proxy._service.support import (
     _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
-    _event_type_from_payload,
     _HTTPBridgeCompletedDeliveryScope,
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
@@ -1652,8 +1655,8 @@ class _HTTPBridgeUpstreamEventsMixin:
     ) -> None:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
-        event = parse_sse_event_payload(payload)
-        event_type = _event_type_from_payload(event, payload)
+        event_type = classify_event_type(payload)
+        event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []
         try:

@@ -41,7 +41,11 @@ from app.core.errors import (
 from app.core.errors import (
     response_failed_event,
 )
-from app.core.openai.parsing import parse_sse_event_payload
+from app.core.openai.parsing import (
+    _LIFECYCLE_EVENT_TYPES,
+    classify_event_type,
+    parse_sse_event_payload,
+)
 from app.core.openai.requests import (
     ResponsesRequest,
 )
@@ -292,7 +296,6 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _ApiKeyReservationTouchState,
-    _event_type_from_payload,
     _finalize_ttft_latency_ms,
     _RequestLogFailureMetadata,
     _RetryableStreamError,
@@ -609,8 +612,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
             first_payload = parse_sse_data_json(first)
-            event = parse_sse_event_payload(first_payload)
-            event_type = _event_type_from_payload(event, first_payload)
+            event_type = classify_event_type(first_payload)
+            event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
             terminal_event_seen = False
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
@@ -765,8 +768,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 raise terminal_stream_error
             async for line in iterator:
                 event_payload = parse_sse_data_json(line)
-                event = parse_sse_event_payload(event_payload)
-                event_type = _event_type_from_payload(event, event_payload)
+                event_type = classify_event_type(event_payload)
+                event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
                 if (
                     enforce_openai_sdk_contract

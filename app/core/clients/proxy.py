@@ -62,7 +62,6 @@ from app.core.openai.models import CompactResponsePayload, OpenAIError
 from app.core.openai.parsing import (
     parse_compact_response_payload,
     parse_error_payload,
-    parse_sse_event,
 )
 from app.core.openai.requests import (
     ResponsesCompactRequest,
@@ -2145,9 +2144,10 @@ async def _stream_responses_via_websocket(
                 headers=headers,
                 extra={"event_format": "sse"},
             )
-            parsed_event = parse_sse_event(event)
-            if parsed_event and _is_response_stream_terminal_event_type(
-                parsed_event.type,
+            event_payload = parse_sse_data_json(event)
+            event_type = event_payload.get("type") if event_payload is not None else None
+            if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+                event_type,
                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             ):
                 seen_terminal = True
@@ -2908,13 +2908,7 @@ async def _stream_responses_with_session(
                         event_block,
                         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                     )
-                    event = parse_sse_event(event_block)
-                    if event:
-                        if event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES or (
-                            event.type == "error" and not enforce_openai_sdk_contract
-                        ):
-                            seen_terminal = True
-                    elif isinstance(normalized_event_type, str) and (
+                    if isinstance(normalized_event_type, str) and (
                         normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
                         or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
                     ):
@@ -3002,13 +2996,7 @@ async def _stream_responses_with_session(
                     event_block,
                     enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                 )
-                event = parse_sse_event(event_block)
-                if event:
-                    if event.type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES or (
-                        event.type == "error" and not enforce_openai_sdk_contract
-                    ):
-                        seen_terminal = True
-                elif isinstance(normalized_event_type, str) and (
+                if isinstance(normalized_event_type, str) and (
                     normalized_event_type in _RESPONSE_STREAM_TERMINAL_EVENT_TYPES
                     or (normalized_event_type == "error" and not enforce_openai_sdk_contract)
                 ):
@@ -3134,14 +3122,13 @@ async def _stream_responses_with_session(
                 ):
                     if status_code is None:
                         status_code = 101
-                    event = parse_sse_event(event_block)
-                    if event:
-                        event_type = event.type
-                        if _is_response_stream_terminal_event_type(
-                            event_type,
-                            enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                        ):
-                            seen_terminal = True
+                    event_payload = parse_sse_data_json(event_block)
+                    event_type = event_payload.get("type") if event_payload is not None else None
+                    if isinstance(event_type, str) and _is_response_stream_terminal_event_type(
+                        event_type,
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    ):
+                        seen_terminal = True
                     yield event_block
             except aiohttp.WSServerHandshakeError as exc:
                 if not _should_fallback_to_http_after_websocket_handshake_error(transport_mode, exc):

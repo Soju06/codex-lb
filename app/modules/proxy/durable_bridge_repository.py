@@ -1784,6 +1784,7 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
+        expected_recovery_dispatch_count: int = 0,
         response_id: str | None = None,
     ) -> bool:
         """Append a terminal event and expose its operation state atomically."""
@@ -1802,6 +1803,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
                 )
                 .with_for_update()
             )
@@ -2019,6 +2021,7 @@ class DurableBridgeRepository:
         owner_epoch: int,
         state: str,
         expected_response_id: str | None,
+        expected_recovery_dispatch_count: int = 0,
         alternate_expected_response_id: str | None = None,
         response_id: str | None = None,
     ) -> bool:
@@ -2063,6 +2066,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
                     or_(
                         and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
                         and_(

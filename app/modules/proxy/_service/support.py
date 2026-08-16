@@ -949,6 +949,9 @@ class _WebSocketRequestState:
     operation_created: bool = False
     operation_replay: bool = False
     operation_dispatched: bool = False
+    # Immutable durable attempt generation. Recovery claims increment the
+    # operation's dispatch count before sending a replacement attempt.
+    operation_attempt_generation: int = 0
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto

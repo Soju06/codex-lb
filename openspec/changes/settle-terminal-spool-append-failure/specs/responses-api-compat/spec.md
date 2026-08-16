@@ -17,7 +17,8 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 
 - **GIVEN** one upstream error selects terminal failures for multiple pending operations
 - **WHEN** the first operation's fallback settlement stalls
-- **THEN** every selected operation receives its terminal event and end-of-stream marker first
+- **THEN** every selected operation attempts its owner-fenced terminal append before any terminal queue is exposed
+- **AND** every selected operation then receives its terminal event and end-of-stream marker before fallback settlement
 - **AND** sibling delivery does not wait for the first fallback settlement
 - **AND** cancellation is preserved as the final outcome only after every pre-delivered sibling finishes settlement and finalization
 - **AND** one sibling's finalization failure does not prevent later siblings from settling or replace pending cancellation
@@ -43,7 +44,7 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 - **GIVEN** terminal append committed its operation state before reporting an exception
 - **AND** a retry under the same owner epoch has since reset the operation to submitted
 - **WHEN** fallback settlement for the prior attempt runs
-- **THEN** the fallback is rejected by an operation-state and persisted upstream-response identity fence
+- **THEN** the fallback is rejected by an immutable recovery-attempt generation plus operation-state and persisted upstream-response identity fence
 - **AND** the newer submitted attempt remains unchanged
 
 #### Scenario: Replay alias preserves the acknowledged-attempt fence

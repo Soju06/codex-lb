@@ -954,6 +954,54 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         assert null_alias_settlement is not None
         assert null_alias_settlement.state == "failed"
         assert null_alias_settlement.response_id == "resp-upstream-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert not await repository.append_terminal_operation_event(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-client-visible-replay",
+        )
+        assert not await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-client-visible-replay",
+        )
+        newer_attempt = await repository.get_operation(operation_id=replay_operation_id)
+        assert newer_attempt is not None
+        assert newer_attempt.state == "acknowledged"
+        assert newer_attempt.recovery_dispatch_count == 1
+        assert newer_attempt.event_spool_complete is False
     finally:
         await session.close()
 

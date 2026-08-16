@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -329,6 +330,8 @@ async def _persist_http_bridge_operation_event(
     terminal_state: str | None = None,
     terminal_event_queue: Any | None = None,
     terminal_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None,
+    terminal_append_barrier: Callable[[], Awaitable[None]] | None = None,
+    terminal_delivery_barrier: Callable[[], Awaitable[None]] | None = None,
 ) -> bool:
     """Spool one downstream-visible SSE block for reconnect replay.
 
@@ -387,11 +390,14 @@ async def _persist_http_bridge_operation_event(
                         )
                     ),
                     state=terminal_state,
+                    expected_recovery_dispatch_count=request_state.operation_attempt_generation,
                     response_id=response_id,
                 ),
                 name=f"http-bridge-terminal-append-{operation_id}",
             )
             append_result, deferred_cancellation = await _await_task_deferring_cancellation(append_task)
+            if terminal_append_barrier is not None:
+                await terminal_append_barrier()
             persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
@@ -400,6 +406,12 @@ async def _persist_http_bridge_operation_event(
             if settlement_required:
                 terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                 deferred_cancellation = deferred_cancellation or delivery_cancellation
+            if terminal_delivery_barrier is not None:
+                if not terminal_enqueued:
+                    terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
+                    deferred_cancellation = deferred_cancellation or delivery_cancellation
+                await terminal_delivery_barrier()
+            if settlement_required:
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
 
                 async def settle_terminal_append_failure() -> None:
@@ -411,6 +423,7 @@ async def _persist_http_bridge_operation_event(
                             owner_epoch=owner_epoch,
                             state=terminal_state,
                             expected_response_id=expected_response_id,
+                            expected_recovery_dispatch_count=request_state.operation_attempt_generation,
                             alternate_expected_response_id=alternate_expected_response_id,
                             response_id=response_id,
                         )
@@ -1909,37 +1922,102 @@ class _HTTPBridgeUpstreamEventsMixin:
                         grouped_operation_state,
                     )
                 )
-                if grouped_request_state.event_queue is not None:
-                    await grouped_request_state.event_queue.put(grouped_event_block)
-                    await grouped_request_state.event_queue.put(None)
+
+            append_terminal_batch = getattr(
+                getattr(self, "_http_bridge_operation_event_batcher", None),
+                "append_terminal_event",
+                None,
+            )
+            append_participants = {
+                id(grouped_request_state)
+                for grouped_request_state, *_rest in grouped_terminal_events
+                if grouped_request_state.operation_id
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+                and callable(append_terminal_batch)
+            }
+            append_ready = asyncio.Event()
+            append_lock = asyncio.Lock()
+            append_arrivals = 0
+            if not append_participants:
+                append_ready.set()
+
+            async def await_all_grouped_appends() -> None:
+                nonlocal append_arrivals
+                async with append_lock:
+                    append_arrivals += 1
+                    if append_arrivals == len(append_participants):
+                        append_ready.set()
+                await append_ready.wait()
+
+            delivery_ready = asyncio.Event()
+            delivery_lock = asyncio.Lock()
+            delivery_arrivals = 0
+
+            async def await_all_grouped_deliveries() -> None:
+                nonlocal delivery_arrivals
+                async with delivery_lock:
+                    delivery_arrivals += 1
+                    if delivery_arrivals == len(grouped_terminal_events):
+                        delivery_ready.set()
+                await delivery_ready.wait()
+
+            async def persist_one_grouped_terminal_event(
+                grouped_terminal_event: tuple[Any, str, OpenAIEvent | None, Any, str | None, str | None],
+            ) -> None:
+                (
+                    grouped_request_state,
+                    grouped_event_block,
+                    _grouped_event,
+                    _grouped_payload,
+                    _grouped_event_type,
+                    grouped_operation_state,
+                ) = grouped_terminal_event
+                if id(grouped_request_state) in append_participants:
+                    await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        grouped_request_state,
+                        grouped_event_block,
+                        terminal=True,
+                        terminal_state=grouped_operation_state,
+                        terminal_event_queue=grouped_request_state.event_queue,
+                        terminal_append_barrier=await_all_grouped_appends,
+                        terminal_delivery_barrier=await_all_grouped_deliveries,
+                    )
+                else:
+                    await append_ready.wait()
+                    if grouped_request_state.event_queue is not None:
+                        await grouped_request_state.event_queue.put(grouped_event_block)
+                        await grouped_request_state.event_queue.put(None)
+                    await await_all_grouped_deliveries()
+                    await _persist_http_bridge_operation_event(
+                        self,
+                        session,
+                        grouped_request_state,
+                        grouped_event_block,
+                        terminal=True,
+                        terminal_state=grouped_operation_state,
+                    )
+                if grouped_operation_state is not None and grouped_operation_state != "failed":
+                    await _update_http_bridge_operation_state(
+                        self,
+                        session,
+                        grouped_request_state,
+                        state=grouped_operation_state,
+                        response_id=_websocket_downstream_response_id(grouped_request_state),
+                    )
 
             async def persist_grouped_terminal_events() -> Exception | None:
                 first_error: Exception | None = None
+                persistence_results = await asyncio.gather(
+                    *(persist_one_grouped_terminal_event(item) for item in grouped_terminal_events),
+                    return_exceptions=True,
+                )
+                for persistence_result in persistence_results:
+                    if isinstance(persistence_result, Exception) and first_error is None:
+                        first_error = persistence_result
                 try:
-                    for (
-                        grouped_request_state,
-                        grouped_event_block,
-                        _grouped_event,
-                        _grouped_payload,
-                        _grouped_event_type,
-                        grouped_operation_state,
-                    ) in grouped_terminal_events:
-                        await _persist_http_bridge_operation_event(
-                            self,
-                            session,
-                            grouped_request_state,
-                            grouped_event_block,
-                            terminal=True,
-                            terminal_state=grouped_operation_state,
-                        )
-                        if grouped_operation_state is not None and grouped_operation_state != "failed":
-                            await _update_http_bridge_operation_state(
-                                self,
-                                session,
-                                grouped_request_state,
-                                state=grouped_operation_state,
-                                response_id=_websocket_downstream_response_id(grouped_request_state),
-                            )
                     for (
                         grouped_request_state,
                         _grouped_event_block,

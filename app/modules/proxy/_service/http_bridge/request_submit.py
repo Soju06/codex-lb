@@ -1349,6 +1349,7 @@ class _HTTPBridgeRequestSubmitMixin:
                             ),
                         )
                     request_state.operation_recovery_claimed = True
+                    request_state.operation_attempt_generation = operation.recovery_dispatch_count + 1
                     # The operation remains fenced to one durable identity.
                     # One-shot mode consumes its existing replay-count budget;
                     # indefinite mode may make further serialized attempts
@@ -1388,6 +1389,8 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.operation_registered = True
             request_state.operation_rebind_required = False
             request_state.operation_created = operation.created
+            if not request_state.operation_recovery_claimed:
+                request_state.operation_attempt_generation = operation.recovery_dispatch_count
 
         async def _cleanup_unsubmitted_recovery_claim() -> None:
             if (

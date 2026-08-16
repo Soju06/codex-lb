@@ -5189,6 +5189,7 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
         skip_request_log=True,
     )
     request_state.operation_id = "op-terminal-append-fallback-order"
+    request_state.operation_attempt_generation = 2
     request_state.replay_downstream_response_id = replay_response_id
     session = _make_bridge_session(
         key_value="terminal-append-fallback-order",
@@ -5246,7 +5247,9 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     release_append.set()
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
     assert append_kwargs["response_id"] == replay_response_id
+    assert append_kwargs["expected_recovery_dispatch_count"] == 2
     assert settlement_kwargs["expected_response_id"] == expected_response_id
+    assert settlement_kwargs["expected_recovery_dispatch_count"] == 2
     assert settlement_kwargs["alternate_expected_response_id"] == alternate_expected_response_id
     assert settlement_kwargs["response_id"] == replay_response_id
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
@@ -5438,13 +5441,20 @@ async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settle
     )
     session.durable_session_id = "durable-grouped-terminal-fanout"
     session.durable_owner_epoch = 5
+    all_appends_started = asyncio.Event()
+    release_first_append = asyncio.Event()
     settlement_started = asyncio.Event()
     release_settlement = asyncio.Event()
     append_calls: list[str] = []
 
     async def append_terminal_event(*args: Any, **kwargs: Any) -> TerminalOperationEventAppendResult:
         del args
-        append_calls.append(kwargs["operation_id"])
+        operation_id = kwargs["operation_id"]
+        append_calls.append(operation_id)
+        if len(append_calls) == 2:
+            all_appends_started.set()
+        if operation_id == "op-grouped-terminal-0":
+            await release_first_append.wait()
         return TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
 
     async def settle_terminal_event(*args: Any, **kwargs: Any) -> None:
@@ -5483,10 +5493,14 @@ async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settle
         )
     )
 
+    await asyncio.wait_for(all_appends_started.wait(), timeout=1.0)
+    assert append_calls == ["op-grouped-terminal-0", "op-grouped-terminal-1"]
+    assert all(event_queue.empty() for event_queue in queues)
+    release_first_append.set()
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
-    assert append_calls == ["op-grouped-terminal-0"]
     for event_queue in queues:
         terminal_event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+        assert terminal_event is not None
         assert '"type":"response.failed"' in terminal_event
         assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
         assert event_queue.empty()

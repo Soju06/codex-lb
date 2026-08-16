@@ -18,6 +18,7 @@ from app.core.utils.sse import (
     format_sse_event,
     inject_sse_keepalives,
     parse_sse_data_json,
+    sse_event_type_from_block,
 )
 from tests.unit.hypothesis_strategies import json_objects, json_values
 
@@ -225,3 +226,40 @@ def test_lifecycle_event_types_cover_terminal_and_created_frames():
             "error",
         }
     )
+
+
+def test_sse_event_type_from_block_extracts_type_from_canonical_block():
+    block = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    assert sse_event_type_from_block(block) == "response.output_text.delta"
+
+
+def test_sse_event_type_from_block_accepts_raw_utf8_payloads():
+    block = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"안녕"}\n\n'
+
+    assert sse_event_type_from_block(block) == "response.output_text.delta"
+
+
+def test_sse_event_type_from_block_rejects_data_only_blocks():
+    assert sse_event_type_from_block('data: {"type":"response.output_text.delta","delta":"hi"}\n\n') is None
+
+
+def test_sse_event_type_from_block_rejects_trailing_event_field_ordering():
+    # `event:` after `data:` is legal SSE but not the canonical framing this
+    # proxy relays verbatim; callers must fall back to a full parse.
+    block = 'data: {"type":"response.output_text.delta","delta":"hi"}\nevent: response.output_text.delta\n\n'
+
+    assert sse_event_type_from_block(block) is None
+
+
+def test_sse_event_type_from_block_rejects_non_lf_framing_and_multiline_data():
+    crlf = 'event: response.output_text.delta\r\ndata: {"type":"response.output_text.delta"}\r\n\r\n'
+    multiline = 'event: response.output_text.delta\ndata: {"type":\ndata: "response.output_text.delta"}\n\n'
+
+    assert sse_event_type_from_block(crlf) is None
+    assert sse_event_type_from_block(multiline) is None
+
+
+def test_sse_event_type_from_block_rejects_non_object_data_payloads():
+    assert sse_event_type_from_block("event: done\ndata: [DONE]\n\n") is None
+    assert sse_event_type_from_block("event: ping\ndata: \n\n") is None

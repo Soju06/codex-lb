@@ -28,6 +28,7 @@ from app.core.resilience.network_recovery import PROCESS_NETWORK_UNAVAILABLE_COD
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute
+from app.core.utils.sse import sse_event_type_from_block
 from app.db.models import Account
 from app.modules.api_keys.service import (
     ApiKeyData,
@@ -265,6 +266,58 @@ def _finalize_ttft_latency_ms(
     started_at: float,
 ) -> int | None:
     return _ttft_latency_ms_from_visible_at(_finalize_ttft_reasoning_deltas(pending_reasoning_deltas), started_at)
+
+
+# Stream frames whose parsed payload feeds a real per-event consumer:
+# lifecycle/terminal handling and usage settlement (created/in_progress/
+# completed/failed/incomplete/error), parallel tool-call rewrite + duplicate
+# side-effect suppression (response.output_item.*), and text-done suppression
+# (response.output_text.done / response.content_part.done). Canonically framed
+# frames of any other type can relay upstream bytes verbatim once the TTFT
+# window is settled and no service-tier snapshot is present.
+_MUST_PARSE_STREAM_EVENT_TYPES = frozenset(
+    {
+        "response.created",
+        "response.in_progress",
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+        "error",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.output_text.done",
+        "response.content_part.done",
+    }
+)
+# Raw-line gate for service-tier attribution: response snapshots carry
+# `"service_tier"` in their JSON, and a false positive (the substring inside
+# delta text) merely takes the full-parse path.
+_SERVICE_TIER_MARKER = '"service_tier"'
+
+
+def _verbatim_relay_event_type(
+    line: str,
+    latency_first_token_ms: int | None,
+    pending_reasoning_deltas: dict[tuple[str | None, int | None, int | None], _TTFTReasoningDeltaState],
+) -> str | None:
+    """Return the cheap event type when a stream frame can relay verbatim.
+
+    Eligible frames are canonically framed (leading ``event: <type>`` line,
+    single JSON-object ``data:`` line — see ``sse_event_type_from_block``),
+    outside the must-parse set, past the TTFT first-token window (including a
+    pending reasoning-delta window), and free of the service-tier marker.
+    Everything else returns ``None`` and takes the full parse +
+    ``format_sse_event`` path, preserving the EventSource framing guarantee
+    for data-only blocks.
+    """
+    if latency_first_token_ms is None or pending_reasoning_deltas:
+        return None
+    if _SERVICE_TIER_MARKER in line:
+        return None
+    event_type = sse_event_type_from_block(line)
+    if event_type is None or event_type in _MUST_PARSE_STREAM_EVENT_TYPES:
+        return None
+    return event_type
 
 
 def _bind_propagated_capacity_startup_wait(event: asyncio.Event) -> Token[asyncio.Event | None]:

@@ -46750,3 +46750,190 @@ async def test_process_and_forward_upstream_websocket_text_decodes_once_and_vali
     finalize_request_state.assert_awaited_once()
     assert finalize_request_state.await_args is not None
     assert finalize_request_state.await_args.kwargs["event_type"] == "response.completed"
+
+
+def test_normalize_sse_event_block_rewrites_alias_on_both_event_and_data_lines():
+    # A legacy alias must be rewritten on the SSE `event:` framing line too,
+    # not just inside the JSON payload — under verbatim relay a stale
+    # `event:` line would otherwise reach clients with mismatched framing.
+    block = 'event: response.text.delta\ndata: {"type":"response.text.delta","delta":"hi"}\n\n'
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert normalized == (
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+    )
+
+
+def test_normalize_sse_event_block_skips_json_parsing_for_non_alias_types(monkeypatch) -> None:
+    # The alias normalizer only inspects blocks carrying one of the legacy
+    # alias names; canonical event types pass through without a JSON parse.
+    block = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    def fail_json_parse(_: str) -> object:
+        raise AssertionError("json.loads should not run for blocks without an alias marker")
+
+    monkeypatch.setattr(proxy_module.json, "loads", fail_json_parse)
+
+    assert proxy_module._normalize_sse_event_block(block) == block
+
+
+def test_normalize_stream_payload_for_http_block_skips_parse_for_canonical_frames(monkeypatch) -> None:
+    block = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    def fail_json_parse(_: str) -> object:
+        raise AssertionError("json.loads should not run for canonical non-error frames")
+
+    monkeypatch.setattr(proxy_module.json, "loads", fail_json_parse)
+
+    assert proxy_module._normalize_stream_payload_for_http_block(block) == (block, "response.output_text.delta")
+    assert proxy_module._normalize_stream_payload_for_http_block(block, enforce_openai_sdk_contract=False) == (
+        block,
+        "response.output_text.delta",
+    )
+
+
+def test_normalize_stream_payload_for_http_block_still_rewrites_error_frames():
+    block = 'event: error\ndata: {"type":"error","message":"boom"}\n\n'
+
+    normalized_block, normalized_type = proxy_module._normalize_stream_payload_for_http_block(block)
+
+    assert normalized_type == "response.failed"
+    assert '"boom"' in normalized_block
+
+
+def test_normalize_stream_payload_for_http_block_still_rewrites_error_envelopes_on_non_error_types():
+    # A payload carrying a top-level error envelope is rewritten regardless of
+    # its event type; the `"error"` substring guard keeps it on the full-parse
+    # path.
+    block = (
+        "event: response.output_text.delta\n"
+        'data: {"type":"response.output_text.delta","error":{"message":"broken"},"delta":"hi"}\n\n'
+    )
+
+    normalized_block, normalized_type = proxy_module._normalize_stream_payload_for_http_block(block)
+
+    assert normalized_type == "response.failed"
+    assert '"broken"' in normalized_block
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbatim(monkeypatch):
+    # After the TTFT window settles, canonically framed delta frames are
+    # relayed with upstream bytes (raw UTF-8, upstream spacing) and are never
+    # JSON-parsed; usage settlement from the parsed terminal frame is
+    # unchanged.
+    from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_verbatim_relay")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    mixin_parse = MagicMock(wraps=streaming_mixin_module.parse_sse_data_json)
+    monkeypatch.setattr(streaming_mixin_module, "parse_sse_data_json", mixin_parse)
+
+    verbatim_delta = (
+        'event: response.output_text.delta\ndata: {"type": "response.output_text.delta", "delta": "안녕 upstream"}\n\n'
+    )
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_verbatim"}}\n\n'
+        yield 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"a"}\n\n'
+        yield verbatim_delta
+        yield (
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_verbatim",'
+            '"usage":{"input_tokens":3,"output_tokens":5}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-verbatim-relay"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    # created (lifecycle), the first delta (TTFT window still open), and
+    # completed (lifecycle) are parsed; the settled second delta is relayed
+    # without any JSON parse.
+    assert mixin_parse.call_count == 3
+    # Upstream bytes are preserved exactly: raw UTF-8 and upstream key
+    # spacing, not the ensure_ascii canonical re-encode.
+    assert chunks[2] == verbatim_delta
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["input_tokens"] == 3
+    assert request_logs.calls[0]["output_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_reframes_data_only_delta_frames_after_ttft(monkeypatch):
+    # Data-only frames (no `event:` line, e.g. bridge rewrite leftovers) never
+    # take the verbatim path: they are parsed and re-serialized with canonical
+    # `event: <type>` framing so named-event (EventSource) clients keep seeing
+    # the event name — the 5ee532cb regression class.
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_verbatim_data_only")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_data_only"}}\n\n'
+        yield 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"a"}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"b"}\n\n'
+        yield (
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_data_only",'
+            '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-verbatim-data-only"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert chunks[2] == 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"b"}\n\n'
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "success"

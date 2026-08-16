@@ -1807,6 +1807,38 @@ async def test_normalize_public_stream_passes_canonical_unmutated_blocks_verbati
 
 
 @pytest.mark.asyncio
+async def test_normalize_public_stream_passes_raw_utf8_verbatim_blocks_byte_identically() -> None:
+    """Upstream-verbatim delta blocks (raw UTF-8, upstream key spacing — not
+    the ensure_ascii canonical re-encode) still satisfy the identity
+    pass-through gate: it compares parsed-payload object identity plus the
+    `event:` framing prefix, never re-serialized bytes."""
+    created = proxy_api_module.format_sse_event(
+        {"type": "response.created", "response": {"id": "resp_utf8", "output": []}}
+    )
+    verbatim_delta = (
+        "event: response.output_text.delta\n"
+        'data: {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "안녕"}\n\n'
+    )
+    completed_payload: dict[str, Any] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_utf8",
+            "output": [{"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "안녕"}]}],
+        },
+    }
+    completed = proxy_api_module.format_sse_event(completed_payload)
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(created, verbatim_delta, completed)
+        )
+    ]
+
+    assert verbatim_delta in blocks
+
+
+@pytest.mark.asyncio
 async def test_normalize_public_stream_reframes_data_only_blocks_with_event_name() -> None:
     """A data-only block (e.g. bridge-rewritten terminal event) must regain
     the canonical `event: <type>` line so named-event clients see it."""

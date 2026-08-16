@@ -88,7 +88,7 @@ from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text, parse_rate_limit_headers
 from app.core.utils.json_guards import is_json_mapping
 from app.core.utils.request_id import get_request_id
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event, parse_sse_data_json, sse_event_type_from_block
 
 CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 CODEX_TURN_METADATA_HEADER = "x-codex-turn-metadata"
@@ -125,6 +125,11 @@ _SSE_EVENT_TYPE_ALIASES = {
     "response.audio.delta": "response.output_audio.delta",
     "response.audio_transcript.delta": "response.output_audio_transcript.delta",
 }
+# Bare (unquoted) alias names gate the block-level alias normalizer: they
+# match both the JSON `"type":"<alias>"` in a data line and a stale
+# `event: <alias>` framing line. False positives (an alias name inside delta
+# text) just take the full-parse path.
+_SSE_EVENT_TYPE_ALIAS_MARKERS = tuple(_SSE_EVENT_TYPE_ALIASES)
 _SSE_LINE_BOUNDARY_RE = re.compile(r"\r\n|\r|\n")
 _RESPONSE_STREAM_TERMINAL_EVENT_TYPES = frozenset(
     {
@@ -1352,11 +1357,23 @@ def _normalize_sse_data_line(line: str) -> str:
     return line
 
 
+def _normalize_sse_event_type_line(line: str) -> str:
+    if not line.startswith("event:"):
+        return line
+    value = line[6:]
+    if value.startswith(" "):
+        value = value[1:]
+    normalized_type = _SSE_EVENT_TYPE_ALIASES.get(value)
+    if normalized_type is None:
+        return line
+    return f"event: {normalized_type}"
+
+
 def _normalize_sse_event_block(event_block: str) -> str:
     if not event_block:
         return event_block
 
-    if '"type":' not in event_block:
+    if not any(marker in event_block for marker in _SSE_EVENT_TYPE_ALIAS_MARKERS):
         return event_block
 
     if event_block.endswith("\r\n\r\n"):
@@ -1383,7 +1400,11 @@ def _normalize_sse_event_block(event_block: str) -> str:
     normalized_lines: list[str] = []
     changed = False
     for line in lines:
-        normalized_line = _normalize_sse_data_line(line)
+        # Rewrite both surfaces of a legacy alias: the JSON payload's `type`
+        # and the SSE `event:` framing line. Rewriting only the data line
+        # would emit mismatched framing when the block is relayed verbatim
+        # downstream instead of being re-serialized.
+        normalized_line = _normalize_sse_event_type_line(_normalize_sse_data_line(line))
         if normalized_line != line:
             changed = True
         normalized_lines.append(normalized_line)
@@ -1446,6 +1467,21 @@ def _normalize_stream_payload_for_http_block(
     *,
     enforce_openai_sdk_contract: bool = True,
 ) -> tuple[str, str | None]:
+    # Cheap path for the dominant delta traffic: a canonically framed block
+    # exposes its event type on the `event:` line, so no JSON parse is needed.
+    # Full parsing remains for `error` frames and any block carrying an
+    # `"error"` substring (the SDK-contract rewrite in
+    # `_normalize_stream_event_payload` keys off a top-level error envelope),
+    # legacy alias types (rewritten payloads), and non-canonical or data-only
+    # framing (the event type then comes from the payload itself).
+    cheap_event_type = sse_event_type_from_block(event_block)
+    if (
+        cheap_event_type is not None
+        and cheap_event_type != "error"
+        and cheap_event_type not in _SSE_EVENT_TYPE_ALIASES
+        and '"error"' not in event_block
+    ):
+        return event_block, cheap_event_type
     if not enforce_openai_sdk_contract:
         payload = parse_sse_data_json(event_block)
         if payload is None:

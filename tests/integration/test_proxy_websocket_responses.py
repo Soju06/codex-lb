@@ -3931,6 +3931,146 @@ def test_backend_responses_websocket_echoed_generated_turn_state_reuses_continui
     ]
 
 
+def test_backend_responses_websocket_goal_restart_retires_reused_socket_and_keeps_full_resend(
+    app_instance,
+    monkeypatch,
+):
+    def upstream_messages(response_id: str) -> list[_FakeUpstreamMessage]:
+        return [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.created", "response": {"id": response_id, "status": "in_progress"}},
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": response_id,
+                            "status": "completed",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+
+    owner_upstream = _FakeUpstreamWebSocket(upstream_messages("resp_goal_owner"))
+    replacement_upstream = _FakeUpstreamWebSocket(upstream_messages("resp_goal_replacement"))
+    upstreams = deque([owner_upstream, replacement_upstream])
+    selections: list[dict[str, object]] = []
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(authorization: str | None, *, request: object | None = None):
+        del request
+        assert authorization == "Bearer external-token"
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        selections.append(
+            {
+                "headers": dict(headers),
+                "sticky_key": sticky_key,
+                "sticky_kind": sticky_kind,
+                "abandon_unavailable_legacy_owner": (request_state.affinity_policy.abandon_unavailable_legacy_owner),
+            }
+        )
+        account_id = "acct_goal_owner" if len(selections) == 1 else "acct_goal_replacement"
+        return SimpleNamespace(id=account_id), upstreams.popleft()
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    first_input = {"role": "user", "content": [{"type": "input_text", "text": "first"}]}
+    continued_input = {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "continue the goal"}],
+    }
+    retained_output = {
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "first answer"}],
+    }
+    first_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "Work on the task.",
+        "input": [first_input],
+        "stream": True,
+    }
+    restart_payload = {
+        **first_payload,
+        "instructions": ('<codex_internal_context source="goal">\nContinue working toward the active thread goal.'),
+        "input": [first_input, retained_output, continued_input],
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={"Authorization": "Bearer external-token", "session_id": "goal-restart-direct"},
+        ) as websocket:
+            websocket.send_text(json.dumps(first_payload))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+            websocket.send_text(json.dumps(restart_payload))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+    assert len(selections) == 2
+    assert selections[0]["abandon_unavailable_legacy_owner"] is False
+    assert selections[1]["abandon_unavailable_legacy_owner"] is True
+    assert "x-codex-turn-state" not in cast(dict[str, str], selections[1]["headers"])
+    assert owner_upstream.closed is True
+    assert len(owner_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 1
+    replacement_payload = json.loads(replacement_upstream.sent_text[0])
+    assert "previous_response_id" not in replacement_payload
+    assert replacement_payload["input"] == [first_input, retained_output, continued_input]
+
+
 def test_backend_responses_websocket_reconnect_keeps_session_affinity_with_fresh_generated_turn_states(
     app_instance,
     monkeypatch,

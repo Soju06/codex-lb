@@ -35,12 +35,14 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lookup_allows_turn_state_takeover,
 )
 from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
     durable_bridge_hash,
     durable_bridge_operation_id,
 )
+from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
 from app.modules.proxy.ring_membership import RingMembershipService
 
 pytestmark = pytest.mark.unit
@@ -806,6 +808,288 @@ async def test_terminal_failure_exposes_state_when_spool_overflows(
         assert await repository.get_operation_events(operation_id=operation_id) == []
     finally:
         await session.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_failure_settlement_is_visible_to_recovery(
+    async_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-terminal-recovery",
+            session_key_value="sid-terminal-recovery",
+        )
+        fingerprint = durable_bridge_hash("terminal-recovery")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-terminal-recovery",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.created"}\n\n',
+            max_bytes=1024,
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-terminal-recovery",
+        )
+
+        replay_fingerprint = durable_bridge_hash("terminal-recovery-replay-alias")
+        replay_operation_id = durable_bridge_operation_id(claim.id, replay_fingerprint)
+        assert await repository.record_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=replay_fingerprint,
+            account_id="account-terminal-recovery",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            response_id="resp-client-visible-replay",
+        )
+        replay_operation = await repository.get_operation(operation_id=replay_operation_id)
+        assert replay_operation is not None
+        assert replay_operation.state == "failed"
+        assert replay_operation.response_id == "resp-client-visible-replay"
+        assert replay_operation.event_spool_complete is False
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            response_id="resp-upstream-replay",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            response_id="resp-client-visible-replay",
+        )
+        pre_settled_replay = await repository.get_operation(operation_id=replay_operation_id)
+        assert pre_settled_replay is not None
+        assert pre_settled_replay.state == "failed"
+        assert pre_settled_replay.response_id == "resp-client-visible-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-persisted-before-replacement",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-unpersisted-replacement",
+            alternate_expected_response_id="resp-persisted-before-replacement",
+            response_id="resp-client-visible-replay",
+        )
+        partially_persisted_replay = await repository.get_operation(operation_id=replay_operation_id)
+        assert partially_persisted_replay is not None
+        assert partially_persisted_replay.state == "failed"
+        assert partially_persisted_replay.response_id == "resp-client-visible-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            response_id=None,
+        )
+        null_alias_settlement = await repository.get_operation(operation_id=replay_operation_id)
+        assert null_alias_settlement is not None
+        assert null_alias_settlement.state == "failed"
+        assert null_alias_settlement.response_id == "resp-upstream-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert not await repository.append_terminal_operation_event(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-client-visible-replay",
+        )
+        assert not await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-client-visible-replay",
+        )
+        newer_attempt = await repository.get_operation(operation_id=replay_operation_id)
+        assert newer_attempt is not None
+        assert newer_attempt.state == "acknowledged"
+        assert newer_attempt.recovery_dispatch_count == 1
+        assert newer_attempt.event_spool_complete is False
+    finally:
+        await session.close()
+
+    coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+    append_terminal_operation_event = coordinator.append_terminal_operation_event
+    settle_terminal_append_failure = coordinator.settle_terminal_append_failure
+    settlement_finished = asyncio.Event()
+
+    async def fail_terminal_append(**kwargs: Any) -> bool:
+        assert await append_terminal_operation_event(**kwargs)
+        raise RuntimeError("injected post-commit terminal append failure")
+
+    async def track_terminal_settlement(**kwargs: Any) -> bool:
+        try:
+            return await settle_terminal_append_failure(**kwargs)
+        finally:
+            settlement_finished.set()
+
+    monkeypatch.setattr(coordinator, "append_terminal_operation_event", fail_terminal_append)
+    monkeypatch.setattr(coordinator, "settle_terminal_append_failure", track_terminal_settlement)
+    batcher = HttpBridgeOperationEventBatcher(
+        coordinator,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+
+    append_result = await batcher.append_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        event_text='data: {"type":"response.failed"}\n\n',
+        max_bytes=1024,
+        state="failed",
+        response_id="resp-terminal-recovery",
+    )
+    assert append_result.persisted is False
+    assert append_result.settlement_required is True
+    await batcher.settle_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        state="failed",
+        expected_response_id="resp-terminal-recovery",
+        response_id="resp-terminal-recovery",
+    )
+    await asyncio.wait_for(settlement_finished.wait(), timeout=1.0)
+
+    recovery = DurableBridgeSessionCoordinator(async_session_factory)
+    observed = await recovery.get_operation_by_fingerprint(request_fingerprint=fingerprint)
+    assert observed is not None
+    assert observed.operation_id == operation_id
+    assert observed.session_id == claim.id
+    assert observed.account_id == "account-terminal-recovery"
+    assert observed.state == "failed"
+    assert observed.event_spool_complete is False
+    assert await recovery.get_operation_events(operation_id=operation_id) == [
+        'data: {"type":"response.created"}\n\n',
+        'data: {"type":"response.failed"}\n\n',
+    ]
+
+    retry = await recovery.record_operation(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        request_fingerprint=fingerprint,
+        account_id="account-terminal-recovery",
+        model="gpt-5.6",
+        parent_response_id="resp-parent",
+    )
+    assert retry is not None
+    assert retry.state == "submitted"
+    await batcher.settle_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        state="failed",
+        expected_response_id="resp-terminal-recovery",
+        response_id="resp-terminal-recovery",
+    )
+    after_stale_settlement = await recovery.get_operation(operation_id=operation_id)
+    assert after_stale_settlement is not None
+    assert after_stale_settlement.state == "submitted"
+    assert after_stale_settlement.response_id is None
+    await batcher.close()
 
 
 @pytest.mark.asyncio

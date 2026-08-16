@@ -5,13 +5,21 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from hashlib import sha256
+from typing import Protocol
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 
 HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND = "internal_unanchored_parallel"
 HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX = "account-neutral-replay:v1:"
-HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS = frozenset({"prompt_cache", "session_header", "turn_state_header"})
+# These are canonical lanes whose exact aliases may move only after the
+# existing full-resend validator has proved the request account-neutral. A
+# thread lane is hard during ordinary use, just like a session-header lane;
+# omitting it here would accidentally remove safe owner-unavailable recovery
+# merely because Codex now supplies a more precise canonical identity.
+HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_REBINDABLE_KINDS = frozenset(
+    {"prompt_cache", "session_header", "thread_header", "turn_state_header"}
+)
 _HTTP_BRIDGE_SESSION_AFFINITY_HEADERS = frozenset(
     {
         "session_id",
@@ -52,6 +60,24 @@ def without_http_bridge_session_affinity_headers(headers: Mapping[str, str]) -> 
         for header_name, header_value in headers.items()
         if header_name.lower() not in _HTTP_BRIDGE_SESSION_AFFINITY_HEADERS
     }
+
+
+class _ReconnectPreferredOwner(Protocol):
+    preferred_account_id: str | None
+    file_required_preferred_account: bool
+
+
+def resolve_reconnect_preferred_account_id(
+    request_state: _ReconnectPreferredOwner,
+    session_account_id: str,
+    require_preferred_account: bool,
+    account_neutral_recovery: bool,
+) -> str | None:
+    if request_state.file_required_preferred_account:
+        return request_state.preferred_account_id or session_account_id
+    if require_preferred_account or account_neutral_recovery:
+        return request_state.preferred_account_id
+    return None
 
 
 def resolve_required_account_id(*owners: tuple[str, str | None]) -> str | None:

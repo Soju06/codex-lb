@@ -205,8 +205,13 @@ class _RefreshSingleflight:
         try:
             async with self._lock:
                 current = self._inflight.get(key)
-                if current is task:
-                    self._inflight.pop(key, None)
+                if current is not task:
+                    # A successor owns settlement for this key; consume the
+                    # stale task's result without touching its cache state.
+                    if not task.cancelled():
+                        task.exception()
+                    return
+                self._inflight.pop(key, None)
                 if task.cancelled():
                     self._recent_failures.pop(key, None)
                     return

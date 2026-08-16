@@ -527,6 +527,81 @@ async def test_responses_source_selector_can_require_streaming(async_client):
 
 
 @pytest.mark.asyncio
+async def test_responses_model_is_source_owned_detects_streaming_source(async_client):
+    from app.modules.model_sources.selection import responses_model_is_source_owned
+
+    model = "ws-guard-streaming-model"
+    await _create_model_source(
+        async_client,
+        name="ws-guard-streaming",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+        supports_responses=True,
+        supports_streaming=True,
+    )
+
+    assert await responses_model_is_source_owned(model, None) is True
+    # A subscription model must stay on the WebSocket path.
+    assert await responses_model_is_source_owned("gpt-5.6-sol", None) is False
+    assert await responses_model_is_source_owned(None, None) is False
+
+
+@pytest.mark.asyncio
+async def test_responses_model_is_source_owned_requires_streaming(async_client):
+    """The guard mirrors the HTTP selector, which requires a streaming source."""
+    from app.modules.model_sources.selection import responses_model_is_source_owned
+
+    model = "ws-guard-non-streaming-model"
+    await _create_model_source(
+        async_client,
+        name="ws-guard-non-streaming",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+        supports_responses=True,
+        supports_streaming=False,
+    )
+
+    assert await responses_model_is_source_owned(model, None) is False
+
+
+@pytest.mark.asyncio
+async def test_responses_model_is_source_owned_honors_enforced_model(async_client):
+    """An API key that forces a source-owned model must also be caught.
+
+    The HTTP handlers build their candidate list from the enforced model as
+    well as the requested one; the WebSocket guard has to match or an enforced
+    source model would fall through to subscription-account selection.
+    """
+    from app.modules.model_sources.selection import responses_model_is_source_owned
+
+    model = "ws-guard-enforced-model"
+    await _create_model_source(
+        async_client,
+        name="ws-guard-enforced",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+        supports_responses=True,
+        supports_streaming=True,
+    )
+    enforcing_key = ApiKeyData(
+        id="key_ws_guard_enforced",
+        name="ws guard enforced",
+        key_prefix="sk-test-ws-enforced",
+        allowed_models=[],
+        enforced_model=model,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    # The client asked for a subscription model, but the key forces the source.
+    assert await responses_model_is_source_owned("gpt-5.6-sol", enforcing_key) is True
+
+
+@pytest.mark.asyncio
 async def test_responses_source_raw_alias_lookup_requires_exact_allowlist(async_client):
     import app.modules.proxy.api as proxy_api
 
@@ -581,6 +656,47 @@ async def test_responses_source_raw_alias_lookup_requires_exact_allowlist(async_
     source, selected_model = exact_selection
     assert source.name == "responses-alias-like-allowlist-source"
     assert selected_model == model
+
+
+@pytest.mark.asyncio
+async def test_responses_model_is_source_owned_prefers_the_raw_alias(async_client):
+    """WebSocket parity for the raw-alias candidate (see the HTTP test above).
+
+    Request preparation normalizes ``gpt-5-high`` to ``gpt-5`` before the
+    WebSocket guards run, so the guard helper must accept the client's raw
+    model and offer it to source selection ahead of the normalized one — the
+    HTTP path routes the identical request via ``raw_source_model``.
+    """
+    from app.modules.model_sources.selection import responses_model_is_source_owned
+
+    model = "gpt-5-high"
+    await _create_model_source(
+        async_client,
+        name="ws-guard-raw-alias",
+        model=model,
+        base_url="http://127.0.0.1:9/v1",
+        supports_responses=True,
+        supports_streaming=True,
+    )
+    exact_key = ApiKeyData(
+        id="key_ws_raw_alias",
+        name="ws raw alias",
+        key_prefix="sk-test-ws-raw-alias",
+        allowed_models=[model],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    assert await responses_model_is_source_owned("gpt-5", exact_key, raw_model=model) is True
+    # Without the raw candidate the exact allowlist hides the source. This is
+    # the pre-fix WebSocket behaviour; keeping it false proves the assertion
+    # above matched through the raw candidate, not some other fallback.
+    assert await responses_model_is_source_owned("gpt-5", exact_key) is False
 
 
 @pytest.mark.asyncio

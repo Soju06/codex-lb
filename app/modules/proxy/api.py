@@ -5,7 +5,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -203,18 +203,29 @@ from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
 from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.model_sources.selection import (
+    allowed_source_ids_for_api_key,
+    effective_model_for_api_key,
+    select_responses_model_source,
+)
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
+    _bind_propagated_responses_owner_forward_dispatched,
+    _bind_propagated_responses_owner_forward_rejected,
+    _bind_propagated_responses_service_cleanup_ready,
     _could_be_blank_html_comment_line,
     _is_reasoning_summary_interleavable_event,
     _reasoning_summary_delta_key,
     _request_log_client_fields,
     _reset_propagated_capacity_startup_ready,
     _reset_propagated_capacity_startup_wait,
+    _reset_propagated_responses_owner_forward_dispatched,
+    _reset_propagated_responses_owner_forward_rejected,
+    _reset_propagated_responses_service_cleanup_ready,
     _strip_blank_html_comment_lines,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -238,6 +249,7 @@ from app.modules.proxy.request_policy import (
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
+    responses_source_route_excluded,
     sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
     validate_model_access,
@@ -1064,12 +1076,16 @@ async def responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        compact_trigger_input = strip_terminal_compaction_trigger_input(responses_payload)
+        # Terminal compaction triggers run the upstream compact flow on the
+        # turn's owner account, and file-referencing requests are pinned to
+        # the account that received the upload; the shared predicate keeps
+        # this gate and the WebSocket source-ownership guards in agreement.
+        source_route_excluded = responses_source_route_excluded(responses_payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
     source = None
-    if compact_trigger_input is None and not extract_input_file_ids(responses_payload.input):
+    if not source_route_excluded:
         source_selection = await _select_responses_model_source(
             responses_payload.model,
             api_key,
@@ -2059,11 +2075,15 @@ async def _rate_limit_headers_with_reservation_cleanup(
     context: ProxyContext,
     api_key: ApiKeyData | None,
     owned_reservation: ApiKeyUsageReservationData | None,
+    *,
+    reservation_cleanup: _ResponsesReservationCleanup | None = None,
 ) -> dict[str, str]:
     try:
         return await _rate_limit_headers_for_request(context, api_key)
     except BaseException:
-        if owned_reservation is not None:
+        if reservation_cleanup is not None:
+            await reservation_cleanup.release(action="rate limit headers")
+        elif owned_reservation is not None:
             try:
                 await _release_reservation_deferring_cancellation(owned_reservation)
             except (Exception, asyncio.CancelledError):
@@ -2072,6 +2092,55 @@ async def _rate_limit_headers_with_reservation_cleanup(
                     exc_info=True,
                 )
         raise
+
+
+@dataclass(slots=True)
+class _ResponsesReservationCleanup:
+    owns_reservation: bool
+    reservation: ApiKeyUsageReservationData | None
+    scheduler: _ResponsesCleanupScheduler | None
+    request_id: str
+    released: bool = False
+
+    async def release(self, *, action: str) -> None:
+        if not self.owns_reservation or self.released:
+            return
+        self.released = True
+        await _release_reservation_best_effort(
+            self.reservation,
+            action=action,
+            scheduler=self.scheduler,
+            request_id=self.request_id,
+        )
+
+
+class _ResponsesCleanupScheduler(Protocol):
+    def _schedule_cancel_safe_cleanup(
+        self,
+        coro: Coroutine[Any, Any, None],
+        *,
+        action: str,
+        request_id: str,
+    ) -> asyncio.Task[None]: ...
+
+
+def _responses_origin_may_release_reservation(
+    *,
+    service_cleanup_ready_event: asyncio.Event,
+    owner_forward_dispatched_event: asyncio.Event | None = None,
+    owner_forward_rejected_event: asyncio.Event | None = None,
+) -> bool:
+    if service_cleanup_ready_event.is_set():
+        return False
+    if owner_forward_dispatched_event is None or not owner_forward_dispatched_event.is_set():
+        return True
+    return owner_forward_rejected_event is not None and owner_forward_rejected_event.is_set()
+
+
+def _responses_cleanup_scheduler(service: object) -> _ResponsesCleanupScheduler | None:
+    if callable(getattr(service, "_schedule_cancel_safe_cleanup", None)):
+        return cast(_ResponsesCleanupScheduler, service)
+    return None
 
 
 def _select_codex_usage_limit(
@@ -4151,35 +4220,14 @@ async def _select_responses_model_source(
     raw_model: str | None = None,
     require_streaming: bool = False,
 ) -> tuple[ModelSource, str] | None:
-    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
-    candidates = [candidate for candidate in (raw_model, model) if candidate]
-    if not candidates:
-        return None
-    deduped_candidates = list(dict.fromkeys(candidates))
-    registry_models = get_model_registry().get_models_with_fallback()
-    async with get_background_session() as session:
-        repository = ModelSourcesRepository(session)
-        for candidate in deduped_candidates:
-            if exact_allowed_models is not None and candidate not in exact_allowed_models:
-                continue
-            subscription_model = registry_models.get(candidate)
-            if assigned_source_ids is None and subscription_model is not None:
-                continue
-            source = await repository.find_responses_source_for_model(
-                candidate,
-                allowed_source_ids=assigned_source_ids,
-                require_streaming=require_streaming,
-            )
-            if source is not None:
-                break
-        else:
-            source = None
-        # ``close_session`` rolls back the read transaction, which would
-        # expire the loaded row; detach it so the forwarding path can read
-        # its attributes after this session boundary.
-        detach_session_objects(session)
-        return (source, candidate) if source is not None else None
+    # Shared with the WebSocket path so both transports agree on which models
+    # belong to a model source.
+    return await select_responses_model_source(
+        model,
+        api_key,
+        raw_model=raw_model,
+        require_streaming=require_streaming,
+    )
 
 
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
@@ -4199,9 +4247,7 @@ async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyD
 
 
 def _allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
-    if api_key is None or not api_key.source_assignment_scope_enabled:
-        return None
-    return set(api_key.assigned_source_ids)
+    return allowed_source_ids_for_api_key(api_key)
 
 
 async def _parse_transcription_multipart(
@@ -5084,12 +5130,22 @@ async def _stream_responses(
             request_usage_budget=estimate_api_key_request_usage(payload),
         )
     )
+    reservation_cleanup = _ResponsesReservationCleanup(
+        owns_reservation=owns_reservation,
+        reservation=reservation,
+        scheduler=_responses_cleanup_scheduler(context.service),
+        request_id=ensure_request_id(),
+    )
+    responses_service_cleanup_ready_event = asyncio.Event()
+    responses_owner_forward_dispatched_event = asyncio.Event()
+    responses_owner_forward_rejected_event = asyncio.Event()
 
     rate_limit_headers = (
         await _rate_limit_headers_with_reservation_cleanup(
             context,
             api_key,
             reservation if owns_reservation else None,
+            reservation_cleanup=reservation_cleanup if owns_reservation else None,
         )
         if include_rate_limit_headers
         else {}
@@ -5115,6 +5171,9 @@ async def _stream_responses(
         else {}
     )
     if compact_payload is not None:
+        responses_cleanup_ready_token = _bind_propagated_responses_service_cleanup_ready(
+            responses_service_cleanup_ready_event
+        )
         try:
             try:
                 compact_result = await context.service.compact_responses(
@@ -5125,6 +5184,8 @@ async def _stream_responses(
                     api_key=api_key,
                     api_key_reservation=reservation,
                     client_ip=client_ip,
+                    forwarded_request=forwarded_request,
+                    forwarded_file_owner_account_id=forwarded_file_owner_account_id,
                 )
             except NotImplementedError:
                 error = OpenAIErrorEnvelopeModel(
@@ -5141,6 +5202,31 @@ async def _stream_responses(
                     headers=rate_limit_headers,
                 )
             except ProxyResponseError as exc:
+                if forwarded_request and responses_service_cleanup_ready_event.is_set():
+                    # Fallback settlement already transferred cleanup. A 502
+                    # would look like a definitive rejection and let origin
+                    # replay a compact that already ran.
+                    envelope = _parse_error_envelope(exc.payload)
+                    error = envelope.error
+                    stream = _synthetic_compaction_failure_stream(
+                        response_id=get_request_id() or "unknown",
+                        error_code=(error.code if error is not None and error.code else "upstream_error"),
+                        error_message=(
+                            error.message
+                            if error is not None and error.message
+                            else "Compact request failed after settlement"
+                        ),
+                    )
+                    return StreamingResponse(
+                        stream,
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache, no-transform",
+                            "X-Accel-Buffering": "no",
+                            **turn_state_headers,
+                            **rate_limit_headers,
+                        },
+                    )
                 return _stream_startup_error_response(
                     request,
                     exc,
@@ -5148,18 +5234,21 @@ async def _stream_responses(
                 )
             compact_item = _compact_response_output_item(compact_result)
             if compact_item is None:
-                error = openai_error(
-                    "upstream_error",
-                    "Compact response did not include a compaction output item",
-                    error_type="server_error",
+                if forwarded_request and responses_service_cleanup_ready_event.is_set():
+                    stream = _synthetic_compaction_failure_stream(response_id=_compact_response_id(compact_result))
+                else:
+                    error = openai_error(
+                        "upstream_error",
+                        "Compact response did not include a compaction output item",
+                        error_type="server_error",
+                    )
+                    return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
+            else:
+                stream = _synthetic_compaction_response_stream(
+                    compact_item,
+                    response_id=_compact_response_id(compact_result),
+                    usage=compact_result.usage,
                 )
-                return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
-            response_id = _compact_response_id(compact_result)
-            stream = _synthetic_compaction_response_stream(
-                compact_item,
-                response_id=response_id,
-                usage=compact_result.usage,
-            )
             return StreamingResponse(
                 stream,
                 media_type="text/event-stream",
@@ -5171,8 +5260,11 @@ async def _stream_responses(
                 },
             )
         finally:
-            if owns_reservation:
-                await _release_reservation(reservation)
+            _reset_propagated_responses_service_cleanup_ready(responses_cleanup_ready_token)
+            if _responses_origin_may_release_reservation(
+                service_cleanup_ready_event=responses_service_cleanup_ready_event
+            ):
+                await reservation_cleanup.release(action="terminal compaction response")
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = _CapacityStartupReadyEvent()
     payload.stream = True
@@ -5262,21 +5354,49 @@ async def _stream_responses(
         return _retry()
 
     stream = build_response_stream()
+    startup_handoff_tasks: list[asyncio.Task[str]] = []
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
+    responses_owner_forward_dispatched_token = _bind_propagated_responses_owner_forward_dispatched(
+        responses_owner_forward_dispatched_event
+    )
+    responses_owner_forward_rejected_token = _bind_propagated_responses_owner_forward_rejected(
+        responses_owner_forward_rejected_event
+    )
+    responses_cleanup_ready_token = _bind_propagated_responses_service_cleanup_ready(
+        responses_service_cleanup_ready_event
+    )
     try:
-        stream, startup_error = await _probe_stream_startup_error(
-            stream,
-            convert_event_errors=bridge_active and enforce_openai_sdk_contract,
-            timeout_seconds=(
-                _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS if prefer_http_bridge else _STREAM_STARTUP_ERROR_PROBE_SECONDS
-            ),
-            capacity_wait_event=capacity_wait_event,
-            capacity_ready_event=capacity_ready_event,
-        )
-    finally:
-        _reset_propagated_capacity_startup_ready(capacity_ready_token)
-        _reset_propagated_capacity_startup_wait(capacity_wait_token)
+        try:
+            stream, startup_error = await _probe_stream_startup_error(
+                stream,
+                convert_event_errors=bridge_active and enforce_openai_sdk_contract,
+                timeout_seconds=(
+                    _HTTP_BRIDGE_STARTUP_ERROR_PROBE_SECONDS
+                    if prefer_http_bridge
+                    else _STREAM_STARTUP_ERROR_PROBE_SECONDS
+                ),
+                capacity_wait_event=capacity_wait_event,
+                capacity_ready_event=capacity_ready_event,
+                handoff_task_sink=startup_handoff_tasks,
+                service_cleanup_ready_event=(
+                    responses_service_cleanup_ready_event if forwarded_request and reservation is not None else None
+                ),
+            )
+        finally:
+            _reset_propagated_responses_service_cleanup_ready(responses_cleanup_ready_token)
+            _reset_propagated_responses_owner_forward_rejected(responses_owner_forward_rejected_token)
+            _reset_propagated_responses_owner_forward_dispatched(responses_owner_forward_dispatched_token)
+            _reset_propagated_capacity_startup_ready(capacity_ready_token)
+            _reset_propagated_capacity_startup_wait(capacity_wait_token)
+    except BaseException:
+        if _responses_origin_may_release_reservation(
+            service_cleanup_ready_event=responses_service_cleanup_ready_event,
+            owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+            owner_forward_rejected_event=responses_owner_forward_rejected_event,
+        ):
+            await reservation_cleanup.release(action="responses startup")
+        raise
     if startup_error is not None:
         startup_error_code = (
             _startup_error_details(startup_error)[0] if isinstance(startup_error, ProxyResponseError) else None
@@ -5289,6 +5409,11 @@ async def _stream_responses(
             and getattr(startup_error, "http_bridge_durable_recovery_eligible", False)
             and startup_error_code
             in {"stream_incomplete", "stream_idle_timeout", "upstream_request_timeout", "upstream_unavailable"}
+            and _responses_origin_may_release_reservation(
+                service_cleanup_ready_event=responses_service_cleanup_ready_event,
+                owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+                owner_forward_rejected_event=responses_owner_forward_rejected_event,
+            )
         )
         if startup_recovery_allowed:
             assert isinstance(startup_error, ProxyResponseError)
@@ -5304,8 +5429,12 @@ async def _stream_responses(
 
             stream = _raise_startup_error()
         else:
-            if owns_reservation:
-                await _release_reservation(reservation)
+            if _responses_origin_may_release_reservation(
+                service_cleanup_ready_event=responses_service_cleanup_ready_event,
+                owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+                owner_forward_rejected_event=responses_owner_forward_rejected_event,
+            ):
+                await reservation_cleanup.release(action="responses startup error")
             return _stream_startup_error_response(
                 request,
                 startup_error,
@@ -5315,18 +5444,32 @@ async def _stream_responses(
     # Server-indefinite recovery is only safe for an explicitly anchored
     # continuation. Fresh first-turn requests have no durable parent
     # operation to fence, so do not install the recovery loop for them.
-    recovery_stream_factory = build_recovery_response_stream if bridge_recovery_eligible else None
+    recovery_stream_factory = (
+        build_recovery_response_stream
+        if bridge_recovery_eligible
+        and _responses_origin_may_release_reservation(
+            service_cleanup_ready_event=responses_service_cleanup_ready_event,
+            owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+            owner_forward_rejected_event=responses_owner_forward_rejected_event,
+        )
+        else None
+    )
     stream = _normalize_public_responses_stream(
         _stream_response_error_events(
             stream,
             owns_reservation=owns_reservation,
             reservation=reservation,
+            reservation_cleanup=reservation_cleanup,
+            responses_service_cleanup_ready_event=responses_service_cleanup_ready_event,
+            responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+            responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
             recovery_stream_factory=recovery_stream_factory,
             allow_client_full_history_once=bridge_recovery_eligible,
             require_durable_recovery_fence=bridge_recovery_eligible,
         ),
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
     )
+    service_stream = stream
     use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
     keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
     if use_codex_keepalive:
@@ -5336,13 +5479,25 @@ async def _stream_responses(
             request_id=get_request_id(),
             route_family="responses",
         )
+    stream = inject_sse_keepalives(
+        stream,
+        get_settings().sse_keepalive_interval_seconds,
+        keepalive_frame=keepalive_frame,
+        on_keepalive=lambda: _record_stream_keepalive("responses"),
+    )
+    # Outermost so a client close after the initial heartbeat still closes
+    # the service stream, including when the startup probe already completed.
+    stream = _guard_responses_startup_handoff(
+        stream,
+        startup_task=startup_handoff_tasks[0] if startup_handoff_tasks else None,
+        streams_to_close=(service_stream,),
+        reservation_cleanup=reservation_cleanup,
+        responses_service_cleanup_ready_event=responses_service_cleanup_ready_event,
+        responses_owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+        responses_owner_forward_rejected_event=responses_owner_forward_rejected_event,
+    )
     return StreamingResponse(
-        inject_sse_keepalives(
-            stream,
-            get_settings().sse_keepalive_interval_seconds,
-            keepalive_frame=keepalive_frame,
-            on_keepalive=lambda: _record_stream_keepalive("responses"),
-        ),
+        stream,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -5388,8 +5543,22 @@ async def _collect_responses(
         request_service_tier=payload.service_tier,
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
+    reservation_cleanup = _ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=reservation,
+        scheduler=_responses_cleanup_scheduler(context.service),
+        request_id=ensure_request_id(),
+    )
+    responses_service_cleanup_ready_event = asyncio.Event()
+    responses_owner_forward_dispatched_event = asyncio.Event()
+    responses_owner_forward_rejected_event = asyncio.Event()
 
-    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(
+        context,
+        api_key,
+        reservation,
+        reservation_cleanup=reservation_cleanup,
+    )
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     bridge_recovery_eligible = _http_bridge_recovery_request_eligible(
         payload,
@@ -5432,13 +5601,35 @@ async def _collect_responses(
             client_ip=client_ip,
         )
     captured_turn_state_headers: dict[str, str] = {}
+    responses_owner_forward_dispatched_token = _bind_propagated_responses_owner_forward_dispatched(
+        responses_owner_forward_dispatched_event
+    )
+    responses_owner_forward_rejected_token = _bind_propagated_responses_owner_forward_rejected(
+        responses_owner_forward_rejected_event
+    )
+    responses_cleanup_ready_token = _bind_propagated_responses_service_cleanup_ready(
+        responses_service_cleanup_ready_event
+    )
     try:
         response_payload = await _collect_responses_payload(
             stream,
             captured_turn_state_headers=captured_turn_state_headers,
         )
+    except asyncio.CancelledError:
+        if _responses_origin_may_release_reservation(
+            service_cleanup_ready_event=responses_service_cleanup_ready_event,
+            owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+            owner_forward_rejected_event=responses_owner_forward_rejected_event,
+        ):
+            await reservation_cleanup.release(action="responses collection cancellation")
+        raise
     except ProxyResponseError as exc:
-        await _release_reservation(reservation)
+        if _responses_origin_may_release_reservation(
+            service_cleanup_ready_event=responses_service_cleanup_ready_event,
+            owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+            owner_forward_rejected_event=responses_owner_forward_rejected_event,
+        ):
+            await reservation_cleanup.release(action="responses collection error")
         error = _parse_error_envelope(exc.payload)
         status_code, error = _mask_previous_response_not_found_error(
             error,
@@ -5453,6 +5644,18 @@ async def _collect_responses(
             error.model_dump(mode="json", exclude_none=True),
             headers={**captured_turn_state_headers, **rate_limit_headers},
         )
+    except BaseException:
+        if _responses_origin_may_release_reservation(
+            service_cleanup_ready_event=responses_service_cleanup_ready_event,
+            owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+            owner_forward_rejected_event=responses_owner_forward_rejected_event,
+        ):
+            await reservation_cleanup.release(action="responses collection")
+        raise
+    finally:
+        _reset_propagated_responses_service_cleanup_ready(responses_cleanup_ready_token)
+        _reset_propagated_responses_owner_forward_rejected(responses_owner_forward_rejected_token)
+        _reset_propagated_responses_owner_forward_dispatched(responses_owner_forward_dispatched_token)
     if isinstance(response_payload, OpenAIResponsePayload):
         if response_payload.status == "failed":
             error_payload = _error_envelope_from_response(response_payload.error)
@@ -5578,7 +5781,22 @@ async def _compact_responses(
         request_usage_budget=request_usage_budget,
     )
 
-    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
+    reservation_cleanup = _ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=reservation,
+        scheduler=_responses_cleanup_scheduler(context.service),
+        request_id=ensure_request_id(),
+    )
+    responses_service_cleanup_ready_event = asyncio.Event()
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(
+        context,
+        api_key,
+        reservation,
+        reservation_cleanup=reservation_cleanup,
+    )
+    responses_cleanup_ready_token = _bind_propagated_responses_service_cleanup_ready(
+        responses_service_cleanup_ready_event
+    )
     try:
         result = await context.service.compact_responses(
             payload,
@@ -5613,7 +5831,9 @@ async def _compact_responses(
             headers=rate_limit_headers,
         )
     finally:
-        await _release_reservation(reservation)
+        _reset_propagated_responses_service_cleanup_ready(responses_cleanup_ready_token)
+        if _responses_origin_may_release_reservation(service_cleanup_ready_event=responses_service_cleanup_ready_event):
+            await reservation_cleanup.release(action="compact response")
     result_payload = result.model_dump(mode="json", exclude_none=True)
     if codex_session_affinity:
         result_payload = _normalize_codex_remote_compaction_v2_result(result, result_payload)
@@ -5750,6 +5970,22 @@ async def _synthetic_compaction_response_stream(
             "sequence_number": 3,
             "response": completed_response,
         }
+    )
+    yield "data: [DONE]\n\n"
+
+
+async def _synthetic_compaction_failure_stream(
+    *,
+    response_id: str,
+    error_code: str = "upstream_error",
+    error_message: str = "Compact response did not include a compaction output item",
+) -> AsyncIterator[str]:
+    yield format_sse_event(
+        response_failed_event(
+            error_code,
+            error_message,
+            response_id=response_id,
+        )
     )
     yield "data: [DONE]\n\n"
 
@@ -6048,8 +6284,9 @@ async def _wait_for_first_stream_probe(
                     return_exceptions=True,
                 )
     except asyncio.CancelledError:
-        first_task.cancel()
-        await asyncio.gather(first_task, return_exceptions=True)
+        with anyio.CancelScope(shield=True):
+            first_task.cancel()
+            await asyncio.gather(first_task, return_exceptions=True)
         raise
 
 
@@ -6060,6 +6297,8 @@ async def _probe_stream_startup_error(
     timeout_seconds: float | None = None,
     capacity_wait_event: asyncio.Event | None = None,
     capacity_ready_event: asyncio.Event | None = None,
+    handoff_task_sink: list[asyncio.Task[str]] | None = None,
+    service_cleanup_ready_event: asyncio.Event | None = None,
 ) -> tuple[AsyncIterator[str], ProxyResponseError | OpenAIErrorEnvelopeModel | None]:
     if timeout_seconds is None:
         timeout_seconds = _STREAM_STARTUP_ERROR_PROBE_SECONDS
@@ -6070,12 +6309,94 @@ async def _probe_stream_startup_error(
         capacity_wait_event=capacity_wait_event,
         capacity_ready_event=capacity_ready_event,
     )
+    if service_cleanup_ready_event is not None:
+        buffered_before_cleanup_ready: list[str] = []
+        handoff_deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while not service_cleanup_ready_event.is_set():
+            remaining = handoff_deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                with anyio.CancelScope(shield=True):
+                    if not first_task.done():
+                        first_task.cancel()
+                        await asyncio.gather(first_task, return_exceptions=True)
+                return (
+                    _prepend_first(None, stream),
+                    ProxyResponseError(
+                        503,
+                        openai_error(
+                            "upstream_unavailable",
+                            "Reservation cleanup handoff timed out",
+                            error_type="server_error",
+                        ),
+                        failure_phase="reservation_cleanup_handoff",
+                        failure_detail="cleanup_handoff_timeout",
+                    ),
+                )
+            if not first_task.done():
+                cleanup_ready_task = asyncio.create_task(service_cleanup_ready_event.wait())
+                try:
+                    await asyncio.wait(
+                        {first_task, cleanup_ready_task},
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except asyncio.CancelledError:
+                    with anyio.CancelScope(shield=True):
+                        first_task.cancel()
+                        cleanup_ready_task.cancel()
+                        await asyncio.gather(first_task, cleanup_ready_task, return_exceptions=True)
+                    raise
+                finally:
+                    if not cleanup_ready_task.done():
+                        cleanup_ready_task.cancel()
+                    await asyncio.gather(cleanup_ready_task, return_exceptions=True)
+            if service_cleanup_ready_event.is_set():
+                break
+            if not first_task.done():
+                continue
+            try:
+                first = first_task.result()
+            except StopAsyncIteration:
+                return (
+                    _prepend_first(None, stream),
+                    ProxyResponseError(
+                        502,
+                        openai_error(
+                            "stream_incomplete",
+                            "Upstream stream ended before reservation cleanup handoff",
+                            error_type="server_error",
+                        ),
+                    ),
+                )
+            except ProxyResponseError as exc:
+                return _prepend_first(None, stream), exc
+            if convert_event_errors:
+                first_error = _stream_event_error_envelope(first)
+                if first_error is not None:
+                    aclose = getattr(stream, "aclose", None)
+                    if callable(aclose):
+                        await aclose()
+                    return _prepend_first(None, stream), first_error
+            buffered_before_cleanup_ready.append(first)
+            first_task = _create_first_stream_probe_task(stream)
+
+        if handoff_task_sink is not None:
+            handoff_task_sink.append(first_task)
+        return (
+            _prepend_items(
+                buffered_before_cleanup_ready,
+                _prepend_first_task(first_task, stream),
+            ),
+            None,
+        )
     if not probe_done:
         # Probe window elapsed before the first item arrived. Hand the still-
         # running task off to be consumed by the streamed response. asyncio.wait
         # (rather than wait_for + shield) never cancels the task on timeout,
         # avoiding the Python 3.14 "exception in shielded future" log when the
         # upstream later returns an error such as a 429 from the admission gate.
+        if handoff_task_sink is not None:
+            handoff_task_sink.append(first_task)
         return _prepend_first_task(first_task, stream), None
     try:
         first = first_task.result()
@@ -6452,14 +6773,74 @@ async def _prepend_initial_sse_heartbeat(
         request_id,
         route_family,
     )
-    yield keepalive_frame
-    async for line in stream:
-        yield line
+    try:
+        yield keepalive_frame
+        async for line in stream:
+            yield line
+    finally:
+        await _close_responses_stream_best_effort(stream, action="initial heartbeat")
 
 
 def _record_stream_keepalive(surface: str) -> None:
     if PROMETHEUS_AVAILABLE and stream_keepalive_sent_total is not None:
         stream_keepalive_sent_total.labels(surface=surface).inc()
+
+
+async def _guard_responses_startup_handoff(
+    stream: AsyncIterator[str],
+    *,
+    startup_task: asyncio.Task[str] | None,
+    streams_to_close: tuple[AsyncIterator[str], ...],
+    reservation_cleanup: _ResponsesReservationCleanup,
+    responses_service_cleanup_ready_event: asyncio.Event,
+    responses_owner_forward_dispatched_event: asyncio.Event,
+    responses_owner_forward_rejected_event: asyncio.Event,
+) -> AsyncIterator[str]:
+    try:
+        async for line in stream:
+            yield line
+    finally:
+        with anyio.CancelScope(shield=True):
+            release_candidate = startup_task is None
+            if startup_task is not None:
+                if startup_task.done():
+                    release_candidate = startup_task.cancelled() or startup_task.exception() is not None
+                else:
+                    release_candidate = True
+                    startup_task.cancel()
+                    await asyncio.gather(startup_task, return_exceptions=True)
+            closed_stream_ids: set[int] = set()
+            for stream_index, stream_to_close in enumerate(reversed(streams_to_close)):
+                stream_id = id(stream_to_close)
+                if stream_id in closed_stream_ids:
+                    continue
+                closed_stream_ids.add(stream_id)
+                await _close_responses_stream_best_effort(
+                    stream_to_close,
+                    action=f"startup wrapper {stream_index}",
+                )
+            if release_candidate and _responses_origin_may_release_reservation(
+                service_cleanup_ready_event=responses_service_cleanup_ready_event,
+                owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+                owner_forward_rejected_event=responses_owner_forward_rejected_event,
+            ):
+                await reservation_cleanup.release(action="responses startup handoff")
+
+
+async def _close_responses_stream_best_effort(
+    stream: AsyncIterator[str],
+    *,
+    action: str,
+) -> None:
+    aclose = getattr(stream, "aclose", None)
+    if not callable(aclose):
+        return
+    try:
+        await aclose()
+    except asyncio.CancelledError:
+        logger.debug("Responses %s stream close was cancelled", action)
+    except Exception:
+        logger.warning("Failed to close Responses %s stream", action, exc_info=True)
 
 
 async def _stream_proxy_errors_as_response_failed(stream: AsyncIterator[str]) -> AsyncIterator[str]:
@@ -6472,10 +6853,30 @@ async def _stream_response_error_events(
     *,
     owns_reservation: bool,
     reservation: ApiKeyUsageReservationData | None,
+    reservation_cleanup: _ResponsesReservationCleanup | None = None,
+    responses_service_cleanup_ready_event: asyncio.Event | None = None,
+    responses_owner_forward_dispatched_event: asyncio.Event | None = None,
+    responses_owner_forward_rejected_event: asyncio.Event | None = None,
     recovery_stream_factory: Callable[[], AsyncIterator[str]] | None = None,
     allow_client_full_history_once: bool = False,
     require_durable_recovery_fence: bool = False,
 ) -> AsyncIterator[str]:
+    cleanup = reservation_cleanup or _ResponsesReservationCleanup(
+        owns_reservation=owns_reservation,
+        reservation=reservation,
+        scheduler=None,
+        request_id=ensure_request_id(),
+    )
+
+    async def release_owned_reservation() -> None:
+        if responses_service_cleanup_ready_event is not None and not _responses_origin_may_release_reservation(
+            service_cleanup_ready_event=responses_service_cleanup_ready_event,
+            owner_forward_dispatched_event=responses_owner_forward_dispatched_event,
+            owner_forward_rejected_event=responses_owner_forward_rejected_event,
+        ):
+            return
+        await cleanup.release(action="responses stream cleanup")
+
     saw_downstream_event = False
     try:
         async for line in stream:
@@ -6565,11 +6966,7 @@ async def _stream_response_error_events(
                         retry_after_seconds=5,
                     )
                     break
-        if owns_reservation:
-            try:
-                await _release_reservation(reservation)
-            except Exception:
-                logger.warning("Failed to release stream reservation after upstream proxy error", exc_info=True)
+        await release_owned_reservation()
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(
             envelope,
@@ -6917,6 +7314,28 @@ async def _release_reservation(reservation: ApiKeyUsageReservationData | None) -
         await service.release_usage_reservation(reservation.reservation_id)
 
 
+async def _release_reservation_best_effort(
+    reservation: ApiKeyUsageReservationData | None,
+    *,
+    action: str,
+    scheduler: _ResponsesCleanupScheduler | None,
+    request_id: str,
+) -> None:
+    if reservation is None:
+        return
+    try:
+        await _release_reservation_deferring_cancellation(reservation)
+    except Exception:
+        logger.warning("Failed to release API key reservation during %s", action, exc_info=True)
+        if scheduler is None:
+            return
+        scheduler._schedule_cancel_safe_cleanup(
+            _release_reservation_deferring_cancellation(reservation),
+            action=f"{action.replace(' ', '_')}_retry",
+            request_id=request_id,
+        )
+
+
 async def _finalize_image_reservation(
     reservation: ApiKeyUsageReservationData | None,
     *,
@@ -7120,9 +7539,7 @@ def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: st
 
 
 def _effective_optional_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
-    if api_key is None or api_key.enforced_model is None:
-        return requested_model
-    return api_key.enforced_model
+    return effective_model_for_api_key(api_key, requested_model)
 
 
 def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | None:

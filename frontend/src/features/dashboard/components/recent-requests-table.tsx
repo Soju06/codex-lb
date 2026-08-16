@@ -59,6 +59,7 @@ import {
 
 const STATUS_CLASS_MAP: Record<string, string> = {
   ok: "bg-emerald-500/15 text-emerald-700 border-emerald-500/20 hover:bg-emerald-500/20 dark:text-emerald-400",
+  cancelled: "bg-sky-500/15 text-sky-700 border-sky-500/20 hover:bg-sky-500/20 dark:text-sky-400",
   rate_limit: "bg-orange-500/15 text-orange-700 border-orange-500/20 hover:bg-orange-500/20 dark:text-orange-400",
   quota: "bg-red-500/15 text-red-700 border-red-500/20 hover:bg-red-500/20 dark:text-red-400",
   error: "bg-zinc-500/15 text-zinc-700 border-zinc-500/20 hover:bg-zinc-500/20 dark:text-zinc-400",
@@ -570,12 +571,12 @@ export function RecentRequestsTable({
       </div>
 
       <Dialog open={selectedRequest !== null} onOpenChange={(open) => { if (!open) setSelectedRequest(null); }}>
-        <DialogContent className="max-h-[85vh] sm:max-w-2xl">
+        <DialogContent className="max-h-[85vh] grid-rows-[auto_minmax(0,1fr)] sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>{t("dashboard.requestDetails.title")}</DialogTitle>
             <DialogDescription>{t("dashboard.requestDetails.description")}</DialogDescription>
           </DialogHeader>
-          <div className="grid gap-4 overflow-y-auto">
+          <div className="grid min-h-0 gap-4 overflow-y-auto">
             <div className="space-y-3 rounded-md border bg-muted/30 p-4">
               <RequestDetailField
                 label={t("dashboard.requestDetails.requestId")}
@@ -600,6 +601,40 @@ export function RecentRequestsTable({
                 <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt, dateDisplayFormat) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.errorCode")} value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
+              {selectedRequest?.upstreamProxyRouteMode ||
+              selectedRequest?.upstreamProxyPoolId ||
+              selectedRequest?.upstreamProxyEndpointId ||
+              selectedRequest?.upstreamProxyFallbackUsed != null ||
+              selectedRequest?.upstreamProxyFailClosedReason ? (
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {selectedRequest.upstreamProxyRouteMode ? (
+                    <RequestDetailField label={t("dashboard.requestDetails.routeMode")} value={selectedRequest.upstreamProxyRouteMode} mono />
+                  ) : null}
+                  {selectedRequest.upstreamProxyPoolId ? (
+                    <RequestDetailField label={t("dashboard.requestDetails.routePool")} value={selectedRequest.upstreamProxyPoolId} mono />
+                  ) : null}
+                  {selectedRequest.upstreamProxyEndpointId ? (
+                    <RequestDetailField label={t("dashboard.requestDetails.routeEndpoint")} value={selectedRequest.upstreamProxyEndpointId} mono />
+                  ) : null}
+                  {selectedRequest.upstreamProxyFallbackUsed != null ? (
+                    <RequestDetailField
+                      label={t("dashboard.requestDetails.routeFallback")}
+                      value={t(
+                        selectedRequest.upstreamProxyFallbackUsed
+                          ? "dashboard.requestDetails.routeFallbackUsed"
+                          : "dashboard.requestDetails.routeFallbackNotUsed",
+                      )}
+                    />
+                  ) : null}
+                  {selectedRequest.upstreamProxyFailClosedReason ? (
+                    <RequestDetailField
+                      label={t("dashboard.requestDetails.routeFailClosedReason")}
+                      value={selectedRequest.upstreamProxyFailClosedReason}
+                      mono
+                    />
+                  ) : null}
+                </div>
+              ) : null}
               {isAdmin ? (
                 <RequestDetailField
                   label={t("dashboard.requestDetails.userAgent")}

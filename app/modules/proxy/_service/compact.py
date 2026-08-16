@@ -48,6 +48,7 @@ from app.modules.proxy.affinity import (
     _resolve_prompt_cache_key,
     _sticky_key_from_session_header,
     _sticky_key_from_turn_state_header,
+    _thread_codex_session_affinity,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.continuity import resolve_required_account_id
@@ -100,6 +101,15 @@ class _CompactServiceProtocol(Protocol):
 
     async def _resolve_file_account_for_responses(
         self, payload: ResponsesCompactRequest, headers: Mapping[str, str]
+    ) -> str | None: ...
+
+    async def _resolve_forwarded_file_account_for_responses(
+        self,
+        payload: ResponsesCompactRequest,
+        headers: Mapping[str, str],
+        *,
+        forwarded_file_owner_account_id: str | None,
+        require_forwarded_file_owner: bool = False,
     ) -> str | None: ...
 
     async def _acquire_account_response_create_lease_or_overload(
@@ -433,6 +443,14 @@ def _sticky_key_for_compact_request(
             codex_session_source="turn_state",
         )
     elif (
+        thread_affinity := _thread_codex_session_affinity(
+            headers,
+            enabled=codex_session_affinity,
+            max_age_seconds=openai_cache_affinity_max_age_seconds,
+        )
+    ) is not None:
+        policy = thread_affinity
+    elif (
         session_affinity := _bare_codex_session_affinity(
             headers,
             enabled=codex_session_affinity,
@@ -579,6 +597,8 @@ class _CompactMixin:
         api_key: ApiKeyData | None = None,
         api_key_reservation: ApiKeyUsageReservationData | None = None,
         client_ip: str | None = None,
+        forwarded_request: bool = False,
+        forwarded_file_owner_account_id: str | None = None,
     ) -> CompactResponsePayload:
         proxy = cast(_CompactServiceProtocol, self)
         _maybe_log_proxy_request_payload("compact", payload, headers)
@@ -602,8 +622,69 @@ class _CompactMixin:
         route_endpoint_id: str | None = None
         route_fallback_used: bool | None = None
         route_fail_closed_reason: str | None = None
+        settlement_attempted = False
+
+        async def settle_compact_usage(
+            *,
+            api_key: ApiKeyData | None,
+            api_key_reservation: ApiKeyUsageReservationData | None,
+            response: CompactResponsePayload | None,
+            request_service_tier: str | None,
+        ) -> None:
+            nonlocal settlement_attempted
+            if settlement_attempted:
+                return
+            if forwarded_request and response is None:
+                # A forwarded receiver has not transferred cleanup ownership
+                # until its successful HTTP 200. Every error before that
+                # acknowledgement remains the origin's single release path.
+                return
+            settlement_attempted = True
+            await proxy._settle_compact_api_key_usage(
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                response=response,
+                request_service_tier=request_service_tier,
+            )
+
         proxy._raise_for_unsupported_input_image_references(payload)
-        rewritten_file_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
+        try:
+            rewritten_file_account_id = await proxy._resolve_forwarded_file_account_for_responses(
+                payload,
+                headers,
+                forwarded_file_owner_account_id=forwarded_file_owner_account_id,
+                require_forwarded_file_owner=forwarded_request,
+            )
+        except ProxyResponseError:
+            if not forwarded_request and api_key is not None and api_key_reservation is not None:
+                try:
+                    await settle_compact_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=_service_tier_from_compact_payload(payload),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to settle compact API key reservation after owner lookup failure",
+                        exc_info=True,
+                    )
+            raise
+        except asyncio.CancelledError:
+            if not forwarded_request and api_key is not None and api_key_reservation is not None:
+                try:
+                    await settle_compact_usage(
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        response=None,
+                        request_service_tier=_service_tier_from_compact_payload(payload),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to settle compact API key reservation after cancelled owner lookup",
+                        exc_info=True,
+                    )
+            raise
         settings = await _service_get_settings_cache().get()
         concurrency_caps = effective_account_concurrency_caps(settings)
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
@@ -618,7 +699,11 @@ class _CompactMixin:
             api_key=api_key,
         )
         sticky_key_source = "none"
-        if affinity.kind == StickySessionKind.CODEX_SESSION:
+        if affinity.codex_session_source == "thread_header":
+            # The payload cache hint remains unchanged; diagnostics must not
+            # imply that it supplied the internal thread-local routing key.
+            sticky_key_source = "thread_header"
+        elif affinity.kind == StickySessionKind.CODEX_SESSION:
             if _sticky_key_from_turn_state_header(headers) is not None:
                 sticky_key_source = "turn_state_header"
             elif _sticky_key_from_session_header(headers) is not None:

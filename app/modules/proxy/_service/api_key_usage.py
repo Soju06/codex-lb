@@ -26,6 +26,7 @@ from app.modules.api_keys.service import (
 from app.modules.proxy._service.support import (
     _ApiKeyReservationTouchState,
     _consume_api_key_reservation_heartbeat_result,
+    _signal_propagated_responses_service_cleanup_ready,
     _StreamSettlement,
     _WebSocketRequestState,
 )
@@ -355,6 +356,8 @@ class _ApiKeyUsageMixin:
                     failure_exception_type=type(exc).__name__,
                     reservation_released=reservation_released,
                 ) from exc
+            finally:
+                _signal_propagated_responses_service_cleanup_ready()
 
     async def _settle_stream_api_key_usage(
         self,

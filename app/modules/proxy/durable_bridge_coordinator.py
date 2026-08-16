@@ -652,6 +652,7 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         state: str,
         response_id: str | None = None,
+        event_spool_complete: bool | None = None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).update_operation(
@@ -661,6 +662,7 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 state=state,
                 response_id=response_id,
+                event_spool_complete=event_spool_complete,
             )
 
     async def get_operation(self, *, operation_id: str) -> DurableBridgeOperationSnapshot | None:

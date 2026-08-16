@@ -22,7 +22,8 @@ The durable bridge already exposes `update_operation` with the same operation, s
 ## Decisions
 
 - On `append_terminal_operation_event` exception, return an incomplete append result that explicitly requires fallback settlement. The relay queues the selected terminal SSE block before awaiting `update_operation` with the same operation ID, session ID, instance ID, owner epoch, intended terminal state, and response ID. This reuses the authoritative fenced repository operation without keeping the terminal event behind a stalled fallback write.
-- Keep fallback settlement structured in the relay task instead of detaching it. This bounds settlement concurrency to active relay operations and preserves settlement ownership through the existing request finalization order.
+- Keep fallback settlement structured in the relay task instead of detaching it. This bounds settlement concurrency to active relay operations, and the relay defers cancellation until the settlement task finishes before preserving the cancellation outcome.
+- Force `event_spool_complete=false` in the same fenced fallback update. This keeps replay disabled even when terminal append committed but its commit acknowledgement was lost before the caller observed success.
 - Log a rejected fence or fallback exception inside the batcher's settlement method and do not re-raise. The terminal event has already been queued for downstream delivery, so bookkeeping failure must not replace or delay that event.
 - Do not invoke fallback for ordinary `False` returns. The repository's bounded-spool overflow path already settles terminal state atomically, while a false owner fence must not be bypassed.
 

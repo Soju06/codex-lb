@@ -2019,6 +2019,7 @@ class DurableBridgeRepository:
         owner_epoch: int,
         state: str,
         response_id: str | None = None,
+        event_spool_complete: bool | None = None,
     ) -> bool:
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
@@ -2036,6 +2037,8 @@ class DurableBridgeRepository:
             values: dict[str, object] = {"state": state, "updated_at": utcnow()}
             if response_id is not None:
                 values["response_id"] = response_id
+            if event_spool_complete is not None:
+                values["event_spool_complete"] = event_spool_complete
             result = await self._session.execute(
                 update(HttpBridgeOperationRecord)
                 .where(

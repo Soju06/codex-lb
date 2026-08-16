@@ -55,6 +55,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+    _await_task_deferring_cancellation,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
@@ -371,23 +372,33 @@ async def _persist_http_bridge_operation_event(
                     await terminal_event_queue.put(event_block)
                     terminal_enqueued = True
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
-                if callable(settle_terminal_batch):
-                    await settle_terminal_batch(
-                        operation_id=operation_id,
-                        session_id=session_id,
-                        instance_id=instance_id,
-                        owner_epoch=owner_epoch,
-                        state=terminal_state,
-                        response_id=response_id,
-                    )
-                else:
-                    await _update_http_bridge_operation_state(
-                        service,
-                        session,
-                        request_state,
-                        state=terminal_state,
-                        response_id=response_id,
-                    )
+
+                async def settle_terminal_append_failure() -> None:
+                    if callable(settle_terminal_batch):
+                        await settle_terminal_batch(
+                            operation_id=operation_id,
+                            session_id=session_id,
+                            instance_id=instance_id,
+                            owner_epoch=owner_epoch,
+                            state=terminal_state,
+                            response_id=response_id,
+                        )
+                    else:
+                        await _update_http_bridge_operation_state(
+                            service,
+                            session,
+                            request_state,
+                            state=terminal_state,
+                            response_id=response_id,
+                        )
+
+                settlement_task = asyncio.create_task(
+                    settle_terminal_append_failure(),
+                    name=f"http-bridge-terminal-settlement-{operation_id}",
+                )
+                _, settlement_cancellation = await _await_task_deferring_cancellation(settlement_task)
+                if settlement_cancellation is not None:
+                    raise settlement_cancellation
             return terminal_enqueued
         if callable(batcher_enqueue):
             await batcher_enqueue(
@@ -1864,7 +1875,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         terminal_event_queue=grouped_request_state.event_queue,
                     )
                     if grouped_request_state.event_queue is not None:
-                        if not grouped_terminal_enqueued:
+                        if grouped_terminal_enqueued is not True:
                             await grouped_request_state.event_queue.put(grouped_event_block)
                         await grouped_request_state.event_queue.put(None)
                     if grouped_operation_state is not None and grouped_operation_state != "failed":
@@ -2689,7 +2700,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             matched_request_state is not None
             and matched_event_queue is not None
             and not suppress_downstream_event
-            and not matched_terminal_enqueued
+            and matched_terminal_enqueued is not True
         ):
             await matched_event_queue.put(event_block)
 
@@ -2727,7 +2738,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     ),
                     terminal_event_queue=terminal_event_queue,
                 )
-            if terminal_event_queue is not None and not terminal_enqueued:
+            if terminal_event_queue is not None and terminal_enqueued is not True:
                 await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:
             await terminal_event_queue.put(None)

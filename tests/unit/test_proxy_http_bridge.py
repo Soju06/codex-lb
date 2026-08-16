@@ -5216,8 +5216,11 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
     assert persist_task.done() is False
+    persist_task.cancel()
+    assert persist_task.cancelling()
     release_settlement.set()
-    assert await asyncio.wait_for(persist_task, timeout=1.0) is True
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(persist_task, timeout=1.0)
     assert settlement_finished.is_set()
 
 

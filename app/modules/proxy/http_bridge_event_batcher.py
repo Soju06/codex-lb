@@ -339,6 +339,7 @@ class HttpBridgeOperationEventBatcher:
                 owner_epoch=owner_epoch,
                 state=state,
                 response_id=response_id,
+                event_spool_complete=False,
             )
             if not settled:
                 logger.warning(

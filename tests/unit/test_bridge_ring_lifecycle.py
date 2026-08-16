@@ -856,12 +856,13 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         await session.close()
 
     coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+    append_terminal_operation_event = coordinator.append_terminal_operation_event
     update_operation = coordinator.update_operation
     settlement_finished = asyncio.Event()
 
     async def fail_terminal_append(**kwargs: Any) -> bool:
-        del kwargs
-        raise RuntimeError("injected production-seam terminal append failure")
+        assert await append_terminal_operation_event(**kwargs)
+        raise RuntimeError("injected post-commit terminal append failure")
 
     async def track_terminal_settlement(**kwargs: Any) -> bool:
         try:
@@ -907,7 +908,10 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
     assert observed.account_id == "account-terminal-recovery"
     assert observed.state == "failed"
     assert observed.event_spool_complete is False
-    assert await recovery.get_operation_events(operation_id=operation_id) == ['data: {"type":"response.created"}\n\n']
+    assert await recovery.get_operation_events(operation_id=operation_id) == [
+        'data: {"type":"response.created"}\n\n',
+        'data: {"type":"response.failed"}\n\n',
+    ]
     await batcher.close()
 
 

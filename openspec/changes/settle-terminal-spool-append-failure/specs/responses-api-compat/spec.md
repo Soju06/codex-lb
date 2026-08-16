@@ -22,13 +22,14 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 - **AND** cancellation is preserved as the final outcome only after every pre-delivered sibling finishes settlement and finalization
 - **AND** one sibling's finalization failure does not prevent later siblings from settling or replace pending cancellation
 
-#### Scenario: Cancellation after successful append preserves terminal delivery
+#### Scenario: Cancellation preserves terminal delivery authority
 
-- **GIVEN** terminal append succeeds while relay cancellation is deferred
+- **GIVEN** terminal append finishes while relay cancellation is deferred
 - **WHEN** the append result becomes available
 - **THEN** the terminal event and end-of-stream marker are queued
 - **AND** a completed-delivery scope is marked authoritative before cleanup can deactivate it
-- **AND** cancellation is preserved only after that delivery
+- **AND** cancellation during that delivery-authority claim does not skip required fallback settlement
+- **AND** cancellation is preserved only after delivery and required settlement
 
 #### Scenario: Stale owner cannot settle after terminal append exception
 
@@ -47,7 +48,7 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 
 #### Scenario: Replay alias preserves the acknowledged-attempt fence
 
-- **GIVEN** a replay whose client-visible response alias differs from its persisted upstream response ID
+- **GIVEN** a replay whose client-visible response alias differs from its persisted upstream response ID or whose active upstream response ID was reset before a replacement response was created
 - **WHEN** durable terminal-event append raises
 - **THEN** fallback settlement compares the acknowledged or already terminal operation against the persisted upstream response ID
 - **AND** persists the intended client-visible terminal response ID when present

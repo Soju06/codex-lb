@@ -346,7 +346,7 @@ async def _persist_http_bridge_operation_event(
         append_terminal_batch = getattr(batcher, "append_terminal_event", None)
         if terminal and terminal_state is not None and callable(append_terminal_batch):
             instance_id = _service_get_settings().http_responses_session_bridge_instance_id
-            expected_response_id = request_state.response_id
+            expected_response_id = request_state.response_id or request_state.replay_downstream_response_id
             response_id = _websocket_downstream_response_id(request_state)
 
             async def enqueue_terminal_delivery() -> bool:
@@ -358,6 +358,13 @@ async def _persist_http_bridge_operation_event(
                     async with session.pending_lock:
                         terminal_delivery_scope.terminal_enqueued = True
                 return True
+
+            async def enqueue_terminal_delivery_deferring_cancellation() -> tuple[bool, asyncio.CancelledError | None]:
+                delivery_task = asyncio.create_task(
+                    enqueue_terminal_delivery(),
+                    name=f"http-bridge-terminal-delivery-{operation_id}",
+                )
+                return await _await_task_deferring_cancellation(delivery_task)
 
             append_task = asyncio.create_task(
                 append_terminal_batch(
@@ -385,7 +392,8 @@ async def _persist_http_bridge_operation_event(
             settlement_required = bool(getattr(append_result, "settlement_required", False))
             terminal_enqueued = False
             if settlement_required:
-                terminal_enqueued = await enqueue_terminal_delivery()
+                terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
+                deferred_cancellation = deferred_cancellation or delivery_cancellation
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
 
                 async def settle_terminal_append_failure() -> None:
@@ -416,7 +424,7 @@ async def _persist_http_bridge_operation_event(
                 deferred_cancellation = deferred_cancellation or settlement_cancellation
             if deferred_cancellation is not None:
                 if not terminal_enqueued:
-                    await enqueue_terminal_delivery()
+                    await enqueue_terminal_delivery_deferring_cancellation()
                 raise deferred_cancellation
             return terminal_enqueued
         if callable(batcher_enqueue):

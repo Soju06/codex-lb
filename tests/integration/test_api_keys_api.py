@@ -778,7 +778,13 @@ async def test_api_key_enforces_model_and_reasoning_for_responses(async_client, 
 
 
 @pytest.mark.asyncio
-async def test_api_key_enforces_ultrafast_service_tier_for_responses(async_client, monkeypatch):
+@pytest.mark.parametrize(
+    ("enforced_service_tier", "expected_service_tier"),
+    [("fast", "priority"), ("ULTRAFAST", "ultrafast")],
+)
+async def test_api_key_enforces_service_tier_for_responses(
+    async_client, monkeypatch, enforced_service_tier, expected_service_tier
+):
     forced_model = "gpt-5.6-sol"
 
     enable = await async_client.put(
@@ -794,12 +800,12 @@ async def test_api_key_enforces_ultrafast_service_tier_for_responses(async_clien
 
     account_id = await _import_account(
         async_client,
-        "acc_enforced_ultrafast_service_tier",
-        "enforced-ultrafast-service-tier@example.com",
+        f"acc_enforced_{expected_service_tier}_service_tier",
+        f"enforced-{expected_service_tier}-service-tier@example.com",
     )
     advertising_model = replace(
         _make_upstream_model(forced_model),
-        raw={"service_tiers": [{"slug": "ultrafast"}]},
+        raw={"service_tiers": [{"slug": expected_service_tier}]},
     )
     await get_model_registry().update(
         {"pro": [advertising_model]},
@@ -813,12 +819,12 @@ async def test_api_key_enforces_ultrafast_service_tier_for_responses(async_clien
             "name": "enforced-service-tier",
             "allowedModels": [forced_model],
             "enforcedModel": forced_model,
-            "enforcedServiceTier": "ULTRAFAST",
+            "enforcedServiceTier": enforced_service_tier,
         },
     )
     assert created.status_code == 200
     key = created.json()["key"]
-    assert created.json()["enforcedServiceTier"] == "ultrafast"
+    assert created.json()["enforcedServiceTier"] == expected_service_tier
 
     seen: dict[str, str | None] = {}
 
@@ -829,7 +835,7 @@ async def test_api_key_enforces_ultrafast_service_tier_for_responses(async_clien
             "type": "response.completed",
             "response": {
                 "id": "resp_enforced_service_tier",
-                "service_tier": "ultrafast",
+                "service_tier": expected_service_tier,
                 "usage": usage,
             },
         }
@@ -852,15 +858,15 @@ async def test_api_key_enforces_ultrafast_service_tier_for_responses(async_clien
         assert response.status_code == 200
         _ = [line async for line in response.aiter_lines() if line]
 
-    assert seen["service_tier"] == "ultrafast"
+    assert seen["service_tier"] == expected_service_tier
 
     async with SessionLocal() as session:
         result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
         latest_log = result.scalars().first()
         assert latest_log is not None
-        assert latest_log.requested_service_tier == "ultrafast"
-        assert latest_log.actual_service_tier == "ultrafast"
-        assert latest_log.service_tier == "ultrafast"
+        assert latest_log.requested_service_tier == expected_service_tier
+        assert latest_log.actual_service_tier == expected_service_tier
+        assert latest_log.service_tier == expected_service_tier
 
 
 @pytest.mark.asyncio

@@ -295,6 +295,8 @@ async def _update_http_bridge_operation_state(
             state=state,
             response_id=response_id,
         )
+        if marked and response_id is not None:
+            request_state.operation_persisted_response_id = response_id
         if not marked:
             logger.info(
                 "HTTP bridge operation outcome owner fence rejected operation_id=%s state=%s",
@@ -349,13 +351,19 @@ async def _persist_http_bridge_operation_event(
         append_terminal_batch = getattr(batcher, "append_terminal_event", None)
         if terminal and terminal_state is not None and callable(append_terminal_batch):
             instance_id = _service_get_settings().http_responses_session_bridge_instance_id
-            expected_response_id = request_state.response_id or request_state.replay_downstream_response_id
-            alternate_expected_response_id = (
-                request_state.replay_downstream_response_id
-                if request_state.response_id is not None
-                and request_state.replay_downstream_response_id != request_state.response_id
-                else None
+            expected_response_ids = tuple(
+                dict.fromkeys(
+                    response_identity
+                    for response_identity in (
+                        request_state.response_id,
+                        getattr(request_state, "operation_persisted_response_id", None),
+                        request_state.replay_downstream_response_id,
+                    )
+                    if response_identity is not None
+                )
             )
+            expected_response_id = expected_response_ids[0] if expected_response_ids else None
+            alternate_expected_response_id = expected_response_ids[1] if len(expected_response_ids) > 1 else None
             response_id = _websocket_downstream_response_id(request_state)
 
             async def enqueue_terminal_delivery() -> bool:

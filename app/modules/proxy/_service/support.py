@@ -952,6 +952,10 @@ class _WebSocketRequestState:
     # Immutable durable attempt generation. Recovery claims increment the
     # operation's dispatch count before sending a replacement attempt.
     operation_attempt_generation: int = 0
+    # Last response identity successfully written to the durable operation.
+    # Retry setup may clear the active response before a replacement is
+    # acknowledged, but fallback settlement must still fence against this ID.
+    operation_persisted_response_id: str | None = None
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto

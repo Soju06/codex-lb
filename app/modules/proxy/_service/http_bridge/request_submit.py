@@ -1389,6 +1389,9 @@ class _HTTPBridgeRequestSubmitMixin:
             request_state.operation_registered = True
             request_state.operation_rebind_required = False
             request_state.operation_created = operation.created
+            request_state.operation_persisted_response_id = (
+                None if request_state.operation_recovery_claimed else getattr(operation, "response_id", None)
+            )
             if not request_state.operation_recovery_claimed:
                 request_state.operation_attempt_generation = getattr(operation, "recovery_dispatch_count", 0)
 

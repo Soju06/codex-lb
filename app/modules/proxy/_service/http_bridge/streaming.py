@@ -1943,6 +1943,9 @@ class _HTTPBridgeStreamingMixin:
             prior_operation_attempt_generation = (
                 request_state.operation_attempt_generation if preserve_operation_identity else 0
             )
+            prior_operation_persisted_response_id = (
+                request_state.operation_persisted_response_id if preserve_operation_identity else None
+            )
             failed_owner_id = request_state.preferred_account_id
             _log_http_bridge_event(
                 "owner_unavailable_fresh_resend",
@@ -1973,6 +1976,7 @@ class _HTTPBridgeStreamingMixin:
                 request_state.operation_parent_response_id = prior_operation_parent_response_id
                 request_state.operation_registered = prior_operation_registered
                 request_state.operation_attempt_generation = prior_operation_attempt_generation
+                request_state.operation_persisted_response_id = prior_operation_persisted_response_id
                 request_state.operation_rebind_required = True
             request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
             request_state.affinity_policy = affinity
@@ -3440,6 +3444,7 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.operation_parent_response_id = request_state.operation_parent_response_id
                 retry_request_state.operation_registered = request_state.operation_registered
                 retry_request_state.operation_attempt_generation = request_state.operation_attempt_generation
+                retry_request_state.operation_persisted_response_id = request_state.operation_persisted_response_id
                 retry_request_state.operation_rebind_required = request_state.operation_rebind_required
                 if recovery_path == "local_previous_response_error":
                     # The prior response.failed/error made the operation

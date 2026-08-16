@@ -5156,6 +5156,56 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
 
 
 @pytest.mark.asyncio
+async def test_terminal_append_failure_retains_last_persisted_response_id_after_retry_reset() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = SimpleNamespace(
+        operation_id="op-terminal-retry-reset",
+        operation_attempt_generation=0,
+        operation_persisted_response_id=None,
+        request_id="req-terminal-retry-reset",
+        response_id="resp-before-retry",
+        replay_downstream_response_id=None,
+    )
+    session = _make_bridge_session(key_value="terminal-retry-reset")
+    session.durable_session_id = "durable-terminal-retry-reset"
+    session.durable_owner_epoch = 2
+    service._durable_bridge = cast(Any, SimpleNamespace(update_operation=AsyncMock(return_value=True)))
+
+    await http_bridge_upstream_events_module._update_http_bridge_operation_state(
+        service,
+        session,
+        request_state,
+        state="acknowledged",
+        response_id="resp-before-retry",
+    )
+    assert request_state.operation_persisted_response_id == "resp-before-retry"
+
+    request_state.response_id = None
+    settle_terminal_event = AsyncMock()
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(
+            append_terminal_event=AsyncMock(
+                return_value=TerminalOperationEventAppendResult(persisted=False, settlement_required=True)
+            ),
+            settle_terminal_event=settle_terminal_event,
+        ),
+    )
+
+    await http_bridge_upstream_events_module._persist_http_bridge_operation_event(
+        service,
+        session,
+        request_state,
+        'data: {"type":"response.failed"}\n\n',
+        terminal=True,
+        terminal_state="failed",
+    )
+
+    assert settle_terminal_event.await_args is not None
+    assert settle_terminal_event.await_args.kwargs["expected_response_id"] == "resp-before-retry"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("upstream_response_id", "replay_response_id", "expected_response_id", "alternate_expected_response_id"),
     [

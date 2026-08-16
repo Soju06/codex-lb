@@ -9,7 +9,7 @@ import anyio
 from sqlalchemy import Integer, String, and_, case, cast, func, insert, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.orm import InstrumentedAttribute, make_transient_to_detached
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import (
@@ -1117,17 +1117,23 @@ class RequestLogsRepository:
                 else calculated_cost_from_log(typing_cast(RequestLogLike, log))
             )
             # Core insert instead of unit-of-work: the row is fully built
-            # above, so the ORM flush (identity-map registration, relationship
-            # cascade scan, per-attribute history snapshots) is pure overhead
-            # on every request's log write. The transient ``log`` instance
-            # stays detached and is returned as the typed result. No refresh:
-            # every column is set explicitly before insert.
+            # above, so the ORM flush (relationship cascade scan,
+            # per-attribute history snapshots) is pure overhead on every
+            # request's log write. No refresh: every column is set explicitly
+            # before insert. Once the primary key is known, the instance is
+            # re-attached as *persistent* (clean, no pending SQL) so callers
+            # that mutate the returned log and commit through the same
+            # session get a tracked UPDATE instead of a silent no-op
+            # (sessions run with ``expire_on_commit=False``, so the attach
+            # never triggers post-commit lazy loads).
             insert_values = {key: getattr(log, key) for key in _REQUEST_LOG_INSERT_COLUMN_KEYS}
             try:
                 result = await self._session.execute(insert(RequestLog).values(insert_values))
                 inserted_primary_key = result.inserted_primary_key
                 if inserted_primary_key is not None and inserted_primary_key[0] is not None:
                     log.id = int(inserted_primary_key[0])
+                    make_transient_to_detached(log)
+                    self._session.add(log)
                 await self._session.commit()
                 return log
             except sa_exc.ResourceClosedError:

@@ -18,6 +18,7 @@ when all of the following hold:
 
 - recovery mode is `server_anchored_replay_once` or
   `server_indefinite_recovery`;
+- the durable operation ledger is enabled;
 - the request has a real hard continuity anchor;
 - the bridge has both a durable session id and current owner epoch;
 - no response id or upstream response event has been observed; and

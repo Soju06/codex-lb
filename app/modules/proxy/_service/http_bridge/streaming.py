@@ -3721,15 +3721,27 @@ class _HTTPBridgeStreamingMixin:
                     remaining_wait_seconds = max(0.0, remaining_wait_seconds - sleep_seconds)
                     if remaining_wait_seconds <= 0:
                         break
-                    owner_lookup = await self._durable_bridge.renew_live_session(
-                        session_id=session.durable_session_id,
-                        api_key_id=session.key.api_key_id,
-                        instance_id=current_instance,
-                        owner_epoch=session.durable_owner_epoch,
-                        lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-                        latest_turn_state=session.downstream_turn_state,
-                        latest_response_id=None,
-                    )
+                    try:
+                        owner_lookup = await self._durable_bridge.renew_live_session(
+                            session_id=session.durable_session_id,
+                            api_key_id=session.key.api_key_id,
+                            instance_id=current_instance,
+                            owner_epoch=session.durable_owner_epoch,
+                            lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                            latest_turn_state=session.downstream_turn_state,
+                            latest_response_id=None,
+                        )
+                    except Exception as exc:
+                        session.closed = True
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP responses session ownership could not be renewed; retry the request.",
+                            ),
+                        ) from exc
                     if (
                         owner_lookup is None
                         or owner_lookup.owner_instance_id != current_instance

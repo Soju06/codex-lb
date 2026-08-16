@@ -721,7 +721,8 @@ describe("ReportsPage", () => {
     );
   });
 
-  it("shows account option load failures instead of hiding empty selector silently", async () => {
+  it("shows account option load failures with a retry button and recovers when retried", async () => {
+    const user = userEvent.setup();
     useReportsMock.mockImplementation(() =>
       asUseReportsResult({
         data: EMPTY_REPORT,
@@ -730,22 +731,32 @@ describe("ReportsPage", () => {
         refetch: vi.fn(),
       }),
     );
-    listAccountsMock.mockRejectedValueOnce(
-      new Error("accounts backend timeout"),
-    );
+    listAccountsMock
+      .mockRejectedValueOnce(new Error("accounts backend timeout"))
+      .mockResolvedValueOnce({ accounts: [] });
 
     renderWithProviders(<ReportsPage />);
 
-    expect(
-      await screen.findByText(
-        /Failed to load account options: accounts backend timeout/i,
-      ),
-    ).toBeInTheDocument();
+    const accountErrorText = await screen.findByText(
+      /Failed to load account options: accounts backend timeout/i,
+    );
+    expect(accountErrorText).toBeInTheDocument();
     expect(
       screen
         .getAllByRole("button", { name: /accounts/i })
         .find((button) => button.getAttribute("aria-haspopup") === "menu"),
     ).toBeInTheDocument();
+
+    const accountErrorContainer = accountErrorText.parentElement!.parentElement!;
+    const retryButton = within(accountErrorContainer).getByRole("button", { name: /retry/i });
+    await user.click(retryButton);
+
+    expect(listAccountsMock).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/Failed to load account options:/i),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it("forwards initial apiKeyId filter to useReports hook calls", () => {
@@ -787,18 +798,18 @@ describe("ReportsPage", () => {
 
     renderWithProviders(<ReportsPage />);
 
-    expect(
-      await screen.findByText(
-        /Failed to load API key options: api keys backend timeout/i,
-      ),
-    ).toBeInTheDocument();
+    const apiKeyErrorText = await screen.findByText(
+      /Failed to load API key options: api keys backend timeout/i,
+    );
+    expect(apiKeyErrorText).toBeInTheDocument();
     expect(
       screen
         .getAllByRole("button", { name: /api keys/i })
         .find((button) => button.getAttribute("aria-haspopup") === "menu"),
     ).toBeInTheDocument();
 
-    const retryButton = screen.getByRole("button", { name: /retry/i });
+    const apiKeyErrorContainer = apiKeyErrorText.parentElement!.parentElement!;
+    const retryButton = within(apiKeyErrorContainer).getByRole("button", { name: /retry/i });
     await user.click(retryButton);
 
     expect(getRequestLogOptionsMock).toHaveBeenCalledTimes(2);

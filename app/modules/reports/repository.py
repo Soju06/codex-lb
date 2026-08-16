@@ -390,7 +390,7 @@ def _report_conditions(
     account_ids: list[str] | None,
     model: str | None,
     useragent_group: str | None,
-    api_key_ids: list[str] | None = None,  # New parameter added
+    api_key_ids: list[str] | None = None,
 ) -> list:
     conditions = [
         RequestLog.requested_at >= start_date,

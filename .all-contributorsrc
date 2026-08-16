@@ -1273,5 +1273,8 @@
         "test"
       ]
     }
-  ]
+  ],
+  "contributorsPerLine": 7,
+  "linkToUsage": false,
+  "commitType": "docs"
 }

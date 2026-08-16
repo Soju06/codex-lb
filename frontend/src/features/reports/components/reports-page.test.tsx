@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
 import { renderWithProviders } from "@/test/utils";
 import type { ReportsResponse } from "@/features/reports/schemas";
 import { listAccounts } from "@/features/accounts/api";
-import { listApiKeys } from "@/features/api-keys/api";
+import { getRequestLogOptions } from "@/features/dashboard/api";
 import { getBrowserReportsTimeZone } from "@/features/reports/date";
 import { useReports } from "@/features/reports/hooks/use-reports";
 import { REPORT_CHART_VISIBILITY_STORAGE_KEY } from "@/features/reports/hooks/use-report-chart-visibility";
@@ -16,8 +16,8 @@ vi.mock("@/features/accounts/api", () => ({
   listAccounts: vi.fn().mockResolvedValue({ accounts: [] }),
 }));
 
-vi.mock("@/features/api-keys/api", () => ({
-  listApiKeys: vi.fn().mockResolvedValue([]),
+vi.mock("@/features/dashboard/api", () => ({
+  getRequestLogOptions: vi.fn().mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] }),
 }));
 
 vi.mock("@/features/reports/hooks/use-reports", () => ({
@@ -74,7 +74,7 @@ const EMPTY_REPORT: ReportsResponse = {
 
 const useReportsMock = vi.mocked(useReports);
 const listAccountsMock = vi.mocked(listAccounts);
-const listApiKeysMock = vi.mocked(listApiKeys);
+const getRequestLogOptionsMock = vi.mocked(getRequestLogOptions);
 const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
 type UseReportsMockResult = ReturnType<typeof useReports>;
 const REPORTS_TIMEZONE_STORAGE_KEY = "codex-lb-reports-timezone";
@@ -87,11 +87,11 @@ describe("ReportsPage", () => {
   beforeEach(() => {
     useReportsMock.mockReset();
     listAccountsMock.mockReset();
-    listApiKeysMock.mockReset();
+    getRequestLogOptionsMock.mockReset();
     getBrowserReportsTimeZoneMock.mockReset();
     window.localStorage.clear();
     listAccountsMock.mockResolvedValue({ accounts: [] });
-    listApiKeysMock.mockResolvedValue([]);
+    getRequestLogOptionsMock.mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
     getBrowserReportsTimeZoneMock.mockReturnValue("America/Los_Angeles");
   });
 
@@ -781,9 +781,9 @@ describe("ReportsPage", () => {
         refetch: vi.fn(),
       }),
     );
-    listApiKeysMock
+    getRequestLogOptionsMock
       .mockRejectedValueOnce(new Error("api keys backend timeout"))
-      .mockResolvedValueOnce([]);
+      .mockResolvedValueOnce({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
 
     renderWithProviders(<ReportsPage />);
 
@@ -801,12 +801,36 @@ describe("ReportsPage", () => {
     const retryButton = screen.getByRole("button", { name: /retry/i });
     await user.click(retryButton);
 
-    expect(listApiKeysMock).toHaveBeenCalledTimes(2);
+    expect(getRequestLogOptionsMock).toHaveBeenCalledTimes(2);
     await waitFor(() => {
       expect(
         screen.queryByText(/Failed to load API key options:/i),
       ).not.toBeInTheDocument();
     });
+  });
+
+  it("populates API key options from request log options including deleted keys with ID fallback", async () => {
+    useReportsMock.mockImplementation(() =>
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+    getRequestLogOptionsMock.mockResolvedValue({
+      accountIds: [],
+      apiKeys: [
+        { id: "key_active", name: "Active Key", keyPrefix: "sk-active" },
+        { id: "key_deleted", name: "key_deleted", keyPrefix: null },
+      ],
+      modelOptions: [],
+      statuses: [],
+    });
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(await screen.findByRole("button", { name: /api keys/i })).toBeInTheDocument();
   });
 
   it("exports CSV based on the filtered report dataset when API key filter is active", async () => {

@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
 import { listAccounts } from "@/features/accounts/api";
-import { listApiKeys } from "@/features/api-keys/api";
+import { getRequestLogOptions } from "@/features/dashboard/api";
 import { useReports } from "@/features/reports/hooks/use-reports";
 import { useReportChartVisibility } from "@/features/reports/hooks/use-report-chart-visibility";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -132,12 +132,12 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
     queryFn: listAccounts,
   });
   const {
-    data: apiKeysData,
+    data: apiKeysOptionsData,
     error: apiKeysError,
     refetch: refetchApiKeys,
   } = useQuery({
-    queryKey: ["api-keys", "reports-filter"],
-    queryFn: listApiKeys,
+    queryKey: ["request-log-options", "reports-filter"],
+    queryFn: () => getRequestLogOptions(),
   });
 
   const accountOptions = useMemo(
@@ -156,11 +156,11 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
 
   const apiKeyOptions = useMemo(
     () =>
-      (apiKeysData ?? []).map((key) => ({
+      (apiKeysOptionsData?.apiKeys ?? []).map((key) => ({
         value: key.id,
         label: key.keyPrefix ? `${key.name} · ${key.keyPrefix}` : key.name,
       })),
-    [apiKeysData],
+    [apiKeysOptionsData],
   );
 
   const modelOptions = useMemo(

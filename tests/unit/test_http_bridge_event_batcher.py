@@ -30,9 +30,32 @@ class _FakeDurableBridge:
 
 
 class _TerminalAppendFailingDurableBridge(_FakeDurableBridge):
+    def __init__(self, *, append_result: bool = True, update_result: bool = True) -> None:
+        super().__init__(append_result=append_result, update_result=update_result)
+        self.update_called = asyncio.Event()
+
     async def append_terminal_operation_event(self, **kwargs) -> bool:
         del kwargs
         raise RuntimeError("injected terminal append failure")
+
+    async def update_operation(self, **kwargs) -> bool:
+        result = await super().update_operation(**kwargs)
+        self.update_called.set()
+        return result
+
+
+class _StalledTerminalSettlementDurableBridge(_TerminalAppendFailingDurableBridge):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_update = asyncio.Event()
+        self.update_finished = asyncio.Event()
+
+    async def update_operation(self, **kwargs) -> bool:
+        self.update_called.set()
+        await self.release_update.wait()
+        result = await _FakeDurableBridge.update_operation(self, **kwargs)
+        self.update_finished.set()
+        return result
 
 
 async def _enqueue(
@@ -151,6 +174,7 @@ async def test_terminal_append_failure_settles_operation() -> None:
     )
 
     assert persisted is False
+    await asyncio.wait_for(durable.update_called.wait(), timeout=1.0)
     assert durable.updated == [
         {
             "operation_id": "op-1",
@@ -185,8 +209,40 @@ async def test_terminal_append_failure_reports_fenced_settlement(
     )
 
     assert persisted is False
+    await asyncio.wait_for(durable.update_called.wait(), timeout=1.0)
     assert durable.updated[0]["owner_epoch"] == 6
     assert "fallback settlement was fenced operation_id=op-1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_stalled_terminal_settlement_does_not_block_append_return() -> None:
+    durable = _StalledTerminalSettlementDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+    append_task = asyncio.create_task(
+        batcher.append_terminal_event(
+            operation_id="op-1",
+            session_id="session-1",
+            instance_id="instance-1",
+            owner_epoch=7,
+            event_text="terminal",
+            max_bytes=1024,
+            state="failed",
+        )
+    )
+
+    await asyncio.wait_for(durable.update_called.wait(), timeout=1.0)
+    try:
+        persisted = await asyncio.wait_for(asyncio.shield(append_task), timeout=0.05)
+    finally:
+        durable.release_update.set()
+
+    assert persisted is False
+    await asyncio.wait_for(durable.update_finished.wait(), timeout=1.0)
+    await batcher.close()
 
 
 @pytest.mark.asyncio

@@ -856,12 +856,21 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         await session.close()
 
     coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+    update_operation = coordinator.update_operation
+    settlement_finished = asyncio.Event()
 
     async def fail_terminal_append(**kwargs: Any) -> bool:
         del kwargs
         raise RuntimeError("injected production-seam terminal append failure")
 
+    async def track_terminal_settlement(**kwargs: Any) -> bool:
+        try:
+            return await update_operation(**kwargs)
+        finally:
+            settlement_finished.set()
+
     monkeypatch.setattr(coordinator, "append_terminal_operation_event", fail_terminal_append)
+    monkeypatch.setattr(coordinator, "update_operation", track_terminal_settlement)
     batcher = HttpBridgeOperationEventBatcher(
         coordinator,
         max_bytes=1024,
@@ -878,6 +887,7 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         state="failed",
         response_id="resp-terminal-recovery",
     )
+    await asyncio.wait_for(settlement_finished.wait(), timeout=1.0)
 
     recovery = DurableBridgeSessionCoordinator(async_session_factory)
     observed = await recovery.get_operation_by_fingerprint(request_fingerprint=fingerprint)
@@ -888,6 +898,7 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
     assert observed.state == "failed"
     assert observed.event_spool_complete is False
     assert await recovery.get_operation_events(operation_id=operation_id) == ['data: {"type":"response.created"}\n\n']
+    await batcher.close()
 
 
 @pytest.mark.asyncio

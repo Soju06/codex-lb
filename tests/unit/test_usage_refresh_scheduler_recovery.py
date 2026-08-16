@@ -65,6 +65,111 @@ def _epoch_to_naive_utc(epoch: float) -> datetime:
     return datetime.fromtimestamp(epoch, timezone.utc).replace(tzinfo=None)
 
 
+def _reset_evidence(
+    before: UsageHistory,
+    after: UsageHistory,
+    *,
+    baseline: UsageHistory | None = None,
+):
+    return refresh_scheduler_module._MonthlyResetEvidence(
+        baseline=baseline or before,
+        before=before,
+        after=after,
+    )
+
+
+def test_historical_reset_recovery_scans_adjacent_sliding_samples() -> None:
+    now = 1_700_000_000
+    legacy_reset_at = now + 7 * 24 * 60 * 60
+    transition_recorded_at = now - 120
+    history = [
+        _make_usage(
+            "acc_free_history",
+            window="monthly",
+            used_percent=used_percent,
+            reset_at=reset_at,
+            recorded_at=_epoch_to_naive_utc(recorded_at),
+            window_minutes=43_200,
+        )
+        for used_percent, reset_at, recorded_at in (
+            (100.0, legacy_reset_at, now - 300),
+            (100.0, legacy_reset_at + 60, now - 240),
+            (100.0, legacy_reset_at + 120, now - 180),
+            (0.0, transition_recorded_at + 43_200 * 60, transition_recorded_at),
+            (0.0, now - 60 + 43_200 * 60, now - 60),
+        )
+    ]
+
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        history,
+        expected_reset_at=legacy_reset_at,
+        reset_at_tolerance_seconds=5,
+    )
+
+    assert evidence is not None
+    assert evidence.baseline is history[0]
+    assert (evidence.before, evidence.after) == (history[2], history[3])
+
+
+def test_historical_reset_recovery_fails_closed_without_matching_baseline() -> None:
+    now = 1_700_000_000
+    history = [
+        _make_usage(
+            "acc_free_no_baseline",
+            window="monthly",
+            used_percent=100.0,
+            reset_at=now + 60,
+            recorded_at=_epoch_to_naive_utc(now - 60),
+            window_minutes=43_200,
+        ),
+        _make_usage(
+            "acc_free_no_baseline",
+            window="monthly",
+            used_percent=0.0,
+            reset_at=now + 43_200 * 60,
+            recorded_at=_epoch_to_naive_utc(now),
+            window_minutes=43_200,
+        ),
+    ]
+
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        history,
+        expected_reset_at=now + 7 * 24 * 60 * 60,
+        reset_at_tolerance_seconds=5,
+    )
+
+    assert evidence is None
+
+
+def test_historical_reset_recovery_never_skips_an_exhausted_successor() -> None:
+    now = 1_700_000_000
+    legacy_reset_at = now + 7 * 24 * 60 * 60
+    next_reset_at = now + 30 * 24 * 60 * 60
+    history = [
+        _make_usage(
+            "acc_free_exhausted_successor",
+            window="monthly",
+            used_percent=used_percent,
+            reset_at=reset_at,
+            recorded_at=_epoch_to_naive_utc(now + offset),
+            window_minutes=43_200,
+        )
+        for offset, used_percent, reset_at in (
+            (0, 100.0, legacy_reset_at),
+            (60, 100.0, next_reset_at),
+            (120, 0.0, next_reset_at),
+        )
+    ]
+
+    evidence = refresh_scheduler_module._latest_confirmed_reset_transition_after_baseline(
+        history,
+        expected_reset_at=legacy_reset_at,
+        reset_at_tolerance_seconds=5,
+    )
+
+    assert evidence is None
+
+
 class StubAccountsRepository:
     def __init__(self, accounts: list[Account]) -> None:
         self._accounts = {account.id: account for account in accounts}
@@ -246,6 +351,386 @@ async def test_reconcile_recoverable_account_statuses_keeps_rate_limited_until_r
     assert account.reset_at == future_reset
     assert account.blocked_at == blocked_at
     assert accounts_repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recovers_free_after_confirmed_monthly_reset_before_legacy_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    previous_monthly_reset = legacy_reset_at
+    next_monthly_reset = int(now - 60 + 30 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_confirmed_reset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=previous_monthly_reset,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=next_monthly_reset,
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={
+                account.id: _make_usage(
+                    account.id,
+                    window="primary",
+                    used_percent=100.0,
+                    reset_at=legacy_reset_at,
+                    recorded_at=_epoch_to_naive_utc(now - 1),
+                    window_minutes=300,
+                )
+            },
+            monthly={account.id: after},
+        ),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 1
+    assert (account.status, account.reset_at, account.blocked_at) == (AccountStatus.ACTIVE, None, None)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_monthly_reset_recovery_loses_cas_to_newer_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_confirmed_reset_cas",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+    repo = MutatingAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: after}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert repo.status_updates == []
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert account.reset_at == 42
+
+
+@pytest.mark.asyncio
+async def test_confirmed_monthly_reset_recovery_honors_post_429_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 10)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_confirmed_reset_floor",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 9),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 1 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 1),
+        window_minutes=43200,
+    )
+    repo = StubAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: after}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_free_blocked_without_confirmed_monthly_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monthly_reset_at = legacy_reset_at
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_no_reset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=monthly_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=monthly_reset_at + 60,
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+    repo = StubAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: after}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        legacy_reset_at,
+        blocked_at,
+    )
+    assert repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_free_blocked_when_current_monthly_quota_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_current_exhausted",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    reset_sample = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+    current = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=reset_sample.reset_at or 0,
+        recorded_at=_epoch_to_naive_utc(now - 1),
+        window_minutes=43200,
+    )
+    repo = StubAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: current}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, reset_sample)},
+    )
+
+    assert recovered == 0
+    assert account.status == AccountStatus.RATE_LIMITED
+    assert repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_free_blocked_when_matching_baseline_predates_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 90)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_free_pre_block_baseline",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="free",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    baseline = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(blocked_at - 1),
+        window_minutes=43_200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 43_200 * 60),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43_200,
+    )
+    repo = StubAccountsRepository([account])
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=repo,
+        usage_repo=StubUsageRepository(monthly={account.id: after}),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(baseline, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        legacy_reset_at,
+        blocked_at,
+    )
+    assert repo.status_updates == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_not_apply_monthly_reset_override_to_plus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 1_700_000_000.0
+    blocked_at = int(now - 3600)
+    legacy_reset_at = int(now + 7 * 24 * 3600)
+    monkeypatch.setattr("app.modules.proxy.load_balancer.time.time", lambda: now)
+    monkeypatch.setattr("app.core.usage.quota.time.time", lambda: now)
+    monkeypatch.setattr(refresh_scheduler_module.time, "time", lambda: now)
+
+    account = _make_account(
+        "acc_plus_monthly_reset",
+        status=AccountStatus.RATE_LIMITED,
+        plan_type="plus",
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    before = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=100.0,
+        reset_at=legacy_reset_at,
+        recorded_at=_epoch_to_naive_utc(now - 120),
+        window_minutes=43200,
+    )
+    after = _make_usage(
+        account.id,
+        window="monthly",
+        used_percent=0.0,
+        reset_at=int(now - 60 + 30 * 24 * 3600),
+        recorded_at=_epoch_to_naive_utc(now - 60),
+        window_minutes=43200,
+    )
+
+    recovered = await refresh_scheduler_module.reconcile_recoverable_account_statuses(
+        accounts_repo=StubAccountsRepository([account]),
+        usage_repo=StubUsageRepository(
+            primary={
+                account.id: _make_usage(
+                    account.id,
+                    window="primary",
+                    used_percent=100.0,
+                    reset_at=legacy_reset_at,
+                    recorded_at=_epoch_to_naive_utc(now - 1),
+                    window_minutes=300,
+                )
+            },
+            monthly={account.id: after},
+        ),
+        accounts=[account],
+        monthly_reset_evidence={account.id: _reset_evidence(before, after)},
+    )
+
+    assert recovered == 0
+    assert (account.status, account.reset_at, account.blocked_at) == (
+        AccountStatus.RATE_LIMITED,
+        legacy_reset_at,
+        blocked_at,
+    )
 
 
 @pytest.mark.asyncio

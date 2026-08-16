@@ -429,6 +429,61 @@ async def test_collect_completion_returns_error_event():
 
 
 @pytest.mark.asyncio
+async def test_collect_completion_drains_after_first_failed_event():
+    # #given
+    closed = {"value": False}
+
+    async def _stream():
+        try:
+            yield (
+                'data: {"type":"response.failed","response":{"error":'
+                '{"message":"limit","type":"rate_limit_error","code":"rate_limit_exceeded"}}}\n\n'
+            )
+            yield 'data: {"type":"response.completed","response":{"id":"should-not-win"}}\n\n'
+        finally:
+            closed["value"] = True
+
+    # #when
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+
+    # #then
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "rate_limit_exceeded"
+    assert closed["value"] is True
+
+
+@pytest.mark.asyncio
+async def test_collect_completion_drains_original_after_anext_split():
+    # #given
+    from app.modules.proxy.api import _prepend_first
+
+    closed = {"value": False}
+
+    async def _stream():
+        try:
+            yield (
+                'data: {"type":"response.failed","response":{"error":'
+                '{"message":"limit","type":"rate_limit_error","code":"rate_limit_exceeded"}}}\n\n'
+            )
+            yield 'data: {"type":"response.completed","response":{"id":"tail"}}\n\n'
+        finally:
+            closed["value"] = True
+
+    stream = _stream()
+    first = await stream.__anext__()
+
+    # #when
+    result = await collect_chat_completion(_prepend_first(first, stream), model="gpt-5.2")
+
+    # #then
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "rate_limit_exceeded"
+    assert closed["value"] is True
+
+
+@pytest.mark.asyncio
 async def test_collect_completion_includes_refusal_delta():
     lines = [
         'data: {"type":"response.refusal.delta","delta":"no"}\n\n',

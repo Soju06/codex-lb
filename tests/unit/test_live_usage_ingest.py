@@ -281,7 +281,6 @@ async def test_stream_responses_tap_publishes_rate_limit_events(monkeypatch: pyt
     assert (account_id, chatgpt_account_id) == (None, "workspace-live")
     assert snapshot.primary is not None
     assert snapshot.primary.used_percent == pytest.approx(55.0)
-    # When the caller knows the selected internal account, attribution
-    # prefers it so multi-seat workspaces are not dropped as ambiguous.
+    # Local attribution stays preferred while retaining its recovery identity.
     _, account_id_internal, chatgpt_internal = captured[1]
-    assert (account_id_internal, chatgpt_internal) == ("acc-internal", None)
+    assert (account_id_internal, chatgpt_internal) == ("acc-internal", "workspace-live")

@@ -96,6 +96,7 @@ class _DemandCountParams:
     models: list[str] | None
     reasoning_efforts: list[str] | None
     include_success: bool
+    include_cancelled: bool
     include_error_other: bool
 
 
@@ -1206,6 +1207,7 @@ class RequestLogsRepository:
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         include_success: bool = True,
+        include_cancelled: bool = True,
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
@@ -1225,6 +1227,7 @@ class RequestLogsRepository:
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=include_success,
+            include_cancelled=include_cancelled,
             include_error_other=include_error_other,
             error_codes_in=error_codes_in,
             error_codes_excluding=error_codes_excluding,
@@ -1258,6 +1261,7 @@ class RequestLogsRepository:
                 models=models,
                 reasoning_efforts=reasoning_efforts,
                 include_success=include_success,
+                include_cancelled=include_cancelled,
                 include_error_other=include_error_other,
             )
 
@@ -1275,6 +1279,7 @@ class RequestLogsRepository:
             tuple(models or ()),
             tuple(reasoning_efforts or ()),
             include_success,
+            include_cancelled,
             include_error_other,
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
@@ -1363,6 +1368,8 @@ class RequestLogsRepository:
         statuses = []
         if params.include_success:
             statuses.append("success")
+        if params.include_cancelled:
+            statuses.append(CANCELLED_STATUS)
         if params.include_error_other:
             statuses.append("error")
         if statuses:
@@ -1427,6 +1434,7 @@ class RequestLogsRepository:
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=True,
+            include_cancelled=True,
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
@@ -1441,6 +1449,7 @@ class RequestLogsRepository:
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=True,
+            include_cancelled=True,
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
@@ -1569,6 +1578,7 @@ class RequestLogsRepository:
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         include_success: bool = True,
+        include_cancelled: bool = True,
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
@@ -1610,6 +1620,8 @@ class RequestLogsRepository:
         status_conditions = []
         if include_success:
             status_conditions.append(RequestLog.status == "success")
+        if include_cancelled:
+            status_conditions.append(RequestLog.status == CANCELLED_STATUS)
         if error_codes_in:
             status_conditions.append(and_(RequestLog.status == "error", RequestLog.error_code.in_(error_codes_in)))
         if include_error_other:

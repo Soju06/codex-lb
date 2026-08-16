@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from enum import StrEnum
 from pathlib import Path
@@ -33,6 +34,27 @@ logger = logging.getLogger(__name__)
 
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQLITE_BUSY_TIMEOUT_SECONDS = _SQLITE_BUSY_TIMEOUT_MS / 1000
+# A write transaction holding SQLite's single writer slot past the busy
+# timeout is exactly the holder that makes every other writer surface
+# "database is locked" (issue #1682); the watchdog below reports it with the
+# statements it ran, since the stall is nondeterministic and self-recovers.
+_SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS = _SQLITE_BUSY_TIMEOUT_SECONDS
+_SQLITE_WRITE_STATEMENT_PREFIXES = (
+    "insert",
+    "update",
+    "delete",
+    "replace",
+    "create",
+    "drop",
+    "alter",
+    "vacuum",
+    # BEGIN IMMEDIATE/EXCLUSIVE acquire the writer slot with no DML at all
+    # (e.g. AccountsRepository._acquire_sqlite_merge_lock); a plain deferred
+    # BEGIN does not and stays untracked.
+    "begin immediate",
+    "begin exclusive",
+)
+_SQLITE_WATCHDOG_STATEMENT_PREVIEW_CHARS = 300
 
 # PostgreSQL pool checkout timeout and connection recycle window. Fixed
 # application constants (issue #1340): recycle keeps pooled connections
@@ -135,6 +157,135 @@ def _configure_sqlite_engine(engine: Engine, *, enable_wal: bool) -> None:
             cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
         finally:
             cursor.close()
+
+    _install_sqlite_long_write_watchdog(engine)
+
+
+def _current_task_name_best_effort() -> str:
+    # Sync engine events run inside the greenlet driving the async engine on
+    # the event loop thread, so the owning task is normally visible; never let
+    # diagnostics raise into the query path.
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return "<no-loop>"
+    if task is None:
+        return "<no-task>"
+    return task.get_name()
+
+
+def _install_sqlite_long_write_watchdog(engine: Engine) -> None:
+    """Report write transactions that outlive the SQLite busy timeout.
+
+    In WAL mode a transaction takes the single writer slot at its first write
+    statement, not at BEGIN, so the window is measured from the first write to
+    commit/rollback. The report fires when the holder finally ends — the stall
+    in issue #1682 self-recovers, so identifying the holder post-hoc is the
+    point; a live sampler is not needed to attribute it.
+    """
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _track_write_statements(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        # after_cursor_execute, not before: the first write statement may wait
+        # up to busy_timeout for the writer slot before failing, and timing
+        # from before the execute would report that victim as the holder. The
+        # slot is only held once a write statement has SUCCEEDED, so the clock
+        # starts there.
+        stripped = statement.lstrip().lower()
+        if not stripped.startswith(_SQLITE_WRITE_STATEMENT_PREFIXES):
+            return
+        info = getattr(conn, "info", None)
+        if info is None:
+            return
+        preview = statement[:_SQLITE_WATCHDOG_STATEMENT_PREVIEW_CHARS]
+        if "sqlite_write_started_at" not in info:
+            info["sqlite_write_started_at"] = time.monotonic()
+            info["sqlite_first_write_statement"] = preview
+            info["sqlite_write_task"] = _current_task_name_best_effort()
+        info["sqlite_last_write_statement"] = preview
+
+    def _finalize_pending_report(info: dict[str, object]) -> None:
+        pending = info.pop("sqlite_write_pending_report", None)
+        if not isinstance(pending, tuple):
+            return
+        started_at, outcome, first_statement, last_statement, task_name = pending
+        held_seconds = time.monotonic() - float(started_at)
+        if held_seconds < _SQLITE_LONG_WRITE_TRANSACTION_WARN_SECONDS:
+            return
+        logger.warning(
+            "sqlite_long_write_transaction held_seconds=%.1f outcome=%s task=%s first_statement=%r "
+            "last_statement=%r — this writer starved every other writer past busy_timeout (issue #1682)",
+            held_seconds,
+            outcome,
+            task_name,
+            first_statement,
+            last_statement,
+        )
+
+    def _mark_transaction_ending(conn: object, *, outcome: str) -> None:
+        # ConnectionEvents.commit/rollback fire BEFORE the DBAPI call, and a
+        # wedged rollback is exactly the holder this watchdog hunts — reporting
+        # here would exclude the wedge itself from the measured hold. Stash the
+        # report and finalize it at the first proof the DBAPI transaction ended:
+        # the connection's next transaction beginning, or the connection going
+        # back to the pool.
+        info = getattr(conn, "info", None)
+        if info is None:
+            return
+        started_at = info.pop("sqlite_write_started_at", None)
+        first_statement = info.pop("sqlite_first_write_statement", None)
+        last_statement = info.pop("sqlite_last_write_statement", None)
+        task_name = info.pop("sqlite_write_task", None)
+        if started_at is None:
+            # A rollback after a commit whose DBAPI call raised: the pending
+            # report already holds outcome=commit, but the transaction is in
+            # fact ending by rollback — rewrite the outcome so the report does
+            # not claim a durable commit that never happened.
+            pending = info.get("sqlite_write_pending_report")
+            if outcome == "rollback" and isinstance(pending, tuple) and pending[1] == "commit":
+                info["sqlite_write_pending_report"] = (pending[0], "commit_failed_rollback", *pending[2:])
+            return
+        info["sqlite_write_pending_report"] = (started_at, outcome, first_statement, last_statement, task_name)
+
+    @event.listens_for(engine, "commit")
+    def _mark_on_commit(conn: object) -> None:
+        _mark_transaction_ending(conn, outcome="commit")
+
+    @event.listens_for(engine, "rollback")
+    def _mark_on_rollback(conn: object) -> None:
+        _mark_transaction_ending(conn, outcome="rollback")
+
+    @event.listens_for(engine, "begin")
+    def _finalize_on_next_begin(conn: object) -> None:
+        info = getattr(conn, "info", None)
+        if info is not None:
+            _finalize_pending_report(info)
+
+    @event.listens_for(engine, "checkin")
+    def _finalize_on_checkin(dbapi_connection: object, connection_record: object) -> None:
+        info = getattr(connection_record, "info", None)
+        if info is not None:
+            _finalize_pending_report(info)
+
+    @event.listens_for(engine, "handle_error")
+    def _flip_outcome_on_failed_end(exception_context: object) -> None:
+        # A DBAPI commit that raises still ends the transaction, but by
+        # rollback; the pending report marked at the commit event must not
+        # claim a durable commit that never happened.
+        connection = getattr(exception_context, "connection", None)
+        info = getattr(connection, "info", None) if connection is not None else None
+        if info is None:
+            return
+        pending = info.get("sqlite_write_pending_report")
+        if isinstance(pending, tuple) and pending[1] == "commit":
+            info["sqlite_write_pending_report"] = (pending[0], "commit_failed_rollback", *pending[2:])
 
 
 def _create_main_engine(url: str) -> AsyncEngine:

@@ -1222,6 +1222,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "kidclone3",
+      "name": "DuyBui",
+      "avatar_url": "https://avatars.githubusercontent.com/u/54184969?v=4",
+      "profile": "https://github.com/kidclone3",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

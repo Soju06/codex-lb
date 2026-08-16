@@ -30,6 +30,31 @@ def _make_account(account_id: str, email: str) -> Account:
 
 
 @pytest.mark.asyncio
+async def test_request_logs_options_include_cancelled_status(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_opt_cancelled", "cancelled@example.com"))
+        await logs_repo.add_log(
+            account_id="acc_opt_cancelled",
+            request_id="req_opt_cancelled",
+            model="gpt-5.1",
+            input_tokens=1,
+            output_tokens=0,
+            latency_ms=10,
+            status="cancelled",
+            error_code="client_disconnected",
+            requested_at=now,
+        )
+
+    response = await async_client.get("/api/request-logs/options")
+
+    assert response.status_code == 200
+    assert response.json()["statuses"] == ["cancelled"]
+
+
+@pytest.mark.asyncio
 async def test_request_logs_options_returns_distinct_accounts_and_models(async_client, db_setup):
     now = utcnow()
     async with SessionLocal() as session:

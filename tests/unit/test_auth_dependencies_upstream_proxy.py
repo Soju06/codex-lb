@@ -5,13 +5,123 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from starlette.datastructures import Headers
 
 from app.core.auth import dependencies as auth_dependencies
+from app.core.clients.proxy import CODEX_LB_REQUIRED_CAPABILITY_HEADER
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_validate_proxy_api_key_requires_carrier_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal = object()
+    request = cast(
+        Any,
+        SimpleNamespace(headers=Headers({CODEX_LB_REQUIRED_CAPABILITY_HEADER: "trusted_cyber"})),
+    )
+
+    async def required_auth(authorization: str | None) -> object:
+        assert authorization == "Bearer inert-key"
+        return principal
+
+    async def fail_ordinary_auth(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("capability carrier must use required per-request authentication")
+
+    monkeypatch.setattr(auth_dependencies, "validate_required_proxy_api_key_authorization", required_auth)
+    monkeypatch.setattr(auth_dependencies, "validate_proxy_api_key_authorization", fail_ordinary_auth)
+
+    resolved = await auth_dependencies.validate_proxy_api_key(
+        request,
+        cast(Any, SimpleNamespace(credentials="inert-key")),
+    )
+
+    assert resolved is principal
+
+
+@pytest.mark.asyncio
+async def test_validate_proxy_api_key_preserves_headerless_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal = object()
+    request = cast(Any, SimpleNamespace(headers=Headers()))
+
+    async def fail_required_auth(_authorization: str | None) -> None:
+        pytest.fail("headerless provider request must retain ordinary authentication")
+
+    async def ordinary_auth(authorization: str | None, *, request: object | None = None) -> object:
+        assert authorization == "Bearer ordinary-key"
+        assert request is not None
+        return principal
+
+    monkeypatch.setattr(auth_dependencies, "validate_required_proxy_api_key_authorization", fail_required_auth)
+    monkeypatch.setattr(auth_dependencies, "validate_proxy_api_key_authorization", ordinary_auth)
+
+    resolved = await auth_dependencies.validate_proxy_api_key(
+        request,
+        cast(Any, SimpleNamespace(credentials="ordinary-key")),
+    )
+
+    assert resolved is principal
+
+
+@pytest.mark.asyncio
+async def test_validate_codex_provider_usage_identity_authenticates_carrier_before_usage_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal = object()
+    request = cast(
+        Any,
+        SimpleNamespace(
+            headers=Headers(
+                {
+                    CODEX_LB_REQUIRED_CAPABILITY_HEADER: "trusted_cyber",
+                    "Authorization": "Bearer inert-key",
+                }
+            )
+        ),
+    )
+
+    async def required_auth(authorization: str | None) -> object:
+        assert authorization == "Bearer inert-key"
+        return principal
+
+    async def fail_usage_identity(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("capability carrier must not enter ChatGPT usage identity validation")
+
+    monkeypatch.setattr(auth_dependencies, "validate_required_proxy_api_key_authorization", required_auth)
+    monkeypatch.setattr(auth_dependencies, "validate_codex_usage_identity", fail_usage_identity)
+
+    resolved = await auth_dependencies.validate_codex_provider_usage_identity(request)
+
+    assert resolved is principal
+
+
+@pytest.mark.asyncio
+async def test_validate_codex_provider_usage_identity_preserves_headerless_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal = object()
+    request = cast(Any, SimpleNamespace(headers=Headers({"Authorization": "Bearer ordinary-token"})))
+
+    async def fail_required_auth(_authorization: str | None) -> None:
+        pytest.fail("headerless usage identity must retain ordinary validation")
+
+    async def ordinary_usage_identity(current_request: object) -> object:
+        assert current_request is request
+        return principal
+
+    monkeypatch.setattr(auth_dependencies, "validate_required_proxy_api_key_authorization", fail_required_auth)
+    monkeypatch.setattr(auth_dependencies, "validate_codex_usage_identity", ordinary_usage_identity)
+
+    resolved = await auth_dependencies.validate_codex_provider_usage_identity(request)
+
+    assert resolved is principal
 
 
 def _account() -> Account:

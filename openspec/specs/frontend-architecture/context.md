@@ -35,9 +35,10 @@ interaction away.
   `ADVANCED_NAV_ITEMS` are flat `as const` arrays in the header component (no
   separate nav-items module); the CI simplicity budget manifest
   (`.github/simplicity-budgets.toml`, `[core_nav]`) points at this file.
-- **No route changes.** `/automations` deep links and the legacy `/firewall` →
-  `/settings` redirect are compatibility surfaces and keep working; regression
-  tests cover both.
+- **No new routes.** `/automations` deep links stay as-is. The legacy
+  `/firewall` compatibility route redirects to `/settings?advanced=1#firewall`
+  so Advanced expands and the firewall section is in view; plain `/settings`
+  stays collapsed by default. Regression tests cover both.
 
 ### Example
 

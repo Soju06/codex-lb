@@ -30,9 +30,13 @@ from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import (
-    _FilePinEntry,
     _request_log_client_fields,
     _RequestLogFailureMetadata,
+)
+from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.file_pin_repository import (
+    FileAccountPinOwnershipConflict,
+    FileAccountPinRepository,
 )
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection
@@ -45,10 +49,9 @@ _ResponsesPayloadT = ResponsesRequest | ResponsesCompactRequest
 
 class _FileOpsServiceProtocol(Protocol):
     _encryptor: Any
-    _file_account_pin_lock: asyncio.Lock
-    _file_account_pins: dict[str, _FilePinEntry]
+    _file_pin_session_factory: Any
     _load_balancer: Any
-    _FILE_ACCOUNT_PIN_TTL_SECONDS: float
+    _FILE_ACCOUNT_PIN_TTL_SECONDS: int
 
     async def _select_account_with_budget_compatible(self, deadline: float, **kwargs: object) -> AccountSelection: ...
     async def _select_account_with_budget(self, deadline: float, **kwargs: Any) -> AccountSelection: ...
@@ -65,8 +68,11 @@ class _FileOpsServiceProtocol(Protocol):
     async def _proxy_files_call(self, **kwargs: Any) -> tuple[dict[str, JsonValue], str | None]: ...
     async def _pin_file_account(self, file_id: str, account_id: str) -> None: ...
     async def _resolve_file_account(self, file_id: str) -> str | None: ...
-    async def _lookup_file_pin(self, file_id: str) -> _FilePinEntry | None: ...
-    def _evict_expired_file_pins_locked(self) -> None: ...
+    async def _resolve_file_account_for_responses(
+        self,
+        payload: ResponsesRequest | ResponsesCompactRequest,
+        headers: Mapping[str, str],
+    ) -> str | None: ...
 
 
 def _service_core_create_file() -> Callable[..., Awaitable[dict[str, JsonValue]]]:
@@ -157,17 +163,32 @@ _FAILED_ACCOUNT_ATTR = "_codex_lb_failed_account"
 _REQUEST_TRANSPORT_HTTP = "http"
 
 
+class _FileOwnerPostSuccessError(RuntimeError):
+    def __init__(self, proxy_error: ProxyResponseError) -> None:
+        super().__init__("File owner persistence failed after a successful upstream call")
+        self.proxy_error = proxy_error
+
+
+def _file_owner_unavailable_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        502,
+        openai_error(
+            "file_owner_unavailable",
+            "Input file owner metadata is unavailable; upload the file again and retry.",
+            error_type="server_error",
+        ),
+    )
+
+
 class _FileOpsMixin:
     # File-account pin TTL: long enough to cover a slow client-side
     # PUT of a 512 MiB upload (the upstream limit) plus the finalize
     # poll loop and a follow-up ``/responses`` that references the
-    # file_id, while still bounding how long stale pins can sit in
-    # memory on long-lived workers. 30 minutes covers a 512 MiB
-    # upload at ~280 KiB/s -- well below typical broadband uplink --
-    # while keeping the table size negligible (each pin is a short
-    # string tuple). Eviction runs opportunistically on every write,
-    # so this acts as an upper bound, not a fixed retention.
-    _FILE_ACCOUNT_PIN_TTL_SECONDS: float = 30 * 60.0
+    # file_id, while still bounding how long stale pins remain in
+    # shared storage. 30 minutes covers a 512 MiB
+    # upload at ~280 KiB/s -- well below typical broadband uplink.
+    # The database clock defines both expiry and opportunistic cleanup.
+    _FILE_ACCOUNT_PIN_TTL_SECONDS: int = 30 * 60
 
     async def _pin_file_account(
         self,
@@ -177,74 +198,48 @@ class _FileOpsMixin:
         """Remember that ``file_id`` was registered through ``account_id``.
 
         Used so a subsequent ``finalize_file`` can be routed to the same
-        account that created the file. Cross-instance handoff is
-        best-effort: if the finalize lands on a different replica with
-        no pin, we fall back to a fresh load-balancer selection.
+        account that created the file, including when another replica
+        handles the follow-up request.
         """
         proxy = cast(_FileOpsServiceProtocol, self)
         if not file_id or not account_id:
             return
-        expires_at = time.monotonic() + proxy._FILE_ACCOUNT_PIN_TTL_SECONDS
-        async with proxy._file_account_pin_lock:
-            proxy._file_account_pins[file_id] = _FilePinEntry(
-                account_id=account_id,
-                expires_at=expires_at,
-            )
-            proxy._evict_expired_file_pins_locked()
+        try:
+            async with proxy._file_pin_session_factory() as session:
+                await FileAccountPinRepository(session).claim(
+                    file_id,
+                    account_id,
+                    ttl_seconds=proxy._FILE_ACCOUNT_PIN_TTL_SECONDS,
+                )
+        except FileAccountPinOwnershipConflict as exc:
+            raise ProxyResponseError(
+                502,
+                openai_error(
+                    "continuity_owner_conflict",
+                    "File ownership conflicts with an existing live upload.",
+                    error_type="server_error",
+                ),
+            ) from exc
+        except Exception as exc:
+            raise _file_owner_unavailable_error() from exc
 
     async def _resolve_file_account(self, file_id: str) -> str | None:
         """Return the pinned account_id for ``file_id`` if still live."""
         proxy = cast(_FileOpsServiceProtocol, self)
-        entry = await proxy._lookup_file_pin(file_id)
-        return entry.account_id if entry is not None else None
-
-    async def _lookup_file_pin(self, file_id: str) -> _FilePinEntry | None:
-        proxy = cast(_FileOpsServiceProtocol, self)
         if not file_id:
             return None
-        async with proxy._file_account_pin_lock:
-            proxy._evict_expired_file_pins_locked()
-            entry = proxy._file_account_pins.get(file_id)
-            if entry is None:
-                return None
-            if entry.expires_at <= time.monotonic():
-                proxy._file_account_pins.pop(file_id, None)
-                return None
-            return entry
-
-    def _evict_expired_file_pins_locked(self) -> None:
-        """Drop pins past their TTL. Called under ``_file_account_pin_lock``."""
-        proxy = cast(_FileOpsServiceProtocol, self)
-        now = time.monotonic()
-        expired = [file_id for file_id, entry in proxy._file_account_pins.items() if entry.expires_at <= now]
-        for file_id in expired:
-            proxy._file_account_pins.pop(file_id, None)
+        try:
+            async with proxy._file_pin_session_factory() as session:
+                return await FileAccountPinRepository(session).get_live_account_id(file_id)
+        except Exception as exc:
+            raise _file_owner_unavailable_error() from exc
 
     async def _resolve_file_account_for_responses(
         self,
         payload: ResponsesRequest | ResponsesCompactRequest,
         headers: Mapping[str, str],
     ) -> str | None:
-        """Resolve a ``preferred_account_id`` from ``input_file.file_id`` pins.
-
-        Looks up the in-memory ``file_id -> account_id`` pin table built
-        by ``create_file``. Used by ``/responses`` flows so a request
-        carrying an ``{type: "input_file", file_id: "file_xxx"}`` part
-        is routed to the same upstream account that registered the
-        upload (the upstream contract is account-scoped via
-        ``chatgpt-account-id``).
-
-        Live pins are account ownership evidence. Partial pin coverage and
-        files owned by different accounts fail closed; choosing a "best"
-        attachment would send at least one account-scoped object to the wrong
-        upstream account. When none of the IDs has a live pin, preserve the
-        established opaque-ID compatibility path and leave routing unpinned.
-
-        Other hard sources are intentionally not inspected here. Callers merge
-        this result with previous-response, turn-state, or bridge ownership at
-        the shared continuity boundary so conflicts cannot hide behind source
-        precedence.
-        """
+        """Resolve a ``preferred_account_id`` from durable ``input_file.file_id`` pins."""
         proxy = cast(_FileOpsServiceProtocol, self)
         del headers
 
@@ -255,18 +250,17 @@ class _FileOpsMixin:
         if not file_ids:
             return None
 
-        async with proxy._file_account_pin_lock:
-            proxy._evict_expired_file_pins_locked()
-            entries = [proxy._file_account_pins.get(file_id) for file_id in file_ids]
+        try:
+            async with proxy._file_pin_session_factory() as session:
+                account_ids_by_file_id = await FileAccountPinRepository(session).get_live_account_ids(file_ids)
+        except Exception as exc:
+            raise _file_owner_unavailable_error() from exc
+        resolved_account_ids = [account_ids_by_file_id.get(file_id) for file_id in file_ids]
 
-        pinned_entries = [entry for entry in entries if entry is not None]
-        if not pinned_entries:
-            # A raw file_id may have been registered directly with upstream or
-            # before this replica observed the upload. With zero local proof,
-            # it remains an opaque compatibility reference rather than a hard
-            # owner; callers forward it verbatim under ordinary routing.
+        pinned_account_ids = [account_id for account_id in resolved_account_ids if account_id is not None]
+        if not pinned_account_ids:
             return None
-        if len(pinned_entries) != len(entries):
+        if len(pinned_account_ids) != len(resolved_account_ids):
             raise ProxyResponseError(
                 502,
                 openai_error(
@@ -275,7 +269,7 @@ class _FileOpsMixin:
                     error_type="server_error",
                 ),
             )
-        owner_account_ids = {entry.account_id for entry in pinned_entries}
+        owner_account_ids = set(pinned_account_ids)
         if len(owner_account_ids) != 1:
             raise ProxyResponseError(
                 502,
@@ -286,6 +280,30 @@ class _FileOpsMixin:
                 ),
             )
         return next(iter(owner_account_ids))
+
+    async def _resolve_forwarded_file_account_for_responses(
+        self,
+        payload: ResponsesRequest | ResponsesCompactRequest,
+        headers: Mapping[str, str],
+        *,
+        forwarded_file_owner_account_id: str | None,
+        require_forwarded_file_owner: bool = False,
+    ) -> str | None:
+        """Revalidate signed bridge ownership against the shared database."""
+        proxy = cast(_FileOpsServiceProtocol, self)
+        durable_owner_account_id = await proxy._resolve_file_account_for_responses(payload, headers)
+        if (
+            require_forwarded_file_owner
+            and durable_owner_account_id is not None
+            and forwarded_file_owner_account_id is None
+        ):
+            raise _file_owner_unavailable_error()
+        if forwarded_file_owner_account_id is not None and durable_owner_account_id is None:
+            raise _file_owner_unavailable_error()
+        return resolve_required_account_id(
+            ("signed forwarding context", forwarded_file_owner_account_id),
+            ("durable file pin", durable_owner_account_id),
+        )
 
     def _raise_for_unsupported_input_image_references(self, payload: _ResponsesPayloadT) -> None:
         references = extract_input_image_file_references(payload.input)
@@ -325,7 +343,13 @@ class _FileOpsMixin:
         fail with not-found / unauthorized.
         """
         proxy = cast(_FileOpsServiceProtocol, self)
-        result, account_id = await proxy._proxy_files_call(
+
+        async def persist_file_owner(result: dict[str, JsonValue], account_id: str) -> None:
+            file_id = result.get("file_id")
+            if isinstance(file_id, str) and file_id:
+                await proxy._pin_file_account(file_id, account_id)
+
+        result, _account_id = await proxy._proxy_files_call(
             log_model="files-create",
             kind="files-create",
             api_key=api_key,
@@ -341,12 +365,8 @@ class _FileOpsMixin:
                     route_trace=route_trace,
                 )
             ),
+            on_success=persist_file_owner,
         )
-        # Best-effort pin so finalize lands on the same account.
-        if isinstance(result, dict) and account_id:
-            file_id = result.get("file_id")
-            if isinstance(file_id, str) and file_id:
-                await proxy._pin_file_account(file_id, account_id)
         return result
 
     async def finalize_file(
@@ -364,20 +384,26 @@ class _FileOpsMixin:
         verbatim.
 
         Routes to the account that handled the matching ``create_file``
-        (via the in-memory pin table) so the upstream finalize call
+        (via the durable pin table) so the upstream finalize call
         carries the same ``chatgpt-account-id`` that registered the
         file. Falls back to a fresh load-balancer selection when no
-        pin is found (unknown ``file_id`` or pin expired / missed across
-        a replica boundary).
+        pin is found (unknown ``file_id`` or an expired pin).
         """
         proxy = cast(_FileOpsServiceProtocol, self)
-        pinned_account_id = await proxy._resolve_file_account(file_id)
-        result, account_id = await proxy._proxy_files_call(
+
+        async def resolve_file_owner() -> str | None:
+            return await proxy._resolve_file_account(file_id)
+
+        async def persist_file_owner(result: dict[str, JsonValue], account_id: str) -> None:
+            if result.get("status") == "success":
+                await proxy._pin_file_account(file_id, account_id)
+
+        result, _account_id = await proxy._proxy_files_call(
             log_model="files-finalize",
             kind="files-finalize",
             api_key=api_key,
             headers=headers,
-            preferred_account_id=pinned_account_id,
+            resolve_preferred_account_id=resolve_file_owner,
             invoke=lambda access_token, upstream_account_id, filtered_headers, route, route_trace: (
                 _service_core_finalize_file()(
                     file_id=file_id,
@@ -389,11 +415,8 @@ class _FileOpsMixin:
                     route_trace=route_trace,
                 )
             ),
+            on_success=persist_file_owner,
         )
-        if isinstance(result, dict) and account_id:
-            status = result.get("status")
-            if status == "success":
-                await proxy._pin_file_account(file_id, account_id)
         return result
 
     async def _proxy_files_call(
@@ -408,6 +431,8 @@ class _FileOpsMixin:
             Awaitable[dict[str, JsonValue]],
         ],
         preferred_account_id: str | None = None,
+        resolve_preferred_account_id: Callable[[], Awaitable[str | None]] | None = None,
+        on_success: Callable[[dict[str, JsonValue], str], Awaitable[None]] | None = None,
     ) -> tuple[dict[str, JsonValue], str | None]:
         """Shared account-selection / refresh / 401-retry plumbing for `/files` calls.
 
@@ -415,9 +440,11 @@ class _FileOpsMixin:
         ensure freshness, invoke upstream, on 401 force-refresh and retry once,
         translate ``FileProxyError`` -> ``ProxyResponseError``, and always
         write a request-log entry on the way out. When
-        ``preferred_account_id`` is provided (e.g. from the file_id pin
-        for ``finalize_file``), the call is strict to that account and
-        fails closed when the owner account is unavailable.
+        ``preferred_account_id`` is provided or resolved (e.g. from the file_id
+        pin for ``finalize_file``), the call is strict to that account and
+        fails closed when the owner account is unavailable. ``on_success`` runs
+        before the request is logged or returned so durable owner persistence
+        remains part of the route's success contract.
         """
         proxy = cast(_FileOpsServiceProtocol, self)
         filtered = filter_inbound_headers(headers)
@@ -437,10 +464,23 @@ class _FileOpsMixin:
         route_fallback_used: bool | None = None
         route_fail_closed_reason: str | None = None
 
-        settings = await _service_get_settings_cache().get()
-        prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        routing_strategy = _routing_strategy(settings)
         try:
+            if resolve_preferred_account_id is not None:
+                preferred_account_id = await resolve_preferred_account_id()
+            settings = await _service_get_settings_cache().get()
+            prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+            routing_strategy = _routing_strategy(settings)
+
+            async def _persist_success(result: dict[str, JsonValue], account_id: str) -> None:
+                if on_success is None:
+                    return
+                try:
+                    await on_success(result, account_id)
+                except ProxyResponseError as exc:
+                    raise _FileOwnerPostSuccessError(exc) from exc
+                except Exception as exc:
+                    raise _FileOwnerPostSuccessError(_file_owner_unavailable_error()) from exc
+
             selection = await proxy._select_account_with_budget_compatible(
                 deadline,
                 request_id=request_id,
@@ -530,6 +570,7 @@ class _FileOpsMixin:
                 account_id_value = account.id
                 result = await _call(account)
                 await proxy._load_balancer.record_success(account)
+                await _persist_success(result, account.id)
                 log_status = "success"
                 return result, account_id_value
             except RefreshError as refresh_exc:
@@ -558,6 +599,7 @@ class _FileOpsMixin:
                     if failover is not None:
                         account, result = failover
                         account_id_value = account.id
+                        await _persist_success(result, account.id)
                         log_status = "success"
                         return result, account_id_value
                     failed_account = _proxy_response_failed_account(exc, account)
@@ -612,6 +654,7 @@ class _FileOpsMixin:
                     # caller's pin is consistent with the upstream call.
                     account_id_value = account.id
                     await proxy._load_balancer.record_success(account)
+                    await _persist_success(result, account.id)
                     log_status = "success"
                     return result, account_id_value
                 except ProxyResponseError as retry_exc:
@@ -639,12 +682,23 @@ class _FileOpsMixin:
                             try:
                                 result = await _call(account)
                                 await proxy._load_balancer.record_success(account)
+                                await _persist_success(result, account.id)
                                 log_status = "success"
                                 return result, account_id_value
                             except ProxyResponseError as failover_exc:
                                 await proxy._handle_proxy_error(account, failover_exc)
                                 raise
                     raise
+        except _FileOwnerPostSuccessError as exc:
+            proxy_error = exc.proxy_error
+            failure_metadata = _request_log_failure_metadata(proxy_error)
+            error = _parse_openai_error(proxy_error.payload)
+            log_error_code = _normalize_error_code(
+                error.code if error else None,
+                error.type if error else None,
+            )
+            log_error_message = error.message if error else None
+            raise proxy_error from exc
         except ProxyResponseError as exc:
             failed_account = getattr(exc, _FAILED_ACCOUNT_ATTR, None)
             if isinstance(failed_account, Account):

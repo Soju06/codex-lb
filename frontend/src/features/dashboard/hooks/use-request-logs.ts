@@ -22,6 +22,18 @@ const DEFAULT_FILTER_STATE: FilterState = {
   offset: 0,
 };
 
+export function requestLogFiltersApplied(filters: FilterState): boolean {
+  return (
+    filters.search.trim() !== "" ||
+    filters.timeframe !== DEFAULT_FILTER_STATE.timeframe ||
+    filters.accountIds.length > 0 ||
+    filters.apiKeyIds.length > 0 ||
+    filters.modelOptions.length > 0 ||
+    filters.statuses.length > 0 ||
+    Boolean(filters.conversationId)
+  );
+}
+
 const REQUEST_LOG_PARAM_KEYS = [
   "search",
   "timeframe",
@@ -114,6 +126,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
+  const filtersApplied = requestLogFiltersApplied(filters);
   const since = useMemo(() => timeframeToSinceIso(filters.timeframe), [filters.timeframe]);
   const listFilters = useMemo<RequestLogsListFilters>(
     () => ({
@@ -140,28 +153,36 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   );
 
   const {
-    data: logsData,
+    data: logsResult,
     error: logsError,
     isFetching: logsIsFetching,
     isLoading: logsIsLoading,
     isPending: logsIsPending,
+    isPlaceholderData: logsIsPlaceholderData,
     isSuccess: logsIsSuccess,
     refetch: refetchLogs,
   } = useQuery({
     queryKey: ["dashboard", "request-logs", listFilters],
-    queryFn: () => getRequestLogs(listFilters),
+    queryFn: async () => ({
+      page: await getRequestLogs(listFilters),
+      filtersApplied,
+    }),
     enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     placeholderData: keepPreviousData,
   });
+  const logsData = logsResult?.page;
+  const emptyStateFiltersApplied =
+    filtersApplied || (logsIsPlaceholderData && Boolean(logsResult?.filtersApplied));
   const logsQuery = {
     data: logsData,
     error: logsError,
     isFetching: logsIsFetching,
     isLoading: logsIsLoading,
     isPending: logsIsPending,
+    isPlaceholderData: logsIsPlaceholderData,
     isSuccess: logsIsSuccess,
     refetch: refetchLogs,
   };
@@ -204,6 +225,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     filters,
     listFilters,
     facetFilters,
+    emptyStateFiltersApplied,
     logsQuery,
     optionsQuery,
     updateFilters,

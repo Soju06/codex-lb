@@ -505,10 +505,9 @@ The system SHALL NOT infer weekly secondary semantics solely because a primary-s
 
 ### Requirement: Background usage refresh is staggered across accounts
 
-Background usage refresh MUST distribute account refresh attempts across the
-configured usage refresh interval instead of refreshing every eligible account
-in one burst. Each scheduler slice MUST attempt at most one eligible account.
-Over a full cycle, all eligible accounts SHOULD be considered once.
+Background usage refresh MUST distribute account refresh attempts across the configured usage refresh interval instead of refreshing every eligible account in one burst. Each scheduler slice MUST attempt at most one eligible account. Over a full cycle, all eligible accounts SHOULD be considered once.
+
+Each slice MUST select its account before reading usage history and MUST scope its latest-usage lookups, updater input, warm-up candidate evaluation, and recoverable-status evaluation to that selected account. The scheduler MAY retain the full eligible account roster only to choose the deterministic rotation and calculate staggered warm-up phases; that roster MUST NOT cause usage-history reads, upstream refresh attempts, warm-up sends, or status mutations for an unrelated account in the slice. A selected-account refresh failure MUST NOT trigger same-slice fallback to another account. Database sessions used to load scheduler state MUST close before upstream network I/O begins, and concurrent follow-up work MUST NOT share an `AsyncSession`.
 
 #### Scenario: Scheduler refreshes one account per slice
 
@@ -516,8 +515,7 @@ Over a full cycle, all eligible accounts SHOULD be considered once.
 - **WHEN** the scheduler runs consecutive refresh slices
 - **THEN** the first slice attempts one account
 - **AND** the second slice attempts the other account
-- **AND** cache invalidation for usage-derived routing state runs at the cycle
-  boundary
+- **AND** cache invalidation for usage-derived routing state runs at the cycle boundary
 
 #### Scenario: Unrefreshable accounts are skipped by scheduler rotation
 
@@ -526,6 +524,38 @@ Over a full cycle, all eligible accounts SHOULD be considered once.
 - **AND** one account requires re-authentication
 - **WHEN** the scheduler builds the refresh rotation
 - **THEN** only the active account is considered
+
+#### Scenario: Selected slot scopes usage history and follow-up work
+
+- **GIVEN** two eligible accounts have stored primary, secondary, and monthly usage
+- **AND** the first account is selected for the current scheduler slice
+- **WHEN** the scheduler reads before/after usage and evaluates warm-up and recoverable status
+- **THEN** every usage-history lookup is filtered to the first account
+- **AND** only the first account is passed to usage refresh, warm-up candidate evaluation, and recoverable-status evaluation
+- **AND** the second account cannot be mutated or contacted during that slice
+
+#### Scenario: Warm-up phase cohort does not widen evaluation scope
+
+- **GIVEN** multiple warm-up-enabled accounts participate in staggered-idle phase calculation
+- **AND** one account is selected for the current usage-refresh slice
+- **WHEN** refreshed usage is evaluated for warm-up
+- **THEN** the phase calculation retains the eligible fleet cohort
+- **AND** only the selected account can create a warm-up attempt or send warm-up traffic
+
+#### Scenario: Selected-account failure does not fail over within the slice
+
+- **GIVEN** two accounts are eligible for scheduler rotation
+- **AND** the first account is selected
+- **WHEN** that account's usage refresh fails
+- **THEN** the scheduler does not attempt the second account in the same slice
+- **AND** the second account remains eligible for its normal later slice
+
+#### Scenario: Scheduler session closes before selected-account network work
+
+- **GIVEN** the scheduler loaded the account roster and selected account usage
+- **WHEN** the selected account's upstream refresh starts
+- **THEN** the scheduler read session is already closed
+- **AND** any concurrent warm-up follow-up owns an independent database session
 
 ### Requirement: Usage refresh trusts recognized paid-plan transitions without workspace identity
 
@@ -1255,6 +1285,111 @@ local writes but MUST NOT be the mechanism that guarantees dedup.
 - **THEN** the unique constraint rejects the duplicate
 - **AND** the worker treats the rejection as a dedup skip rather than an error
 
+### Requirement: Compact failover settles before account-health writes
+
+When `compact_responses` holds an API-key usage reservation, it MUST NOT write account health for a compact upstream failure until that reservation has been settled or released. A `failover_next` decision MUST keep the same reservation for the next account and MUST defer the failed account's health write until the next settlement. Timeout and exhaustion terminals MUST keep settle-then-health order. Compact MUST NOT acquire a second reservation mid-request. If usage finalization fails but the fail-safe reservation release succeeds, compact MUST flush deferred health before surfacing `usage_settlement_failed`. If the reservation remains held because that fail-safe release also fails, deferred health MUST stay unapplied. After a compact reservation is finalized, a deferred health-persistence failure MUST NOT replace the successful compact response. If compact exits through cancellation or any exception other than a `ProxyResponseError` that already settled, it MUST settle or release the reservation and flush deferred health before propagating that exception. A later account-selection budget timeout after `failover_next` MUST use that same settle-and-flush path. Deferred health flush MUST complete even if the compact request is cancelled while that flush is awaiting a health write. If one deferred health write fails, compact MUST still attempt the remaining deferred health writes.
+
+#### Scenario: Compact failover_next defers health until settle
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the first account fails with a `failover_next` class
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_stream_error` for the failed account runs only after that settlement
+- **AND** the request does not acquire another reservation
+
+#### Scenario: Compact timeout still settles before health
+
+- **GIVEN** a compact request whose upstream call times out
+- **WHEN** the timeout branch records account health
+- **THEN** the reservation is settled before `_handle_stream_error`
+
+#### Scenario: Compact HTTP 500 failover defers health until settle
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the first account exhausts same-account HTTP 500 retries
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_proxy_error` and extra `record_errors` for the failed account run only after that settlement
+
+#### Scenario: Compact route failure after failover still applies deferred health
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **WHEN** the next account raises `UpstreamProxyRouteError`
+- **THEN** the reservation is settled
+- **AND** the deferred health write still runs
+
+#### Scenario: Compact refresh/connect failover defers health until settle
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the first account fails a retryable freshness/connect or post-401 forced-refresh transport error
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_stream_error` for the failed account runs only after that settlement
+
+#### Scenario: Compact second 401 failover defers health until settle
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the same account returns 401 again after a forced refresh
+- **WHEN** a later account completes and settlement runs
+- **THEN** `_handle_proxy_error` for the failed account runs only after that settlement
+
+#### Scenario: Compact permanent refresh settles before the health mark
+
+- **GIVEN** a compact request with a held API-key reservation
+- **AND** the post-401 forced refresh raises a permanent `RefreshError`
+- **WHEN** the compact request records the permanent account failure
+- **THEN** the reservation is settled before `mark_permanent_failure`
+
+#### Scenario: Compact fallback release still flushes deferred health
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **AND** a later account completes but usage finalization fails
+- **AND** the fail-safe reservation release succeeds
+- **WHEN** settlement surfaces `usage_settlement_failed`
+- **THEN** the deferred health write still runs
+- **AND** it runs before the `usage_settlement_failed` error is raised
+
+#### Scenario: Compact unsettled reservation keeps deferred health unapplied
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **AND** both usage finalization and fail-safe release fail
+- **WHEN** settlement surfaces `usage_settlement_failed`
+- **THEN** the deferred health write does not run
+
+#### Scenario: Compact success survives deferred health persistence failure
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **AND** a later account completes and usage finalization succeeds
+- **WHEN** the deferred health write raises
+- **THEN** the successful compact response is still returned
+
+#### Scenario: Compact unexpected exit still flushes deferred health
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **WHEN** the next account attempt raises cancellation or another non-proxy exception
+- **THEN** the reservation is settled or released
+- **AND** the deferred health write still runs
+- **AND** the original exception is propagated
+
+#### Scenario: Compact deferred health flush completes under cancellation
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **AND** a later account completed and settlement started flushing
+- **WHEN** the request is cancelled during the deferred health write
+- **THEN** the deferred health write still completes
+
+#### Scenario: Compact continues flushing after one deferred health write fails
+
+- **GIVEN** a compact request that deferred health for more than one failed account
+- **WHEN** the first deferred health write raises
+- **THEN** later deferred health writes are still attempted
+
+#### Scenario: Compact selection timeout after failover still flushes deferred health
+
+- **GIVEN** a compact request that deferred health on `failover_next`
+- **WHEN** selecting the next account exhausts the request budget
+- **THEN** the reservation is settled or released
+- **AND** the deferred health write still runs
+- **AND** the original budget-timeout error is propagated
+
 ### Requirement: Compact budget-exhausted terminals settle the API-key reservation before raising
 
 On the HTTP bridge / forwarded compact path the caller passes an `api_key_reservation_override` with `owns_reservation` false, making `compact_responses` the SOLE settler of the API-key usage reservation; therefore EVERY budget-exhausted terminal raise in the compact request path that is reached with a held, unsettled reservation MUST settle the compact API-key usage reservation (release it via `_settle_compact_api_key_usage` with `response` `None`) BEFORE raising the budget-exhausted `ProxyResponseError` (`upstream_request_timeout`), so held API-key quota is not leaked. This MUST apply to the outer-loop preflight budget terminals (before the freshness check, before the freshness reserve, and after the freshness check) and to the post-401 forced-refresh preflight budget terminal, each of which propagates straight to the outer `except ProxyResponseError` handler (which does not settle) and the `finally` (which only writes a request log). The terminal MUST preserve its prior escalation: it still raises the same `502` `upstream_request_timeout` error after settling, and it MUST still release the selected account's `response_create` lease where it already did so. A budget-exhausted terminal that is caught by an enclosing handler that already settles the reservation before raising — the inner upstream-call budget terminals, whose `upstream_request_timeout` error is settled by the retry loop's `upstream_request_timeout` / account-neutral branch — MUST NOT settle a second time, so the reservation is never double-settled.
@@ -1328,3 +1463,184 @@ A non-2xx upstream response or the network-failure sentinel MUST NOT count as a 
 - **WHEN** the older successful probe attempts to settle
 - **THEN** settlement is rejected as stale
 - **AND** the newer transient error state and reset success streak remain intact
+
+### Requirement: Implausible persisted rate-limit deadlines do not block recovery
+
+Background usage refresh MUST treat a persisted `rate_limited` reset deadline
+as invalid when it is non-finite, elapsed, or beyond
+`RATE_LIMIT_RESET_MAX_HORIZON_SECONDS` (366 days) plus the less-than-one-second
+whole-second persistence tolerance. An invalid deadline MUST NOT be treated as
+an unexpired explicit cooldown. When the account carries `blocked_at`, recovery
+MUST still honor the existing 30-second minimum floor and MUST still require
+the existing fresh available quota evidence recorded after the block. Without
+`blocked_at`, recent available evidence SHALL suffice. Every applicable quota
+window MUST report below `100%` usage before recovery.
+
+#### Scenario: Scheduler recovers an implausible persisted cooldown
+
+- **WHEN** an account is persisted as `rate_limited` with a reset deadline more than 366 days in the future
+- **AND** its persisted `blocked_at` minimum floor has elapsed
+- **AND** a later background usage refresh writes fresh available quota evidence
+- **THEN** the scheduler treats the reset deadline as invalid
+- **AND** marks the account `active`
+- **AND** clears persisted `reset_at` and `blocked_at`
+
+#### Scenario: Scheduler preserves a plausible unexpired cooldown
+
+- **GIVEN** an account is persisted as `rate_limited` with a finite reset deadline within 366 days
+- **AND** that deadline has not elapsed
+- **WHEN** a later background usage refresh writes fresh available quota evidence
+- **THEN** the scheduler leaves the account `rate_limited`
+
+#### Scenario: Scheduler recovers an implausible legacy deadline without a block marker
+
+- **GIVEN** an account is persisted as `rate_limited` with an implausible reset deadline and no `blocked_at`
+- **WHEN** a later background usage refresh writes recent available quota evidence for every applicable window
+- **THEN** the scheduler marks the account `active`
+- **AND** clears persisted `reset_at`
+
+### Requirement: Weekly-primary remap tiebreak is data-aware within a fetch
+
+The weekly-primary to secondary remap tiebreak (`should_use_weekly_primary` / `normalize_weekly_only_rows`) MUST be data-aware within a single refresh fetch and MUST NOT let a sub-second `recorded_at` difference between same-fetch rows decide the winner.
+
+A row carries real quota metadata when it has a positive `window_minutes` AND a non-null `reset_at`; a row that lacks both is a no-data placeholder. For the data-aware tiebreak, a no-data placeholder MUST be classified as the absence of a measurement and MUST NOT be treated as a measurement of zero usage merely because its stored `used_percent` is zero — a timestamped placeholder must not beat an untimestamped real row, and a same-fetch real row must not be displaced by a placeholder. When two competing rows are from the same fetch (their `recorded_at` values differ by at most `SIBLING_FETCH_MARGIN_SECONDS`, 5.0 seconds, or one/both timestamps are unavailable), a weekly `primary` row that carries real quota metadata MUST be selected over a competing `secondary` row that is a no-data placeholder, and a real `secondary` row MUST be selected over a no-data `primary` placeholder. (Rendering a newer no-data placeholder that wins a cross-fetch comparison as an explicit "unavailable" window is out of scope for this change; the cross-fetch winner is rendered per existing placeholder rules.)
+
+When both rows carry `recorded_at` and their difference is strictly greater than `SIBLING_FETCH_MARGIN_SECONDS`, the rows are from genuinely different fetches and the newer row MUST win — a later fetch is more authoritative about what upstream currently reports. This preserves the pre-fix cross-fetch behavior so a stale real weekly primary cannot freeze the weekly value over a fresh placeholder from a later fetch.
+
+This tiebreak MUST be shared by every consumer of `should_use_weekly_primary`, including account-summary remap, dashboard overview and projection aggregation, and per-bucket account usage trend remap, so the weekly quota is reported consistently across all surfaces.
+
+#### Scenario: Same-fetch real weekly primary beats a no-data secondary placeholder
+
+- **GIVEN** an account whose latest `primary` usage row reports a weekly window (`window_minutes == 10080`) with a non-null `reset_at` and `used_percent` below 100
+- **AND** the latest `secondary` usage row is a no-data placeholder (`window_minutes` falsy or null, `reset_at` null, `used_percent` 0.0, no credit metadata)
+- **AND** the two rows were recorded within `SIBLING_FETCH_MARGIN_SECONDS` (5.0 seconds) of each other in the same refresh cycle
+- **WHEN** the system derives the effective secondary (weekly) usage window for account summaries, dashboard overview/projection aggregation, or account usage trends
+- **THEN** the weekly `primary` row is selected as the source of weekly usage
+- **AND** the reported weekly remaining percent equals `100 - primary.used_percent`
+- **AND** the reported value does not jump to 100% remaining
+
+#### Scenario: Real secondary beats a no-data primary placeholder in the same fetch
+
+- **GIVEN** an account whose latest `secondary` usage row carries real quota metadata (positive `window_minutes` and a non-null `reset_at`)
+- **AND** the latest `primary` usage row is a no-data placeholder
+- **AND** the two rows were recorded within `SIBLING_FETCH_MARGIN_SECONDS` of each other
+- **WHEN** the system derives the effective secondary usage window
+- **THEN** the real `secondary` row is selected as the source of weekly usage
+- **AND** the reported weekly remaining percent reflects that row's `used_percent`
+
+#### Scenario: Genuinely newer row from a later fetch wins regardless of metadata
+
+- **GIVEN** an account whose latest `primary` usage row reports a weekly window with real quota metadata but was written in an earlier fetch
+- **AND** a later fetch wrote a competing `secondary` row whose `recorded_at` is more than `SIBLING_FETCH_MARGIN_SECONDS` (5.0 seconds) after the primary row
+- **WHEN** the system derives the effective secondary usage window
+- **THEN** the newer row from the later fetch is selected
+- **AND** the stale real weekly primary does not freeze the weekly value indefinitely
+
+#### Scenario: Two real same-fetch weekly rows resolve by reset-at precedence
+
+- **GIVEN** an account whose latest `primary` and `secondary` usage rows both carry real quota metadata
+- **AND** the two rows were recorded within `SIBLING_FETCH_MARGIN_SECONDS` (5.0 seconds) of each other in the same refresh cycle
+- **WHEN** the system derives the effective secondary usage window across repeated refresh cycles
+- **THEN** the selected row is determined by reset-at precedence and the stable weekly-primary default
+- **AND** the selection does not flip between the two rows on a sub-second `recorded_at` difference
+
+### Requirement: Standard usage refresh snapshots persist atomically
+
+For one account's successful upstream usage response, the system MUST persist every available normalized standard usage window (`primary`, `secondary`, and any applicable `monthly` window) in one database transaction. All standard rows from that response MUST use the same capture timestamp. If any standard row cannot be persisted or the transaction cannot commit, the system MUST roll back the transaction so none of that response's standard rows becomes visible, and a caller-owned database session MUST remain open and reusable. This atomic unit applies to standard `usage_history` rows; additional per-model usage history and independent live-ingest writes retain their existing persistence contracts.
+
+#### Scenario: Multi-window response commits as one snapshot
+
+- **WHEN** a successful account usage response contains multiple normalized standard windows
+- **THEN** the system persists all of those standard rows in one transaction with one shared capture timestamp
+
+#### Scenario: Later row failure leaves no partial snapshot
+
+- **WHEN** persistence fails after at least one standard row from an account response has been staged
+- **THEN** the system rolls back the transaction and no standard row from that response is visible
+
+#### Scenario: Caller retains its session after rollback
+
+- **WHEN** a caller-owned session is used for a standard usage snapshot and the snapshot transaction fails
+- **THEN** the repository leaves that session open and reusable after rolling back the failed transaction
+
+### Requirement: Owner-forwarded compact settlement failures fail closed
+
+An HTTP-bridge owner MUST treat any persistence exception while finalizing or
+releasing a forwarded compact API-key usage reservation as a failed settlement,
+and MUST NOT swallow it.
+The owner MUST log the persistence failure, MUST attempt to release the
+reservation through a fresh repository context, and MUST surface a `502`
+`usage_settlement_failed` server error regardless of whether that fail-safe
+release succeeds. The settlement failure MUST carry trusted internal provenance
+that is checked before compact upstream retry, failover, and account-health error
+handling, so the compact request is not sent upstream again and the selected
+account is not penalized for a local persistence failure. When the reservation
+is still `reserved` when the fail-safe release begins and that release succeeds,
+the reservation's final status MUST be `released`. This behavior MUST NOT add or
+alter stale-reservation cleanup or WebSocket health handling.
+
+#### Scenario: Forwarded compact finalization fails after upstream success
+
+- **GIVEN** a signed owner-forwarded compact request whose API-key reservation is `reserved`
+- **AND** the upstream compact succeeds but usage finalization raises a persistence exception
+- **WHEN** the owner handles the settlement failure
+- **THEN** the owner attempts a fail-safe reservation release through a fresh repository context
+- **AND** the request returns `502` with error code `usage_settlement_failed`
+- **AND** the upstream compact is called exactly once and no account-health error is recorded
+- **AND** when the reservation is still `reserved` at fail-safe release and that release succeeds, its status is `released`
+
+### Requirement: Reset-confirmed warm-up follows the plan-applicable long window
+
+When reset-confirmed limit warm-up evaluates an account's selected long quota
+window, the system MUST use the monthly usage row when that account's plan has
+monthly quota capacity and MUST otherwise use the secondary usage row. The
+persisted warm-up attempt MUST retain the canonical window name from the
+selected usage row.
+
+#### Scenario: Free monthly reset triggers one monthly warm-up
+
+- **GIVEN** limit warm-up is enabled globally and for a free-plan account
+- **AND** long-window warm-up is selected
+- **AND** the account's previous monthly usage sample was exhausted
+- **WHEN** background usage refresh records a newer monthly sample with
+  available quota and a later `reset_at`
+- **THEN** the system sends at most one warm-up request for that
+  account/monthly/reset tuple
+- **AND** the durable warm-up attempt records `window="monthly"`
+
+#### Scenario: Paid plans retain secondary long-window warm-up
+
+- **GIVEN** an account plan has no monthly quota capacity
+- **AND** primary and secondary usage samples are available
+- **WHEN** background usage refresh evaluates long-window warm-up
+- **THEN** the system uses the secondary usage row
+- **AND** it does not substitute an unrelated monthly row
+
+#### Scenario: First monthly sample is not treated as a reset
+
+- **GIVEN** a free-plan account has no previous monthly usage sample
+- **AND** its latest secondary sample is exhausted
+- **WHEN** background usage refresh records the account's first monthly sample
+- **THEN** the system does not compare the secondary and monthly `reset_at`
+  values as one window
+- **AND** it does not send a reset-confirmed warm-up for that transition
+
+#### Scenario: Scheduler scopes monthly snapshots to the selected account
+
+- **GIVEN** multiple accounts are eligible for background usage refresh
+- **AND** one account is selected for the current scheduler slice
+- **WHEN** the scheduler loads before and after usage for warm-up evaluation
+- **THEN** monthly lookups are filtered to the selected account
+- **AND** monthly usage from another account cannot create a warm-up attempt
+
+### Requirement: Auth Guardian candidate handoff survives session closure
+
+Auth Guardian MUST preserve stable account identities while its candidate-query session is active and MUST execute selected refresh work after that session closes without reading unloaded or expired state from detached persistence objects. Each selected account MUST still be re-read in the separately owned refresh session before eligibility is confirmed and credentials are refreshed.
+
+#### Scenario: Stale candidate crosses the query-session boundary
+
+- **GIVEN** a stale eligible account is selected during an Auth Guardian pass
+- **WHEN** the candidate-query session closes before per-account refresh work begins
+- **THEN** Auth Guardian refreshes the selected account without a detached-instance failure
+- **AND** the refresh worker re-reads the account in its own session before refreshing it
+

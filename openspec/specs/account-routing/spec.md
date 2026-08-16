@@ -292,26 +292,44 @@ unit. When the hint contains no recognizable unit token, the system SHALL fall
 back to the error-count backoff schedule. A rate-limited account SHALL NOT be
 re-selected before its cooldown elapses.
 
-When the upstream rate-limit error carries no explicit reset metadata
-(`resets_at`/`resets_in_seconds`), the resolved cooldown deadline SHALL be
-persisted on the account row (`reset_at`) so the cooldown survives process
-restarts and is visible to all replicas sharing the database: a parsed
-Retry-After hint deadline SHALL be persisted rounded up to the next whole
-second (persistence stores `reset_at` as an integer, so a short or fractional
-hint MUST NOT truncate down to an already-elapsed deadline), and when the
-cooldown comes from the error-count backoff fallback the persisted deadline
-SHALL be at least `RATE_LIMITED_MIN_COOLDOWN_SECONDS` (30 seconds) in the
-future. Explicit upstream reset metadata, when present, SHALL continue to be
-persisted as-is.
-The marking replica's in-process cooldown MAY remain shorter than the
-persisted deadline so its existing fresh-usage recovery gate is unchanged.
+Explicit upstream reset metadata SHALL be accepted only when it resolves to a
+finite deadline strictly later than the current time and no more than
+`RATE_LIMIT_RESET_MAX_HORIZON_SECONDS` (366 days) in the future. `resets_at`
+SHALL be interpreted as an absolute Unix timestamp and `resets_in_seconds`
+SHALL be interpreted as a relative duration. When `resets_at` is invalid but
+`resets_in_seconds` is valid, the relative duration SHALL be used. An accepted
+fractional deadline SHALL be rounded up to the next whole second before
+persistence. A persisted integer deadline produced by that rounding MAY be
+less than one second beyond the raw 366-day horizon and MUST remain valid when
+selection reconstructs it. When neither field is valid, the error SHALL be
+treated as carrying no explicit reset metadata.
+
+When the upstream rate-limit error carries no valid explicit reset metadata,
+the resolved cooldown deadline SHALL be persisted on the account row
+(`reset_at`) so the cooldown survives process restarts and is visible to all
+replicas sharing the database: a parsed Retry-After hint deadline SHALL be
+persisted rounded up to the next whole second (persistence stores `reset_at`
+as an integer, so a short or fractional hint MUST NOT truncate down to an
+already-elapsed deadline), and when the cooldown comes from the error-count
+backoff fallback the persisted deadline SHALL be at least
+`RATE_LIMITED_MIN_COOLDOWN_SECONDS` (30 seconds) in the future. The marking
+replica's in-process cooldown MAY remain shorter than the persisted deadline
+so its existing fresh-usage recovery gate is unchanged.
+
+An already-persisted `rate_limited` reset deadline beyond the same plausibility
+horizon SHALL be treated as missing metadata rather than as an unexpired
+cooldown. A row carrying `blocked_at` SHALL still honor the existing 30-second
+minimum floor and SHALL require recent usage evidence recorded after that block
+before selection-time recovery may clear it. A row without `blocked_at` SHALL
+require recent available usage evidence. In both cases, every applicable
+derived quota window MUST report below `100%` usage before recovery.
 
 #### Scenario: Compound minute-and-second hint sets the full cooldown
 
 - **GIVEN** an upstream 429 whose message says "try again in 6m0s"
 - **WHEN** the balancer records the rate limit for the account
 - **THEN** the account cooldown lasts 360 seconds
-- **AND** the account is not re-selected until that cooldown elapses
+- **AND** the account is not re-selected until its cooldown elapses
 
 #### Scenario: Minutes-only hint is honored
 
@@ -351,6 +369,58 @@ persisted deadline so its existing fresh-usage recovery gate is unchanged.
 - **WHEN** the balancer records the rate limit for the account
 - **THEN** the persisted integer `reset_at` deadline is strictly in the future
 - **AND** peer replicas honor the hinted cooldown instead of reselecting the account immediately
+
+#### Scenario: Plausible explicit reset metadata remains authoritative
+
+- **GIVEN** an OpenAI service 429 carrying a finite `resets_at` deadline 30 days in the future
+- **WHEN** the balancer records the rate limit for the account
+- **THEN** the accepted explicit deadline is persisted
+- **AND** the Retry-After/backoff fallback does not replace it
+
+#### Scenario: Implausible explicit reset metadata uses the bounded fallback
+
+- **GIVEN** an OpenAI service 429 carrying `resets_at=15023672358` while the current Unix time is approximately `1784146959`
+- **AND** the error carries no valid `resets_in_seconds` or parseable duration
+- **WHEN** the balancer records the rate limit for the account
+- **THEN** the implausible absolute deadline is rejected
+- **AND** the persisted deadline uses the minimum bounded backoff instead
+
+#### Scenario: Valid relative metadata survives an invalid absolute value
+
+- **GIVEN** an OpenAI service 429 whose `resets_at` is implausibly far in the future
+- **AND** whose `resets_in_seconds` is a finite positive duration within 366 days
+- **WHEN** the balancer records the rate limit for the account
+- **THEN** the relative duration determines the persisted deadline
+
+#### Scenario: Horizon-edge rounding remains stable
+
+- **GIVEN** valid absolute or relative reset metadata resolves exactly 366 days after a fractional current timestamp
+- **WHEN** the balancer rounds and persists the deadline to a whole second
+- **THEN** persisted-state reconstruction continues to accept that deadline
+- **AND** does not clear the cooldown solely because rounding crossed the raw horizon by less than one second
+
+#### Scenario: Existing implausible deadline does not pin selection indefinitely
+
+- **GIVEN** a persisted `rate_limited` account whose `reset_at` is more than 366 days in the future
+- **AND** whose `blocked_at` minimum floor has elapsed
+- **WHEN** selection reconstructs the account from fresh available usage evidence
+- **THEN** the implausible deadline is treated as missing metadata
+- **AND** normal compare-and-set recovery may restore the account to `active`
+
+#### Scenario: Exhausted long-window quota prevents poisoned-row recovery
+
+- **GIVEN** a persisted `rate_limited` account whose reset deadline is implausible
+- **AND** a fresh primary window reports available quota
+- **AND** an applicable weekly or monthly window reports `100%` usage
+- **WHEN** selection reconstructs the account
+- **THEN** the account remains `rate_limited`
+
+#### Scenario: Implausible legacy deadline without a block marker recovers
+
+- **GIVEN** a persisted `rate_limited` account whose reset deadline is implausible
+- **AND** the row has no `blocked_at` marker
+- **WHEN** selection reconstructs the account from recent available usage in every applicable window
+- **THEN** normal compare-and-set recovery may restore the account to `active`
 
 ### Requirement: Re-authentication-required accounts are not selectable
 
@@ -641,3 +711,36 @@ Recovery admission MUST occur only after all ordinary account eligibility, coold
 - **WHEN** selection finalizes the stable local account-cap error
 - **THEN** any provisional delete or rebind decision is discarded
 - **AND** the existing hard-sticky owner mapping remains unchanged
+
+### Requirement: Trusted cyber intent narrows the existing account pool
+
+Account routing MUST constrain an authenticated direct Responses WebSocket
+turn requiring `trusted_cyber` by passing
+`require_security_work_authorized=True` to the canonical selector before the
+first upstream attempt and every later retry. The selector MUST apply the
+constraint only to accounts already permitted by API-key, account, model,
+service-tier, ownership, health, quota, affinity, concurrency, and failover
+rules. Routing MUST NOT add an account, change the configured strategy, rebind
+an owner, or fall back to an ordinary account.
+
+#### Scenario: First attempt uses the capable pool
+- **WHEN** an authenticated direct WebSocket turn establishes `trusted_cyber`
+- **THEN** its first account-selection call requires a
+  security-work-authorized account
+- **AND** no ordinary account receives an upstream attempt
+
+#### Scenario: Empty capable pool fails closed
+- **WHEN** a required turn has no eligible security-work-authorized account
+- **THEN** selection returns the existing typed
+  `no_security_work_authorized_accounts` error
+- **AND** its advisory states that no ordinary-account fallback occurred
+- **AND** an earlier reactive or account/model error cannot replace that typed
+  capability-routing result
+- **AND** ordinary routing is not attempted
+
+#### Scenario: Ordinary routing is unchanged
+- **WHEN** an authenticated direct WebSocket turn has neither a trusted signal
+  nor required lineage
+- **THEN** selection receives the same scope, strategy, ownership, admission,
+  and retry inputs as before this change
+

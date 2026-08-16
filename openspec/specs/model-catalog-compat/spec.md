@@ -375,6 +375,22 @@ capability. Requests that omit a tier or use the omit-equivalent `auto` or
 `default` tiers MUST use model-only account filtering, including when reusing
 an HTTP bridge session.
 
+A service tier imposed by an API key's enforced service tier is not an explicit
+request for that tier. When the requested tier originates from API key
+enforcement and the model's catalog does not advertise that tier at all, the
+system MUST remove the tier from the account-routed request, MUST select
+accounts and reuse HTTP bridge sessions using model-only filtering, MUST
+reserve, settle, and log API-key usage at the effective default tier, and MUST
+omit the unsupported tier from the upstream request. This account-catalog
+fallback MUST NOT alter a request selected for an external model source, and an
+unknown or account-catalog-absent model MUST retain the enforced tier. When the model's catalog
+does advertise the tier, account-level tier filtering MUST continue to apply
+regardless of the tier's origin. A tier supplied explicitly by the client MUST
+continue to filter accounts even when it equals the enforced value or uses an
+equivalent alias and the model does not advertise it. When an
+unavailable service tier is what excluded every account, the selection error
+MUST name that tier.
+
 #### Scenario: Same-plan accounts expose different models
 
 - **GIVEN** two active accounts share a plan
@@ -389,6 +405,38 @@ an HTTP bridge session.
 - **AND** only one advertises the priority service tier
 - **WHEN** a request explicitly asks for priority
 - **THEN** selection considers only the account that advertised priority
+
+#### Scenario: Enforced tier does not exclude a model that never advertises it
+
+- **GIVEN** an active account advertises a model at its default tier
+- **AND** the model's catalog advertises no `priority` service tier
+- **AND** an API key sets `enforced_service_tier` to `priority`
+- **WHEN** account selection is requested for that model
+- **THEN** the enforced tier is removed from the account-routed request
+- **AND** API-key accounting, bridge compatibility, and upstream forwarding use the effective default tier
+- **AND** the advertising account is selected
+
+#### Scenario: Account-catalog fallback does not alter a model source
+
+- **GIVEN** an API key enforces the `priority` service tier
+- **AND** the selected model is routed through an external model source
+- **WHEN** the subscription-account catalog does not advertise `priority` for that model
+- **THEN** the source-routed request retains `priority`
+
+#### Scenario: Explicitly requested unadvertised tier is still rejected
+
+- **GIVEN** an active account advertises a model at its default tier
+- **AND** the model's catalog advertises no `priority` service tier
+- **WHEN** a client explicitly requests that model with `priority` or an equivalent `fast` alias
+- **THEN** no account is selected
+
+#### Scenario: Unavailable advertised tier names the tier in the error
+
+- **GIVEN** a model's catalog advertises the `priority` service tier
+- **AND** no active account carries `priority` for that model
+- **WHEN** account selection is requested for that model with `priority`
+- **THEN** no account is selected
+- **AND** the selection error names the `priority` service tier
 
 ### Requirement: Unknown account catalogs degrade without false exclusion
 
@@ -832,4 +880,180 @@ At startup every replica SHALL load the persisted model-registry snapshot into i
 - **AND** the only `model_registry_snapshot` row is a previously published snapshot whose age now exceeds `model_registry_snapshot_max_age_seconds`
 - **WHEN** the replica loses leadership and its next reconcile runs (poller callback or refresh-tick backstop)
 - **THEN** it drops the unpublished catalog, reverts to the bootstrap floor, and invalidates its account-selection cache
+
+### Requirement: Every Codex-native catalog entry is wire-parseable
+
+Every model entry returned by `GET /backend-api/codex/models` or the equivalent
+`GET /v1/models?client_version=<version>` route MUST include the non-defaulted
+Codex wire fields `truncation_policy` and `experimental_supported_tools`, even
+when the entry comes from hidden retained bootstrap metadata or a persisted
+legacy registry snapshot. When either field is absent from stored raw metadata,
+the mapper MUST provide a conservative model-compatible default. Wire-valid
+values provided by a live upstream catalog or model source MUST remain
+authoritative and MUST NOT be overwritten by the compatibility defaults. When
+`experimental_supported_tools` is not a list, the mapper MUST emit an empty
+list. When it contains non-string members, the mapper MUST omit those members
+rather than failing the complete catalog. A wire-valid `truncation_policy` MUST
+use the `bytes` or `tokens` mode and a JSON integer representable by Codex's
+signed 64-bit `limit` field. When an explicit policy does not satisfy that wire
+shape, the mapper MUST emit the same conservative model-compatible policy used
+when the field is absent.
+
+#### Scenario: Hidden bootstrap metadata cannot invalidate the live catalog
+
+- **GIVEN** a successful live refresh omits an older bundled model
+- **AND** codex-lb retains that model as hidden metadata whose raw payload lacks
+  required Codex wire fields
+- **WHEN** a Codex client requests the native model catalog
+- **THEN** the hidden entry includes a valid `truncation_policy`
+- **AND** it includes `experimental_supported_tools` as a list
+- **AND** the complete catalog can be deserialized instead of falling back to
+  bundled client metadata
+
+#### Scenario: Explicit valid upstream compatibility values win
+
+- **GIVEN** a live catalog or model source provides `truncation_policy` or
+  `experimental_supported_tools`
+- **WHEN** codex-lb renders the Codex-native catalog entry
+- **THEN** it preserves those explicit values unchanged
+
+#### Scenario: Invalid source tool members cannot fail the catalog
+
+- **GIVEN** a model source provides `experimental_supported_tools` with both
+  string and non-string members
+- **WHEN** codex-lb renders the Codex-native catalog entry
+- **THEN** it retains the string tool names
+- **AND** it omits non-string members instead of returning a server error
+
+#### Scenario: Non-list source tool metadata cannot fail the catalog
+
+- **GIVEN** a model source provides a non-list value for
+  `experimental_supported_tools`
+- **WHEN** codex-lb renders the Codex-native catalog entry
+- **THEN** it emits an empty list instead of returning a server error
+
+#### Scenario: Malformed source truncation policy cannot fail the catalog
+
+- **GIVEN** a model source provides an invalid `truncation_policy`, such as a
+  null, non-object, incomplete object, unknown mode, non-integer limit, or
+  out-of-range limit
+- **WHEN** codex-lb renders the Codex-native catalog entry
+- **THEN** it emits the conservative model-compatible truncation policy
+- **AND** it does not return a server error
+
+#### Scenario: Client-version alias has the same complete contract
+
+- **WHEN** Codex requests `GET /v1/models` with a non-empty `client_version`
+- **THEN** every returned `models` entry satisfies the same required-field
+  contract as `GET /backend-api/codex/models`
+
+### Requirement: Fresh additional-quota evidence can establish account support
+
+For a model canonically mapped to a separately metered additional quota, account selection MUST allow fresh account-specific additional-quota telemetry to establish model support when an authoritative general per-account model catalog omits that model. The system MUST continue to enforce registry plan and service-tier restrictions and MUST apply the existing additional-quota freshness, exhaustion, account-health, cooldown, capacity, security, and routing gates before selecting an account. When such a selected account is bound to an HTTP bridge session, every existing-session reuse entry point, including direct key lookup, previous-response alias fallback, and in-flight creation waiters, MUST enforce exact normalized model, canonical quota key, and normalized effective service-tier compatibility before returning the session. For a genuinely catalog-omitted account, reuse MUST re-evaluate current registry plan and requested service-tier plan eligibility without synchronously re-reading quota telemetry. This behavior MUST NOT apply to unknown models or to an unrelated additional-limit key supplied independently of the requested model.
+
+#### Scenario: Fresh Spark quota overrides general account-catalog omission
+
+- **GIVEN** an authoritative general account catalog omits `gpt-5.3-codex-spark` for a plan-compatible active account
+- **AND** that account has fresh, non-exhausted `codex_spark` quota telemetry
+- **WHEN** account selection is requested for `gpt-5.3-codex-spark`
+- **THEN** the general account-catalog omission does not remove that account from consideration
+- **AND** the account proceeds through the remaining additional-quota and routing gates
+
+#### Scenario: Quota-admitted bridge session remains reusable
+
+- **GIVEN** an account omitted from the authoritative general account catalog was selected for `gpt-5.3-codex-spark` using fresh, non-exhausted `codex_spark` telemetry
+- **AND** an HTTP bridge session records that selection's normalized model, canonical quota key, and effective service tier
+- **WHEN** a later turn requests the same normalized model, canonical quota mapping, and effective service tier
+- **THEN** the existing bridge session remains reusable
+- **AND** the synchronous reuse check does not re-read quota telemetry
+
+#### Scenario: Bridge admission provenance is narrowly bound
+
+- **GIVEN** an HTTP bridge session carries quota-backed catalog-omission provenance
+- **WHEN** a later request reaches that session through direct key lookup, previous-response alias fallback, or an in-flight creation waiter with a different normalized model, canonical quota key, or effective service tier
+- **THEN** that provenance does not bypass the normal catalog and service-tier checks
+- **AND** a catalog-supported account rejected by the requested account-level service-tier index remains rejected
+
+#### Scenario: Reuse rechecks current plan-tier eligibility for a catalog omission
+
+- **GIVEN** an HTTP bridge session carries exact quota-backed catalog-omission provenance for a requested service tier
+- **AND** the registry's current requested service-tier plan restrictions exclude the session account's current plan
+- **WHEN** a later request reaches that session through any reuse entry point
+- **THEN** the existing session is not returned under the recorded provenance
+- **AND** the current request follows a request-scope fork or fail-closed path without synchronously re-reading quota telemetry or mutating the existing live session
+
+#### Scenario: Incompatible request preserves another request's live bridge state
+
+- **GIVEN** a live or in-flight HTTP bridge session is compatible with its creator request
+- **AND** another direct, previous-response-alias, turn-state-alias, or in-flight-waiter request has mismatched quota-backed admission provenance or current plan-tier eligibility
+- **WHEN** bridge request compatibility rejects that second request
+- **THEN** an unanchored request uses an independent collision-resistant request-scope session, or an anchored request alone fails closed
+- **AND** the creator's session remains registered, open, and unscheduled for close with its request model, service tier, and transport unchanged
+- **AND** live previous-response and turn-state aliases remain unchanged so a subsequent compatible request can resolve and reuse the owner
+- **AND** an alias mapping is removed only when its target is missing, closed, or inactive
+
+#### Scenario: Forwarded prompt-cache mismatch forks on the receiving owner
+
+- **GIVEN** two bridge replicas agree that a prompt-cache key belongs to one canonical owner
+- **AND** that owner has an open quota-admitted Spark session whose effective service tier is incompatible with a priority request already forwarded to the owner
+- **AND** the priority request's collision-resistant `internal_request_parallel` fork key rendezvous-hashes to the other replica
+- **WHEN** compatibility rejects either the registered session or a session returned to an in-flight creation waiter
+- **THEN** the receiving canonical owner creates and owns the request-local mismatch fork without forwarding again
+- **AND** both requests can complete on independent transports while the creator session remains open and registered
+- **AND** normal rendezvous ownership remains unchanged for canonical prompt-cache, session, turn-state, previous-response, and unforwarded fork keys
+
+#### Scenario: Catalog-supported account-level service-tier exclusion remains authoritative
+
+- **GIVEN** an authoritative general per-account catalog includes a mapped separately metered model for two plan-compatible accounts
+- **AND** the authoritative requested service-tier account index includes only one of those accounts
+- **AND** both accounts have fresh, non-exhausted additional-quota telemetry for the model
+- **WHEN** account selection requests that model and service tier
+- **THEN** the account absent from the requested service-tier account index is not selected
+- **AND** quota evidence does not reclassify that catalog-supported account as model-catalog-omitted
+
+#### Scenario: Plan incompatibility remains authoritative
+
+- **GIVEN** a requested separately metered model is mapped to an additional quota
+- **AND** an account's plan is excluded by the model registry's plan or requested service-tier restrictions
+- **WHEN** account selection evaluates that account
+- **THEN** the account is not selected even if additional-quota telemetry exists
+
+#### Scenario: Missing or stale quota evidence fails closed
+
+- **GIVEN** the general account catalog omits a mapped separately metered model
+- **AND** no plan-compatible account has fresh additional-quota telemetry for that model
+- **WHEN** account selection is requested
+- **THEN** selection fails with the existing additional-quota data-unavailable behavior
+- **AND** the system does not route based only on bootstrap metadata
+- **AND** no quota-backed HTTP bridge session is admitted from that failed selection
+
+#### Scenario: Explicit unrelated quota cannot bypass model support
+
+- **GIVEN** a caller supplies an additional-limit key that is not the requested model's canonical quota mapping
+- **WHEN** the general per-account catalog excludes an account for that model
+- **THEN** the supplied quota key does not override the account-catalog exclusion
+
+### Requirement: Model catalog reservations are released on every exit path
+
+The model catalog builders for `GET /v1/models` and `GET /backend-api/codex/models` SHALL release the API-key usage reservation after acquisition on normal return, exception, or cancellation. The builders MUST preserve the existing reservation amount and successful response shape.
+
+#### Scenario: OpenAI-compatible catalog lookup fails
+
+- **WHEN** `_list_enabled_source_catalog_models` raises after reservation
+  acquisition while serving `GET /v1/models`
+- **THEN** the reservation row is released
+- **AND** its reserved usage is no longer charged to the key
+
+#### Scenario: Codex-native catalog lookup fails
+
+- **WHEN** `_list_enabled_source_catalog_models` raises after reservation
+  acquisition while serving `GET /backend-api/codex/models`
+- **THEN** the reservation row is released
+- **AND** its reserved usage is no longer charged to the key
+
+#### Scenario: Catalog request is cancelled
+
+- **WHEN** either model catalog builder is cancelled after reservation
+  acquisition
+- **THEN** the reservation is released before cancellation propagates
 

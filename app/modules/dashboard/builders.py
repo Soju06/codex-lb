@@ -97,6 +97,7 @@ def build_dashboard_overview_summary(
                 "cached_input_tokens": activity_metrics.cached_input_tokens,
                 "error_rate": activity_metrics.error_rate,
                 "error_count": activity_metrics.error_count,
+                "cancelled_count": activity_metrics.cancelled_count,
                 "top_error": activity_metrics.top_error,
                 "conversations": activity_metrics.conversation_count,
                 "conversation_requests": activity_metrics.conversation_request_count,

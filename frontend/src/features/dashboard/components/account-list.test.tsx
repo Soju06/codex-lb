@@ -1,5 +1,6 @@
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AccountList } from "@/features/dashboard/components/account-list";
@@ -348,5 +349,15 @@ describe("AccountList", () => {
 
     const resetButton = screen.getByRole("button", { name: "Redeem reset credit for Many Reset Account" });
     expect(within(resetButton).getByText("99+")).toBeInTheDocument();
+  });
+
+  it("links the empty-account state to the Accounts page", () => {
+    render(
+      <MemoryRouter>
+        <AccountList accounts={[]} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("link", { name: "Add accounts" })).toHaveAttribute("href", "/accounts");
   });
 });

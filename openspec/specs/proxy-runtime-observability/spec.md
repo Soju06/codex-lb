@@ -184,12 +184,21 @@ analytics.
 - **AND** request-log metadata stores `upstream_status_code = null`
 
 ### Requirement: Request logs persist prompt-client user-agent metadata
-The proxy MUST persist prompt-client user-agent metadata on `request_logs` for both HTTP and WebSocket Responses traffic. Each persisted row MUST store the full inbound `User-Agent` header value when present and a derived `useragent_group` value extracted from the first product token. When the inbound header is missing or blank after trimming, both persisted values MUST be `null`.
+The proxy MUST persist prompt-client user-agent metadata on `request_logs` for both HTTP and WebSocket Responses traffic. Each persisted row MUST store the full inbound `User-Agent` header value when present and a derived `useragent_group` value. When the inbound header contains `/`, `useragent_group` MUST be the complete sequence of characters before its first `/`; when it contains no `/`, the existing group extraction behavior MUST remain unchanged. When the inbound header is missing or blank after trimming, both persisted values MUST be `null`.
+
+#### Scenario: Historical request-log user-agent families are backfilled without normalization
+- **WHEN** the user-agent family migration processes historical `request_logs` rows
+- **THEN** rows whose `useragent` is non-null and contains `/` MUST have `useragent_group` set to the exact unprocessed full prefix before the first `/`
+- **AND** rows whose `useragent` is `null` or contains no `/` MUST remain unchanged
 
 #### Scenario: HTTP request log stores user-agent metadata
 - **WHEN** an HTTP or HTTP/SSE proxy request includes `User-Agent: opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`
 - **THEN** the persisted `request_logs` row stores `useragent = "opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"`
 - **AND** the persisted row stores `useragent_group = "opencode"`
+
+#### Scenario: Multi-word product family retains its full prefix
+- **WHEN** an HTTP or HTTP/SSE proxy request includes `User-Agent: Codex Desktop/0.142.4`
+- **THEN** the persisted `request_logs` row stores `useragent_group = "Codex Desktop"`
 
 #### Scenario: WebSocket request log stores user-agent metadata
 - **WHEN** a proxied WebSocket Responses session is opened with `User-Agent: opencode/1.15.13 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`
@@ -638,3 +647,141 @@ The service MUST expose a Prometheus gauge named `codex_lb_cap_partition_replica
 - **WHEN** a partition refresh observes and adopts two active members
 - **THEN** `codex_lb_cap_partition_replicas` reports 2
 - **AND** an info-level log records the rebalance from count 1 to count 2 with the replica's rank
+
+### Requirement: Source-routed requests report upstream-measured generation timings
+
+The proxy MUST record upstream-reported generation timing on the request log
+for source-routed chat/responses/audio-transcription requests when the
+OpenAI-compatible source's response body includes a `metrics` object with
+`time_to_first_token_ms` and `generation_time_ms`. The proxy MUST set
+`latency_first_token_ms` to the reported time-to-first-token and `latency_ms`
+to the sum of time-to-first-token and generation time, using the same
+request-log fields subscription-backed requests already populate. Sources
+that do not return a `metrics` object MUST leave both fields `null`, and
+negative or non-numeric values MUST be rejected rather than recorded.
+Non-finite numeric values (`NaN`, positive infinity, or negative infinity)
+MUST also be rejected rather than failing or interrupting the proxied request.
+
+#### Scenario: Source metrics populate TTFT and total latency
+
+- **GIVEN** an OpenAI-compatible source's chat completion response includes
+  `metrics: {time_to_first_token_ms: 108.83, generation_time_ms: 162.98}`
+- **WHEN** the request is logged
+- **THEN** the request log's `latency_first_token_ms` is `109`
+- **AND** the request log's `latency_ms` is `272`
+
+#### Scenario: Streamed responses capture metrics from the final frame
+
+- **GIVEN** a source-routed streaming chat completion whose final SSE frame
+  carries both `usage` and `metrics`
+- **WHEN** the stream completes successfully
+- **THEN** the request log records the same `latency_first_token_ms` /
+  `latency_ms` derived from that frame's `metrics`
+
+#### Scenario: Missing metrics leaves latency fields null
+
+- **GIVEN** an OpenAI-compatible source's response includes no `metrics` object
+- **WHEN** the request is logged
+- **THEN** `latency_ms` and `latency_first_token_ms` remain `null`, unchanged
+  from prior behavior
+
+#### Scenario: Dashboard retains generation-only throughput semantics
+
+- **GIVEN** a source response reports `time_to_first_token_ms: 108.83`,
+  `generation_time_ms: 162.98`, and `9` output tokens
+- **WHEN** the existing dashboard computes tokens per second as output tokens
+  divided by `latency_ms - latency_first_token_ms`
+- **THEN** it reports approximately `55.2` generation tokens per second
+- **AND** it does not substitute an upstream `tokens_per_second` value that may
+  include TTFT
+
+#### Scenario: Non-finite metrics are ignored safely
+
+- **GIVEN** a source response contains `NaN` or infinity in either timing field
+- **WHEN** the proxy parses the optional metrics
+- **THEN** both timing values remain unset
+- **AND** the otherwise successful proxied request is not interrupted
+
+### Requirement: Shipped high-error-rate alert uses aggregate request share
+
+The shipped `CodexLBHighErrorRate` alert MUST calculate, independently for each
+namespace and job, the sum of five-minute 5xx request rates divided by the sum
+of all five-minute request rates. Method, path, status, instance, replica, and
+other non-scope labels MUST be aggregated before division. The alert MUST
+compare the aggregate ratio to 0.05 and MUST require it to remain above that
+threshold for five minutes.
+
+#### Scenario: Mixed success and error series produce their aggregate share
+
+- **GIVEN** one namespace and job have positive 2xx and 5xx request rates
+- **WHEN** the high-error-rate alert expression is evaluated
+- **THEN** the ratio equals the sum of 5xx request rates divided by the sum of
+  all request rates
+- **AND** the ratio is not 1 unless all requests in that group are 5xx
+
+#### Scenario: Alert groups remain isolated
+
+- **GIVEN** request series exist for more than one namespace or job
+- **WHEN** the high-error-rate alert expression is evaluated
+- **THEN** each namespace and job pair has an independent aggregate ratio
+- **AND** traffic from one pair is not included in another pair
+
+#### Scenario: Threshold and duration apply to the aggregate ratio
+
+- **GIVEN** one namespace and job have an aggregate 5xx share above 0.05
+- **WHEN** that aggregate share remains above 0.05 for five minutes
+- **THEN** `CodexLBHighErrorRate` fires for that namespace and job pair
+
+### Requirement: Bundled Grafana 5xx stat uses selected aggregate request share
+
+The bundled Grafana `Error Rate (5xx)` stat MUST apply the selected namespace
+and job filters to both operands, aggregate all remaining request-series labels
+before division, and display the resulting 5xx share as one value. When the
+selected total request rate is positive but no matching 5xx series exists, the
+stat MUST display 0%.
+
+#### Scenario: Selected mixed traffic produces one aggregate value
+
+- **GIVEN** the selected namespace and job have positive 2xx and 5xx request
+  rates across one or more request or replica label combinations
+- **WHEN** the Grafana error-rate stat is evaluated
+- **THEN** it displays the sum of selected 5xx request rates divided by the sum
+  of all selected request rates
+
+#### Scenario: Dashboard selection filters both operands
+
+- **GIVEN** request series exist inside and outside the selected namespace and
+  job
+- **WHEN** the Grafana error-rate stat is evaluated
+- **THEN** both the 5xx numerator and total denominator exclude traffic outside
+  the selected namespace and job
+
+#### Scenario: Success-only traffic displays zero
+
+- **GIVEN** the selected scope has a positive successful-request rate
+- **AND** no matching 5xx series exists
+- **WHEN** the Grafana error-rate stat is evaluated
+- **THEN** the stat displays 0%
+
+### Requirement: Stream pool congestion is observable
+
+When Prometheus support is available the service MUST expose a gauge named `codex_lb_stream_pool_capacity` whose value equals the fair-share gate's most recently computed candidate pool capacity and a gauge named `codex_lb_stream_pool_inflight` whose value equals the corresponding pool in-flight stream count, and a counter named `codex_lb_api_key_fair_share_rejections_total` incremented once per fair-share denial. The gauges and the counter MUST NOT carry API-key, account, or request labels. Each fair-share denial MUST log at warning level with the requesting `api_key_id`, the key's in-flight count, the computed fair share, the pool in-flight and capacity, and the active-key count, and MUST NOT include other keys' identifiers, instance secrets, or request payload content. All fair-share metrics MUST degrade to no-ops when the Prometheus client is absent.
+
+#### Scenario: Pool gauges are exported during gate evaluation
+
+- **GIVEN** the fair-share gate is enabled and evaluates a stream selection
+- **WHEN** metrics are scraped
+- **THEN** `codex_lb_stream_pool_capacity` and `codex_lb_stream_pool_inflight` report the evaluated pool values without per-key or per-account labels
+
+#### Scenario: Denials are counted without key cardinality
+
+- **GIVEN** repeated fair-share denials for multiple keys
+- **WHEN** metrics are scraped
+- **THEN** `codex_lb_api_key_fair_share_rejections_total` reflects the total denial count with no per-key label
+
+#### Scenario: Denial log carries the diagnostic numbers
+
+- **GIVEN** a fair-share denial
+- **WHEN** the warning is logged
+- **THEN** it includes the requester's `api_key_id`, key in-flight count, fair share, pool in-flight, pool capacity, and active-key count and no other key's identifier
+

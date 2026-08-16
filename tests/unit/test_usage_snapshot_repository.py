@@ -3,13 +3,16 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import event, func, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models import Account, AccountStatus, Base, UsageHistory
 from app.modules.usage import background_repository as background_repository_module
+from app.modules.usage import repository as usage_repository_module
 from app.modules.usage.background_repository import BackgroundUsageRepository
 from app.modules.usage.repository import UsageRepository, UsageWindowWrite
 
@@ -24,6 +27,43 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgresql_settlement_lookups_compile_for_no_key_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = MagicMock()
+    session.get_bind.return_value.dialect.name = "postgresql"
+    observed_result = MagicMock()
+    observed_result.one_or_none.return_value = MagicMock(
+        id="acc_current",
+        chatgpt_account_id="workspace-current",
+    )
+    locked_result = MagicMock()
+    locked_result.one_or_none.return_value = MagicMock(
+        id="acc_current",
+        chatgpt_account_id="workspace-current",
+    )
+    session.execute = AsyncMock(side_effect=[observed_result, locked_result])
+    session.add_all = MagicMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+    monkeypatch.setattr(usage_repository_module, "lock_postgresql_account_identities", AsyncMock())
+    monkeypatch.setattr(usage_repository_module, "relax_commit_durability", AsyncMock())
+
+    resolved = await UsageRepository(session).settle_live_account_snapshot(
+        account_id="acc_stale",
+        chatgpt_account_id="workspace-current",
+        windows=[UsageWindowWrite(window="primary", used_percent=25.0)],
+        should_skip=lambda _account_id: False,
+    )
+
+    assert resolved == "acc_current"
+    observed_stmt = session.execute.await_args_list[0].args[0]
+    locked_stmt = session.execute.await_args_list[1].args[0]
+    assert "FOR NO KEY UPDATE" not in str(observed_stmt.compile(dialect=postgresql.dialect()))
+    assert "FOR NO KEY UPDATE" in str(locked_stmt.compile(dialect=postgresql.dialect()))
 
 
 def _account(account_id: str) -> Account:

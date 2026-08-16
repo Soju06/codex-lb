@@ -1,0 +1,22 @@
+# Machine-local Codex configuration: ~/.codex/config.toml
+# The default provider remains ordinary codex-lb traffic.
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+model_provider = "codex-lb"
+
+[model_providers.codex-lb]
+name = "openai"
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+supports_websockets = true
+requires_openai_auth = true
+
+# Opt-in only. ~/.codex/daybreak-blue.config.toml selects this provider.
+[model_providers.codex-lb-daybreak-blue]
+name = "openai"
+base_url = "http://127.0.0.1:2455/backend-api/codex"
+wire_api = "responses"
+env_key = "CODEX_LB_API_KEY"
+supports_websockets = true
+requires_openai_auth = true
+http_headers = { "X-Codex-LB-Required-Capability" = "trusted_cyber" }

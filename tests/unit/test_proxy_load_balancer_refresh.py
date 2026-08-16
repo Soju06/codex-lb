@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -202,7 +202,9 @@ class StubStickySessionsRepository(StickySessionsRepository):
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> str | None:
+        del continuity_source
         return None
 
     async def get_account_id_and_abandonment(
@@ -211,11 +213,17 @@ class StubStickySessionsRepository(StickySessionsRepository):
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> StickyOwnerLookup:
         # Delegates to get_account_id (rather than duplicating its logic) so
         # a test that only overrides get_account_id — the common pattern in
         # this file — is still observed here.
-        account_id = await self.get_account_id(key, kind=kind, max_age_seconds=max_age_seconds)
+        account_id = await self.get_account_id(
+            key,
+            kind=kind,
+            max_age_seconds=max_age_seconds,
+            continuity_source=continuity_source,
+        )
         return StickyOwnerLookup(account_id=account_id, continuity_abandoned=False)
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
@@ -2264,8 +2272,9 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> str | None:
-        del key, kind, max_age_seconds
+        del key, kind, max_age_seconds, continuity_source
         return account.id
 
     original_persist_selection_state = balancer._persist_selection_state
@@ -2350,8 +2359,9 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> str | None:
-        del key, kind, max_age_seconds
+        del key, kind, max_age_seconds, continuity_source
         return account.id
 
     async def always_stale_selected_persist(
@@ -2435,8 +2445,9 @@ async def test_paused_legacy_hard_owner_fails_closed_without_rebinding(monkeypat
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> str | None:
-        del key, kind, max_age_seconds
+        del key, kind, max_age_seconds, continuity_source
         return paused_team.id
 
     monkeypatch.setattr(sticky_repo, "get_account_id", pinned_account_id)

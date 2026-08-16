@@ -94,6 +94,21 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
                 latency_ms=2600,
                 latency_first_token_ms=600,
             ),
+            # Cancelled (client-disconnect) terminal on the same local day:
+            # counted in requests, excluded from error_count (#1552).
+            RequestLog(
+                account_id=None,
+                request_id="report-daily-3",
+                requested_at=datetime(2026, 6, 3, 17, 30, tzinfo=timezone.utc).replace(tzinfo=None),
+                model="gpt-5.1",
+                status="cancelled",
+                error_code="client_disconnected",
+                input_tokens=3,
+                output_tokens=0,
+                cached_input_tokens=0,
+                cost_usd=0.0,
+                latency_ms=100,
+            ),
         ]
     )
     await async_session.commit()
@@ -116,17 +131,61 @@ async def test_aggregate_daily_rows_groups_in_sql_and_returns_only_buckets_with_
     assert rows[0].median_tps == 4
     assert rows[0].median_queue_ms == 350
 
-    assert rows[1].requests == 1
-    assert rows[1].input_tokens == 5
+    assert rows[0].cancelled_count == 0
+
+    assert rows[1].requests == 2
+    assert rows[1].input_tokens == 8
     assert rows[1].output_tokens == 1
     assert rows[1].cached_input_tokens == 0
     assert rows[1].cost_usd == 0.1
     assert rows[1].active_accounts == 0
     assert rows[1].error_count == 1
+    assert rows[1].cancelled_count == 1
     assert rows[1].median_ttft_ms == 600
     assert rows[1].median_tps == 0.5
     # No queue samples on this day: zero-filled rather than null.
     assert rows[1].median_queue_ms == 0.0
+
+
+@pytest.mark.asyncio
+async def test_aggregate_summary_excludes_cancelled_from_errors_and_counts_them(
+    async_session: AsyncSession,
+) -> None:
+    """Regression for #1552: cancelled terminals stay in total_requests but
+    leave total_errors, surfacing as total_cancelled instead."""
+    repo = ReportsRepository(async_session)
+    base = datetime(2026, 6, 1, 12, 0)
+    async_session.add(_make_account("acc_reports_cx", "reports-cx@example.com"))
+    statuses = [
+        ("success", None),
+        ("cancelled", "client_disconnected"),
+        ("cancelled", "client_disconnected"),
+        ("error", "upstream_500"),
+    ]
+    async_session.add_all(
+        [
+            RequestLog(
+                account_id="acc_reports_cx",
+                request_id=f"report-cx-{index}",
+                requested_at=base + timedelta(minutes=index),
+                model="gpt-5.1",
+                status=status,
+                error_code=error_code,
+                input_tokens=10,
+                output_tokens=5,
+                cached_input_tokens=0,
+                cost_usd=0.1,
+            )
+            for index, (status, error_code) in enumerate(statuses)
+        ]
+    )
+    await async_session.commit()
+
+    summary = await repo.aggregate_summary(base - timedelta(hours=1), base + timedelta(hours=1))
+
+    assert summary.total_requests == 4
+    assert summary.total_errors == 1
+    assert summary.total_cancelled == 2
 
 
 @pytest.mark.asyncio

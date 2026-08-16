@@ -387,6 +387,66 @@ def test_namespace_log_labels_cover_all_namespaces() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_bump_survives_a_cancelled_flush(db_setup, monkeypatch) -> None:
+    """The marker is cleared before the write is awaited, so a cancelled write
+    must restore it — otherwise the namespace is neither written nor pending
+    and no later cycle can retry it. (At process stop no cycle remains either
+    way; shutdown delivery is explicitly out of scope, and the restore there
+    only keeps the pending set honest.)"""
+    namespace = "test_flush_cancelled"
+    started = asyncio.Event()
+
+    async def never_finishes(ns: str) -> bool:
+        started.set()
+        await asyncio.Event().wait()
+        return True
+
+    poller = CacheInvalidationPoller(SessionLocal)
+    monkeypatch.setattr(poller, "bump", never_finishes)
+    poller.request_bump(namespace)
+
+    flush_task = asyncio.create_task(poller._flush_pending_bumps())
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+    assert namespace not in poller._pending_bumps, "marker is cleared before the write, by design"
+
+    flush_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await flush_task
+
+    assert namespace in poller._pending_bumps
+    assert await _namespace_version(namespace) is None
+
+
+@pytest.mark.asyncio
+async def test_pending_bump_survives_a_raising_flush_and_does_not_starve_others(db_setup, monkeypatch) -> None:
+    """A raise is abnormal (bump() reports failure by returning False), so it
+    must not abort the flush: the loop is sorted, and a persistently raising
+    namespace sorting first would otherwise starve every namespace after it
+    on every cycle. The raiser stays pending; the rest still land."""
+    raising_namespace = "test_flush_raised_a"
+    healthy_namespace = "test_flush_raised_b"
+    real_bump = CacheInvalidationPoller.bump
+
+    poller = CacheInvalidationPoller(SessionLocal)
+
+    async def raising_for_one(ns: str) -> bool:
+        if ns == raising_namespace:
+            raise RuntimeError("driver exploded")
+        return await real_bump(poller, ns)
+
+    monkeypatch.setattr(poller, "bump", raising_for_one)
+    poller.request_bump(raising_namespace)
+    poller.request_bump(healthy_namespace)
+
+    await poller._flush_pending_bumps()
+
+    assert raising_namespace in poller._pending_bumps
+    assert await _namespace_version(raising_namespace) is None
+    assert healthy_namespace not in poller._pending_bumps
+    assert await _namespace_version(healthy_namespace) == 1
+
+
+@pytest.mark.asyncio
 async def test_pending_coalesced_bump_flushes_after_recovery(db_setup) -> None:
     namespace = "test_pending_flush"
     # First cycle: bump retries (3 attempts) and the poll read both fail.
@@ -793,3 +853,41 @@ async def test_inflight_poll_does_not_clobber_concurrent_local_bump(db_setup) ->
     await source._poll_once()
     assert source_calls == []
     assert source._known_versions.get(NAMESPACE_RESET_CREDITS) == 2
+
+
+@pytest.mark.asyncio
+async def test_aborted_bump_is_retried_by_the_running_poller(db_setup, monkeypatch) -> None:
+    """End-to-end: the point of restoring the marker is that the background
+    poller actually retries. Without the restore the first raise loses the
+    namespace and no later cycle ever writes its version."""
+    namespace = "test_abort_retried_by_poller"
+    attempts = 0
+    real_bump = CacheInvalidationPoller.bump
+
+    poller = CacheInvalidationPoller(SessionLocal, poll_interval_seconds=0.01)
+
+    retry_settled = asyncio.Event()
+
+    async def failing_then_real(ns: str) -> bool:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("driver exploded")
+        result = await real_bump(poller, ns)
+        # Signal only after bump() fully returns: the committed row can become
+        # visible while the shielded session cleanup is still running, and
+        # stopping the poller at that instant would cancel the retry mid-flight.
+        retry_settled.set()
+        return result
+
+    monkeypatch.setattr(poller, "bump", failing_then_real)
+    poller.request_bump(namespace)
+    await poller.start()
+    try:
+        await asyncio.wait_for(retry_settled.wait(), timeout=5.0)
+    finally:
+        await poller.stop()
+
+    assert attempts >= 2, "the poller must retry the aborted namespace"
+    assert await _namespace_version(namespace) == 1
+    assert namespace not in poller._pending_bumps

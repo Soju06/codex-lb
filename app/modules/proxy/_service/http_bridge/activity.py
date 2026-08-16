@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+from app.core.clients.proxy import ProxyResponseError
+from app.core.resilience.overload import local_overload_error
 from app.modules.proxy._service.http_bridge.helpers import (
     _close_http_bridge_session_bounded,
+    _http_bridge_capacity_generation_count,
     _http_bridge_pending_count_nowait,
     _http_bridge_pending_state_is_stale,
     _http_bridge_request_counts_against_queue,
@@ -13,7 +17,11 @@ from app.modules.proxy._service.http_bridge.helpers import (
     http_bridge_activity_snapshot_nowait,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
-from app.modules.proxy._service.support import _http_bridge_session_supports_service_tier, _HTTPBridgeSession
+from app.modules.proxy._service.support import (
+    _http_bridge_session_supports_service_tier,
+    _HTTPBridgeSession,
+    _HTTPBridgeSessionKey,
+)
 from app.modules.proxy.affinity import _extract_model_class
 
 
@@ -76,6 +84,75 @@ class _HTTPBridgeActivityMixin:
         reason: str,
     ) -> None:
         await _close_http_bridge_session_bounded(self, session, reason=reason)
+
+    def _http_bridge_active_capacity_error(
+        self: _HTTPBridgeServiceProtocol,
+        *,
+        key: _HTTPBridgeSessionKey,
+        request_model: str | None,
+    ) -> ProxyResponseError:
+        _log_http_bridge_event(
+            "capacity_exhausted_active_sessions",
+            key,
+            account_id=None,
+            model=request_model,
+            pending_count=_http_bridge_capacity_generation_count(self),
+            cache_key_family=key.affinity_kind,
+            model_class=_extract_model_class(request_model) if request_model else None,
+        )
+        return ProxyResponseError(
+            429,
+            local_overload_error(
+                "HTTP responses session bridge has no idle capacity",
+                code="capacity_exhausted_active_sessions",
+            ),
+        )
+
+    def _http_bridge_forced_close_must_finish_before_create(
+        self: _HTTPBridgeServiceProtocol,
+        forced_replacement: bool,
+        max_sessions: int,
+    ) -> bool:
+        # Detachment retains capacity. A forced replacement at the cap must
+        # finish closing its idle predecessor before enforcing the same cap.
+        return forced_replacement and _http_bridge_capacity_generation_count(self) >= max_sessions
+
+    async def _enforce_http_bridge_capacity_after_planned_closes(
+        self: _HTTPBridgeServiceProtocol,
+        *,
+        key: _HTTPBridgeSessionKey,
+        inflight_future: asyncio.Future[_HTTPBridgeSession] | None,
+        max_sessions: int,
+        request_model: str | None,
+    ) -> None:
+        assert inflight_future is not None
+        async with self._http_bridge_lock:
+            if (
+                self._http_bridge_inflight_sessions.get(key) is not inflight_future
+                or _http_bridge_capacity_generation_count(self) <= max_sessions
+            ):
+                return
+            # Planned evictions are discounted only to reserve this creation
+            # slot. A bounded close may return on timeout while the detached
+            # socket and leases remain live, so registry ownership wins here.
+            _log_http_bridge_event(
+                "capacity_exhausted_after_lru_close",
+                key,
+                account_id=None,
+                model=request_model,
+                pending_count=_http_bridge_capacity_generation_count(self),
+                cache_key_family=key.affinity_kind,
+                model_class=_extract_model_class(request_model) if request_model else None,
+            )
+            capacity_error = ProxyResponseError(
+                429,
+                local_overload_error(
+                    "HTTP responses session bridge has no idle capacity",
+                    code="capacity_exhausted_active_sessions",
+                ),
+            )
+        await self._fail_http_bridge_inflight_session_creation(key, inflight_future, capacity_error)
+        raise capacity_error
 
     async def _http_bridge_pending_count(
         self: _HTTPBridgeServiceProtocol,

@@ -70,6 +70,8 @@ const EXPECTED_ENDPOINTS = [
 	// settings
 	"GET /api/settings",
 	"PUT /api/settings",
+	"GET /api/settings/telemetry",
+	"PUT /api/settings/telemetry",
 	"GET /api/settings/upstream-proxy",
 	"POST /api/settings/upstream-proxy/endpoints",
 	"POST /api/settings/upstream-proxy/endpoints/:endpointId/test",

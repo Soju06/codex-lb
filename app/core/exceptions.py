@@ -42,6 +42,13 @@ class ProxyUpstreamError(AppError):
     error_type = "server_error"
 
 
+class ProxyRequiredCapabilityTransportError(AppError):
+    status_code = 400
+    code = "required_capability_transport_unsupported"
+    error_type = "invalid_request_error"
+    message = "Required capability routing is only supported over the Responses WebSocket transport."
+
+
 # --- Dashboard-envelope errors ---
 
 

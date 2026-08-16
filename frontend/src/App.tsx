@@ -10,6 +10,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { TelemetryConsentDialog } from "@/features/settings/components/telemetry-consent-dialog";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 
 // Route-level code splitting: only the visited page's chunk loads, instead
@@ -61,6 +62,7 @@ function AppLayout() {
         </Suspense>
       </main>
       <StatusBar onHeightChange={setStatusBarHeight} />
+      <TelemetryConsentDialog />
     </div>
   );
 }
@@ -79,7 +81,7 @@ export default function App() {
             <Route path="/automations" element={<AutomationsPage />} />
             <Route path="/apis" element={<ApisPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/firewall" element={<Navigate to="/settings" replace />} />
+            <Route path="/firewall" element={<Navigate to="/settings?advanced=1#firewall" replace />} />
           </Route>
         </Routes>
       </AuthGate>

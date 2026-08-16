@@ -123,6 +123,8 @@ class HTTPBridgeOwnerClient:
         headers: Mapping[str, str],
         context: HTTPBridgeForwardContext,
         request_started_at: float,
+        on_request_dispatched: Callable[[], None] | None = None,
+        on_response_rejected: Callable[[], None] | None = None,
         on_response_wait: Callable[[], None] | None = None,
         on_response_ready: Callable[[], None] | None = None,
     ) -> AsyncIterator[str]:
@@ -134,51 +136,79 @@ class HTTPBridgeOwnerClient:
         if on_response_wait is not None:
             on_response_wait()
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-            async with session.post(
-                f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}",
-                json=payload.model_dump_for_forwarding(),
-                headers=build_owner_forward_headers(headers=headers, payload=payload, context=context),
+            request_url = f"{owner_endpoint}{HTTP_BRIDGE_INTERNAL_FORWARD_PATH}"
+            request_payload = payload.model_dump_for_forwarding()
+            request_headers = build_owner_forward_headers(headers=headers, payload=payload, context=context)
+            request_context = session.post(
+                request_url,
+                json=request_payload,
+                headers=request_headers,
                 skip_auto_headers=_OWNER_FORWARD_SKIP_AUTO_HEADERS,
-            ) as response:
-                if response.status != 200:
-                    payload_text = await response.text()
-                    raise ProxyResponseError(
-                        response.status,
-                        _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
-                        failure_phase="owner_forward_status",
-                        failure_detail="owner_forward_non_200",
-                        upstream_status_code=response.status,
-                    )
-                if on_response_ready is not None:
-                    on_response_ready()
-                yielded_event = False
-                try:
-                    async for event_block in _iter_sse_event_blocks(
-                        response,
-                        request_started_at=request_started_at,
-                        proxy_request_budget_seconds=_http_bridge_request_budget_seconds(settings),
-                        stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
-                    ):
-                        yielded_event = True
-                        yield event_block
-                except _OwnerForwardStreamTimeoutError as exc:
-                    raise OwnerForwardRelayFailure(
-                        format_sse_event(
+            )
+            # I/O begins when __aenter__ is awaited. Cancellation after that
+            # point can leave the receiver settling the reservation.
+            transport_started = False
+            observed_status = False
+            try:
+                transport_started = True
+                async with request_context as response:
+                    observed_status = True
+                    if response.status != 200:
+                        if on_response_rejected is not None:
+                            # The receiver contract never transfers cleanup on a
+                            # non-200 response, so the origin may safely release.
+                            on_response_rejected()
+                        payload_text = await response.text()
+                        raise ProxyResponseError(
+                            response.status,
+                            _owner_forward_error_payload(status_code=response.status, payload_text=payload_text),
+                            failure_phase="owner_forward_status",
+                            failure_detail="owner_forward_non_200",
+                            upstream_status_code=response.status,
+                        )
+                    if on_response_ready is not None:
+                        on_response_ready()
+                    yielded_event = False
+                    try:
+                        async for event_block in _iter_sse_event_blocks(
+                            response,
+                            request_started_at=request_started_at,
+                            proxy_request_budget_seconds=_http_bridge_request_budget_seconds(settings),
+                            stream_idle_timeout_seconds=settings.stream_idle_timeout_seconds,
+                        ):
+                            yielded_event = True
+                            yield event_block
+                    except _OwnerForwardStreamTimeoutError as exc:
+                        raise OwnerForwardRelayFailure(
+                            format_sse_event(
+                                response_failed_event(
+                                    exc.error_code,
+                                    exc.error_message,
+                                    response_id=get_request_id(),
+                                )
+                            )
+                        )
+                    if not yielded_event:
+                        yield format_sse_event(
                             response_failed_event(
-                                exc.error_code,
-                                exc.error_message,
+                                "stream_incomplete",
+                                "Upstream websocket closed before response.completed",
                                 response_id=get_request_id(),
                             )
                         )
-                    )
-                if not yielded_event:
-                    yield format_sse_event(
-                        response_failed_event(
-                            "stream_incomplete",
-                            "Upstream websocket closed before response.completed",
-                            response_id=get_request_id(),
-                        )
-                    )
+            except aiohttp.ClientConnectorError:
+                # DNS/connect refusal never delivered the reservation.
+                raise
+            except asyncio.CancelledError:
+                if transport_started and not observed_status and on_request_dispatched is not None:
+                    on_request_dispatched()
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                if not observed_status and on_request_dispatched is not None:
+                    # The request left local construction and may have reached
+                    # the owner; origin must not release or replay.
+                    on_request_dispatched()
+                raise
 
 
 def build_owner_forward_headers(

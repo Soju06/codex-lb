@@ -33,5 +33,5 @@ The durable bridge exposes operation settlement under the same operation, sessio
 - [Relay cancellation can interrupt an in-flight terminal append] -> Defer cancellation through the append and any required fallback, then preserve it.
 - [A stale owner could attempt to settle another owner's operation] -> Pass the unchanged session/instance/epoch fence and treat rejection as non-settlement.
 - [A delayed fallback could overwrite a newer retry under the same owner] -> Require the prior attempt's acknowledged/terminal state and response identity in the update predicate.
-- [Replay aliases can differ from the upstream response identity persisted at acknowledgement] -> Carry the upstream identity as the expected CAS value separately from the client-visible terminal identity.
+- [Replay aliases can differ from the upstream response identity persisted at acknowledgement] -> Carry the upstream identity as the expected CAS value separately from the client-visible terminal identity, and preserve it when no new client-visible identity is supplied.
 - [A failed terminal append leaves no replayable terminal event] -> Keep `event_spool_complete` false and report `persisted=false`; authoritative state and transcript completeness remain separate facts.

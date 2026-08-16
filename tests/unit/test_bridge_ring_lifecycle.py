@@ -909,6 +909,28 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
         assert pre_settled_replay is not None
         assert pre_settled_replay.state == "failed"
         assert pre_settled_replay.response_id == "resp-client-visible-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            response_id=None,
+        )
+        null_alias_settlement = await repository.get_operation(operation_id=replay_operation_id)
+        assert null_alias_settlement is not None
+        assert null_alias_settlement.state == "failed"
+        assert null_alias_settlement.response_id == "resp-upstream-replay"
     finally:
         await session.close()
 

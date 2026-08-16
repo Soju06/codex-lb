@@ -2045,6 +2045,13 @@ class DurableBridgeRepository:
                 if response_id is not None
                 else HttpBridgeOperationRecord.response_id.is_(None)
             )
+            values: dict[str, object] = {
+                "state": state,
+                "event_spool_complete": False,
+                "updated_at": utcnow(),
+            }
+            if response_id is not None:
+                values["response_id"] = response_id
             result = await self._session.execute(
                 update(HttpBridgeOperationRecord)
                 .where(
@@ -2058,12 +2065,7 @@ class DurableBridgeRepository:
                         ),
                     ),
                 )
-                .values(
-                    state=state,
-                    response_id=response_id,
-                    event_spool_complete=False,
-                    updated_at=utcnow(),
-                )
+                .values(**values)
             )
             await self._session.commit()
         return bool(getattr(result, "rowcount", 0))

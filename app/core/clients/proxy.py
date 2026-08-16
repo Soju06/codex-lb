@@ -1369,6 +1369,56 @@ def _normalize_sse_event_type_line(line: str) -> str:
     return f"event: {normalized_type}"
 
 
+def _normalize_multi_data_sse_block(
+    event_block: str,
+    lines: list[str],
+    line_separator: str,
+    terminator: str,
+) -> str:
+    # Fragments of a payload split across multiple `data:` lines are not
+    # individually decodable, so alias detection must run on the combined
+    # payload (the SSE spec joins data-line values with "\n"). Decode it
+    # before touching the `event:` framing line so both surfaces are
+    # rewritten together; if the combined payload cannot be decoded, leave
+    # the whole block — framing line included — untouched rather than
+    # emitting a partially rewritten frame.
+    payload = parse_sse_data_json(event_block)
+    if payload is None:
+        return event_block
+
+    data_replacement: str | None = None
+    event_type = payload.get("type")
+    if isinstance(event_type, str) and event_type in _SSE_EVENT_TYPE_ALIASES:
+        payload["type"] = _SSE_EVENT_TYPE_ALIASES[event_type]
+        data_replacement = f"data: {json.dumps(payload, ensure_ascii=True, separators=(',', ':'))}"
+
+    normalized_lines: list[str] = []
+    changed = False
+    data_line_emitted = False
+    for line in lines:
+        if line.startswith("data:"):
+            if data_replacement is None:
+                normalized_lines.append(line)
+            elif not data_line_emitted:
+                # The rewritten payload re-serializes compactly, so the
+                # fragments collapse into one canonical `data:` line.
+                normalized_lines.append(data_replacement)
+                data_line_emitted = True
+                changed = True
+            continue
+        normalized_line = _normalize_sse_event_type_line(line)
+        if normalized_line != line:
+            changed = True
+        normalized_lines.append(normalized_line)
+    if not changed:
+        return event_block
+
+    normalized = line_separator.join(normalized_lines)
+    if terminator:
+        return normalized + terminator
+    return normalized
+
+
 def _normalize_sse_event_block(event_block: str) -> str:
     if not event_block:
         return event_block
@@ -1396,6 +1446,9 @@ def _normalize_sse_event_block(event_block: str) -> str:
     lines = _SSE_LINE_BOUNDARY_RE.split(body)
     if not lines:
         return event_block
+
+    if sum(1 for line in lines if line.startswith("data:")) > 1:
+        return _normalize_multi_data_sse_block(event_block, lines, line_separator, terminator)
 
     normalized_lines: list[str] = []
     changed = False

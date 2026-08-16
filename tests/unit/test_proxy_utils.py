@@ -46765,6 +46765,30 @@ def test_normalize_sse_event_block_rewrites_alias_on_both_event_and_data_lines()
     )
 
 
+def test_normalize_sse_event_block_rewrites_alias_split_across_data_lines():
+    # A legal SSE payload split across multiple `data:` lines is only
+    # decodable as the combined value (fragments joined with "\n"); the alias
+    # rewrite must still land on both the payload and the `event:` line.
+    block = 'event: response.text.delta\ndata: {"type":"response.text.delta",\ndata: "delta":"hi"}\n\n'
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert normalized == (
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+    )
+
+
+def test_normalize_sse_event_block_leaves_undecodable_multi_line_data_untouched():
+    # When the combined multi-line payload cannot be decoded, neither surface
+    # may be rewritten: rewriting only the `event:` framing line would emit a
+    # frame whose framing and payload disagree about the event type.
+    block = 'event: response.text.delta\ndata: {"type":"response.te\ndata: xt.delta","delta":"hi"}\n\n'
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert normalized == block
+
+
 def test_normalize_sse_event_block_skips_json_parsing_for_non_alias_types(monkeypatch) -> None:
     # The alias normalizer only inspects blocks carrying one of the legacy
     # alias names; canonical event types pass through without a JSON parse.

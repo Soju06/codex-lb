@@ -11,6 +11,14 @@ contain request ids, account ids, request payloads, credentials, or exception
 content. This diagnostic MUST NOT change cleanup ordering, timeout budgets,
 retry behavior, or task ownership.
 
+The phase MUST be one of `not_started`, `upstream_close`, `upstream_reader`,
+`retired_create_lease`, `unsent_request`, `replay_request`, `pending_requests`,
+`connection_lease`, or `complete`. `not_started` is the fallback before the
+first cleanup operation begins. `complete` records finished cleanup and MUST NOT
+appear in a timeout warning. Missing or unrecognized phases MUST fall back to
+`not_started`; implementations MUST NOT derive a phase from request or exception
+data.
+
 #### Scenario: Pending request finalization exceeds the cleanup budget
 
 - **GIVEN** a cancelled WebSocket scope whose pending request finalization does

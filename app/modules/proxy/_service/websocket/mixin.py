@@ -2456,13 +2456,14 @@ class _WebSocketMixin:
                     )
 
                 try:
-                    if (
+                    is_response_create = (
                         text_data is not None
                         and request_state is not None
                         and payload is not None
                         and account is not None
                         and _is_websocket_response_create(payload)
-                    ):
+                    )
+                    if is_response_create:
                         usage_limit_state = await proxy._load_balancer.check_account_usage_limit(account.id)
                         if usage_limit_state in {
                             AccountUsageLimitState.REACHED,
@@ -2477,11 +2478,9 @@ class _WebSocketMixin:
                             )
                             raise ProxyResponseError(status_code, error_payload)
                     if (
-                        text_data is not None
+                        is_response_create
                         and request_state is not None
-                        and payload is not None
                         and account is not None
-                        and _is_websocket_response_create(payload)
                         and request_state.account_response_create_lease is None
                     ):
                         # Account-cap spillover belongs to connect selection.
@@ -2499,11 +2498,10 @@ class _WebSocketMixin:
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and account is not None
-                        and _is_websocket_response_create(payload)
                     ):
                         text_data = _websocket_text_with_account_installation_id(text_data, account)
                         if request_state.fresh_upstream_request_text is not None:
@@ -2516,12 +2514,11 @@ class _WebSocketMixin:
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and upstream_control is not None
                         and upstream_control.reconnect_requested
-                        and _is_websocket_response_create(payload)
                     ):
                         # Admission and account-cap waits can outlive a clean
                         # close observed by the upstream reader. Re-check at

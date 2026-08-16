@@ -1480,6 +1480,7 @@ class LoadBalancer:
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
+                traffic_class=TRAFFIC_CLASS_OPPORTUNISTIC,
             )
             if account_caps_exhausted:
                 logger.warning(

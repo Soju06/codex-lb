@@ -22,6 +22,7 @@ from app.core.balancer import (
     SelectionResult,
     TrafficClass,
     account_usage_limit_blocks_selection,
+    routing_eligible_states,
     select_account,
 )
 from app.core.utils.time import utcnow
@@ -489,7 +490,7 @@ async def run_sticky_selection_path(
             # Fair share is measured against the routable pool,
             # before hard-sticky narrows selection to the owner account.
             fair_share_candidate_ids = [
-                state.account_id for state in _routing_eligible_states(states, traffic_class=traffic_class)
+                state.account_id for state in routing_eligible_states(states, traffic_class=traffic_class)
             ]
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
@@ -520,6 +521,7 @@ async def run_sticky_selection_path(
                     lease_kind=lease_kind,
                     caps=caps,
                     stream_reserve_slots=stream_reserve_slots,
+                    traffic_class=traffic_class,
                 )
             if cap_spillover_allowed and lease_kind == "stream":
                 # Stream selection immediately precedes response-create
@@ -531,6 +533,7 @@ async def run_sticky_selection_path(
                     lease_kind="response_create",
                     caps=caps,
                     stream_reserve_slots=0,
+                    traffic_class=traffic_class,
                 )
                 selection_states = response_create_states or selection_states
             preserve_existing_mapping = (
@@ -1578,17 +1581,18 @@ def _filter_states_for_usage_limit_and_account_caps(
     lease_kind: AccountLeaseKind | None,
     caps: AccountConcurrencyCaps,
     stream_reserve_slots: int = 0,
+    traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
 ) -> tuple[list[AccountState], bool]:
     state_list = list(states)
     usage_limit_blocked = [state for state in state_list if account_usage_limit_blocks_selection(state)]
-    usage_limit_eligible = _usage_limit_eligible_states(state_list)
+    usage_limit_eligible = [state for state in state_list if not account_usage_limit_blocks_selection(state)]
     if not usage_limit_eligible:
         # Preserve blocked states so the canonical selector returns the stable
         # local-policy error instead of misclassifying the pool as cap-bound.
         return state_list, False
-    routing_eligible = _routing_eligible_states(
+    routing_eligible = routing_eligible_states(
         usage_limit_eligible,
-        traffic_class=TRAFFIC_CLASS_FOREGROUND,
+        traffic_class=traffic_class,
     )
     if not routing_eligible:
         return usage_limit_blocked or state_list, False
@@ -1603,30 +1607,6 @@ def _filter_states_for_usage_limit_and_account_caps(
     # The canonical selector excludes policy-blocked states before selection,
     # but retaining them preserves terminal error precedence on fallback paths.
     return [*filtered, *usage_limit_blocked], False
-
-
-def _usage_limit_eligible_states(states: Iterable[AccountState]) -> list[AccountState]:
-    return [state for state in states if not account_usage_limit_blocks_selection(state)]
-
-
-def _routing_eligible_states(
-    states: Iterable[AccountState],
-    *,
-    traffic_class: TrafficClass,
-) -> list[AccountState]:
-    current = time.time()
-    return [
-        state
-        for state in states
-        if select_account(
-            [replace(state)],
-            now=current,
-            allow_backoff_fallback=False,
-            traffic_class=traffic_class,
-            allow_usage_exhaustion_error=False,
-        ).account
-        is not None
-    ]
 
 
 def _probing_result_requires_recovery_reservation(
@@ -1674,14 +1654,7 @@ def _pool_has_available_account_without_backoff(
     # classify on copies so cap-error reporting cannot mutate the real
     # selection snapshot before sticky persistence. Keep the pool intact:
     # opportunistic admission compares candidates with one another.
-    result = select_account(
-        [replace(state) for state in states],
-        now=time.time(),
-        routing_strategy="single_account",
-        allow_backoff_fallback=False,
-        traffic_class=traffic_class,
-    )
-    return result.account is not None
+    return bool(routing_eligible_states(states, now=time.time(), traffic_class=traffic_class))
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:

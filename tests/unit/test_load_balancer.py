@@ -24,13 +24,16 @@ from app.core.balancer import (
     handle_quota_exceeded,
     handle_rate_limit,
     plausible_rate_limit_reset_at,
+    routing_eligible_states,
     select_account,
 )
 from app.core.balancer.logic import DRAIN_PRIMARY_THRESHOLD_PCT, PROBE_QUIET_SECONDS
 from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.usage.quota import apply_usage_quota
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.modules.proxy._load_balancer.sticky_selection import _filter_states_for_usage_limit_and_account_caps
 from app.modules.proxy.load_balancer import (
+    AccountConcurrencyCaps,
     RuntimeState,
     _additional_quota_applies_to_plan,
     _AdditionalLimitFilterResult,
@@ -54,6 +57,70 @@ def test_select_account_picks_lowest_used_percent():
     result = select_account(states, routing_strategy="usage_weighted")
     assert result.account is not None
     assert result.account.account_id == "b"
+
+
+def _opportunistic_pool(now: float) -> list[AccountState]:
+    return [
+        AccountState(
+            "near-floor",
+            AccountStatus.ACTIVE,
+            used_percent=96.0,
+            secondary_used_percent=96.0,
+            reset_at=now + 3600,
+            secondary_reset_at=int(now + 3600),
+        ),
+        AccountState(
+            "peer",
+            AccountStatus.ACTIVE,
+            used_percent=20.0,
+            secondary_used_percent=20.0,
+            reset_at=now + 3600,
+            secondary_reset_at=int(now + 3600),
+        ),
+    ]
+
+
+def test_opportunistic_routing_eligibility_is_pool_scoped() -> None:
+    now = 1_700_000_000.0
+
+    eligible = routing_eligible_states(
+        _opportunistic_pool(now),
+        now=now,
+        traffic_class="opportunistic",
+    )
+
+    assert [state.account_id for state in eligible] == ["near-floor", "peer"]
+
+
+def test_routing_eligibility_does_not_normalize_live_states() -> None:
+    now = 1_700_000_000.0
+    expired = AccountState(
+        "expired",
+        AccountStatus.RATE_LIMITED,
+        used_percent=80.0,
+        reset_at=now - 1,
+    )
+
+    eligible = routing_eligible_states([expired], now=now)
+
+    assert eligible == [expired]
+    assert expired.status == AccountStatus.RATE_LIMITED
+    assert expired.reset_at == now - 1
+    assert expired.used_percent == 80.0
+
+
+def test_opportunistic_account_cap_filter_keeps_pool_eligible_membership() -> None:
+    now = 1_700_000_000.0
+
+    eligible, exhausted = _filter_states_for_usage_limit_and_account_caps(
+        _opportunistic_pool(now),
+        lease_kind="stream",
+        caps=AccountConcurrencyCaps(response_create_limit=1, stream_limit=1),
+        traffic_class="opportunistic",
+    )
+
+    assert not exhausted
+    assert [state.account_id for state in eligible] == ["near-floor", "peer"]
 
 
 def test_select_account_never_uses_reached_limit_even_for_burn_first_policy() -> None:

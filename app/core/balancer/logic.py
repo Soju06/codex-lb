@@ -6,7 +6,7 @@ import math
 import random
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Collection, Iterable, Literal
 
 from app.core.balancer.types import FailureClass, UpstreamError
@@ -451,6 +451,101 @@ def _fallback_secondary_capacity_credits(plan_type: str | None) -> float:
     )
 
 
+def _prepare_routing_candidates(
+    states: Iterable[AccountState],
+    *,
+    current: float,
+    ignore_standard_quota: bool,
+    bypass_quota_exceeded: bool,
+    bypass_account_ids: Collection[str] | None,
+) -> tuple[list[AccountState], list[AccountState], list[AccountState]]:
+    all_states = list(states)
+    available: list[AccountState] = []
+    in_error_backoff: list[AccountState] = []
+    usage_limit_blocked: list[AccountState] = []
+    bypass_ids = set(bypass_account_ids or ())
+
+    for state in all_states:
+        bypass_standard_quota = (
+            ignore_standard_quota
+            or state.ignore_standard_quota
+            or bypass_quota_exceeded
+            or state.account_id in bypass_ids
+        )
+        if state.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            continue
+        if state.status == AccountStatus.PAUSED:
+            continue
+        if state.status == AccountStatus.RATE_LIMITED:
+            if state.reset_at and current >= state.reset_at:
+                state.status = AccountStatus.ACTIVE
+                state.used_percent = 0.0
+                state.error_count = 0
+                state.reset_at = None
+            elif not bypass_standard_quota:
+                continue
+        if state.status == AccountStatus.QUOTA_EXCEEDED:
+            if state.reset_at and current >= state.reset_at:
+                state.status = AccountStatus.ACTIVE
+                state.used_percent = 0.0
+                state.secondary_used_percent = 0.0
+                state.reset_at = None
+            elif not bypass_standard_quota:
+                continue
+        if state.cooldown_until and current >= state.cooldown_until:
+            state.cooldown_until = None
+            state.last_error_at = None
+            state.error_count = 0
+        if state.cooldown_until and current < state.cooldown_until:
+            continue
+        if account_usage_limit_blocks_selection(state):
+            usage_limit_blocked.append(state)
+            continue
+        if state.error_count >= ERROR_BACKOFF_THRESHOLD:
+            backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
+            if state.last_error_at and current - state.last_error_at < backoff:
+                in_error_backoff.append(state)
+                continue
+            # Error backoff expired — reset error state so recovery is
+            # not penalised by stale counts. The account has already
+            # been held back for the full backoff period; letting it
+            # re-enter the pool with a clean slate avoids the problem
+            # where a previously-high error_count causes an immediate
+            # return to maximum backoff on the very next transient error.
+            state.error_count = 0
+            state.last_error_at = None
+        available.append(state)
+
+    return available, in_error_backoff, usage_limit_blocked
+
+
+def routing_eligible_states(
+    states: Iterable[AccountState],
+    *,
+    now: float | None = None,
+    traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+) -> list[AccountState]:
+    """Return the pool-wide states eligible for the requested traffic class."""
+    current = time.time() if now is None else now
+    state_list = list(states)
+    evaluated_states = [replace(state) for state in state_list]
+    available, _, _ = _prepare_routing_candidates(
+        evaluated_states,
+        current=current,
+        ignore_standard_quota=False,
+        bypass_quota_exceeded=False,
+        bypass_account_ids=None,
+    )
+    if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and available:
+        available, _ = _filter_opportunistic_candidates(available, current)
+    eligible_evaluations = {id(state) for state in available}
+    return [
+        state
+        for state, evaluated in zip(state_list, evaluated_states, strict=True)
+        if id(evaluated) in eligible_evaluations
+    ]
+
+
 def select_account(
     states: Iterable[AccountState],
     now: float | None = None,
@@ -537,64 +632,16 @@ def select_account(
         human-readable error message when no account is eligible.
     """
     current = now or time.time()
-    available: list[AccountState] = []
-    in_error_backoff: list[AccountState] = []
-    all_states = list(states)
-    usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else all_states
-    usage_limit_blocked: list[AccountState] = []
-    selectable_states = all_states
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
-
-    for state in selectable_states:
-        bypass_standard_quota = (
-            ignore_standard_quota
-            or state.ignore_standard_quota
-            or bypass_quota_exceeded
-            or (bypass_account_ids is not None and state.account_id in bypass_account_ids)
-        )
-        if state.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
-            continue
-        if state.status == AccountStatus.PAUSED:
-            continue
-        if state.status == AccountStatus.RATE_LIMITED:
-            if state.reset_at and current >= state.reset_at:
-                state.status = AccountStatus.ACTIVE
-                state.used_percent = 0.0
-                state.error_count = 0
-                state.reset_at = None
-            elif not bypass_standard_quota:
-                continue
-        if state.status == AccountStatus.QUOTA_EXCEEDED:
-            if state.reset_at and current >= state.reset_at:
-                state.status = AccountStatus.ACTIVE
-                state.used_percent = 0.0
-                state.secondary_used_percent = 0.0
-                state.reset_at = None
-            elif not bypass_standard_quota:
-                continue
-        if state.cooldown_until and current >= state.cooldown_until:
-            state.cooldown_until = None
-            state.last_error_at = None
-            state.error_count = 0
-        if state.cooldown_until and current < state.cooldown_until:
-            continue
-        if account_usage_limit_blocks_selection(state):
-            usage_limit_blocked.append(state)
-            continue
-        if state.error_count >= ERROR_BACKOFF_THRESHOLD:
-            backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
-            if state.last_error_at and current - state.last_error_at < backoff:
-                in_error_backoff.append(state)
-                continue
-            # Error backoff expired — reset error state so recovery is
-            # not penalised by stale counts. The account has already
-            # been held back for the full backoff period; letting it
-            # re-enter the pool with a clean slate avoids the problem
-            # where a previously-high error_count causes an immediate
-            # return to maximum backoff on the very next transient error.
-            state.error_count = 0
-            state.last_error_at = None
-        available.append(state)
+    all_states = list(states)
+    available, in_error_backoff, usage_limit_blocked = _prepare_routing_candidates(
+        all_states,
+        current=current,
+        ignore_standard_quota=ignore_standard_quota,
+        bypass_quota_exceeded=bypass_quota_exceeded,
+        bypass_account_ids=bypass_account_ids,
+    )
+    usage_exhaustion_state_list = list(usage_exhaustion_states) if usage_exhaustion_states is not None else all_states
 
     if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and available:
         opportunistic_available, reason = _filter_opportunistic_candidates(available, current)
@@ -614,7 +661,7 @@ def select_account(
                 AccountStatus.QUOTA_EXCEEDED,
             )
             and state.account_id not in in_error_backoff_ids
-            for state in selectable_states
+            for state in all_states
         )
         if allow_backoff_fallback and (len(in_error_backoff) > 1 or (in_error_backoff and hard_blocked_exists)):
 

@@ -13,6 +13,7 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
+    routing_eligible_states,
 )
 from app.db.models import Account, AccountStatus
 from app.modules.proxy._load_balancer.sticky_selection import (
@@ -24,7 +25,6 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _filter_recovery_probe_candidates,
     _filter_states_for_usage_limit_and_account_caps,
     _probing_result_requires_recovery_reservation,
-    _routing_eligible_states,
     _select_account_preferring_budget_safe,
 )
 from app.modules.proxy._load_balancer.types import (
@@ -165,7 +165,7 @@ async def run_unbound_selection_path(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
                 candidate_account_ids=[
-                    state.account_id for state in _routing_eligible_states(states, traffic_class=traffic_class)
+                    state.account_id for state in routing_eligible_states(states, traffic_class=traffic_class)
                 ],
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
@@ -177,6 +177,7 @@ async def run_unbound_selection_path(
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
+                traffic_class=traffic_class,
             )
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(

@@ -61,7 +61,7 @@ from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind
+from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind, UsageHistory
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -3702,6 +3702,7 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_opportunistic_stream_cap")
+    now = utcnow()
     monkeypatch.setattr("app.modules.proxy.load_balancer.get_settings", lambda: settings)
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_settings_cache",
@@ -3713,8 +3714,28 @@ async def test_opportunistic_admission_honors_stream_account_cap(monkeypatch):
         AsyncMock(
             return_value=SelectionInputs(
                 accounts=[account],
-                latest_primary={},
-                latest_secondary={},
+                latest_primary={
+                    account.id: UsageHistory(
+                        id=1,
+                        account_id=account.id,
+                        recorded_at=now,
+                        window="primary",
+                        used_percent=10.0,
+                        reset_at=int(now.timestamp()) + 3600,
+                        window_minutes=300,
+                    )
+                },
+                latest_secondary={
+                    account.id: UsageHistory(
+                        id=2,
+                        account_id=account.id,
+                        recorded_at=now,
+                        window="secondary",
+                        used_percent=10.0,
+                        reset_at=int(now.timestamp()) + 86400,
+                        window_minutes=10080,
+                    )
+                },
                 latest_monthly={},
             )
         ),

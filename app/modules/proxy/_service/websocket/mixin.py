@@ -2644,7 +2644,7 @@ class _WebSocketMixin:
                     await _close_websocket_upstream_for_cleanup(
                         proxy,
                         upstream,
-                        timeout_seconds=cleanup_timeout,
+                        timeout_seconds=task_cleanup_timeout,
                     )
                 if reader_to_await is not None:
                     try:
@@ -2783,7 +2783,7 @@ class _WebSocketMixin:
             )
             if not done:
                 _facade().logger.warning(
-                    "Websocket scope cleanup exceeded its remaining drain budget "
+                    "Websocket scope cleanup exceeded its cleanup budget "
                     "timeout_seconds=%.3f background_cleanup_tasks=%d",
                     max(float(cleanup_timeout), 0.0),
                     sum(1 for task in proxy._background_cleanup_tasks if not task.done()),

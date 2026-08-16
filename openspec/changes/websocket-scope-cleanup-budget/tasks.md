@@ -19,5 +19,5 @@
 - [x] 3.2 Run changed-file Ruff check/format, proxy architecture checks, and
   applicable type checks.
 - [x] 3.3 Validate the OpenSpec delta and inspect the final diff/status.
-- [ ] 3.4 Open a Draft PR targeting upstream `main` and add the live 1.23.0
+- [x] 3.4 Open a Draft PR targeting upstream `main` and add the live 1.23.0
   evidence to issue #1711.

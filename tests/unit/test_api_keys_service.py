@@ -94,6 +94,9 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             row.source_assignments = self._source_assignments.get(key_id, [])
         return row
 
+    async def get_for_limit_enforcement(self, key_id: str) -> ApiKey | None:
+        return await self.get_by_id(key_id)
+
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         for row in self.rows.values():
             if row.key_hash == key_hash:

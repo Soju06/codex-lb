@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only, selectinload
+from sqlalchemy.orm import load_only, raiseload, selectinload
 
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -166,6 +166,32 @@ class ApiKeysRepository:
 
     async def get_by_id(self, key_id: str) -> ApiKey | None:
         result = await self._session.execute(self._select_api_key().where(ApiKey.id == key_id))
+        return result.scalar_one_or_none()
+
+    async def get_for_limit_enforcement(self, key_id: str) -> ApiKey | None:
+        """Admission-path load for ``enforce_limits_for_request``.
+
+        The enforcement transaction reads only ``is_active``/``expires_at``
+        plus the ``limits`` collection, so this skips the
+        ``account_assignments``/``source_assignments`` selectin round trips
+        that ``get_by_id`` pays on every proxied request. ``raiseload`` keeps
+        the narrowing fail-loud: any future enforcement code that touches an
+        unlisted column or relationship raises instead of silently lazy
+        loading. ``populate_existing`` stays required because the lazy limit
+        reset commits mid-enforcement and the refetch must re-hydrate rows
+        already in the identity map (sessions use ``expire_on_commit=False``).
+        """
+        result = await self._session.execute(
+            select(ApiKey)
+            .execution_options(populate_existing=True)
+            .options(
+                load_only(ApiKey.is_active, ApiKey.expires_at, raiseload=True),
+                selectinload(ApiKey.limits),
+                raiseload(ApiKey.account_assignments),
+                raiseload(ApiKey.source_assignments),
+            )
+            .where(ApiKey.id == key_id)
+        )
         return result.scalar_one_or_none()
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:

@@ -58,6 +58,8 @@ class ApiKeysRepositoryProtocol(Protocol):
 
     async def get_by_id(self, key_id: str) -> ApiKey | None: ...
 
+    async def get_for_limit_enforcement(self, key_id: str) -> ApiKey | None: ...
+
     async def get_by_hash(self, key_hash: str) -> ApiKey | None: ...
 
     async def list_all(self) -> list[ApiKey]: ...
@@ -827,11 +829,15 @@ class ApiKeysService:
     ) -> ApiKeyUsageReservationData:
         now = utcnow()
         async with sqlite_writer_section():
-            row = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id))
+            row = _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(key_id))
             if row.expires_at is not None and row.expires_at < now:
                 raise ApiKeyInvalidError("API key has expired")
             limits_reset = await _lazy_reset_expired_limits(self._repository, row.limits, now=now)
-            refreshed = _ensure_valid_api_key_row(await self._repository.get_by_id(key_id)) if limits_reset else row
+            refreshed = (
+                _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(key_id))
+                if limits_reset
+                else row
+            )
             if refreshed.expires_at is not None and refreshed.expires_at < now:
                 raise ApiKeyInvalidError("API key has expired")
 

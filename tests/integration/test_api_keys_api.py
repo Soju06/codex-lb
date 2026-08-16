@@ -10,6 +10,7 @@ from typing import cast
 
 import pytest
 from fastapi.responses import JSONResponse
+from sqlalchemy import exc as sqlalchemy_exc
 from sqlalchemy import select, update
 
 import app.core.clients.proxy as core_proxy_module
@@ -26,7 +27,7 @@ from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, LimitW
 from app.db.session import SessionLocal
 from app.modules.api_keys.last_used_coalescer import get_api_key_last_used_coalescer
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyInvalidError, ApiKeysService, LimitRuleInput
 from app.modules.model_sources.forwarding import (
     SourceChatCompletion,
     SourceResponsesStream,
@@ -3605,6 +3606,77 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         limits = await repo.get_limits_by_key(created.id)
         assert len(limits) == 1
         assert limits[0].current_value == fresh_reservation.items[0].reserved_delta
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_lazy_reset_and_expiry_with_narrowed_admission_load(async_client):
+    """Regression for the narrowed admission load (``get_for_limit_enforcement``).
+
+    The enforcement path loads only ``is_active``/``expires_at`` plus the
+    ``limits`` collection. The lazy expired-limit reset (which commits
+    mid-enforcement and refetches through the same narrowed load) and the
+    key-expiry rejection must behave exactly as with the full-graph load.
+    """
+    del async_client
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        service = ApiKeysService(repo)
+        created = await service.create_key(
+            ApiKeyCreateData(
+                name="narrowed-admission-load",
+                allowed_models=None,
+                expires_at=None,
+                limits=[
+                    LimitRuleInput(limit_type="total_tokens", limit_window="daily", max_value=50_000),
+                ],
+            )
+        )
+        limits = await repo.get_limits_by_key(created.id)
+        assert len(limits) == 1
+        # Exhausted AND expired: without the lazy reset the enforcement
+        # would reject; the reset must zero the counter and advance reset_at.
+        limits[0].current_value = 50_000
+        limits[0].reset_at = now - timedelta(hours=2)
+        await session.commit()
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        service = ApiKeysService(repo)
+        reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        assert reservation.has_applicable_limits is True
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(created.id)
+        assert len(limits) == 1
+        assert limits[0].reset_at > now
+        reserved = await repo.get_usage_reservation(reservation.reservation_id)
+        assert reserved is not None
+        assert reserved.status == "reserved"
+        assert limits[0].current_value == reserved.items[0].reserved_delta
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        # Fail-loud contract of the narrowed load: unlisted columns and the
+        # assignment relationships raise instead of lazy loading.
+        row = await repo.get_for_limit_enforcement(created.id)
+        assert row is not None
+        assert row.is_active is True
+        assert row.expires_at is None
+        assert len(row.limits) == 1
+        with pytest.raises(sqlalchemy_exc.InvalidRequestError):
+            _ = row.name
+        with pytest.raises(sqlalchemy_exc.InvalidRequestError):
+            _ = row.account_assignments
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        service = ApiKeysService(repo)
+        await repo.update(created.id, expires_at=now - timedelta(minutes=1))
+        with pytest.raises(ApiKeyInvalidError):
+            await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
 
 
 @pytest.mark.asyncio

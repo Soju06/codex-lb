@@ -1592,11 +1592,14 @@ async def test_enforce_limits_without_limits_skips_reservation_and_commit() -> N
 
     assert reservation is None
     assert repo._reservations == {}
-    assert repo.commit_count == initial_commit_count
     # The implicit transaction opened by the admission SELECTs must be closed
     # on the limit-free path (long-lived sessions would otherwise idle in
-    # transaction across the upstream round-trip).
-    assert repo.rollback_calls == initial_rollback_calls + 1
+    # transaction across the upstream round-trip) — via commit(), never
+    # rollback(): rollback expires every ORM object tracked by a shared
+    # session even with expire_on_commit=False, which broke quota-planner
+    # warmup probes. The commit is read-only (no reservation was inserted).
+    assert repo.commit_count == initial_commit_count + 1
+    assert repo.rollback_calls == initial_rollback_calls
     # Settlement never runs without a reservation, so admission itself must
     # record the last-used touch for limit-free keys.
     pending = coalescer.pending_snapshot()
@@ -1630,8 +1633,11 @@ async def test_enforce_limits_with_no_applicable_limits_skips_reservation_and_le
 
     assert reservation is None
     assert repo._reservations == {}
-    assert repo.commit_count == initial_commit_count
-    assert repo.rollback_calls == initial_rollback_calls + 1
+    # One read-only commit closes the admission transaction; no rollback
+    # (rollback would expire shared-session ORM state — see the limit-free
+    # transaction-close comment in _enforce_limits_for_request_once).
+    assert repo.commit_count == initial_commit_count + 1
+    assert repo.rollback_calls == initial_rollback_calls
     limits = await repo.get_limits_by_key(created.id)
     assert limits[0].current_value == 0
 

@@ -880,12 +880,26 @@ class ApiKeysService:
                     # lazy expired-limit reset above commits inside
                     # ``reset_limit`` itself, so no write is pending here).
                     # Every downstream consumer treats a missing reservation
-                    # as "nothing to settle". Roll back to close the implicit
+                    # as "nothing to settle". Commit to close the implicit
                     # transaction opened by the admission SELECTs: on sessions
                     # that outlive this call (e.g. the quota-planner warmup
                     # service) an open transaction would otherwise idle across
-                    # the upstream round-trip until the next commit.
-                    await self._repository.rollback()
+                    # the upstream round-trip until the next commit. This must
+                    # be ``commit()`` rather than ``rollback()``:
+                    # ``AsyncSession.rollback()`` expires every tracked ORM
+                    # object regardless of ``expire_on_commit``, and the warmup
+                    # service shares this session with already-loaded
+                    # ``account``/``decision`` rows whose attribute access
+                    # after expiry raises ``MissingGreenlet``. ``commit()``
+                    # with ``expire_on_commit=False`` (app/db/session.py)
+                    # leaves tracked state loaded, and is semantically
+                    # equivalent here because the transaction holds only the
+                    # admission SELECTs — no reservation write ran, and every
+                    # production caller either dedicates a session to
+                    # admission (proxy paths) or commits each prior write
+                    # inside its repository methods (quota-planner), so no
+                    # unrelated dirty state can be flushed by this commit.
+                    await self._repository.commit()
                 else:
                     reservation_id = _next_usage_reservation_id()
                     await self._repository.create_usage_reservation(

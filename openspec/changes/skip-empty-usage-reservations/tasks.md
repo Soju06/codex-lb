@@ -27,14 +27,19 @@
 ## 3. Tests
 
 - [x] 3.1 Unit: key without limits → admission returns `None`, no
-      reservation INSERT, no commit.
+      reservation INSERT; the only commit is the read-only transaction close.
 - [x] 3.2 Unit: key whose limits do not match the request model → `None`,
       limits untouched.
 - [x] 3.2b Unit: limit-free admission records the last-used coalescer touch
-      and closes the read transaction (rollback called).
+      and closes the read transaction via commit — never rollback, which
+      would expire shared-session ORM state (quota-planner warmup).
 - [x] 3.3 Unit: settlement/release/heartbeat with `reservation=None` no-op.
 - [x] 3.4 Integration: quota-planner warmup executes with a limit-free key
       (no finalize call, probe succeeds).
+- [x] 3.4b Integration (regression): warmup through the REAL ApiKeysService
+      on the shared session — the probe's `account.access_token_encrypted`
+      access stays readable after the limit-free early return (no
+      MissingGreenlet from expired shared state).
 - [x] 3.5 Integration: stale-release reclamation finds no rows after
       limit-free admissions; limited keys keep creating reservations
       (regression).

@@ -14,11 +14,29 @@ Safety of skipping the commit: with zero applicable limits no
 `try_reserve_usage` CAS ran (and a zero-delta call is read-only), and the
 lazy expired-limit reset commits inside `reset_limit` itself, so there is
 no pending write to lose when admission returns early. The early return
-still issues a `rollback()` to close the implicit transaction opened by
+still issues a `commit()` to close the implicit transaction opened by
 the admission SELECTs: proxy call sites use short-lived background
 sessions, but the quota-planner warmup service holds one long-lived
 session, and leaving the read transaction open would pin an
 idle-in-transaction window across the warmup probe's upstream round-trip.
+
+Why `commit()` and not `rollback()`: `AsyncSession.rollback()` expires
+every tracked ORM instance **regardless of** `expire_on_commit=False`.
+The warmup service shares its long-lived session with this repository and
+already tracks `account` and `decision` rows; expiring them makes the
+subsequent `_send_warmup_probe` access to `account.access_token_encrypted`
+(and the error path's `decision.id`) raise `MissingGreenlet` — limit-free
+warmups would never execute. `commit()` with `expire_on_commit=False`
+(both session factories in `app/db/session.py`) leaves tracked state
+loaded. It is semantically equivalent to a rollback at this point because
+the open transaction holds only the admission SELECTs, and no unrelated
+dirty state can be flushed by it: the proxy call sites dedicate a
+fresh/scoped session to admission (`get_background_session`,
+`_repo_factory`), and the quota-planner repositories commit every prior
+write inside their own methods (`log_decision`, `update_decision_status`,
+`claim_warmup_decision` — the latter even commits at the start of its own
+transaction). Regression coverage drives the real `ApiKeysService` through
+a shared session and asserts the probe's attributes stay readable.
 
 Settlement is not a pure no-op for the ledger only: `_settle_usage_reservation`
 is also the production writer of the key's last-used touch (write-behind

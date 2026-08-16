@@ -893,6 +893,24 @@ class _WebSocketRequestState:
     connection_request_kind: str | None = None
     generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
+    # The client's requested model captured before api-key enforcement
+    # normalized aliases (``gpt-5-high`` -> ``gpt-5``), with the key's
+    # ``enforced_model`` substituted and the fast-mode correction applied,
+    # exactly like the HTTP path's ``raw_source_model``. Consumed only by the
+    # WebSocket source-ownership guards; it must never reach the upstream
+    # wire payload. ``None`` on request states that were not built by
+    # ``_prepare_websocket_response_create_request`` (replays, archives),
+    # which keeps those on the normalized-model check.
+    raw_source_model: str | None = None
+    # True when the HTTP route would exclude this request from model-source
+    # routing (``responses_source_route_excluded``: a terminal compaction
+    # trigger, or ``input_file`` references pinned to the uploading
+    # subscription account). The WebSocket source-ownership guards skip such
+    # requests so the owner-routing logic can dispatch them to a subscription
+    # account, exactly like HTTP. ``False`` on request states that were not
+    # built by ``_prepare_websocket_response_create_request``, which keeps
+    # the guards active for those.
+    source_route_excluded: bool = False
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0

@@ -203,6 +203,11 @@ from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
 from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.model_sources.selection import (
+    allowed_source_ids_for_api_key,
+    effective_model_for_api_key,
+    select_responses_model_source,
+)
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
@@ -244,6 +249,7 @@ from app.modules.proxy.request_policy import (
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
+    responses_source_route_excluded,
     sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
     validate_model_access,
@@ -1070,12 +1076,16 @@ async def responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        compact_trigger_input = strip_terminal_compaction_trigger_input(responses_payload)
+        # Terminal compaction triggers run the upstream compact flow on the
+        # turn's owner account, and file-referencing requests are pinned to
+        # the account that received the upload; the shared predicate keeps
+        # this gate and the WebSocket source-ownership guards in agreement.
+        source_route_excluded = responses_source_route_excluded(responses_payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
     source = None
-    if compact_trigger_input is None and not extract_input_file_ids(responses_payload.input):
+    if not source_route_excluded:
         source_selection = await _select_responses_model_source(
             responses_payload.model,
             api_key,
@@ -4210,35 +4220,14 @@ async def _select_responses_model_source(
     raw_model: str | None = None,
     require_streaming: bool = False,
 ) -> tuple[ModelSource, str] | None:
-    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
-    candidates = [candidate for candidate in (raw_model, model) if candidate]
-    if not candidates:
-        return None
-    deduped_candidates = list(dict.fromkeys(candidates))
-    registry_models = get_model_registry().get_models_with_fallback()
-    async with get_background_session() as session:
-        repository = ModelSourcesRepository(session)
-        for candidate in deduped_candidates:
-            if exact_allowed_models is not None and candidate not in exact_allowed_models:
-                continue
-            subscription_model = registry_models.get(candidate)
-            if assigned_source_ids is None and subscription_model is not None:
-                continue
-            source = await repository.find_responses_source_for_model(
-                candidate,
-                allowed_source_ids=assigned_source_ids,
-                require_streaming=require_streaming,
-            )
-            if source is not None:
-                break
-        else:
-            source = None
-        # ``close_session`` rolls back the read transaction, which would
-        # expire the loaded row; detach it so the forwarding path can read
-        # its attributes after this session boundary.
-        detach_session_objects(session)
-        return (source, candidate) if source is not None else None
+    # Shared with the WebSocket path so both transports agree on which models
+    # belong to a model source.
+    return await select_responses_model_source(
+        model,
+        api_key,
+        raw_model=raw_model,
+        require_streaming=require_streaming,
+    )
 
 
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
@@ -4258,9 +4247,7 @@ async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyD
 
 
 def _allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
-    if api_key is None or not api_key.source_assignment_scope_enabled:
-        return None
-    return set(api_key.assigned_source_ids)
+    return allowed_source_ids_for_api_key(api_key)
 
 
 async def _parse_transcription_multipart(
@@ -7552,9 +7539,7 @@ def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: st
 
 
 def _effective_optional_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
-    if api_key is None or api_key.enforced_model is None:
-        return requested_model
-    return api_key.enforced_model
+    return effective_model_for_api_key(api_key, requested_model)
 
 
 def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | None:

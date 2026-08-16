@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable, Collection
+from datetime import datetime, timezone
 from typing import cast
 
 import pytest
+from sqlalchemy.orm.exc import DetachedInstanceError
 
 from app.core.crypto import TokenEncryptor
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
@@ -42,6 +44,24 @@ def _account(
         blocked_at=blocked_at,
         limit_warmup_enabled=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_background_accounts_repo_keeps_loaded_account_usable_after_context(db_setup) -> None:
+    del db_setup
+    account = _account("acc_detached", status=AccountStatus.RATE_LIMITED)
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+
+    async with refresh_scheduler_module._background_accounts_repo() as accounts_repo:
+        loaded = await accounts_repo.get_by_id_fresh(account.id)
+
+    assert loaded is not None
+    try:
+        actual = (loaded.status, loaded.limit_warmup_enabled)
+    except DetachedInstanceError:
+        pytest.fail("background account expired when its read transaction closed")
+    assert actual == (AccountStatus.RATE_LIMITED, True)
 
 
 @pytest.mark.asyncio
@@ -163,14 +183,25 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
 
 
 @pytest.mark.asyncio
-async def test_scheduler_free_monthly_reset_creates_monthly_warmup_attempt(
+async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
     db_setup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del db_setup
-    before_reset_at = int(time.time()) + 3600
-    after_reset_at = before_reset_at + 43_200 * 60
-    account = _account("acc_free", status=AccountStatus.ACTIVE)
+    now = int(time.time())
+    primary_reset_at = now + 8 * 24 * 60 * 60
+    before_reset_at = primary_reset_at
+    blocked_at = now - 5 * 24 * 60 * 60
+    before_recorded_at = datetime.fromtimestamp(now - 120, timezone.utc).replace(tzinfo=None)
+    after_recorded_epoch = now - 60
+    after_recorded_at = datetime.fromtimestamp(after_recorded_epoch, timezone.utc).replace(tzinfo=None)
+    after_reset_at = after_recorded_epoch + 43_200 * 60
+    account = _account(
+        "acc_free",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=primary_reset_at,
+        blocked_at=blocked_at,
+    )
     account.plan_type = "free"
 
     async with SessionLocal() as session:
@@ -178,7 +209,16 @@ async def test_scheduler_free_monthly_reset_creates_monthly_warmup_attempt(
         await UsageRepository(session).add_entry(
             account.id,
             100.0,
+            window="primary",
+            recorded_at=datetime.fromtimestamp(blocked_at, timezone.utc).replace(tzinfo=None),
+            reset_at=primary_reset_at,
+            window_minutes=300,
+        )
+        await UsageRepository(session).add_entry(
+            account.id,
+            100.0,
             window="monthly",
+            recorded_at=before_recorded_at,
             reset_at=before_reset_at,
             window_minutes=43_200,
         )
@@ -199,12 +239,13 @@ async def test_scheduler_free_monthly_reset_creates_monthly_warmup_attempt(
             latest_usage: dict[str, UsageHistory],
         ) -> bool:
             assert [candidate.id for candidate in accounts] == [account.id]
-            assert latest_usage == {}
+            assert set(latest_usage) == {account.id}
             async with SessionLocal() as session:
                 await UsageRepository(session).add_entry(
                     account.id,
                     0.0,
                     window="monthly",
+                    recorded_at=after_recorded_at,
                     reset_at=after_reset_at,
                     window_minutes=43_200,
                 )
@@ -214,7 +255,21 @@ async def test_scheduler_free_monthly_reset_creates_monthly_warmup_attempt(
         def __init__(self) -> None:
             self.calls: list[tuple[str, str]] = []
 
-        async def send(self, target: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
+        async def send(
+            self,
+            target: Account,
+            *,
+            model: str,
+            prompt: str,
+        ) -> LimitWarmupSendResult:
+            async with SessionLocal() as session:
+                persisted = await AccountsRepository(session).get_by_id(target.id)
+            assert persisted is not None
+            assert (persisted.status, persisted.reset_at, persisted.blocked_at) == (
+                AccountStatus.ACTIVE,
+                None,
+                None,
+            )
             self.calls.append((target.id, model))
             return LimitWarmupSendResult(
                 request_id="warmup-monthly",
@@ -232,5 +287,165 @@ async def test_scheduler_free_monthly_reset_creates_monthly_warmup_attempt(
     assert await scheduler._refresh_once() == 60.0
     assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
     async with SessionLocal() as session:
+        persisted_account = await AccountsRepository(session).get_by_id(account.id)
         attempt = (await LimitWarmupRepository(session).latest_by_account([account.id]))[account.id]
+    assert persisted_account is not None
+    assert (persisted_account.status, persisted_account.reset_at, persisted_account.blocked_at) == (
+        AccountStatus.ACTIVE,
+        None,
+        None,
+    )
     assert (attempt.window, attempt.reset_at, attempt.status) == ("monthly", after_reset_at, "succeeded")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_attempt", [False, True], ids=["warmup-new", "warmup-deduped"])
+@pytest.mark.parametrize(
+    "current_pair_confirms_unanchored",
+    [False, True],
+    ids=["persisted-only", "unanchored-current"],
+)
+async def test_scheduler_restart_uses_anchored_persisted_evidence(
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_attempt: bool,
+    current_pair_confirms_unanchored: bool,
+) -> None:
+    del db_setup
+    now = int(time.time())
+    blocked_at = now - 5 * 24 * 60 * 60
+    legacy_reset_at = now + 8 * 24 * 60 * 60
+    transition_recorded_at = now - 60 * 60
+    transition_reset_at = transition_recorded_at + 43_200 * 60
+    current_before_recorded_at = now - 120
+    current_before_reset_at = now - 90
+    latest_recorded_at = now - 60
+    latest_reset_at = latest_recorded_at + 43_200 * 60
+    expected_attempt_reset_at = latest_reset_at if current_pair_confirms_unanchored else transition_reset_at
+    account = _account(
+        "acc_free_restart",
+        status=AccountStatus.RATE_LIMITED,
+        reset_at=legacy_reset_at,
+        blocked_at=blocked_at,
+    )
+    account.plan_type = "free"
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account.id,
+            100.0,
+            window="monthly",
+            recorded_at=datetime.fromtimestamp(blocked_at, timezone.utc).replace(tzinfo=None),
+            reset_at=legacy_reset_at,
+            window_minutes=43_200,
+        )
+        await usage_repo.add_entry(
+            account.id,
+            100.0,
+            window="monthly",
+            recorded_at=datetime.fromtimestamp(blocked_at + 60, timezone.utc).replace(tzinfo=None),
+            reset_at=legacy_reset_at,
+            window_minutes=43_200,
+        )
+        sliding_sample_count = 240
+        sliding_span = transition_recorded_at - blocked_at - 120
+        for index in range(1, sliding_sample_count + 1):
+            recorded_at = blocked_at + 60 + (sliding_span * index // sliding_sample_count)
+            await usage_repo.add_entry(
+                account.id,
+                100.0,
+                window="monthly",
+                recorded_at=datetime.fromtimestamp(recorded_at, timezone.utc).replace(tzinfo=None),
+                reset_at=legacy_reset_at + index * 60,
+                window_minutes=43_200,
+            )
+        await usage_repo.add_entry(
+            account.id,
+            0.0,
+            window="monthly",
+            recorded_at=datetime.fromtimestamp(transition_recorded_at, timezone.utc).replace(tzinfo=None),
+            reset_at=transition_reset_at,
+            window_minutes=43_200,
+        )
+        if current_pair_confirms_unanchored:
+            await usage_repo.add_entry(
+                account.id,
+                40.0,
+                window="monthly",
+                recorded_at=datetime.fromtimestamp(current_before_recorded_at, timezone.utc).replace(tzinfo=None),
+                reset_at=current_before_reset_at,
+                window_minutes=43_200,
+            )
+        await SettingsRepository(session).update(
+            limit_warmup_enabled=True,
+            limit_warmup_windows="secondary",
+            limit_warmup_model="gpt-5.1-codex-mini",
+        )
+        if existing_attempt:
+            attempt = await LimitWarmupRepository(session).try_create_attempt(
+                account_id=account.id,
+                window="monthly",
+                reset_at=expected_attempt_reset_at,
+                model="gpt-5.1-codex-mini",
+                attempted_at=utcnow(),
+                status="succeeded",
+                reset_at_tolerance_seconds=5,
+            )
+            assert attempt is not None
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert [candidate.id for candidate in accounts] == [account.id]
+            async with SessionLocal() as session:
+                await UsageRepository(session).add_entry(
+                    account.id,
+                    0.0,
+                    window="monthly",
+                    recorded_at=datetime.fromtimestamp(latest_recorded_at, timezone.utc).replace(tzinfo=None),
+                    reset_at=latest_reset_at,
+                    window_minutes=43_200,
+                )
+            return True
+
+    class _Sender:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def send(self, target: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
+            del model, prompt
+            async with SessionLocal() as session:
+                persisted = await AccountsRepository(session).get_by_id(target.id)
+            assert persisted is not None
+            assert persisted.status == AccountStatus.ACTIVE
+            self.calls.append(target.id)
+            return LimitWarmupSendResult(request_id="warmup-restart", success=True, latency_ms=12)
+
+    sender = _Sender()
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "StreamingLimitWarmupSender", lambda *_args, **_kwargs: sender)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+
+    assert await scheduler._refresh_once() == 60.0
+    assert sender.calls == ([] if existing_attempt else [account.id])
+    async with SessionLocal() as session:
+        persisted = await AccountsRepository(session).get_by_id(account.id)
+        attempt = (await LimitWarmupRepository(session).latest_by_account([account.id]))[account.id]
+    assert persisted is not None
+    assert (persisted.status, persisted.reset_at, persisted.blocked_at) == (AccountStatus.ACTIVE, None, None)
+    assert (attempt.window, attempt.reset_at, attempt.status) == (
+        "monthly",
+        expected_attempt_reset_at,
+        "succeeded",
+    )

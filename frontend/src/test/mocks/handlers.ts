@@ -53,7 +53,7 @@ import {
 } from "@/test/mocks/factories";
 
 const MODEL_OPTION_DELIMITER = ":::";
-const STATUS_ORDER = ["ok", "rate_limit", "quota", "error"] as const;
+const STATUS_ORDER = ["ok", "cancelled", "rate_limit", "quota", "error"] as const;
 
 // ── Zod schemas for mock request bodies ──
 

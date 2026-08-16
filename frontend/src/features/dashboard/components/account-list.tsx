@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp, ArrowUpDown, Clock, ExternalLink, List, Play, RotateCcw, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 
 import { EmptyState } from "@/components/empty-state";
 import { StatusBadge } from "@/components/status-badge";
@@ -304,6 +305,11 @@ export function AccountList({
         icon={List}
         title={t("dashboard.accountList.emptyTitle")}
         description={t("dashboard.accountList.emptyDescription")}
+        action={
+          <Button asChild size="sm">
+            <Link to="/accounts">{t("dashboard.accountList.emptyAction")}</Link>
+          </Button>
+        }
       />
     );
   }

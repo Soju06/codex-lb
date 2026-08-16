@@ -43,13 +43,19 @@ def _usage(
     window: str = "primary",
     recorded_at: datetime | None = None,
 ) -> UsageHistory:
+    window_minutes = {"primary": 300, "secondary": 10_080, "monthly": 43_200}[window]
+    if recorded_at is None:
+        recorded_at = datetime.fromtimestamp(
+            reset_at - window_minutes * 60,
+            tz=timezone.utc,
+        ).replace(tzinfo=None)
     return UsageHistory(
         account_id=account_id,
         used_percent=used_percent,
         reset_at=reset_at,
         window=window,
-        window_minutes=300 if window == "primary" else 10_080,
-        recorded_at=recorded_at or utcnow(),
+        window_minutes=window_minutes,
+        recorded_at=recorded_at,
     )
 
 
@@ -387,8 +393,16 @@ class CoordinatedSender:
 
 
 class _WarmupAccountsRepo:
-    def __init__(self, session: object | None = None) -> None:
+    def __init__(self, session: object | None = None, *, account: Account | None = None) -> None:
         self.session = session or object()
+        self.account = account
+        self.fresh_reads = 0
+
+    async def get_by_id_fresh(self, account_id: str) -> Account | None:
+        self.fresh_reads += 1
+        if self.account is None or self.account.id != account_id:
+            return None
+        return self.account
 
 
 class _WarmupAccountsRepoContext:
@@ -436,6 +450,70 @@ async def test_streaming_limit_warmup_sender_passes_resolved_route(monkeypatch: 
     assert calls["resolve_kwargs"]["operation"] == "limit_warmup"
     assert calls["stream_kwargs"]["route"] is route
     assert calls["stream_kwargs"]["route_trace"].endpoint_id is None
+
+
+@pytest.mark.asyncio
+async def test_streaming_limit_warmup_sender_rejects_ineligible_account_before_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = _account(status=AccountStatus.RATE_LIMITED)
+    current = _account(status=AccountStatus.RATE_LIMITED)
+    repo = _WarmupAccountsRepo(account=current)
+    sender = StreamingLimitWarmupSender(cast(Any, repo))
+
+    async def ensure_fresh(_account: Account) -> Account:
+        raise AssertionError("OAuth refresh must not run for an ineligible account")
+
+    monkeypatch.setattr(sender._auth_manager, "ensure_fresh", ensure_fresh)
+
+    result = await sender.send(selected, model="gpt-5.2", prompt="Say OK.")
+
+    assert result.error_code == "account_not_active"
+    assert repo.fresh_reads == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selected_status", "current_status", "current_enabled"),
+    [
+        (AccountStatus.ACTIVE, AccountStatus.RATE_LIMITED, True),
+        (AccountStatus.ACTIVE, AccountStatus.PAUSED, True),
+        (AccountStatus.ACTIVE, AccountStatus.ACTIVE, False),
+    ],
+)
+async def test_streaming_limit_warmup_sender_rechecks_account_after_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    selected_status: AccountStatus,
+    current_status: AccountStatus,
+    current_enabled: bool,
+) -> None:
+    selected = _account(status=selected_status)
+    repo = _WarmupAccountsRepo(account=selected)
+    sender = StreamingLimitWarmupSender(cast(Any, repo))
+    stream_calls = 0
+
+    async def ensure_fresh(target: Account) -> Account:
+        repo.account = _account(status=current_status, enabled=current_enabled)
+        return target
+
+    async def resolve_route(_account: Account) -> None:
+        return None
+
+    async def stream(*_args: object, **_kwargs: object):
+        nonlocal stream_calls
+        stream_calls += 1
+        yield 'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+    monkeypatch.setattr(sender._auth_manager, "ensure_fresh", ensure_fresh)
+    monkeypatch.setattr(sender, "_resolve_upstream_route", resolve_route)
+    monkeypatch.setattr(sender._encryptor, "decrypt", lambda value: "access")
+    monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+
+    result = await sender.send(selected, model="gpt-5.2", prompt="Say OK.")
+
+    assert result.error_code == "account_not_active"
+    assert repo.fresh_reads == 2
+    assert stream_calls == 0
 
 
 @pytest.mark.asyncio
@@ -584,7 +662,7 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exhausted_threshold_accepts_pre_reset_99_percent_usage() -> None:
+async def test_reset_warms_after_pre_reset_99_percent_usage() -> None:
     repo = FakeWarmupRepo()
     logs = FakeRequestLogsRepo()
     sender = FakeSender()
@@ -606,7 +684,7 @@ async def test_exhausted_threshold_accepts_pre_reset_99_percent_usage() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exhausted_threshold_skips_usage_below_threshold() -> None:
+async def test_reset_warms_regardless_of_pre_reset_usage() -> None:
     repo = FakeWarmupRepo()
     sender = FakeSender()
     service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
@@ -615,9 +693,149 @@ async def test_exhausted_threshold_skips_usage_below_threshold() -> None:
     await service.run_after_usage_refresh(
         accounts=[account],
         settings=_settings(limit_warmup_exhausted_threshold_percent=99.0),
-        before_primary={account.id: _usage(account.id, used_percent=98.9, reset_at=1000)},
+        before_primary={account.id: _usage(account.id, used_percent=15.0, reset_at=1000)},
         before_secondary={},
         after_primary={account.id: _usage(account.id, used_percent=0, reset_at=2000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 2000, "succeeded")]
+
+
+@pytest.mark.asyncio
+async def test_early_reset_reanchor_uses_sampling_interval() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    before_recorded_at = datetime.fromtimestamp(900, tz=timezone.utc).replace(tzinfo=None)
+    observed_at = datetime.fromtimestamp(1201, tz=timezone.utc).replace(tzinfo=None)
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=23.0,
+                reset_at=10_000,
+                recorded_at=before_recorded_at,
+            )
+        },
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=19_000,
+                recorded_at=observed_at,
+            )
+        },
+        after_secondary={},
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 19_000, "succeeded")]
+
+
+@pytest.mark.asyncio
+async def test_full_window_reset_warms_when_usage_was_already_zero() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=19_000)},
+        after_secondary={},
+    )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at, row.status) for row in repo.rows] == [("primary", 19_000, "succeeded")]
+
+
+@pytest.mark.asyncio
+async def test_sliding_reset_at_without_quota_recovery_does_not_warm() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_secondary={},
+        after_primary={account.id: _usage(account.id, used_percent=0, reset_at=1120)},
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_future_full_window_slide_without_quota_recovery_does_not_warm() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    observed_at = datetime.fromtimestamp(0, tz=timezone.utc).replace(tzinfo=None)
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={account.id: _usage(account.id, used_percent=0, reset_at=1000)},
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=19_000,
+                recorded_at=observed_at,
+            )
+        },
+        after_secondary={},
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
+
+
+@pytest.mark.asyncio
+async def test_stale_past_boundary_update_without_quota_recovery_does_not_warm() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account()
+    before_recorded_at = datetime.fromtimestamp(2000, tz=timezone.utc).replace(tzinfo=None)
+    observed_at = datetime.fromtimestamp(2100, tz=timezone.utc).replace(tzinfo=None)
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=1000,
+                recorded_at=before_recorded_at,
+            )
+        },
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0,
+                reset_at=2200,
+                recorded_at=observed_at,
+            )
+        },
         after_secondary={},
     )
 
@@ -631,7 +849,13 @@ async def test_warmup_request_log_persists_route_metadata() -> None:
     logs = FakeRequestLogsRepo()
 
     class RouteMetadataSender:
-        async def send(self, account: Account, *, model: str, prompt: str) -> LimitWarmupSendResult:
+        async def send(
+            self,
+            account: Account,
+            *,
+            model: str,
+            prompt: str,
+        ) -> LimitWarmupSendResult:
             del account, model, prompt
             return LimitWarmupSendResult(
                 request_id="warmup-route",
@@ -1427,6 +1651,28 @@ async def test_regular_warmup_ignores_reset_at_jitter(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_regular_warmup_dedupes_same_reset_across_after_reset_at_jitter() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    account = _account("acc_1")
+    settings = _settings(limit_warmup_cooldown_seconds=0)
+
+    for reset_at in (18_000, 18_001):
+        await service.run_after_usage_refresh(
+            accounts=[account],
+            settings=settings,
+            before_primary={account.id: _usage(account.id, used_percent=98.0, reset_at=1000)},
+            before_secondary={},
+            after_primary={account.id: _usage(account.id, used_percent=0.0, reset_at=reset_at)},
+            after_secondary={},
+        )
+
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.window, row.reset_at) for row in repo.rows] == [("primary", 18_000)]
+
+
+@pytest.mark.asyncio
 async def test_regular_warmup_boundary_59_seconds_rejected(monkeypatch) -> None:
     """A reset_at jump of exactly 59 seconds must NOT trigger a warm-up."""
     repo = FakeWarmupRepo()
@@ -1592,7 +1838,7 @@ async def test_staggered_idle_warmup_rejects_stale_entry_from_prior_cycle(monkey
 
 
 @pytest.mark.asyncio
-async def test_recent_attempt_cooldown_blocks_new_reset() -> None:
+async def test_recent_attempt_cooldown_does_not_block_distinct_reset() -> None:
     repo = FakeWarmupRepo()
     account = _account()
     repo.rows.append(
@@ -1606,6 +1852,7 @@ async def test_recent_attempt_cooldown_blocks_new_reset() -> None:
             attempted_at=utcnow() - timedelta(minutes=10),
         )
     )
+    repo.next_id = 2
     sender = FakeSender()
     service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
 
@@ -1618,5 +1865,5 @@ async def test_recent_attempt_cooldown_blocks_new_reset() -> None:
         after_secondary={},
     )
 
-    assert sender.calls == []
-    assert len(repo.rows) == 1
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    assert [(row.reset_at, row.status) for row in repo.rows] == [(1000, "failed"), (3000, "succeeded")]

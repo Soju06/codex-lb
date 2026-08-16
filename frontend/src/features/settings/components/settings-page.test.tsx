@@ -1,5 +1,7 @@
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsPage } from "@/features/settings/components/settings-page";
@@ -173,13 +175,26 @@ describe("SettingsPage", () => {
     telemetrySettingsMock.mockReset();
   });
 
+  function renderSettings(initialEntry = "/settings") {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    return render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
   async function expandAdvancedSettings() {
     const user = userEvent.setup({ delay: null });
     await user.click(screen.getByRole("button", { name: "Show advanced settings" }));
   }
 
   it("keeps advanced sections collapsed and unmounted by default", () => {
-    render(<SettingsPage />);
+    renderSettings();
 
     expect(screen.getByRole("button", { name: "Show advanced settings" })).toBeInTheDocument();
     expect(screen.queryByText("Routing Settings")).not.toBeInTheDocument();
@@ -205,7 +220,7 @@ describe("SettingsPage", () => {
   });
 
   it("mounts every advanced section after one expand interaction", async () => {
-    render(<SettingsPage />);
+    renderSettings();
 
     await expandAdvancedSettings();
 
@@ -221,7 +236,7 @@ describe("SettingsPage", () => {
   it("disables write-capable sections for read-only guests", async () => {
     useAuthStore.setState({ canWrite: false });
 
-    render(<SettingsPage />);
+    renderSettings();
 
     expect(screen.getByText("You are viewing the dashboard with read-only guest access. Admin controls are disabled.")).toBeInTheDocument();
     expect(screen.queryByText("Guest Access Settings")).not.toBeInTheDocument();
@@ -242,7 +257,7 @@ describe("SettingsPage", () => {
   });
 
   it("keeps guest access settings available for writable sessions", async () => {
-    render(<SettingsPage />);
+    renderSettings();
 
     expect(screen.getByText("Guest Access Settings")).toBeInTheDocument();
     expect(guestAccessSettingsMock).toHaveBeenCalledWith(
@@ -256,4 +271,13 @@ describe("SettingsPage", () => {
 
     expect(routingSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: false }));
   });
+
+  it("expands Advanced and mounts firewall on the advanced deeplink", () => {
+    renderSettings("/settings?advanced=1#firewall");
+
+    expect(screen.getByText("Firewall Section")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hide advanced settings" })).toBeInTheDocument();
+    expect(firewallSectionMock).toHaveBeenCalled();
+  });
+
 });

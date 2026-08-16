@@ -30,15 +30,19 @@ from app.db.models import (
 )
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_allow_durable_takeover,
+    _http_bridge_claim_allows_takeover,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
 )
 from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
     durable_bridge_hash,
     durable_bridge_operation_id,
 )
+from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
 from app.modules.proxy.ring_membership import RingMembershipService
 
 pytestmark = pytest.mark.unit
@@ -804,6 +808,288 @@ async def test_terminal_failure_exposes_state_when_spool_overflows(
         assert await repository.get_operation_events(operation_id=operation_id) == []
     finally:
         await session.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_failure_settlement_is_visible_to_recovery(
+    async_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-terminal-recovery",
+            session_key_value="sid-terminal-recovery",
+        )
+        fingerprint = durable_bridge_hash("terminal-recovery")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-terminal-recovery",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.created"}\n\n',
+            max_bytes=1024,
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-terminal-recovery",
+        )
+
+        replay_fingerprint = durable_bridge_hash("terminal-recovery-replay-alias")
+        replay_operation_id = durable_bridge_operation_id(claim.id, replay_fingerprint)
+        assert await repository.record_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=replay_fingerprint,
+            account_id="account-terminal-recovery",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            response_id="resp-client-visible-replay",
+        )
+        replay_operation = await repository.get_operation(operation_id=replay_operation_id)
+        assert replay_operation is not None
+        assert replay_operation.state == "failed"
+        assert replay_operation.response_id == "resp-client-visible-replay"
+        assert replay_operation.event_spool_complete is False
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            response_id="resp-upstream-replay",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            response_id="resp-client-visible-replay",
+        )
+        pre_settled_replay = await repository.get_operation(operation_id=replay_operation_id)
+        assert pre_settled_replay is not None
+        assert pre_settled_replay.state == "failed"
+        assert pre_settled_replay.response_id == "resp-client-visible-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-persisted-before-replacement",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-unpersisted-replacement",
+            alternate_expected_response_id="resp-persisted-before-replacement",
+            response_id="resp-client-visible-replay",
+        )
+        partially_persisted_replay = await repository.get_operation(operation_id=replay_operation_id)
+        assert partially_persisted_replay is not None
+        assert partially_persisted_replay.state == "failed"
+        assert partially_persisted_replay.response_id == "resp-client-visible-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            response_id=None,
+        )
+        null_alias_settlement = await repository.get_operation(operation_id=replay_operation_id)
+        assert null_alias_settlement is not None
+        assert null_alias_settlement.state == "failed"
+        assert null_alias_settlement.response_id == "resp-upstream-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="unknown",
+        )
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+        )
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-upstream-replay",
+        )
+        assert not await repository.append_terminal_operation_event(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-client-visible-replay",
+        )
+        assert not await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-upstream-replay",
+            expected_recovery_dispatch_count=0,
+            response_id="resp-client-visible-replay",
+        )
+        newer_attempt = await repository.get_operation(operation_id=replay_operation_id)
+        assert newer_attempt is not None
+        assert newer_attempt.state == "acknowledged"
+        assert newer_attempt.recovery_dispatch_count == 1
+        assert newer_attempt.event_spool_complete is False
+    finally:
+        await session.close()
+
+    coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+    append_terminal_operation_event = coordinator.append_terminal_operation_event
+    settle_terminal_append_failure = coordinator.settle_terminal_append_failure
+    settlement_finished = asyncio.Event()
+
+    async def fail_terminal_append(**kwargs: Any) -> bool:
+        assert await append_terminal_operation_event(**kwargs)
+        raise RuntimeError("injected post-commit terminal append failure")
+
+    async def track_terminal_settlement(**kwargs: Any) -> bool:
+        try:
+            return await settle_terminal_append_failure(**kwargs)
+        finally:
+            settlement_finished.set()
+
+    monkeypatch.setattr(coordinator, "append_terminal_operation_event", fail_terminal_append)
+    monkeypatch.setattr(coordinator, "settle_terminal_append_failure", track_terminal_settlement)
+    batcher = HttpBridgeOperationEventBatcher(
+        coordinator,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+
+    append_result = await batcher.append_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        event_text='data: {"type":"response.failed"}\n\n',
+        max_bytes=1024,
+        state="failed",
+        response_id="resp-terminal-recovery",
+    )
+    assert append_result.persisted is False
+    assert append_result.settlement_required is True
+    await batcher.settle_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        state="failed",
+        expected_response_id="resp-terminal-recovery",
+        response_id="resp-terminal-recovery",
+    )
+    await asyncio.wait_for(settlement_finished.wait(), timeout=1.0)
+
+    recovery = DurableBridgeSessionCoordinator(async_session_factory)
+    observed = await recovery.get_operation_by_fingerprint(request_fingerprint=fingerprint)
+    assert observed is not None
+    assert observed.operation_id == operation_id
+    assert observed.session_id == claim.id
+    assert observed.account_id == "account-terminal-recovery"
+    assert observed.state == "failed"
+    assert observed.event_spool_complete is False
+    assert await recovery.get_operation_events(operation_id=operation_id) == [
+        'data: {"type":"response.created"}\n\n',
+        'data: {"type":"response.failed"}\n\n',
+    ]
+
+    retry = await recovery.record_operation(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        request_fingerprint=fingerprint,
+        account_id="account-terminal-recovery",
+        model="gpt-5.6",
+        parent_response_id="resp-parent",
+    )
+    assert retry is not None
+    assert retry.state == "submitted"
+    await batcher.settle_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        state="failed",
+        expected_response_id="resp-terminal-recovery",
+        response_id="resp-terminal-recovery",
+    )
+    after_stale_settlement = await recovery.get_operation(operation_id=operation_id)
+    assert after_stale_settlement is not None
+    assert after_stale_settlement.state == "submitted"
+    assert after_stale_settlement.response_id is None
+    await batcher.close()
 
 
 @pytest.mark.asyncio
@@ -1978,3 +2264,65 @@ def test_durable_lookup_allows_turn_state_takeover_requires_inactive_lease() -> 
     assert allows(expired_draining) is True
     assert allows(released_draining) is True
     assert allows(closed) is True
+    assert _http_bridge_allow_durable_takeover(live_draining) is False
+    assert _http_bridge_allow_durable_takeover(expired_draining) is True
+    assert _http_bridge_allow_durable_takeover(released_draining) is True
+    assert _http_bridge_allow_durable_takeover(closed) is True
+    assert _http_bridge_claim_allows_takeover(live_draining, force=True) is False
+    assert _http_bridge_claim_allows_takeover(expired_draining, force=True) is True
+    assert _http_bridge_claim_allows_takeover(released_draining, force=True) is True
+    assert _http_bridge_claim_allows_takeover(closed, force=True) is True
+    live_active = _durable_lookup(
+        session_id="sess-5",
+        owner_instance_id="instance-b",
+        owner_epoch=1,
+        state=HttpBridgeSessionState.ACTIVE,
+        lease_seconds_from_now=60.0,
+    )
+    assert _http_bridge_claim_allows_takeover(live_active, force=True) is True
+    assert _http_bridge_claim_allows_takeover(live_active, force=False) is False
+
+
+@pytest.mark.asyncio
+async def test_claim_does_not_retry_takeover_against_a_live_foreign_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repository drops takeover permission after losing a claim race, but
+    the service's own retry loop issues a fresh claim — which would restore the
+    permission and steal the winner's live lease. A live foreign owner must end
+    the retry so the 409 'retry to reach the correct replica' response stands
+    (issue #1695)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(proxy_service, "get_settings", _make_app_settings)
+    session = _make_bridge_session(key_value="sid-foreign-live")
+    session.account = cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE, plan_type="plus"))
+
+    claims: list[bool] = []
+
+    async def claim_live_session(*, allow_takeover, **kwargs):
+        claims.append(allow_takeover)
+        # A live foreign owner: lease well in the future, ACTIVE.
+        return SimpleNamespace(
+            session_id="durable-foreign",
+            owner_instance_id="instance-other",
+            owner_epoch=7,
+            lease_expires_at=utcnow() + timedelta(seconds=600),
+            state=HttpBridgeSessionState.ACTIVE,
+            latest_turn_state=None,
+            latest_response_id=None,
+            canonical_kind=session.key.affinity_kind,
+            canonical_key=session.key.affinity_key,
+            account_id="acc-1",
+            api_key_scope="__anonymous__",
+            lease_is_active=lambda now: True,
+        )
+
+    service._durable_bridge = cast(Any, SimpleNamespace(claim_live_session=claim_live_session))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._claim_durable_http_bridge_session(session, allow_takeover=True)
+
+    assert exc_info.value.status_code == 409
+    # Exactly one claim: the live foreign owner ends the retry instead of
+    # issuing a second, permission-restoring claim.
+    assert claims == [True]

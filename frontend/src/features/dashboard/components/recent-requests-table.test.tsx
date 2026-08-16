@@ -124,6 +124,11 @@ describe("RecentRequestsTable", () => {
             ...NULL_FAILURE_METADATA,
             ...NULL_USERAGENT_METADATA,
             upstreamTransport: "auto",
+            upstreamProxyRouteMode: "account_bound",
+            upstreamProxyPoolId: "pool-1",
+            upstreamProxyEndpointId: "endpoint-1",
+            upstreamProxyFallbackUsed: true,
+            upstreamProxyFailClosedReason: "no_healthy_endpoint",
              tokens: 1200,
              inputTokens: 1000,
              outputTokens: 200,
@@ -163,6 +168,16 @@ describe("RecentRequestsTable", () => {
     expect(within(dialog).getByText("rate_limit_exceeded")).toBeInTheDocument();
     expect(dialog.textContent).toContain("Rate limit reached while processing this request");
     expect(within(dialog).getByText("1.0 s")).toBeInTheDocument();
+    expect(within(dialog).getByText("Route mode")).toBeInTheDocument();
+    expect(within(dialog).getByText("account_bound")).toBeInTheDocument();
+    expect(within(dialog).getByText("Proxy pool")).toBeInTheDocument();
+    expect(within(dialog).getByText("pool-1")).toBeInTheDocument();
+    expect(within(dialog).getByText("Proxy endpoint")).toBeInTheDocument();
+    expect(within(dialog).getByText("endpoint-1")).toBeInTheDocument();
+    expect(within(dialog).getByText("Same-pool fallback")).toBeInTheDocument();
+    expect(within(dialog).getByText("Used")).toBeInTheDocument();
+    expect(within(dialog).getByText("Fail-closed reason")).toBeInTheDocument();
+    expect(within(dialog).getByText("no_healthy_endpoint")).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Copy Request ID" }));
@@ -179,6 +194,55 @@ describe("RecentRequestsTable", () => {
     });
 
     expect(writeText).toHaveBeenCalledWith(longError);
+  });
+
+  it("renders cancelled requests with a distinct non-error badge", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            requestedAt: ISO,
+            accountId: "acc-cancelled",
+            planType: "plus",
+            apiKeyName: "Key Cancelled",
+            apiKeyId: "key-cancelled",
+            requestId: "req-cancelled",
+            conversationId: null,
+            requestKind: "normal",
+            model: "gpt-5.1",
+            source: null,
+            serviceTier: null,
+            requestedServiceTier: null,
+            actualServiceTier: null,
+            transport: "http",
+            ...NULL_USERAGENT_METADATA,
+            status: "cancelled",
+            errorCode: "client_disconnected",
+            errorMessage: null,
+            ...NULL_FAILURE_METADATA,
+            tokens: 1,
+            inputTokens: 1,
+            outputTokens: 0,
+            outputTokensRaw: 0,
+            reasoningTokens: null,
+            cachedInputTokens: 0,
+            reasoningEffort: null,
+            costUsd: 0,
+            costBreakdown: null,
+            latencyMs: 10,
+            latencyFirstTokenMs: null,
+            latencyQueueMs: null,
+          },
+        ]}
+      />,
+    );
+
+    const badge = screen.getByText("Cancelled");
+
+    expect(badge).toHaveClass("bg-sky-500/15");
+    expect(badge).not.toHaveClass("bg-zinc-500/15");
   });
 
   it("shows TTFT and output-token TPS beside tokens", () => {
@@ -281,8 +345,41 @@ describe("RecentRequestsTable", () => {
     expect(within(row as HTMLElement).queryByText("250.0")).not.toBeInTheDocument();
   });
 
-  it("renders empty state", () => {
+  it("renders first-run empty copy when no filters are applied", () => {
     render(<RecentRequestsTable {...PAGINATION_PROPS} total={0} accounts={[]} requests={[]} />);
+    expect(screen.getByText("No requests yet")).toBeInTheDocument();
+    expect(
+      screen.getByText("Requests will appear here after clients start using the proxy."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No request logs match the current filters.")).not.toBeInTheDocument();
+  });
+
+  it("renders filter-empty copy when a later page has no rows but logs exist", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={40}
+        offset={25}
+        accounts={[]}
+        requests={[]}
+      />,
+    );
+    expect(screen.getByText("No matching requests")).toBeInTheDocument();
+    expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
+    expect(screen.queryByText("No requests yet")).not.toBeInTheDocument();
+  });
+
+  it("renders filter-empty copy when filters are applied", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        total={0}
+        accounts={[]}
+        requests={[]}
+        filtersApplied
+      />,
+    );
+    expect(screen.getByText("No matching requests")).toBeInTheDocument();
     expect(screen.getByText("No request logs match the current filters.")).toBeInTheDocument();
   });
 

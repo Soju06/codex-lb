@@ -3,11 +3,13 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from typing import cast as typing_cast
 
 import anyio
 from sqlalchemy import Integer, String, and_, case, cast, func, insert, or_, select
 from sqlalchemy import exc as sa_exc
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, make_transient_to_detached
 from sqlalchemy.sql.elements import ColumnElement
@@ -1128,7 +1130,10 @@ class RequestLogsRepository:
             # never triggers post-commit lazy loads).
             insert_values = {key: getattr(log, key) for key in _REQUEST_LOG_INSERT_COLUMN_KEYS}
             try:
-                result = await self._session.execute(insert(RequestLog).values(insert_values))
+                result = typing_cast(
+                    CursorResult[Any],
+                    await self._session.execute(insert(RequestLog).values(insert_values)),
+                )
                 inserted_primary_key = result.inserted_primary_key
                 if inserted_primary_key is not None and inserted_primary_key[0] is not None:
                     log.id = int(inserted_primary_key[0])

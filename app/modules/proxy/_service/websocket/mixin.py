@@ -494,6 +494,9 @@ def _facade() -> Any:
 logger = logging.getLogger(__name__)
 
 _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
+# Scope teardown coordinates several request/lease finalizers; keep its normal
+# observation budget separate from the short generic child-task cancel bound.
+_WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS = 5.0
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "This request requires Trusted Access for Cyber, but no eligible account is marked as "
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
@@ -2615,9 +2618,15 @@ class _WebSocketMixin:
             scope_cancelled = True
             raise
         finally:
-            cleanup_timeout = shutdown_state.remaining_drain_timeout_seconds()
-            if cleanup_timeout is None:
-                cleanup_timeout = _facade()._TASK_CANCEL_TIMEOUT_SECONDS
+            remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
+            cleanup_timeout = (
+                _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS
+                if remaining_drain_timeout is None
+                else max(float(remaining_drain_timeout), 0.0)
+            )
+            task_cleanup_timeout = (
+                _facade()._TASK_CANCEL_TIMEOUT_SECONDS if remaining_drain_timeout is None else cleanup_timeout
+            )
             cleanup_phase = "not_started"
 
             async def finalize_websocket_scope() -> None:
@@ -2638,7 +2647,7 @@ class _WebSocketMixin:
                     await _close_websocket_upstream_for_cleanup(
                         proxy,
                         upstream,
-                        timeout_seconds=cleanup_timeout,
+                        timeout_seconds=task_cleanup_timeout,
                     )
                 if reader_to_await is not None:
                     try:
@@ -2662,7 +2671,7 @@ class _WebSocketMixin:
                         cleanup_phase = "retired_create_lease"
                         await _facade()._await_cancelled_task(
                             retired_create_lease_release_task,
-                            timeout_seconds=cleanup_timeout,
+                            timeout_seconds=task_cleanup_timeout,
                             label="proxy websocket retired create lease release",
                             cancel=False,
                         )
@@ -2677,7 +2686,7 @@ class _WebSocketMixin:
                         cleanup_phase = "unsent_request"
                         await _facade()._await_cancelled_task(
                             request_state_failure_task,
-                            timeout_seconds=cleanup_timeout,
+                            timeout_seconds=task_cleanup_timeout,
                             label="proxy websocket unsent request finalization",
                             cancel=False,
                         )
@@ -2785,7 +2794,7 @@ class _WebSocketMixin:
             )
             if not done:
                 _facade().logger.warning(
-                    "Websocket scope cleanup exceeded its remaining drain budget "
+                    "Websocket scope cleanup exceeded its cleanup budget "
                     "timeout_seconds=%.3f cleanup_phase=%s background_cleanup_tasks=%d",
                     max(float(cleanup_timeout), 0.0),
                     cleanup_phase,

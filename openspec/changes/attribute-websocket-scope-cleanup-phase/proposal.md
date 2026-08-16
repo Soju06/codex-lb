@@ -1,6 +1,6 @@
 ## Why
 
-When WebSocket scope cleanup exceeds its drain budget, the warning reports the
+When WebSocket scope cleanup exceeds its cleanup budget, the warning reports the
 timeout and total background cleanup task count but not the operation that is
 still blocked. Operators cannot distinguish an upstream-close stall from
 reader observation, request finalization, or lease release without reproducing

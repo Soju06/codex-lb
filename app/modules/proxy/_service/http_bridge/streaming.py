@@ -3642,10 +3642,149 @@ class _HTTPBridgeStreamingMixin:
                     ),
                 )
 
+        def operation_fenced_cooldown_wait_enabled() -> bool:
+            """Allow a hard turn to wait until its durable fence can arbitrate recovery."""
+            return (
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
+                    "fail_closed",
+                )
+                in {"server_anchored_replay_once", "server_indefinite_recovery"}
+                and getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
+                and request_state.hard_continuity_anchor
+                and session.durable_session_id is not None
+                and session.durable_owner_epoch is not None
+                and request_state.previous_response_id is None
+                and request_state.response_id is None
+                and request_state.response_event_count == 0
+            )
+
         def continuity_bound_without_safe_replay() -> bool:
             """Do not hold a client stream through a cooldown we cannot use."""
             return _http_bridge_continuity_bound_without_safe_replay(request_state) and not (
-                _http_bridge_server_anchored_replay_enabled(request_state)
+                _http_bridge_server_anchored_replay_enabled(request_state) or operation_fenced_cooldown_wait_enabled()
+            )
+
+        async def wait_through_operation_fenced_startup_cooldown() -> bool:
+            if session.key.strength != "hard" or not operation_fenced_cooldown_wait_enabled():
+                return False
+            retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+            if retry_cooldown_seconds <= 0:
+                return False
+            remaining_budget_seconds = request_deadline - _service_time().monotonic()
+            if remaining_budget_seconds <= 0:
+                return False
+            wait_seconds = min(retry_cooldown_seconds, remaining_budget_seconds)
+            async with session.pending_lock:
+                if session.queued_request_count >= queue_limit:
+                    raise ProxyResponseError(
+                        429,
+                        openai_error(
+                            "bridge_queue_full",
+                            "HTTP responses session bridge queue is full",
+                            error_type="rate_limit_error",
+                        ),
+                    )
+                session.queued_request_count += 1
+            _log_http_bridge_event(
+                "wait_operation_fenced_cooldown",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail="hard_turn_operation_fence",
+                cache_key_family=session.key.affinity_kind,
+            )
+            logger.info(
+                "HTTP bridge waiting through retry-circuit cooldown before durable hard-turn arbitration "
+                "request_id=%s wait_seconds=%.1f remaining_budget_seconds=%.1f",
+                request_state.request_id,
+                wait_seconds,
+                remaining_budget_seconds,
+            )
+            # No upstream request has been dispatched on this path.  After the
+            # cooldown, normal submission still has to create or claim the
+            # durable operation fence before response.create can be sent.
+            try:
+                current_instance = _service_get_settings().http_responses_session_bridge_instance_id
+                lease_refresh_interval_seconds = max(
+                    1.0,
+                    min(
+                        _http_bridge_durable_lease_ttl_seconds() / 3.0,
+                        wait_seconds,
+                    ),
+                )
+                remaining_wait_seconds = wait_seconds
+                while remaining_wait_seconds > 0:
+                    sleep_seconds = min(remaining_wait_seconds, lease_refresh_interval_seconds)
+                    await asyncio.sleep(sleep_seconds)
+                    remaining_wait_seconds = max(0.0, remaining_wait_seconds - sleep_seconds)
+                    if remaining_wait_seconds <= 0:
+                        break
+                    try:
+                        owner_lookup = await self._durable_bridge.renew_live_session(
+                            session_id=session.durable_session_id,
+                            api_key_id=session.key.api_key_id,
+                            instance_id=current_instance,
+                            owner_epoch=session.durable_owner_epoch,
+                            lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+                            latest_turn_state=session.downstream_turn_state,
+                            latest_response_id=None,
+                        )
+                    except Exception as exc:
+                        session.closed = True
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP responses session ownership could not be renewed; retry the request.",
+                            ),
+                        ) from exc
+                    if (
+                        owner_lookup is None
+                        or owner_lookup.owner_instance_id != current_instance
+                        or owner_lookup.owner_epoch != session.durable_owner_epoch
+                    ):
+                        session.closed = True
+                        session.upstream_control.reconnect_requested = True
+                        session.upstream_control.retire_after_drain = True
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP responses session ownership changed during cooldown; retry the request.",
+                            ),
+                        )
+            finally:
+                async with session.pending_lock:
+                    session.queued_request_count = max(0, session.queued_request_count - 1)
+            return True
+
+        async def operation_fenced_request_budget_terminal_event() -> str | None:
+            if not operation_fenced_cooldown_wait_enabled() or _service_time().monotonic() < request_deadline:
+                return None
+            await self._release_websocket_request_state_reservation(request_state)
+            request_state.api_key_reservation = None
+            if propagate_http_errors:
+                raise ProxyResponseError(
+                    503,
+                    openai_error(
+                        "upstream_request_timeout",
+                        "HTTP responses session bridge recovery exceeded the request budget.",
+                        error_type="server_error",
+                    ),
+                )
+            return format_sse_event(
+                cast(
+                    Mapping[str, JsonValue],
+                    response_failed_event(
+                        "stream_idle_timeout",
+                        "HTTP responses session bridge recovery exceeded the request budget",
+                        response_id=_websocket_downstream_response_id(request_state),
+                    ),
+                )
             )
 
         async def startup_continuity_cooldown_terminal_event() -> str | None:
@@ -3716,6 +3855,12 @@ class _HTTPBridgeStreamingMixin:
             )
 
         while True:
+            budget_terminal_event = await operation_fenced_request_budget_terminal_event()
+            if budget_terminal_event is not None:
+                yield budget_terminal_event
+                return
+            if await wait_through_operation_fenced_startup_cooldown():
+                continue
             startup_terminal_event = await startup_continuity_cooldown_terminal_event()
             if startup_terminal_event is not None:
                 yield startup_terminal_event

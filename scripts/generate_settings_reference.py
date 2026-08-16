@@ -262,6 +262,8 @@ def render_settings_reference() -> str:
             "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation) · "
             "[responses-api-compat]"
             "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · "
+            "[rate-limit-reset-credits]"
+            "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/rate-limit-reset-credits) · "
             "[deployment-installation]"
             "(https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation)*",
             "",

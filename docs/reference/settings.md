@@ -7,7 +7,7 @@ Regenerate with `uv run python scripts/generate_settings_reference.py`;
 `tests/unit/test_settings_reference.py` fails when this page drifts from
 `app/core/config/settings.py`.
 
-codex-lb currently exposes 126 settings. Every setting is an environment
+codex-lb currently exposes 129 settings. Every setting is an environment
 variable with the `CODEX_LB_` prefix (process environment or `.env` /
 `.env.local` next to the process). All defaults work with zero configuration —
 start from [Configuration](../configuration.md) for the handful that matter,
@@ -148,6 +148,7 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_LIVE_USAGE_INGESTION_ENABLED` | `bool` | `True` |
+| `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED` | `bool` | `True` |
 | `CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_INTERVAL_SECONDS` | `int` | `60` |
 | `CODEX_LB_REQUEST_LOG_RETENTION_DAYS` | `int` | `0` |
 | `CODEX_LB_USAGE_FETCH_MAX_RETRIES` | `int` | `2` |
@@ -250,6 +251,8 @@ the host side of the compose `ports` mapping instead.
 
 | Environment variable | Type | Default |
 | --- | --- | --- |
+| `CODEX_LB_TELEMETRY_ENABLED` | `bool \| None` | `None` |
+| `CODEX_LB_TELEMETRY_ENDPOINT` | `str` | `'https://telemetry.tokmaxxing.com'` |
 | `CODEX_LB_WARMUP_MODEL` | `str` | `'gpt-5.4-mini'` |
 
 ## Removed / deprecated
@@ -318,4 +321,4 @@ issue [#1340](https://github.com/Soju06/codex-lb/issues/1340)):
 
 ---
 
-*Specs: [user-documentation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation) · [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation)*
+*Specs: [user-documentation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation) · [responses-api-compat](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/responses-api-compat) · [rate-limit-reset-credits](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/rate-limit-reset-credits) · [deployment-installation](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/deployment-installation)*

@@ -16,6 +16,7 @@ const EMPTY_REPORT: ReportsResponse = {
     totalOutputTokens: 0,
     totalCachedTokens: 0,
     totalRequests: 0,
+    totalCancelled: 0,
     totalErrors: 0,
     totalConversations: 0,
     activeAccounts: 0,

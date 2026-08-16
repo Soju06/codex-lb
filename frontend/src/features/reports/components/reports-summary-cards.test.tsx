@@ -2,7 +2,27 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { ReportsSummaryCards } from "./reports-summary-cards";
+import type { ReportSummary } from "../schemas";
+import {
+  ReportsSummaryCards as ReportsSummaryCardsImpl,
+  type ReportsSummaryCardsProps,
+} from "./reports-summary-cards";
+
+type ReportsSummaryFixture = Omit<ReportSummary, "totalCancelled"> & {
+  totalCancelled?: number;
+};
+
+function ReportsSummaryCards({
+  summary,
+  ...props
+}: Omit<ReportsSummaryCardsProps, "summary"> & { summary: ReportsSummaryFixture }) {
+  return (
+    <ReportsSummaryCardsImpl
+      {...props}
+      summary={{ totalCancelled: 0, ...summary }}
+    />
+  );
+}
 
 describe("ReportsSummaryCards", () => {
   it("renders inline comparison badges for cost, tokens, and requests", () => {
@@ -163,6 +183,48 @@ describe("ReportsSummaryCards", () => {
     expect(within(conversationsCard).queryByText("42 distinct")).not.toBeInTheDocument();
     const requestsCard = screen.getByTestId("report-summary-card-requests");
     expect(requestsCard.nextElementSibling).toBe(conversationsCard);
+  });
+
+  it("renders requests, cancelled, and errors as distinct summary totals", () => {
+    render(
+      <ReportsSummaryCards
+        summary={{
+          totalCostUsd: 1,
+          totalInputTokens: 100,
+          totalOutputTokens: 20,
+          totalCachedTokens: 0,
+          totalRequests: 4,
+          totalCancelled: 2,
+          totalErrors: 1,
+          totalConversations: 1,
+          activeAccounts: 1,
+          avgCostPerDay: 1,
+          avgRequestsPerDay: 4,
+        }}
+        comparison={{
+          canCompare: false,
+          previous: { totalCostUsd: 0, totalTokens: 0, totalRequests: 0 },
+        }}
+      />,
+    );
+
+    const requestsCard = screen.getByTestId("report-summary-card-requests");
+    expect(within(requestsCard).getByText("Requests")).toBeInTheDocument();
+    expect(within(requestsCard).getByText("4")).toBeInTheDocument();
+
+    const cancelledCard = screen.queryByTestId("report-summary-card-cancelled");
+    expect.soft(cancelledCard).toBeInTheDocument();
+    if (cancelledCard) {
+      expect.soft(within(cancelledCard).getByText("Cancelled")).toBeInTheDocument();
+      expect.soft(within(cancelledCard).getByText("2")).toBeInTheDocument();
+    }
+
+    const errorsCard = screen.queryByTestId("report-summary-card-errors");
+    expect.soft(errorsCard).toBeInTheDocument();
+    if (errorsCard) {
+      expect.soft(within(errorsCard).getByText("Errors")).toBeInTheDocument();
+      expect.soft(within(errorsCard).getByText("1")).toBeInTheDocument();
+    }
   });
 
   it("preserves trailing zeroes for unrelated whole K and B values", () => {

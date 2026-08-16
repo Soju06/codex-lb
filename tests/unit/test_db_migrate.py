@@ -2313,6 +2313,33 @@ def test_http_bridge_operation_migrations_round_trip_existing_rows_and_rebuild_s
         engine.dispose()
 
 
+def test_sticky_abandonment_scope_migration_is_additive_and_reversible(tmp_path: Path) -> None:
+    db_path = tmp_path / "sticky-abandonment-scope.db"
+    url = _db_url(db_path)
+    parent_revision = "20260813_000000_add_file_account_pins"
+    target_revision = "20260812_120000_add_sticky_abandonment_scope"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("sticky_sessions")}
+            assert "continuity_abandonment_scope" not in columns
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("sticky_sessions")}
+            assert columns["continuity_abandonment_scope"]["nullable"] is True
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("sticky_sessions")}
+            assert "continuity_abandonment_scope" not in columns
+    finally:
+        engine.dispose()
+
+
 def test_check_schema_drift_detects_missing_dashboard_hot_path_indexes(tmp_path: Path) -> None:
     db_path = tmp_path / "missing-hot-path-indexes.db"
     url = _db_url(db_path)

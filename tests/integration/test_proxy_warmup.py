@@ -15,7 +15,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
-from app.core.exceptions import ProxyRateLimitError
+from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.time import utcnow
@@ -960,6 +960,62 @@ async def test_warmup_runs_parallel_with_max_five_accounts(async_client, monkeyp
     assert len(payload["submitted"]) == total_accounts
     assert payload["failed"] == []
     assert peak_compact_calls == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error_type", "error_code", "error_message"),
+    [
+        (ProxyAuthError, "auth_error", "account unauthorized"),
+        (ProxyRateLimitError, "rate_limit_exceeded", "account limited"),
+    ],
+    ids=["auth", "rate-limit"],
+)
+async def test_single_account_pre_submit_failure_returns_summary(
+    async_client,
+    monkeypatch,
+    error_type,
+    error_code,
+    error_message,
+):
+    await _enable_api_key_auth(async_client)
+    raw_account_id = "acc-warmup-single-failure"
+    account_id = await _import_account(async_client, raw_account_id, "warmup-single-failure@example.com")
+    await _add_primary_usage(account_id, used_percent=0.0, window_minutes=300)
+    _, key = await _create_api_key(async_client, name="warmup-single-failure")
+
+    async def _fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    async def _fake_compact(payload, headers, access_token, upstream_account_id, session=None):
+        del payload, headers, access_token, session
+        assert upstream_account_id == raw_account_id
+        raise error_type(error_message)
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _fake_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "mode": "force",
+        "total_accounts": 1,
+        "submitted": [],
+        "skipped": [],
+        "failed": [
+            {
+                "account_id": account_id,
+                "error_code": error_code,
+                "error_message": error_message,
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio

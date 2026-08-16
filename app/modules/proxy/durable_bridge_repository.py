@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Row, and_, case, delete, exists, func, or_, select, text, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -45,6 +45,10 @@ REQUIRED_DURABLE_BRIDGE_TABLES = (
 )
 DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS = 3600.0
 _PURGE_CLOSED_BATCH_SIZE = 500
+# Claim retry budget: insert races and epoch-CAS losses re-read and retry;
+# each round has a winner, so a small budget converges under any realistic
+# same-row claim contention.
+_CLAIM_CAS_ATTEMPTS = 5
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
 
 
@@ -596,7 +600,19 @@ class DurableBridgeRepository:
         force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeSessionSnapshot:
         session_key_hash = durable_bridge_hash(session_key_value)
-        for attempt in range(2):
+        # ``allow_takeover`` was decided by the caller against a pre-claim
+        # lookup. Once another claimant has demonstrably written this row under
+        # us (lost CAS, or lost insert race), that decision is stale: the row
+        # we re-read may now carry the winner's live lease, and reusing the
+        # permission would let the loser steal it. Revalidate from the fresh
+        # read instead — a live foreign owner then fails closed exactly like a
+        # non-takeover claim, which surfaces as the correct cross-replica
+        # "retry to reach the correct replica" response.
+        contended = False
+        # Bounded retry budget shared by the insert race (IntegrityError) and
+        # the epoch CAS: every round has a winner, so a loser converges after
+        # at most one fresh read per concurrent claimant.
+        for attempt in range(_CLAIM_CAS_ATTEMPTS):
             now = utcnow()
             lease_expires_at = now + timedelta(seconds=max(1.0, lease_ttl_seconds))
             row = await self._session.execute(
@@ -633,66 +649,153 @@ class DurableBridgeRepository:
                     await self._commit_writer_section()
                 except IntegrityError:
                     await self._session.rollback()
-                    if attempt == 0:
+                    if attempt < _CLAIM_CAS_ATTEMPTS - 1:
+                        contended = True
                         continue
                     raise
-                await self._session.refresh(record)
-                return _to_snapshot_required(record)
+                # Same reason the CAS path builds its own snapshot: another
+                # same-instance claimant can advance this brand-new row before
+                # a refresh runs, and returning that epoch would hand two
+                # claimants the same fence.
+                inserted_id = record.id
+                return DurableBridgeSessionSnapshot(
+                    id=inserted_id,
+                    session_key_kind=session_key_kind,
+                    session_key_value=session_key_value,
+                    session_key_hash=session_key_hash,
+                    api_key_scope=api_key_scope,
+                    owner_instance_id=instance_id,
+                    owner_process_epoch=owner_process_epoch,
+                    owner_epoch=1,
+                    lease_expires_at=lease_expires_at,
+                    state=HttpBridgeSessionState.ACTIVE,
+                    account_id=account_id,
+                    model=model,
+                    service_tier=service_tier,
+                    latest_turn_state=latest_turn_state,
+                    latest_response_id=latest_response_id,
+                    latest_input_item_count=None,
+                    latest_input_full_fingerprint=None,
+                    latest_pending_tool_calls=None,
+                    last_seen_at=now,
+                    closed_at=None,
+                )
 
-            state_allows_takeover = existing.state in {
-                HttpBridgeSessionState.DRAINING,
-                HttpBridgeSessionState.CLOSED,
-            }
+            state_closed = existing.state == HttpBridgeSessionState.CLOSED
+            owner_absent = existing.owner_instance_id is None
             account_changed = existing.account_id != account_id
             owner_changed = existing.owner_instance_id != instance_id
             if owner_changed:
                 lease_expired = existing.lease_expires_at is None or to_utc_naive(existing.lease_expires_at) <= now
-                if not allow_takeover and not lease_expired and not state_allows_takeover:
+                live_owned_draining = (
+                    existing.state == HttpBridgeSessionState.DRAINING and not lease_expired and not owner_absent
+                )
+                takeover_permitted = allow_takeover and not contended
+                if live_owned_draining or (
+                    not takeover_permitted and not lease_expired and not owner_absent and not state_closed
+                ):
                     return _to_snapshot_required(existing)
-                next_epoch = existing.owner_epoch + 1
-            elif account_changed or force_owner_epoch_advance:
-                next_epoch = existing.owner_epoch + 1
-            else:
-                next_epoch = existing.owner_epoch
+            # Every claim advances the owner epoch, including a same-owner
+            # reclaim: claims come only from a successor in-memory session (a
+            # reused session renews instead of claiming), so a live same-owner
+            # row means the predecessor local session is retiring concurrently
+            # and its outstanding fenced release/renewals must no-op rather
+            # than race this claim into a closed, ownerless row (issue #1695).
+            next_epoch = existing.owner_epoch + 1
 
+            # Write through an explicit UPDATE that sets every ownership field
+            # unconditionally. Mutating ORM attributes lets SQLAlchemy omit
+            # fields whose values match this transaction's (possibly stale)
+            # read, so a release committing between the SELECT and this write
+            # survived the claim and the refresh below returned a closed,
+            # ownerless row to a claimant that believed it had succeeded
+            # (issue #1695; SQLite's with_for_update is a no-op).
+            values: dict[str, object] = {
+                "owner_instance_id": instance_id,
+                "owner_process_epoch": owner_process_epoch,
+                "owner_epoch": next_epoch,
+                "lease_expires_at": lease_expires_at,
+                "state": HttpBridgeSessionState.ACTIVE,
+                "account_id": account_id,
+                "model": model,
+                "service_tier": service_tier,
+                "last_seen_at": now,
+                "closed_at": None,
+            }
+            if account_changed:
+                values["latest_turn_state"] = latest_turn_state
+                values["latest_response_id"] = latest_response_id
+                values["latest_input_item_count"] = None
+                values["latest_input_full_fingerprint"] = None
+                values["latest_pending_tool_calls_json"] = None
+            else:
+                if latest_turn_state is not None:
+                    values["latest_turn_state"] = latest_turn_state
+                if latest_response_id is not None:
+                    values["latest_response_id"] = latest_response_id
+                    values["latest_input_item_count"] = None
+                    values["latest_input_full_fingerprint"] = None
+                    values["latest_pending_tool_calls_json"] = None
             async with sqlite_writer_section():
-                existing.owner_instance_id = instance_id
-                existing.owner_process_epoch = owner_process_epoch
-                existing.owner_epoch = next_epoch
-                existing.lease_expires_at = lease_expires_at
-                existing.state = HttpBridgeSessionState.ACTIVE
+                # Compare-and-set on the epoch read above: SQLite's
+                # with_for_update is a no-op, so two successor claims can both
+                # read epoch N; without the guard both would write N+1 and both
+                # believe they own the row with colliding fences. The loser's
+                # update matches zero rows and retries against fresh state.
+                result = await self._session.execute(
+                    update(HttpBridgeSessionRecord)
+                    .where(
+                        HttpBridgeSessionRecord.id == existing.id,
+                        HttpBridgeSessionRecord.owner_epoch == existing.owner_epoch,
+                    )
+                    .values(**values)
+                )
+                if not bool(getattr(result, "rowcount", 0)):
+                    await self._session.rollback()
+                    if attempt < _CLAIM_CAS_ATTEMPTS - 1:
+                        contended = True
+                        continue
+                    raise RuntimeError("Failed to claim durable bridge session after retry")
                 if account_changed:
                     await self._clear_aliases_for_session(existing.id)
-                existing.account_id = account_id
-                existing.model = model
-                existing.service_tier = service_tier
-                if account_changed:
-                    existing.latest_turn_state = latest_turn_state
-                    existing.latest_response_id = latest_response_id
-                    existing.latest_input_item_count = None
-                    existing.latest_input_full_fingerprint = None
-                    existing.latest_pending_tool_calls_json = None
-                elif owner_changed:
-                    if latest_turn_state is not None:
-                        existing.latest_turn_state = latest_turn_state
-                    if latest_response_id is not None:
-                        existing.latest_response_id = latest_response_id
-                        existing.latest_input_item_count = None
-                        existing.latest_input_full_fingerprint = None
-                        existing.latest_pending_tool_calls_json = None
-                else:
-                    if latest_turn_state is not None:
-                        existing.latest_turn_state = latest_turn_state
-                    if latest_response_id is not None:
-                        existing.latest_response_id = latest_response_id
-                        existing.latest_input_item_count = None
-                        existing.latest_input_full_fingerprint = None
-                        existing.latest_pending_tool_calls_json = None
-                existing.last_seen_at = now
-                existing.closed_at = None
                 await self._session.commit()
-            await self._session.refresh(existing)
-            return _to_snapshot_required(existing)
+            # Build the snapshot from the values THIS CAS wrote rather than a
+            # post-commit refresh: another successor can commit its own CAS
+            # between this commit and a refresh, and returning that later epoch
+            # would hand this claimant a fence that collides with the winner's.
+            written_turn_state = values.get("latest_turn_state", existing.latest_turn_state)
+            written_response_id = values.get("latest_response_id", existing.latest_response_id)
+            written_pending_json = values.get("latest_pending_tool_calls_json", existing.latest_pending_tool_calls_json)
+            return DurableBridgeSessionSnapshot(
+                id=existing.id,
+                session_key_kind=existing.session_key_kind,
+                session_key_value=existing.session_key_value,
+                session_key_hash=existing.session_key_hash,
+                api_key_scope=existing.api_key_scope,
+                owner_instance_id=instance_id,
+                owner_process_epoch=owner_process_epoch,
+                owner_epoch=next_epoch,
+                lease_expires_at=lease_expires_at,
+                state=HttpBridgeSessionState.ACTIVE,
+                account_id=account_id,
+                model=model,
+                service_tier=service_tier,
+                latest_turn_state=cast("str | None", written_turn_state),
+                latest_response_id=cast("str | None", written_response_id),
+                latest_input_item_count=cast(
+                    "int | None", values.get("latest_input_item_count", existing.latest_input_item_count)
+                ),
+                latest_input_full_fingerprint=cast(
+                    "str | None",
+                    values.get("latest_input_full_fingerprint", existing.latest_input_full_fingerprint),
+                ),
+                latest_pending_tool_calls=_decode_pending_tool_calls(
+                    cast("str | None", written_response_id),
+                    cast("str | None", written_pending_json),
+                ),
+                last_seen_at=now,
+                closed_at=None,
+            )
         raise RuntimeError("Failed to claim durable bridge session after retry")
 
     async def renew_session(
@@ -1681,6 +1784,7 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
+        expected_recovery_dispatch_count: int = 0,
         response_id: str | None = None,
     ) -> bool:
         """Append a terminal event and expose its operation state atomically."""
@@ -1699,6 +1803,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
                 )
                 .with_for_update()
             )
@@ -1906,6 +2011,74 @@ class DurableBridgeRepository:
             .limit(1)
         )
         return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def settle_terminal_append_failure(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        state: str,
+        expected_response_id: str | None,
+        expected_recovery_dispatch_count: int = 0,
+        alternate_expected_response_id: str | None = None,
+        response_id: str | None = None,
+    ) -> bool:
+        """Settle only the terminal attempt whose append outcome was ambiguous."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            acknowledged_response_matches = (
+                HttpBridgeOperationRecord.response_id == expected_response_id
+                if expected_response_id is not None
+                else HttpBridgeOperationRecord.response_id.is_(None)
+            )
+            if alternate_expected_response_id is not None:
+                acknowledged_response_matches = or_(
+                    acknowledged_response_matches,
+                    HttpBridgeOperationRecord.response_id == alternate_expected_response_id,
+                )
+            terminal_response_matches = (
+                HttpBridgeOperationRecord.response_id == response_id
+                if response_id is not None
+                else HttpBridgeOperationRecord.response_id.is_(None)
+            )
+            values: dict[str, object] = {
+                "state": state,
+                "event_spool_complete": False,
+                "updated_at": utcnow(),
+            }
+            if response_id is not None:
+                values["response_id"] = response_id
+            result = await self._session.execute(
+                update(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
+                    or_(
+                        and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
+                        and_(
+                            HttpBridgeOperationRecord.state == state,
+                            or_(acknowledged_response_matches, terminal_response_matches),
+                        ),
+                    ),
+                )
+                .values(**values)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
 
     async def update_operation(
         self,

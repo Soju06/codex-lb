@@ -6,16 +6,20 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from app.core.openai.parsing import parse_sse_event
 from app.core.utils.sse import (
     CODEX_KEEPALIVE_FRAME,
     SSE_KEEPALIVE_FRAME,
     extract_sse_data,
+    format_sse_data,
     format_sse_event,
     inject_sse_keepalives,
     parse_sse_data_json,
 )
+from tests.unit.hypothesis_strategies import json_objects, json_values
 
 pytestmark = pytest.mark.unit
 
@@ -24,6 +28,58 @@ def test_format_sse_event_serializes_payload():
     payload = {"type": "response.completed", "response": {"id": "resp_1"}}
     result = format_sse_event(payload)
     assert result == 'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+
+
+@given(payload=json_objects)
+@settings(max_examples=40, deadline=None)
+def test_format_sse_event_round_trips_arbitrary_json_objects(payload):
+    assert parse_sse_data_json(format_sse_event(payload)) == payload
+
+
+@given(payload=json_objects)
+@settings(max_examples=40, deadline=None)
+def test_format_sse_data_round_trips_arbitrary_json_objects(payload):
+    assert parse_sse_data_json(format_sse_data(payload)) == payload
+
+
+@given(
+    boundary=st.sampled_from(["\r", "\n", "\r\n"]),
+    key=st.text(max_size=40),
+    value=st.integers(),
+)
+@settings(max_examples=30, deadline=None)
+def test_sse_line_boundaries_are_equivalent_in_multiline_data(boundary, key, value):
+    encoded_key = json.dumps(key, ensure_ascii=True)
+    block = f"data: {{{encoded_key}:" + boundary + f"data: {value}}}" + boundary * 2
+
+    assert parse_sse_data_json(block) == {key: value}
+
+
+@given(text=st.text(max_size=80))
+@settings(max_examples=30, deadline=None)
+def test_sse_unicode_line_separators_remain_data(text):
+    payload = {"value": f"before{text}\u2028middle\u2029after"}
+    block = "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+    assert parse_sse_data_json(block) == payload
+
+
+@given(
+    boundary=st.sampled_from(["\r", "\n", "\r\n"]),
+    first=st.text(alphabet=st.characters(blacklist_categories=("C", "Z")), min_size=1, max_size=40),
+    second=st.text(alphabet=st.characters(blacklist_categories=("C", "Z")), min_size=1, max_size=40),
+)
+@settings(max_examples=30, deadline=None)
+def test_sse_multiline_data_ignores_comments_and_joins_with_newline(boundary, first, second):
+    block = f": comment{boundary}data: {first}{boundary}event: ignored{boundary}data: {second}{boundary}{boundary}"
+
+    assert extract_sse_data(block) == f"{first}\n{second}"
+
+
+@given(value=st.one_of(st.none(), st.booleans(), st.integers(), st.lists(json_values, max_size=4)))
+@settings(max_examples=30, deadline=None)
+def test_parse_sse_data_json_rejects_non_object_json(value):
+    assert parse_sse_data_json("data: " + json.dumps(value) + "\n\n") is None
 
 
 async def _agen(items: list[str]) -> AsyncIterator[str]:

@@ -140,9 +140,9 @@ def _corpus() -> list[RequestLog]:
     for offset in (timedelta(hours=30), timedelta(days=5, hours=1), timedelta(days=9, hours=20)):
         rows.append(_log(BASE + offset, request_id_suffix="w", request_kind="warmup", cost_usd=0.002))
         rows.append(_log(BASE + offset + timedelta(minutes=20), request_id_suffix="lw", request_kind="limit_warmup"))
-    # Cancelled rows on both sides of every candidate watermark: the listing
-    # count's default status split (success+error) must exclude them from
-    # the folded sum and the raw tail alike.
+    # Cancelled rows on both sides of every candidate watermark: the default
+    # listing must include them as a distinct status in both the folded sum
+    # and the raw tail.
     for offset in (timedelta(days=1, hours=5), timedelta(days=9, hours=23)):
         rows.append(
             _log(
@@ -330,9 +330,18 @@ async def _listing_totals(logs: RequestLogsRepository, lead_since: datetime) -> 
 
     return {
         "default": await _total(),
-        "success_only": await _total(include_error_other=False),
-        "error_only": await _total(include_success=False),
-        "no_status_filter": await _total(include_success=False, include_error_other=False),
+        "success_only": await _total(include_cancelled=False, include_error_other=False),
+        "cancelled_only": await _total(
+            include_success=False,
+            include_cancelled=True,
+            include_error_other=False,
+        ),
+        "error_only": await _total(include_success=False, include_cancelled=False),
+        "no_status_filter": await _total(
+            include_success=False,
+            include_cancelled=False,
+            include_error_other=False,
+        ),
         "windowed": await _total(since=lead_since, until=UNTIL_UNALIGNED),
         "folded_only": await _total(since=FOLDED_ONLY_WINDOW[0], until=FOLDED_ONLY_WINDOW[1]),
         "tail_only": await _total(since=TAIL_ONLY_WINDOW[0], until=TAIL_ONLY_WINDOW[1]),

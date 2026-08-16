@@ -86,6 +86,7 @@ dev = [
     "openai>=2.16.0",
     "pytest-xdist>=3.8.0",
     "pytest-cov>=7.1.0",
+    "hypothesis>=6.165.3",
 ]
 docs = [
     "mkdocs-material>=9.6",

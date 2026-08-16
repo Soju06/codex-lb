@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import os
 import stat
 import sys
@@ -45,6 +46,7 @@ from app.core.middleware import (
     add_request_body_limit_middleware,
     add_request_decompression_middleware,
     add_request_id_middleware,
+    add_required_capability_http_middleware,
     add_trusted_proxy_headers_middleware,
 )
 from app.core.middleware.dashboard_gzip import add_dashboard_gzip_middleware
@@ -101,11 +103,64 @@ from app.modules.sticky_sessions.cleanup_scheduler import (
     _abandoned_bridge_retention_seconds,
     build_sticky_session_cleanup_scheduler,
 )
+from app.modules.telemetry import api as telemetry_api
+from app.modules.telemetry.scheduler import build_telemetry_scheduler
 from app.modules.usage import api as usage_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 from app.modules.usage.live_ingest import start_live_usage_ingestor, stop_live_usage_ingestor
 
 logger = logging.getLogger(__name__)
+
+# On Windows, ``mimetypes`` merges HKCR registry mappings where third-party
+# software commonly remaps web extensions (``.js`` -> ``text/plain``), and
+# browsers enforce strict MIME checking for ES module scripts, so a poisoned
+# mapping renders the dashboard as a blank page (issue #1698). ``FileResponse``
+# resolves ``media_type`` through ``mimetypes.guess_type``, so pin every
+# extension the built dashboard serves; ``add_type`` wins over the merged
+# registry table on all platforms.
+_WEB_ASSET_MIME_TYPES: dict[str, str] = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+    ".json": "application/json",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".html": "text/html",
+}
+
+
+def _ensure_web_asset_mime_types() -> None:
+    for extension, mime_type in _WEB_ASSET_MIME_TYPES.items():
+        mimetypes.add_type(mime_type, extension)
+
+
+_ensure_web_asset_mime_types()
+
+
+async def run_http_bridge_heartbeat_maintenance(proxy_service: Any) -> None:
+    """Per-replica bridge upkeep driven by the ring heartbeat.
+
+    Both passes are request-independent by design: durable ownership must be
+    reconciled even on a replica nothing is routing to, and the idle sweep is
+    otherwise only reached from ``_get_or_create_http_bridge_session``, so a
+    replica that stops taking bridge requests would keep its idle sessions'
+    upstream WebSockets open until restart (issue #1354). Each pass is isolated
+    so one failing cannot skip the other or stop the heartbeat.
+    """
+    if proxy_service is None:
+        return
+    for attribute, failure_message in (
+        ("reconcile_durable_http_bridge_ownership", "HTTP bridge durable ownership reconciliation failed"),
+        ("prune_idle_http_bridge_sessions", "HTTP bridge idle sweep failed"),
+    ):
+        pass_callable = getattr(proxy_service, attribute, None)
+        if pass_callable is None:
+            continue
+        try:
+            await pass_callable()
+        except Exception:
+            logger.warning(failure_message, exc_info=True)
 
 
 def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
@@ -434,6 +489,7 @@ async def lifespan(app: FastAPI):
     rate_limit_reset_credits_scheduler = build_rate_limit_reset_credits_scheduler()
     account_usage_rollup_scheduler = build_account_usage_rollup_scheduler()
     data_retention_scheduler = build_data_retention_scheduler()
+    telemetry_scheduler = build_telemetry_scheduler()
     start_live_usage_ingestor()
     await usage_scheduler.start()
     await api_key_limit_reset_scheduler.start()
@@ -446,6 +502,7 @@ async def lifespan(app: FastAPI):
     await rate_limit_reset_credits_scheduler.start()
     await account_usage_rollup_scheduler.start()
     await data_retention_scheduler.start()
+    await telemetry_scheduler.start()
     if settings.metrics_enabled and PROMETHEUS_AVAILABLE:
         import uvicorn
 
@@ -512,12 +569,7 @@ async def lifespan(app: FastAPI):
                 await svc.heartbeat(iid, endpoint_base_url=bridge_endpoint_base_url)
             except Exception:
                 logger.warning("Ring heartbeat failed", exc_info=True)
-            proxy_service = getattr(app.state, "proxy_service", None)
-            if proxy_service is not None and hasattr(proxy_service, "reconcile_durable_http_bridge_ownership"):
-                try:
-                    await proxy_service.reconcile_durable_http_bridge_ownership()
-                except Exception:
-                    logger.warning("HTTP bridge durable ownership reconciliation failed", exc_info=True)
+            await run_http_bridge_heartbeat_maintenance(getattr(app.state, "proxy_service", None))
             await refresh_cap_partition(svc.list_active, iid)
 
     async def _register_and_heartbeat(svc: RingMembershipService, iid: str) -> None:
@@ -667,6 +719,7 @@ async def lifespan(app: FastAPI):
         await rate_limit_reset_credits_scheduler.stop()
         await account_usage_rollup_scheduler.stop()
         await data_retention_scheduler.stop()
+        await telemetry_scheduler.stop()
         # Release the scheduler leader lease only after every leader-gated
         # scheduler has stopped so no local tick re-acquires it; followers can
         # then take over immediately instead of waiting out the lease TTL.
@@ -717,6 +770,7 @@ def create_app() -> FastAPI:
     add_request_decompression_middleware(app)
     add_request_body_limit_middleware(app)
     add_multipart_content_encoding_middleware(app)
+    add_required_capability_http_middleware(app)
     add_request_id_middleware(app)
     add_api_firewall_middleware(app)
     app.add_middleware(cast(Any, MetricsMiddleware), enabled=settings.metrics_enabled)
@@ -765,6 +819,7 @@ def create_app() -> FastAPI:
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)
+    app.include_router(telemetry_api.router)
     app.include_router(firewall_api.router)
     app.include_router(fleet_api.router)
     app.include_router(sticky_sessions_api.router)

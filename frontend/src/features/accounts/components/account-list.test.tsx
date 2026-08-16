@@ -432,6 +432,22 @@ describe("AccountList", () => {
     expect(screen.getByText("No matching accounts")).toBeInTheDocument();
   });
 
+  it("shows first-run empty copy when no accounts exist", () => {
+    render(
+      <AccountList
+        accounts={[]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("No accounts yet")).toBeInTheDocument();
+    expect(screen.getByText("Add an account to start routing.")).toBeInTheDocument();
+    expect(screen.queryByText("Adjust filters")).not.toBeInTheDocument();
+  });
+
   it("keeps the add account action outside the scrollable account list", () => {
     render(
       <AccountList

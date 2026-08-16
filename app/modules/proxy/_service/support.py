@@ -72,6 +72,7 @@ _HARD_HTTP_BRIDGE_AFFINITY_KINDS = frozenset(
     {
         "turn_state_header",
         "session_header",
+        "thread_header",
         "internal_unanchored_parallel",
         "internal_model_parallel",
         "internal_request_parallel",
@@ -93,6 +94,18 @@ _PROPAGATED_CAPACITY_STARTUP_WAIT: ContextVar[asyncio.Event | None] = ContextVar
 )
 _PROPAGATED_CAPACITY_STARTUP_READY: ContextVar[asyncio.Event | None] = ContextVar(
     "propagated_capacity_startup_ready",
+    default=None,
+)
+_PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_responses_service_cleanup_ready",
+    default=None,
+)
+_PROPAGATED_RESPONSES_OWNER_FORWARD_DISPATCHED: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_responses_owner_forward_dispatched",
+    default=None,
+)
+_PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED: ContextVar[asyncio.Event | None] = ContextVar(
+    "propagated_responses_owner_forward_rejected",
     default=None,
 )
 
@@ -283,6 +296,48 @@ def _signal_propagated_capacity_startup_ready() -> None:
     if wait_event is not None:
         wait_event.clear()
     event = _PROPAGATED_CAPACITY_STARTUP_READY.get()
+    if event is not None:
+        event.set()
+
+
+def _bind_propagated_responses_service_cleanup_ready(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY.set(event)
+
+
+def _reset_propagated_responses_service_cleanup_ready(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY.reset(token)
+
+
+def _signal_propagated_responses_service_cleanup_ready() -> None:
+    event = _PROPAGATED_RESPONSES_SERVICE_CLEANUP_READY.get()
+    if event is not None:
+        event.set()
+
+
+def _bind_propagated_responses_owner_forward_dispatched(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_RESPONSES_OWNER_FORWARD_DISPATCHED.set(event)
+
+
+def _reset_propagated_responses_owner_forward_dispatched(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_RESPONSES_OWNER_FORWARD_DISPATCHED.reset(token)
+
+
+def _signal_propagated_responses_owner_forward_dispatched() -> None:
+    event = _PROPAGATED_RESPONSES_OWNER_FORWARD_DISPATCHED.get()
+    if event is not None:
+        event.set()
+
+
+def _bind_propagated_responses_owner_forward_rejected(event: asyncio.Event) -> Token[asyncio.Event | None]:
+    return _PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED.set(event)
+
+
+def _reset_propagated_responses_owner_forward_rejected(token: Token[asyncio.Event | None]) -> None:
+    _PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED.reset(token)
+
+
+def _signal_propagated_responses_owner_forward_rejected() -> None:
+    event = _PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED.get()
     if event is not None:
         event.set()
 
@@ -735,12 +790,6 @@ def _consume_api_key_reservation_heartbeat_result(task: asyncio.Task[None]) -> N
 
 
 @dataclass(frozen=True, slots=True)
-class _FilePinEntry:
-    account_id: str
-    expires_at: float
-
-
-@dataclass(frozen=True, slots=True)
 class _RequestLogFailureMetadata:
     failure_phase: str | None = None
     failure_detail: str | None = None
@@ -769,6 +818,34 @@ class _DeferredAccountBackoffTracker:
     current_lifecycle: _DeferredAccountBackoffLifecycle | None = None
 
 
+@dataclass(eq=False, slots=True)
+class _HTTPBridgeResponseCreateAttempt:
+    ordinal: int
+    disarmed: bool = False
+    response_observed: bool = False
+    retry_circuit_failure_recorded: bool = False
+    retry_circuit_failure_settled: anyio.Event | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitAttemptSelection:
+    kind: Literal["absent", "eligible", "recorded", "settled", "ineligible"]
+    attempts: tuple[_HTTPBridgeResponseCreateAttempt, ...] = ()
+
+    def __post_init__(self) -> None:
+        carries_attempts = self.kind in {"eligible", "recorded", "settled"}
+        if carries_attempts != bool(self.attempts):
+            raise ValueError(f"invalid retry-circuit attempt selection: {self.kind}")
+
+    @property
+    def attempt(self) -> _HTTPBridgeResponseCreateAttempt | None:
+        return self.attempts[0] if len(self.attempts) == 1 else None
+
+    @property
+    def ambiguous(self) -> bool:
+        return len(self.attempts) > 1
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -791,6 +868,8 @@ class _WebSocketRequestState:
     # send. Retries replace this value so admission wait and prior attempts do
     # not age a fresh send into the eventless owner deadline.
     response_create_sent_at: float | None = None
+    response_create_attempt_count: int = 0
+    response_create_attempt: _HTTPBridgeResponseCreateAttempt | None = None
     bridge_queue_wait_started_at: float | None = None
     # Monotonic deadline of the original bridge request budget. Retry and
     # recovery paths re-prepare request states with a fresh started_at, so
@@ -814,6 +893,24 @@ class _WebSocketRequestState:
     connection_request_kind: str | None = None
     generate_false_prewarm: bool = False
     api_key: ApiKeyData | None = None
+    # The client's requested model captured before api-key enforcement
+    # normalized aliases (``gpt-5-high`` -> ``gpt-5``), with the key's
+    # ``enforced_model`` substituted and the fast-mode correction applied,
+    # exactly like the HTTP path's ``raw_source_model``. Consumed only by the
+    # WebSocket source-ownership guards; it must never reach the upstream
+    # wire payload. ``None`` on request states that were not built by
+    # ``_prepare_websocket_response_create_request`` (replays, archives),
+    # which keeps those on the normalized-model check.
+    raw_source_model: str | None = None
+    # True when the HTTP route would exclude this request from model-source
+    # routing (``responses_source_route_excluded``: a terminal compaction
+    # trigger, or ``input_file`` references pinned to the uploading
+    # subscription account). The WebSocket source-ownership guards skip such
+    # requests so the owner-routing logic can dispatch them to a subscription
+    # account, exactly like HTTP. ``False`` on request states that were not
+    # built by ``_prepare_websocket_response_create_request``, which keeps
+    # the guards active for those.
+    source_route_excluded: bool = False
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
     replay_count: int = 0
@@ -900,6 +997,13 @@ class _WebSocketRequestState:
     operation_created: bool = False
     operation_replay: bool = False
     operation_dispatched: bool = False
+    # Immutable durable attempt generation. Recovery claims increment the
+    # operation's dispatch count before sending a replacement attempt.
+    operation_attempt_generation: int = 0
+    # Last response identity successfully written to the durable operation.
+    # Retry setup may clear the active response before a replacement is
+    # acknowledged, but fallback settlement must still fence against this ID.
+    operation_persisted_response_id: str | None = None
     # Responses-Lite model advertised by ``fresh_upstream_request_text``. A
     # fresh replay built from a trusted marker-only frame has the reserved
     # marker stripped, so swapping to the fresh body must also swap this onto
@@ -936,6 +1040,7 @@ class _WebSocketRequestState:
     account_response_create_release: Callable[[AccountLease | None], Coroutine[Any, Any, None]] | None = None
     websocket_stream_lease: AccountLease | None = None
     affinity_policy: _AffinityPolicy = field(default_factory=_AffinityPolicy)
+    thread_affinity_last_touch_at: float = field(default_factory=time.monotonic)
     suppressed_downstream_tool_call: bool = False
     suppressed_duplicate_tool_call: bool = False
     pending_function_call_ids: list[str] = field(default_factory=list)
@@ -1059,6 +1164,10 @@ class _HTTPBridgeSession:
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False
+    # ``closed`` is only an admission fence. Resource teardown is single-flight
+    # through this task so invalidation and shutdown can distinguish a rejected
+    # session from one whose socket and leases actually have a close owner.
+    resource_close_task: asyncio.Task[None] | None = None
     # ``closed`` rejects new admissions but is written by many unrelated
     # retirement paths; it never proves that a sender owns pending settlement.
     # Only the submitter may claim this, while holding ``lifecycle_lock``, when
@@ -1301,9 +1410,21 @@ def _clear_websocket_deferred_reasoning_downstream_texts(request_state: _WebSock
         request_state.deferred_reasoning_downstream_texts = []
 
 
+def _mark_response_create_attempt_observed(
+    request_state: _WebSocketRequestState | None,
+    event_type: str | None,
+) -> None:
+    if request_state is None or event_type is None or not event_type.startswith("response."):
+        return
+    attempt = request_state.response_create_attempt
+    if attempt is not None:
+        attempt.response_observed = True
+
+
 def _record_response_event(request_state: _WebSocketRequestState | None, event_type: str | None) -> None:
     if request_state is None or event_type is None or not event_type.startswith("response."):
         return
+    _mark_response_create_attempt_observed(request_state, event_type)
     request_state.last_upstream_activity_at = time.monotonic()
     if event_type in {"response.failed", "response.incomplete"}:
         return
@@ -1481,6 +1602,7 @@ def _is_account_neutral_error_code(code: str | None) -> bool:
         PROCESS_NETWORK_UNAVAILABLE_CODE,
         "proxy_unavailable",
         "responses_compact_input_too_large",
+        "stream_idle_timeout",
     }
 
 

@@ -96,6 +96,10 @@ from app.modules.api_keys.service import (
     ApiKeyInvalidError,
     ApiKeysService,
 )
+from app.modules.model_sources.selection import (
+    effective_model_for_api_key,
+    responses_model_is_source_owned,
+)
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -433,9 +437,11 @@ from app.modules.proxy.affinity import (
     _is_synthesized_turn_state,
     _owner_lookup_session_id_from_headers,
     _prompt_cache_key_from_request_model,
+    _request_allows_unavailable_legacy_owner_abandonment,
     _sticky_key_for_responses_request,
     _sticky_key_from_session_header,  # noqa: F401
     _sticky_key_from_turn_state_header,
+    _websocket_continuity_aliases_from_headers,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
 from app.modules.proxy.capability_routing import (
@@ -469,10 +475,12 @@ from app.modules.proxy.load_balancer import AccountLease, effective_account_conc
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
+    model_alias_requests_fast_mode,
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_invalid_payload_error,
     openai_validation_error,
+    responses_source_route_excluded,
     validate_model_access,
 )
 from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED, selection_failure_response
@@ -492,6 +500,9 @@ def _facade() -> Any:
 logger = logging.getLogger(__name__)
 
 _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
+# Scope teardown coordinates several request/lease finalizers; keep its normal
+# observation budget separate from the short generic child-task cancel bound.
+_WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS = 5.0
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "This request requires Trusted Access for Cyber, but no eligible account is marked as "
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
@@ -534,23 +545,24 @@ async def _reject_websocket_owner_switch_blocked(
     api_key: ApiKeyData | None,
     response_create_gate: asyncio.Semaphore,
     downstream_activity: _DownstreamWebSocketActivity,
-) -> None:
-    error_message = (
+    error_code: str = "previous_response_owner_unavailable",
+    error_message: str = (
         "Previous response owner differs while another response is still streaming; retry after the terminal frame."
-    )
+    ),
+) -> None:
     await proxy._release_websocket_request_state_reservation(request_state)
     await proxy._write_websocket_connect_failure(
         account_id=account.id,
         api_key=api_key,
         request_state=request_state,
-        error_code="previous_response_owner_unavailable",
+        error_code=error_code,
         error_message=error_message,
     )
     await proxy._emit_websocket_terminal_error(
         websocket,
         client_send_lock=client_send_lock,
         request_state=request_state,
-        error_code="previous_response_owner_unavailable",
+        error_code=error_code,
         error_message=error_message,
         downstream_activity=downstream_activity,
     )
@@ -1213,6 +1225,45 @@ async def _process_upstream_websocket_transport_end(
 
 
 class _WebSocketMixin:
+    async def _touch_active_websocket_thread_affinity(
+        self,
+        request_state: _WebSocketRequestState,
+        account: Account,
+    ) -> None:
+        """Refresh bounded thread locality without turning it into ownership."""
+
+        proxy = cast(_WebSocketServiceProtocol, self)
+        policy = request_state.affinity_policy
+        if (
+            policy.codex_session_source != "thread_header"
+            or policy.selection_key is None
+            or policy.kind != StickySessionKind.PROMPT_CACHE
+            or policy.max_age_seconds is None
+        ):
+            return
+        now = time.monotonic()
+        touch_interval = max(1.0, min(float(policy.max_age_seconds) / 2.0, 60.0))
+        if now - request_state.thread_affinity_last_touch_at < touch_interval:
+            return
+        try:
+            # A response can outlive the selection TTL. Throttled event-time
+            # touches keep reconnect locality current, while exact response or
+            # bridge ownership remains the hard authority for this turn.
+            async with proxy._repo_factory() as repos:
+                await repos.sticky_sessions.upsert(
+                    policy.selection_key,
+                    account.id,
+                    kind=policy.kind,
+                )
+        except Exception:
+            _facade().logger.warning(
+                "Failed to refresh active Codex thread affinity account_id=%s",
+                account.id,
+                exc_info=True,
+            )
+            return
+        request_state.thread_affinity_last_touch_at = now
+
     def _websocket_continuity_state_for_request(
         self,
         headers: Mapping[str, str],
@@ -1225,28 +1276,37 @@ class _WebSocketMixin:
         _ = proxy
         if not codex_session_affinity:
             return _WebSocketContinuityState()
-        session_id = _owner_lookup_session_id_from_headers(headers, synthesized_turn_state=synthesized_turn_state)
         api_key_id = api_key.id if api_key is not None else None
-        cache_keys: list[tuple[str, str | None]] = []
-        if session_id is not None:
-            cache_keys.append((session_id, api_key_id))
-        if synthesized_turn_state is not None:
-            generated_key = (synthesized_turn_state, api_key_id)
-            if generated_key not in cache_keys:
-                cache_keys.append(generated_key)
+        cache_keys = [
+            (continuity_key, api_key_id)
+            for continuity_key in _websocket_continuity_aliases_from_headers(
+                headers,
+                synthesized_turn_state=synthesized_turn_state,
+            )
+        ]
         if not cache_keys:
             return _WebSocketContinuityState()
+        explicit_turn_state = _sticky_key_from_turn_state_header(headers)
+        exact_client_turn = explicit_turn_state is not None and explicit_turn_state != synthesized_turn_state
+        # An exact client turn state is hard continuity. If its alias is
+        # unknown, do not borrow retained response/tool state from the broader
+        # thread key; the turn may have a different owner. Once the exact alias
+        # resolves, publishing that same state under the thread key is safe and
+        # keeps a later unanchored reconnect thread-local.
+        lookup_keys = cache_keys[:1] if exact_client_turn else cache_keys
         continuity_state = next(
             (
                 existing_state
-                for key in cache_keys
+                for key in lookup_keys
                 if (existing_state := proxy._websocket_continuity_index.get(key)) is not None
             ),
             None,
         )
+        exact_alias_resolved = continuity_state is not None
         if continuity_state is None:
             continuity_state = _WebSocketContinuityState()
-        for key in cache_keys:
+        publish_keys = cache_keys if not exact_client_turn or exact_alias_resolved else lookup_keys
+        for key in publish_keys:
             proxy._websocket_continuity_index.pop(key, None)
             proxy._websocket_continuity_index[key] = continuity_state
         while len(proxy._websocket_continuity_index) > _facade()._WEBSOCKET_CONTINUITY_CACHE_LIMIT:
@@ -1293,7 +1353,14 @@ class _WebSocketMixin:
         account_lease: AccountLease | None = None
         upstream_requires_security_work_authorized: bool | None = None
         upstream_turn_state: str | None = _sticky_key_from_turn_state_header(headers)
-        client_turn_state_header: str | None = _sticky_key_from_turn_state_header(filtered_headers)
+        # The API inserts its generated downstream turn state into ``headers``
+        # before entering this service. Preserve a turn-state header as
+        # client-owned only when no synthesized value accompanied it; otherwise
+        # account-switch cleanup must remain able to remove the old account's
+        # generated token from ``filtered_headers``.
+        client_turn_state_header: str | None = (
+            _sticky_key_from_turn_state_header(filtered_headers) if synthesized_turn_state is None else None
+        )
         upstream_account_id: str | None = None
         downstream_activity = _DownstreamWebSocketActivity()
         replay_request_state: _WebSocketRequestState | None = None
@@ -1647,6 +1714,81 @@ class _WebSocketMixin:
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
+                                if (
+                                    upstream is not None
+                                    and account is not None
+                                    # A reader that has already finished means the upstream is
+                                    # gone but the cleanup that nulls it runs further below, so
+                                    # without this the turn would take the reuse path (terminal
+                                    # error) when it should reconnect and take the connect path
+                                    # (503, which the client transparently falls back from).
+                                    and upstream_reader is not None
+                                    and not upstream_reader.done()
+                                    # Requests the HTTP route excludes from
+                                    # source routing (a terminal compaction
+                                    # trigger, ``input_file`` references)
+                                    # must stay on subscription accounts even
+                                    # when their model is also source-owned;
+                                    # the owner-routing below dispatches them
+                                    # to the pinned account instead of this
+                                    # guard failing the turn.
+                                    and not request_state.source_route_excluded
+                                    and await responses_model_is_source_owned(
+                                        request_state.model,
+                                        request_state.api_key or api_key,
+                                        # The raw client model, before enforcement
+                                        # normalized aliases: an alias-only source
+                                        # (``gpt-5-high``) is invisible in the
+                                        # normalized ``request_state.model``.
+                                        raw_model=request_state.raw_source_model,
+                                    )
+                                ):
+                                    # Socket reuse bypasses connect-time selection, so a later
+                                    # response.create that switches to a source-owned model
+                                    # would otherwise be forwarded to the subscription account
+                                    # already attached to the open upstream. Model sources are
+                                    # only reachable from the HTTP request path.
+                                    #
+                                    # Gated on an existing upstream on purpose: a first turn has
+                                    # no socket yet and must fall through to the connect guard,
+                                    # which fails with a service-level 503 so the client falls
+                                    # back to HTTP. Emitting a terminal error here would preempt
+                                    # that fallback and make source models unreachable.
+                                    source_model = request_state.raw_source_model or request_state.model
+                                    source_message = (
+                                        f"Model {source_model!r} is served by an "
+                                        "OpenAI-compatible model source, which is only reachable "
+                                        "over the HTTP transport; retry the request over HTTPS."
+                                    )
+                                    _facade().logger.info(
+                                        "Websocket model source requires http transport "
+                                        "request_id=%s model=%s raw_model=%s stage=response_create",
+                                        request_state.request_log_id or request_state.request_id,
+                                        request_state.model,
+                                        request_state.raw_source_model,
+                                    )
+                                    await proxy._release_websocket_request_state_reservation(request_state)
+                                    # The prepared request already owns a request-log row; without
+                                    # this the row is never finalized, so the same logical failure
+                                    # is only visible in request logs when it happens on the first
+                                    # turn (where the connect path writes it).
+                                    await proxy._write_websocket_connect_failure(
+                                        account_id=account.id,
+                                        api_key=request_state.api_key or api_key,
+                                        request_state=request_state,
+                                        error_code="model_source_requires_http_transport",
+                                        error_message=source_message,
+                                    )
+                                    await proxy._emit_websocket_terminal_error(
+                                        websocket,
+                                        client_send_lock=client_send_lock,
+                                        request_state=request_state,
+                                        error_code="model_source_requires_http_transport",
+                                        error_message=source_message,
+                                        error_type="invalid_request_error",
+                                        downstream_activity=downstream_activity,
+                                    )
+                                    continue
                             except ProxyResponseError as exc:
                                 (
                                     status_code,
@@ -1848,6 +1990,53 @@ class _WebSocketMixin:
                     text_data = None
                     payload = None
                     continue
+
+                if (
+                    request_state is not None
+                    and upstream is not None
+                    and account is not None
+                    and request_state.affinity_policy.abandon_unavailable_legacy_owner
+                ):
+                    # Reusing the existing socket would bypass sticky
+                    # selection, so the unavailable raw owner would never be
+                    # compared, tombstoned, or replaced. A restart is movable
+                    # only before dispatch and cannot retire a socket that
+                    # still owns another response.
+                    async with pending_lock:
+                        restart_switch_blocked = _websocket_owner_switch_has_other_pending_requests(
+                            request_state,
+                            pending_requests,
+                        )
+                    if restart_switch_blocked:
+                        await _reject_websocket_owner_switch_blocked(
+                            proxy,
+                            websocket,
+                            client_send_lock=client_send_lock,
+                            request_state=request_state,
+                            account=account,
+                            api_key=api_key,
+                            response_create_gate=response_create_gate,
+                            downstream_activity=downstream_activity,
+                            error_code="stream_incomplete",
+                            error_message=(
+                                "Goal restart cannot switch accounts while another response is still streaming; "
+                                "retry after the terminal frame."
+                            ),
+                        )
+                        request_state = None
+                        text_data = None
+                        payload = None
+                        continue
+                    await retire_current_upstream()
+                    upstream_turn_state = None
+                    if client_turn_state_header is None:
+                        # Provenance was captured before this switch: absence
+                        # here means the API synthesized the forwarded token.
+                        # Such account-local state must die with its upstream;
+                        # an actual client anchor remains fail-closed instead.
+                        filtered_headers = {
+                            key: value for key, value in filtered_headers.items() if key.lower() != "x-codex-turn-state"
+                        }
 
                 if (
                     request_state is not None
@@ -2510,11 +2699,19 @@ class _WebSocketMixin:
             scope_cancelled = True
             raise
         finally:
-            cleanup_timeout = shutdown_state.remaining_drain_timeout_seconds()
-            if cleanup_timeout is None:
-                cleanup_timeout = _facade()._TASK_CANCEL_TIMEOUT_SECONDS
+            remaining_drain_timeout = shutdown_state.remaining_drain_timeout_seconds()
+            cleanup_timeout = (
+                _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS
+                if remaining_drain_timeout is None
+                else max(float(remaining_drain_timeout), 0.0)
+            )
+            task_cleanup_timeout = (
+                _facade()._TASK_CANCEL_TIMEOUT_SECONDS if remaining_drain_timeout is None else cleanup_timeout
+            )
+            cleanup_phase = "not_started"
 
             async def finalize_websocket_scope() -> None:
+                nonlocal cleanup_phase
                 nonlocal replay_request_state
                 nonlocal request_state_failure_task
                 nonlocal request_state_to_fail
@@ -2527,13 +2724,15 @@ class _WebSocketMixin:
                     # release that wait.
                     reader_to_await.cancel()
                 if upstream is not None:
+                    cleanup_phase = "upstream_close"
                     await _close_websocket_upstream_for_cleanup(
                         proxy,
                         upstream,
-                        timeout_seconds=cleanup_timeout,
+                        timeout_seconds=task_cleanup_timeout,
                     )
                 if reader_to_await is not None:
                     try:
+                        cleanup_phase = "upstream_reader"
                         await _facade()._await_cancelled_task(
                             reader_to_await,
                             label="proxy websocket upstream reader",
@@ -2550,9 +2749,10 @@ class _WebSocketMixin:
                     upstream_reader = None
                 if retired_create_lease_release_task is not None:
                     try:
+                        cleanup_phase = "retired_create_lease"
                         await _facade()._await_cancelled_task(
                             retired_create_lease_release_task,
-                            timeout_seconds=cleanup_timeout,
+                            timeout_seconds=task_cleanup_timeout,
                             label="proxy websocket retired create lease release",
                             cancel=False,
                         )
@@ -2564,9 +2764,10 @@ class _WebSocketMixin:
                     retired_create_lease_release_task = None
                 if request_state_failure_task is not None:
                     try:
+                        cleanup_phase = "unsent_request"
                         await _facade()._await_cancelled_task(
                             request_state_failure_task,
-                            timeout_seconds=cleanup_timeout,
+                            timeout_seconds=task_cleanup_timeout,
                             label="proxy websocket unsent request finalization",
                             cancel=False,
                         )
@@ -2580,6 +2781,7 @@ class _WebSocketMixin:
                     replay_request_state = upstream_control.replay_request_state
                     upstream_control.replay_request_state = None
                 if request_state_to_fail is not None:
+                    cleanup_phase = "unsent_request"
                     await proxy._fail_pending_websocket_requests(
                         account=None,
                         account_id_value=account.id if account is not None else upstream_account_id,
@@ -2598,6 +2800,7 @@ class _WebSocketMixin:
                     )
                     request_state_to_fail = None
                 if replay_request_state is not None:
+                    cleanup_phase = "replay_request"
                     await proxy._fail_pending_websocket_requests(
                         account=None,
                         account_id_value=account.id if account is not None else upstream_account_id,
@@ -2615,6 +2818,7 @@ class _WebSocketMixin:
                         penalize_account=False,
                     )
                 client_disconnected = downstream_activity.disconnected
+                cleanup_phase = "pending_requests"
                 await proxy._fail_pending_websocket_requests(
                     account=None if client_disconnected or scope_cancelled else account,
                     account_id_value=account.id if account is not None else upstream_account_id,
@@ -2637,6 +2841,7 @@ class _WebSocketMixin:
                     penalize_account=not (client_disconnected or scope_cancelled),
                 )
                 try:
+                    cleanup_phase = "connection_lease"
                     await release_current_account_lease()
                 except Exception:
                     # Connection-lease cleanup must never replace cancellation
@@ -2645,6 +2850,7 @@ class _WebSocketMixin:
                         "Failed to release websocket connection lease during scope cleanup",
                         exc_info=True,
                     )
+                cleanup_phase = "complete"
 
             cleanup_task = asyncio.create_task(
                 finalize_websocket_scope(),
@@ -2669,9 +2875,10 @@ class _WebSocketMixin:
             )
             if not done:
                 _facade().logger.warning(
-                    "Websocket scope cleanup exceeded its remaining drain budget "
-                    "timeout_seconds=%.3f background_cleanup_tasks=%d",
+                    "Websocket scope cleanup exceeded its cleanup budget "
+                    "timeout_seconds=%.3f cleanup_phase=%s background_cleanup_tasks=%d",
                     max(float(cleanup_timeout), 0.0),
+                    cleanup_phase,
                     sum(1 for task in proxy._background_cleanup_tasks if not task.done()),
                 )
 
@@ -2709,6 +2916,14 @@ class _WebSocketMixin:
             payload,
             openai_compat=openai_cache_affinity,
         )
+        # The client's raw model, captured before enforcement normalizes
+        # aliases (``gpt-5-high`` -> ``gpt-5``). The source-ownership guards
+        # must judge the raw alias too, or an alias-only model source is
+        # missed on the WebSocket paths while the HTTP path routes the same
+        # request via ``raw_source_model``. Mirrors ``api.py::responses``
+        # exactly, including the enforced-model substitution here and the
+        # fast-mode correction after enforcement below.
+        raw_source_model = effective_model_for_api_key(refreshed_api_key, responses_payload.model)
         # The effort the normalizer replaced is discarded here on purpose: the
         # WebSocket transport never reaches a model source, so the rewrite that
         # works around the backend hang must stick.
@@ -2717,10 +2932,23 @@ class _WebSocketMixin:
             refreshed_api_key,
             prohibit_fast_mode=prohibit_fast_mode,
         ).service_tier_was_enforced
+        if prohibit_fast_mode and model_alias_requests_fast_mode(raw_source_model):
+            raw_source_model = responses_payload.model
         apply_enforced_service_tier_model_fallback(
             responses_payload,
             service_tier_was_enforced=service_tier_was_enforced,
         )
+        # Judged on the full client input, before the websocket-specific
+        # trimming and anchor injection below rewrite it — the same payload
+        # the HTTP route evaluates for its source-selection gate.
+        try:
+            source_route_excluded = responses_source_route_excluded(responses_payload)
+        except ClientPayloadError:
+            # HTTP rejects a malformed compaction trigger with a 400; the
+            # WebSocket path has always forwarded such frames verbatim, so a
+            # parse failure keeps the source guards active instead of
+            # changing that behavior here.
+            source_route_excluded = False
         normalized_payload = responses_payload.to_payload()
         stripped_client_metadata = strip_capability_metadata(normalized_payload.get("client_metadata"))
         if stripped_client_metadata is not normalized_payload.get("client_metadata"):
@@ -2791,11 +3019,21 @@ class _WebSocketMixin:
         original_full_resend_payload: ResponsesRequest | None = None
         original_input_item_count: int | None = None
         original_input_fingerprint: str | None = None
-        session_anchor = _websocket_continuity_anchor_for_payload(
-            continuity_state,
-            responses_payload=responses_payload,
-            codex_session_affinity=codex_session_affinity,
-        )
+        # Classify restart authority from the complete normalized client body,
+        # before ordinary direct-WebSocket continuity injects a
+        # ``previous_response_id`` and trims historical input. That injected
+        # anchor is account-owned and would both erase the restart capability
+        # and make the payload unsafe for the replacement account. A proven
+        # goal restart must retain the complete resend through selection.
+        goal_restart_full_resend = _request_allows_unavailable_legacy_owner_abandonment(responses_payload)
+        restart_affinity_payload = responses_payload
+        session_anchor = None
+        if not goal_restart_full_resend:
+            session_anchor = _websocket_continuity_anchor_for_payload(
+                continuity_state,
+                responses_payload=responses_payload,
+                codex_session_affinity=codex_session_affinity,
+            )
         if session_anchor is not None:
             original_input_items = cast(list[JsonValue], responses_payload.input)
             original_input_item_count = len(original_input_items)
@@ -2876,6 +3114,8 @@ class _WebSocketMixin:
         request_state.useragent_group = useragent_group
         request_state.conversation_id = conversation_id
         request_state.client_ip = client_ip
+        request_state.raw_source_model = raw_source_model
+        request_state.source_route_excluded = source_route_excluded
         request_state.responses_lite_model = next_responses_lite_model
         request_state.expose_stale_previous_response_classifier = codex_session_affinity
         request_state.require_security_work_authorized = capability_route.require_security_work_authorized
@@ -2959,7 +3199,10 @@ class _WebSocketMixin:
                     request_state.input_item_count,
                 )
         affinity_policy = _sticky_key_for_responses_request(
-            responses_payload,
+            # Only the proven restart uses the pre-injection body. Ordinary
+            # full resends must be classified after anchor injection so they
+            # cannot accidentally gain soft-session mobility.
+            restart_affinity_payload if goal_restart_full_resend else responses_payload,
             headers,
             codex_session_affinity=codex_session_affinity,
             openai_cache_affinity=openai_cache_affinity,
@@ -2969,7 +3212,9 @@ class _WebSocketMixin:
             synthesized_turn_state=synthesized_turn_state,
         )
         sticky_key_source = "none"
-        if affinity_policy.kind == StickySessionKind.CODEX_SESSION:
+        if affinity_policy.codex_session_source == "thread_header":
+            sticky_key_source = "thread_header"
+        elif affinity_policy.kind == StickySessionKind.CODEX_SESSION:
             turn_state_key = _sticky_key_from_turn_state_header(headers)
             if turn_state_key is not None and turn_state_key == synthesized_turn_state:
                 sticky_key_source = "generated_turn_state"
@@ -3105,6 +3350,65 @@ class _WebSocketMixin:
                 request_transport="websocket",
             ),
         )
+        # Model sources are only reachable from the HTTP request path. Fail the
+        # WebSocket connect instead of dispatching a source-owned model to a
+        # subscription account, which the upstream rejects with "The '<model>'
+        # model is not supported when using Codex with a ChatGPT account."
+        # Codex clients fall back to the HTTP transport when a WebSocket
+        # connect fails, and that path routes to the source correctly.
+        #
+        # Evaluated once per connect series rather than inside the failover
+        # loop below: source ownership is a property of the requested model, so
+        # re-resolving it per attempt would only repeat the same lookup. The
+        # per-request api key is used (rather than the session key) so a policy
+        # refresh mid-session cannot make this disagree with the equivalent
+        # check on the prepared-request path.
+        #
+        # Requests the HTTP route excludes from source routing (a terminal
+        # compaction trigger, ``input_file`` references pinned to the
+        # uploading account) skip the guard: they must land on a subscription
+        # account either way, and the owner-required selection below routes
+        # them there instead of bouncing the turn to HTTP.
+        if not request_state.source_route_excluded and await responses_model_is_source_owned(
+            model,
+            request_state.api_key or api_key,
+            # ``model`` is the session loop's post-enforcement
+            # ``request_state.model``; the raw client alias captured at
+            # preparation is what an alias-only source is registered under.
+            raw_model=request_state.raw_source_model,
+        ):
+            source_model = request_state.raw_source_model or model
+            message = (
+                f"Model {source_model!r} is served by an OpenAI-compatible model source, which is only "
+                "reachable over the HTTP transport; retry the request over HTTPS."
+            )
+            _facade().logger.info(
+                "Websocket model source requires http transport request_id=%s model=%s raw_model=%s api_key_present=%s",
+                request_state.request_log_id or request_state.request_id,
+                model,
+                request_state.raw_source_model,
+                (request_state.api_key or api_key) is not None,
+            )
+            await proxy._emit_websocket_connect_failure(
+                websocket,
+                client_send_lock=client_send_lock,
+                account_id=None,
+                api_key=request_state.api_key or api_key,
+                request_state=request_state,
+                # 503 (not 4xx) is deliberate: Codex clients only fall back to
+                # the HTTP transport when a WebSocket connect fails at the
+                # service level. A 4xx is treated as terminal and surfaces to
+                # the user instead of retrying over HTTPS.
+                status_code=503,
+                payload=openai_error(
+                    "model_source_requires_http_transport",
+                    message,
+                    error_type="server_error",
+                ),
+                error_code="model_source_requires_http_transport",
+                error_message=message,
+            )
+            return None, None
         max_attempts = _facade()._WEBSOCKET_MAX_ACCOUNT_ATTEMPTS
         excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
         last_failover_exc: ProxyResponseError | None = None
@@ -3359,7 +3663,11 @@ class _WebSocketMixin:
                     reallocate_sticky=reallocate_sticky,
                     sticky_source=request_state.affinity_policy.codex_session_source,
                     legacy_sticky_key=request_state.affinity_policy.legacy_selection_key,
+                    legacy_continuity_source=request_state.affinity_policy.legacy_continuity_source,
+                    sticky_seed_key=request_state.affinity_policy.seed_selection_key,
+                    sticky_seed_kind=request_state.affinity_policy.seed_selection_kind,
                     spill_bare_session_on_account_cap=request_state.affinity_policy.spill_on_account_cap,
+                    abandon_unavailable_legacy_owner=(request_state.affinity_policy.abandon_unavailable_legacy_owner),
                     require_unambiguous_account=request_state.affinity_policy.require_unambiguous_account,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
@@ -4973,6 +5281,9 @@ class _WebSocketMixin:
 
         if event_type == "response.created" and release_create_gate and created_request_state is not None:
             await _release_websocket_response_create_gate(created_request_state, response_create_gate)
+
+        if request_state is not None:
+            await proxy._touch_active_websocket_thread_affinity(request_state, account)
 
         if len(grouped_previous_response_request_states) > 1:
             upstream_control.reconnect_requested = True

@@ -287,6 +287,7 @@ class Settings(BaseSettings):
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     live_usage_ingestion_enabled: bool = True
+    rate_limit_reset_credits_refresh_enabled: bool = True
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     warmup_model: str = "gpt-5.4-mini"
@@ -358,6 +359,8 @@ class Settings(BaseSettings):
     usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
     automations_scheduler_enabled: bool = True
+    telemetry_enabled: bool | None = None
+    telemetry_endpoint: str = "https://telemetry.tokmaxxing.com"
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     # Startup cross-replica encryption-key consistency check against the shared
     # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an

@@ -5,21 +5,16 @@ import logging
 import time
 from dataclasses import dataclass
 
-from sqlalchemy import select
-
 from app.core import usage as usage_core
 from app.core.config.settings import get_settings
 from app.core.usage.live_hub import register_live_usage_publisher
 from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
-from app.db.models import Account
 from app.db.session import get_background_session
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import UsageRepository, UsageWindowWrite
 
 logger = logging.getLogger(__name__)
-
-_RESOLUTION_TTL_SECONDS = 300.0
 
 # Write-coalescing tuning (fixed; issue #1340 / PRINCIPLES.md P2). The
 # ingestor keeps both as constructor fields so tests can exercise queue
@@ -68,7 +63,6 @@ class LiveUsageIngestor:
         self._queue: asyncio.Queue[_QueuedSnapshot] = asyncio.Queue(maxsize=max(1, queue_size))
         self._write_min_interval_seconds = write_min_interval_seconds
         self._last_write: dict[str, tuple[tuple[object, ...], float]] = {}
-        self._resolution_cache: dict[str, tuple[str | None, float]] = {}
         self._consumer: asyncio.Task[None] | None = None
         self._dropped = 0
         self._last_cache_invalidation = 0.0
@@ -141,14 +135,6 @@ class LiveUsageIngestor:
                 )
 
     async def _ingest(self, item: _QueuedSnapshot) -> None:
-        account_id = item.account_id
-        if account_id is None:
-            account_id = await self._resolve_account_id(item.chatgpt_account_id)
-        if account_id is None:
-            return
-        if self._should_skip(account_id, item.snapshot):
-            return
-
         snapshot = item.snapshot
         primary = snapshot.primary
         secondary = snapshot.secondary
@@ -162,51 +148,56 @@ class LiveUsageIngestor:
             and primary.window_minutes == usage_core.DEFAULT_WINDOW_MINUTES_MONTHLY
         ):
             monthly, primary = primary, None
-        async with get_background_session() as session:
-            repo = UsageRepository(session)
-            if primary is not None:
-                await repo.add_entry(
-                    account_id=account_id,
-                    used_percent=float(primary.used_percent),
-                    input_tokens=None,
-                    output_tokens=None,
+        windows: list[UsageWindowWrite] = []
+        if primary is not None:
+            windows.append(
+                UsageWindowWrite(
                     window="primary",
+                    used_percent=float(primary.used_percent),
                     reset_at=primary.reset_at,
                     window_minutes=primary.window_minutes,
                     credits_has=snapshot.credits_has,
                     credits_unlimited=snapshot.credits_unlimited,
                     credits_balance=snapshot.credits_balance,
                 )
-            if secondary is not None:
-                # Mirror the poller: credits normally ride the primary row.
-                # A secondary-only snapshot (e.g. the short window is not
-                # being reported) must still carry the fresh credit state.
-                secondary_carries_credits = primary is None
-                await repo.add_entry(
-                    account_id=account_id,
-                    used_percent=float(secondary.used_percent),
-                    input_tokens=None,
-                    output_tokens=None,
+            )
+        if secondary is not None:
+            # Mirror the poller: credits normally ride the primary row. A
+            # secondary-only snapshot must still carry fresh credit state.
+            secondary_carries_credits = primary is None
+            windows.append(
+                UsageWindowWrite(
                     window="secondary",
+                    used_percent=float(secondary.used_percent),
                     reset_at=secondary.reset_at,
                     window_minutes=secondary.window_minutes,
                     credits_has=snapshot.credits_has if secondary_carries_credits else None,
                     credits_unlimited=snapshot.credits_unlimited if secondary_carries_credits else None,
                     credits_balance=snapshot.credits_balance if secondary_carries_credits else None,
                 )
-            if monthly is not None:
-                await repo.add_entry(
-                    account_id=account_id,
-                    used_percent=float(monthly.used_percent),
-                    input_tokens=None,
-                    output_tokens=None,
+            )
+        if monthly is not None:
+            windows.append(
+                UsageWindowWrite(
                     window="monthly",
+                    used_percent=float(monthly.used_percent),
                     reset_at=monthly.reset_at,
                     window_minutes=monthly.window_minutes,
                     credits_has=snapshot.credits_has,
                     credits_unlimited=snapshot.credits_unlimited,
                     credits_balance=snapshot.credits_balance,
                 )
+            )
+
+        async with get_background_session() as session:
+            account_id = await UsageRepository(session).settle_live_account_snapshot(
+                account_id=item.account_id,
+                chatgpt_account_id=item.chatgpt_account_id,
+                windows=windows,
+                should_skip=lambda resolved: self._should_skip(resolved, snapshot),
+            )
+        if account_id is None:
+            return
         self._last_write[account_id] = (_fingerprint(snapshot), time.monotonic())
         await self._invalidate_caches_throttled()
 
@@ -235,25 +226,6 @@ class LiveUsageIngestor:
         # the poller invalidates otherwise; drop it so clients see the live
         # values before the TTL expires.
         await get_rate_limit_headers_cache().invalidate()
-
-    async def _resolve_account_id(self, chatgpt_account_id: str | None) -> str | None:
-        if not chatgpt_account_id:
-            return None
-        cached = self._resolution_cache.get(chatgpt_account_id)
-        now = time.monotonic()
-        if cached is not None and now - cached[1] < _RESOLUTION_TTL_SECONDS:
-            return cached[0]
-        async with get_background_session() as session:
-            rows = (
-                (await session.execute(select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)))
-                .scalars()
-                .all()
-            )
-        # Ambiguous identities (multiple workspace slots) are dropped rather
-        # than guessed; the poller stays authoritative for them.
-        resolved = rows[0] if len(rows) == 1 else None
-        self._resolution_cache[chatgpt_account_id] = (resolved, now)
-        return resolved
 
 
 _ingestor: LiveUsageIngestor | None = None

@@ -240,3 +240,95 @@ Migration state inspection SHALL classify `alembic_version` revisions that are n
 - **WHEN** the upgrade runs
 - **THEN** it fails with the ahead-specific guidance rather than a generic unsupported-revision remap error
 
+### Requirement: Migration CLI distinguishes omitted and empty targets
+
+The `app.db.migrate` / `codex-lb-db` CLI SHALL use the settings-derived database URL only when `--db-url` is omitted. If `--db-url` is explicitly supplied as an exact empty string, the CLI MUST terminate with an argument error before resolving or opening a settings-derived database target. This validation MUST apply to every supported migration subcommand: `upgrade`, `current`, `check`, `wait-for-head`, `wait-for-connection`, and `stamp`.
+
+#### Scenario: Explicit empty target is rejected before side effects
+
+- **GIVEN** settings would resolve a valid database target
+- **WHEN** any supported migration subcommand is invoked with `--db-url ""`
+- **THEN** the CLI exits nonzero with an argument-validation error
+- **AND** it does not select, connect to, create, inspect, migrate, or stamp the settings-derived target
+
+#### Scenario: Omitted target retains the settings fallback
+
+- **GIVEN** settings resolve a valid database target
+- **WHEN** a supported migration subcommand is invoked without `--db-url`
+- **THEN** the CLI uses the settings-derived database target
+
+### Requirement: Capability lineage uses one additive opaque-marker table
+
+The migration MUST descend from the current single Alembic head and create one
+`capability_lineage_markers` table containing only an opaque SHA-256 marker
+primary key plus creation and last-seen timestamps. It MUST NOT modify existing
+sticky-session, account, usage, quota, request-log, or durable-bridge columns or
+foreign keys, and MUST NOT backfill historical rows.
+
+#### Scenario: Upgrade creates an empty marker table
+- **WHEN** a database at the previous head upgrades to the new head
+- **THEN** the marker table exists with its primary-key uniqueness contract
+- **AND** no existing application table is scanned or rewritten for backfill
+
+#### Scenario: Downgrade removes only the marker table
+- **WHEN** the migration is downgraded to its parent revision
+- **THEN** only `capability_lineage_markers` is removed
+- **AND** existing application data remains unchanged
+
+#### Scenario: Migration graph remains single-head
+- **WHEN** the repository migration graph is inspected after this change
+- **THEN** it has exactly one head containing the marker-table revision
+
+### Requirement: SQLite maintenance releases file handles before filesystem mutation
+
+Synchronous SQLite maintenance operations MUST explicitly close every native
+connection they open after completing or rolling back its transaction. A
+pre-migration backup MUST release its source and destination connections before
+retention deletes an older snapshot. Recovery with `--replace` MUST release
+connections used for integrity checking, dump export, and dump import before it
+renames either the source database or recovered output. Correctness MUST NOT
+depend on garbage collection or interpreter object-finalization timing.
+
+#### Scenario: Backup retention deletes an old snapshot on Windows
+
+- **GIVEN** SQLite pre-migration backups have reached their retention limit
+- **WHEN** a new online snapshot is complete and retention deletes the oldest
+  snapshot
+- **THEN** every connection opened for the completed snapshot is explicitly
+  closed before deletion
+- **AND** backup rotation succeeds on platforms that prohibit deleting an open
+  database file
+
+#### Scenario: Recovery replaces a database on Windows
+
+- **GIVEN** a file-backed SQLite database is recovered through the CLI with
+  `--replace`
+- **WHEN** dump export and import complete
+- **THEN** the integrity-check, source, and output connections are explicitly
+  closed before either database file is renamed
+- **AND** the original is preserved under the corrupt-backup name while the
+  recovered database is moved into the original path
+
+### Requirement: Alembic Config escapes percent characters in the SQLAlchemy URL
+
+When the application builds an Alembic `Config` for migration inspection or upgrade (`_build_alembic_config`), any `%` in the SQLAlchemy URL MUST be escaped to `%%` before being stored via `set_main_option`. Alembic stores option values in a `configparser` using `BasicInterpolation`, which treats a bare `%` as interpolation syntax; a percent-encoded Windows path (`C%3A%5CUsers%5C...`) otherwise raises `ValueError: invalid interpolation syntax` during startup. `get_main_option` decodes `%%` back to `%`, so the URL handed to SQLAlchemy is unchanged.
+
+#### Scenario: Windows path does not crash migration inspection
+
+- **GIVEN** the default SQLite URL on Windows, percent-encoded by `URL.render_as_string()` into `sqlite:///C%3A%5CUsers%5C...%5Cstore.db`
+- **WHEN** the Alembic `Config` is built for migration inspection
+- **THEN** no `ValueError: invalid interpolation syntax` is raised
+- **AND** `get_main_option("sqlalchemy.url")` returns the normalized sync URL whose path is the decoded Windows filesystem path (`sqlite:///C:\Users\...\store.db`), because `to_sync_database_url` normalizes recognizable SQLAlchemy-rendered Windows SQLite URLs before the value is stored in the Alembic `Config`
+
+#### Scenario: Round-trip preserves an already-encoded percent
+
+- **GIVEN** a path that already contains a percent-encoded `%` (rendered as `%25`)
+- **WHEN** the escape turns it into `%%25` and `get_main_option` decodes it
+- **THEN** the value SQLAlchemy receives decodes back to `%25`, i.e. the original URL is preserved exactly
+
+#### Scenario: Non-Windows URLs are unaffected
+
+- **GIVEN** a SQLite or PostgreSQL URL whose path contains no `%`
+- **WHEN** the escape and decode round-trip is applied
+- **THEN** the URL is unchanged and migration behavior is identical to before
+

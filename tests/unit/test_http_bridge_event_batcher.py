@@ -8,8 +8,9 @@ from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEvent
 
 
 class _FakeDurableBridge:
-    def __init__(self, *, append_result: bool = True) -> None:
+    def __init__(self, *, append_result: bool = True, update_result: bool = True) -> None:
         self.append_result = append_result
+        self.update_result = update_result
         self.batches: list[list[str]] = []
         self.finalized: list[str] = []
         self.updated: list[dict[str, object]] = []
@@ -25,7 +26,13 @@ class _FakeDurableBridge:
 
     async def update_operation(self, **kwargs) -> bool:
         self.updated.append(kwargs)
-        return True
+        return self.update_result
+
+
+class _TerminalAppendFailingDurableBridge(_FakeDurableBridge):
+    async def append_terminal_operation_event(self, **kwargs) -> bool:
+        del kwargs
+        raise RuntimeError("injected terminal append failure")
 
 
 async def _enqueue(
@@ -121,6 +128,65 @@ async def test_dropped_batch_is_never_marked_replayable() -> None:
         assert batcher._dropped_operations == set()
     finally:
         await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_failure_settles_operation() -> None:
+    durable = _TerminalAppendFailingDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+
+    persisted = await batcher.append_terminal_event(
+        operation_id="op-1",
+        session_id="session-1",
+        instance_id="instance-1",
+        owner_epoch=7,
+        event_text="terminal",
+        max_bytes=1024,
+        state="failed",
+        response_id="resp-1",
+    )
+
+    assert persisted is False
+    assert durable.updated == [
+        {
+            "operation_id": "op-1",
+            "session_id": "session-1",
+            "instance_id": "instance-1",
+            "owner_epoch": 7,
+            "state": "failed",
+            "response_id": "resp-1",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_failure_reports_fenced_settlement(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    durable = _TerminalAppendFailingDurableBridge(update_result=False)
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+
+    persisted = await batcher.append_terminal_event(
+        operation_id="op-1",
+        session_id="session-1",
+        instance_id="stale-instance",
+        owner_epoch=6,
+        event_text="terminal",
+        max_bytes=1024,
+        state="failed",
+    )
+
+    assert persisted is False
+    assert durable.updated[0]["owner_epoch"] == 6
+    assert "fallback settlement was fenced operation_id=op-1" in caplog.text
 
 
 @pytest.mark.asyncio

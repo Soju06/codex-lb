@@ -35,12 +35,14 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lookup_allows_turn_state_takeover,
 )
 from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
+from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeRepository,
     durable_bridge_hash,
     durable_bridge_operation_id,
 )
+from app.modules.proxy.http_bridge_event_batcher import HttpBridgeOperationEventBatcher
 from app.modules.proxy.ring_membership import RingMembershipService
 
 pytestmark = pytest.mark.unit
@@ -806,6 +808,86 @@ async def test_terminal_failure_exposes_state_when_spool_overflows(
         assert await repository.get_operation_events(operation_id=operation_id) == []
     finally:
         await session.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_append_failure_settlement_is_visible_to_recovery(
+    async_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-terminal-recovery",
+            session_key_value="sid-terminal-recovery",
+        )
+        fingerprint = durable_bridge_hash("terminal-recovery")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-terminal-recovery",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.created"}\n\n',
+            max_bytes=1024,
+        )
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
+            response_id="resp-terminal-recovery",
+        )
+    finally:
+        await session.close()
+
+    coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+
+    async def fail_terminal_append(**kwargs: Any) -> bool:
+        del kwargs
+        raise RuntimeError("injected production-seam terminal append failure")
+
+    monkeypatch.setattr(coordinator, "append_terminal_operation_event", fail_terminal_append)
+    batcher = HttpBridgeOperationEventBatcher(
+        coordinator,
+        max_bytes=1024,
+        flush_interval_seconds=60.0,
+    )
+
+    assert not await batcher.append_terminal_event(
+        operation_id=operation_id,
+        session_id=claim.id,
+        instance_id="inst-terminal-recovery",
+        owner_epoch=claim.owner_epoch,
+        event_text='data: {"type":"response.failed"}\n\n',
+        max_bytes=1024,
+        state="failed",
+        response_id="resp-terminal-recovery",
+    )
+
+    recovery = DurableBridgeSessionCoordinator(async_session_factory)
+    observed = await recovery.get_operation_by_fingerprint(request_fingerprint=fingerprint)
+    assert observed is not None
+    assert observed.operation_id == operation_id
+    assert observed.session_id == claim.id
+    assert observed.account_id == "account-terminal-recovery"
+    assert observed.state == "failed"
+    assert observed.event_spool_complete is False
+    assert await recovery.get_operation_events(operation_id=operation_id) == ['data: {"type":"response.created"}\n\n']
 
 
 @pytest.mark.asyncio

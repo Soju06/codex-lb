@@ -301,6 +301,26 @@ class HttpBridgeOperationEventBatcher:
                 operation_id,
                 exc_info=True,
             )
+            try:
+                settled = await self._durable_bridge.update_operation(
+                    operation_id=operation_id,
+                    session_id=context.session_id,
+                    instance_id=context.instance_id,
+                    owner_epoch=context.owner_epoch,
+                    state=state,
+                    response_id=response_id,
+                )
+                if not settled:
+                    logger.warning(
+                        "Terminal HTTP bridge operation fallback settlement was fenced operation_id=%s",
+                        operation_id,
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to settle terminal HTTP bridge operation after event append failure operation_id=%s",
+                    operation_id,
+                    exc_info=True,
+                )
             return False
         finally:
             async with self._lock:

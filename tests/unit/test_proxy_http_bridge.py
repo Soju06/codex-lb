@@ -5157,16 +5157,22 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("upstream_response_id", "replay_response_id", "expected_response_id"),
+    ("upstream_response_id", "replay_response_id", "expected_response_id", "alternate_expected_response_id"),
     [
-        ("resp-terminal-append-fallback-order", "resp-client-visible-replay", "resp-terminal-append-fallback-order"),
-        (None, "resp-persisted-before-replay", "resp-persisted-before-replay"),
+        (
+            "resp-terminal-append-fallback-order",
+            "resp-client-visible-replay",
+            "resp-terminal-append-fallback-order",
+            "resp-client-visible-replay",
+        ),
+        (None, "resp-persisted-before-replay", "resp-persisted-before-replay", None),
     ],
 )
 async def test_terminal_append_failure_queues_before_stalled_fallback_settlement(
     upstream_response_id: str | None,
     replay_response_id: str,
     expected_response_id: str,
+    alternate_expected_response_id: str | None,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     event_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -5241,6 +5247,7 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     await asyncio.wait_for(settlement_started.wait(), timeout=1.0)
     assert append_kwargs["response_id"] == replay_response_id
     assert settlement_kwargs["expected_response_id"] == expected_response_id
+    assert settlement_kwargs["alternate_expected_response_id"] == alternate_expected_response_id
     assert settlement_kwargs["response_id"] == replay_response_id
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None

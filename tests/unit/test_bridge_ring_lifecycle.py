@@ -916,6 +916,29 @@ async def test_terminal_append_failure_settlement_is_visible_to_recovery(
             instance_id="inst-terminal-recovery",
             owner_epoch=claim.owner_epoch,
             state="acknowledged",
+            response_id="resp-persisted-before-replacement",
+        )
+        assert await repository.settle_terminal_append_failure(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="failed",
+            expected_response_id="resp-unpersisted-replacement",
+            alternate_expected_response_id="resp-persisted-before-replacement",
+            response_id="resp-client-visible-replay",
+        )
+        partially_persisted_replay = await repository.get_operation(operation_id=replay_operation_id)
+        assert partially_persisted_replay is not None
+        assert partially_persisted_replay.state == "failed"
+        assert partially_persisted_replay.response_id == "resp-client-visible-replay"
+
+        assert await repository.update_operation(
+            operation_id=replay_operation_id,
+            session_id=claim.id,
+            instance_id="inst-terminal-recovery",
+            owner_epoch=claim.owner_epoch,
+            state="acknowledged",
             response_id="resp-upstream-replay",
         )
         assert await repository.settle_terminal_append_failure(

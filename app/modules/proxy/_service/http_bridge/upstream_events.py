@@ -347,6 +347,12 @@ async def _persist_http_bridge_operation_event(
         if terminal and terminal_state is not None and callable(append_terminal_batch):
             instance_id = _service_get_settings().http_responses_session_bridge_instance_id
             expected_response_id = request_state.response_id or request_state.replay_downstream_response_id
+            alternate_expected_response_id = (
+                request_state.replay_downstream_response_id
+                if request_state.response_id is not None
+                and request_state.replay_downstream_response_id != request_state.response_id
+                else None
+            )
             response_id = _websocket_downstream_response_id(request_state)
 
             async def enqueue_terminal_delivery() -> bool:
@@ -405,6 +411,7 @@ async def _persist_http_bridge_operation_event(
                             owner_epoch=owner_epoch,
                             state=terminal_state,
                             expected_response_id=expected_response_id,
+                            alternate_expected_response_id=alternate_expected_response_id,
                             response_id=response_id,
                         )
                     else:

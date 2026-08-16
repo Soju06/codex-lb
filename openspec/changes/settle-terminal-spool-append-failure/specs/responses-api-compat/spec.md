@@ -50,7 +50,7 @@ When durable append of a terminal HTTP-bridge event raises after the operation w
 
 - **GIVEN** a replay whose client-visible response alias differs from its persisted upstream response ID or whose active upstream response ID was reset before a replacement response was created
 - **WHEN** durable terminal-event append raises
-- **THEN** fallback settlement compares the acknowledged or already terminal operation against the persisted upstream response ID
+- **THEN** fallback settlement compares the acknowledged or already terminal operation against every response identity that may remain persisted when a replacement acknowledgement update fails
 - **AND** persists the intended client-visible terminal response ID when present
 - **AND** otherwise preserves the known upstream response ID
 

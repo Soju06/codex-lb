@@ -182,6 +182,7 @@ async def test_terminal_append_failure_settles_operation() -> None:
             "owner_epoch": 7,
             "state": "failed",
             "expected_response_id": "resp-upstream-1",
+            "alternate_expected_response_id": None,
             "response_id": "resp-1",
             "event_spool_complete": False,
         }

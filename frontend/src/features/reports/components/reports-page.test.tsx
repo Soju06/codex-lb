@@ -810,6 +810,7 @@ describe("ReportsPage", () => {
   });
 
   it("populates API key options from request log options including deleted keys with ID fallback", async () => {
+    const user = userEvent.setup();
     useReportsMock.mockImplementation(() =>
       asUseReportsResult({
         data: EMPTY_REPORT,
@@ -830,7 +831,11 @@ describe("ReportsPage", () => {
 
     renderWithProviders(<ReportsPage />);
 
-    expect(await screen.findByRole("button", { name: /api keys/i })).toBeInTheDocument();
+    const trigger = await screen.findByRole("button", { name: /api keys/i });
+    await user.click(trigger);
+
+    expect(await screen.findByText(/Active Key/i)).toBeInTheDocument();
+    expect(await screen.findByText("key_deleted")).toBeInTheDocument();
   });
 
   it("exports CSV based on the filtered report dataset when API key filter is active", async () => {

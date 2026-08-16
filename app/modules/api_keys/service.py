@@ -802,7 +802,7 @@ class ApiKeysService:
         request_model: str | None,
         request_service_tier: str | None = None,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
-    ) -> ApiKeyUsageReservationData:
+    ) -> ApiKeyUsageReservationData | None:
         for attempt in range(_SQLITE_BUSY_RETRY_ATTEMPTS):
             try:
                 return await self._enforce_limits_for_request_once(
@@ -826,7 +826,7 @@ class ApiKeysService:
         request_model: str | None,
         request_service_tier: str | None,
         request_usage_budget: ApiKeyRequestUsageBudget | None,
-    ) -> ApiKeyUsageReservationData:
+    ) -> ApiKeyUsageReservationData | None:
         now = utcnow()
         async with sqlite_writer_section():
             row = _ensure_valid_api_key_row(await self._repository.get_for_limit_enforcement(key_id))
@@ -842,6 +842,7 @@ class ApiKeysService:
                 raise ApiKeyInvalidError("API key has expired")
 
             reservation_items: list[UsageReservationItemData] = []
+            reservation_id: str | None = None
             normalized_usage_budget = _normalize_request_usage_budget(request_usage_budget)
             try:
                 for limit in refreshed.limits:
@@ -872,17 +873,40 @@ class ApiKeysService:
                         )
                     )
 
-                reservation_id = _next_usage_reservation_id()
-                await self._repository.create_usage_reservation(
-                    reservation_id,
-                    key_id=key_id,
-                    model=request_model or "",
-                    items=reservation_items,
-                )
-                await self._repository.commit()
+                if not reservation_items:
+                    # No configured limit applies to this request, so there is
+                    # nothing to reserve and nothing to settle. Skip the empty
+                    # reservation INSERT and its full-durability commit (the
+                    # lazy expired-limit reset above commits inside
+                    # ``reset_limit`` itself, so no write is pending here).
+                    # Every downstream consumer treats a missing reservation
+                    # as "nothing to settle". Roll back to close the implicit
+                    # transaction opened by the admission SELECTs: on sessions
+                    # that outlive this call (e.g. the quota-planner warmup
+                    # service) an open transaction would otherwise idle across
+                    # the upstream round-trip until the next commit.
+                    await self._repository.rollback()
+                else:
+                    reservation_id = _next_usage_reservation_id()
+                    await self._repository.create_usage_reservation(
+                        reservation_id,
+                        key_id=key_id,
+                        model=request_model or "",
+                        items=reservation_items,
+                    )
+                    await self._repository.commit()
             except Exception:
                 await self._repository.rollback()
                 raise
+
+        if reservation_id is None:
+            # Settlement is the only other production writer of
+            # ``last_used_at``; without a reservation it never runs, so record
+            # the last-used touch at admission instead. Recorded outside
+            # sqlite_writer_section() for the same reason as settlement: the
+            # shutdown write-through flush takes the writer section itself.
+            await self._last_used_coalescer.record(key_id, utcnow())
+            return None
 
         return ApiKeyUsageReservationData(
             reservation_id=reservation_id,

@@ -934,6 +934,77 @@ async def test_quota_planner_warm_now_cancellation_releases_api_key_reservation(
 
 
 @pytest.mark.asyncio
+async def test_quota_planner_warm_now_limit_free_key_probes_without_reservation(monkeypatch, db_setup):
+    """A key with no applicable limits admits without a reservation; the
+    warmup probe must execute and never attempt reservation settlement."""
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-unlimited-key",
+            email="warm-unlimited-key@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                return None
+
+            async def finalize_usage_reservation(self, *args, **kwargs):
+                del args, kwargs
+                raise AssertionError("limit-free warmup must not finalize a reservation")
+
+            async def fail_usage_reservation(self, *args, **kwargs):
+                del args, kwargs
+                raise AssertionError("limit-free warmup must not fail a reservation")
+
+        async def fake_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+        async def noop_record_effect(self, account, model, *, source, confidence):
+            del self, account, model, source, confidence
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+        monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+        result = await service.warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            api_key_id="api-key-unlimited",
+            force_probe=True,
+        )
+
+    assert result.status == "executed"
+    assert result.reason == "warmup_executed"
+
+
+@pytest.mark.asyncio
 async def test_quota_planner_warm_now_api_key_not_found_is_skipped(monkeypatch, db_setup):
     del db_setup
     encryptor = TokenEncryptor()

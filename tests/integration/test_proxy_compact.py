@@ -86,6 +86,7 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
             request_service_tier=None,
             request_usage_budget=estimate_api_key_request_usage(compact_model),
         )
+        assert reservation is not None
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
@@ -1459,6 +1460,7 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
             request_service_tier=None,
             request_usage_budget=estimate_api_key_request_usage(compact_model),
         )
+        assert reservation is not None
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None

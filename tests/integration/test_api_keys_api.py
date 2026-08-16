@@ -3559,6 +3559,10 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
         stale_second = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
         abandoned_before_first_heartbeat = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
         fresh = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        assert stale is not None
+        assert stale_second is not None
+        assert abandoned_before_first_heartbeat is not None
+        assert fresh is not None
         await session.execute(
             update(ApiKeyUsageReservation)
             .where(ApiKeyUsageReservation.id.in_([stale.reservation_id, stale_second.reservation_id]))
@@ -3609,6 +3613,55 @@ async def test_release_stale_usage_reservations_restores_reserved_usage(async_cl
 
 
 @pytest.mark.asyncio
+async def test_limit_free_admission_creates_no_reservation_rows(async_client):
+    """Limit-free keys skip the reservation ledger: admission returns no
+    reservation, writes no rows, and stale-reservation reclamation has
+    nothing to release; limited keys keep creating reservations."""
+    del async_client
+    now = utcnow()
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        service = ApiKeysService(repo)
+        unlimited = await service.create_key(
+            ApiKeyCreateData(name="limit-free-admission", allowed_models=None, expires_at=None)
+        )
+        limited = await service.create_key(
+            ApiKeyCreateData(
+                name="limited-admission-regression",
+                allowed_models=None,
+                expires_at=None,
+                limits=[
+                    LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=50_000),
+                ],
+            )
+        )
+        unlimited_reservation = await service.enforce_limits_for_request(unlimited.id, request_model="gpt-5.1")
+        limited_reservation = await service.enforce_limits_for_request(limited.id, request_model="gpt-5.1")
+
+    assert unlimited_reservation is None
+    assert limited_reservation is not None
+    assert limited_reservation.has_applicable_limits is True
+
+    async with SessionLocal() as session:
+        rows = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == unlimited.id)
+        )
+        assert rows.scalars().all() == []
+        repo = ApiKeysRepository(session)
+        limited_row = await repo.get_usage_reservation(limited_reservation.reservation_id)
+        assert limited_row is not None
+        assert limited_row.status == "reserved"
+        # A future cutoff would reclaim any reserved row; the limit-free key
+        # contributed none, so only the limited key's reservation is released.
+        released_count = await repo.release_stale_usage_reservations(
+            cutoff=now + timedelta(hours=1),
+            max_age_cutoff=now + timedelta(hours=1),
+        )
+        assert released_count == 1
+
+
+@pytest.mark.asyncio
 async def test_enforce_limits_lazy_reset_and_expiry_with_narrowed_admission_load(async_client):
     """Regression for the narrowed admission load (``get_for_limit_enforcement``).
 
@@ -3645,6 +3698,7 @@ async def test_enforce_limits_lazy_reset_and_expiry_with_narrowed_admission_load
         repo = ApiKeysRepository(session)
         service = ApiKeysService(repo)
         reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        assert reservation is not None
         assert reservation.has_applicable_limits is True
 
     async with SessionLocal() as session:
@@ -3708,6 +3762,8 @@ async def test_release_stale_usage_reservations_max_age_ceiling_beats_orphaned_h
         )
         heartbeat_kept = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
         fresh = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+        assert heartbeat_kept is not None
+        assert fresh is not None
         # An orphaned heartbeat keeps the reservation's updated_at current
         # even though it was created past the hard age ceiling.
         await session.execute(

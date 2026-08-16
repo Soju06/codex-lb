@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, case, cast, func, or_, select
+from sqlalchemy import Integer, String, and_, case, cast, func, insert, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
@@ -66,6 +66,14 @@ class _RequestLogFilters:
 
 # Earliest representable listing lower bound for the rollup-count window.
 _ROLLUP_EPOCH = datetime(1970, 1, 1)
+
+# Column keys for the Core request-log insert in ``add_log``. Every non-PK
+# column is read off the fully built transient instance; columns ``add_log``
+# never sets are nullable with no Python/server default the flush would have
+# applied, so an explicit NULL is identical to the old unit-of-work insert.
+_REQUEST_LOG_INSERT_COLUMN_KEYS: tuple[str, ...] = tuple(
+    column.key for column in RequestLog.__table__.columns if column.key != "id"
+)
 
 
 def _naive_utc(value: datetime) -> datetime:
@@ -1108,12 +1116,19 @@ class RequestLogsRepository:
                 if model_source_id is not None
                 else calculated_cost_from_log(typing_cast(RequestLogLike, log))
             )
-            self._session.add(log)
+            # Core insert instead of unit-of-work: the row is fully built
+            # above, so the ORM flush (identity-map registration, relationship
+            # cascade scan, per-attribute history snapshots) is pure overhead
+            # on every request's log write. The transient ``log`` instance
+            # stays detached and is returned as the typed result. No refresh:
+            # every column is set explicitly before insert.
+            insert_values = {key: getattr(log, key) for key in _REQUEST_LOG_INSERT_COLUMN_KEYS}
             try:
+                result = await self._session.execute(insert(RequestLog).values(insert_values))
+                inserted_primary_key = result.inserted_primary_key
+                if inserted_primary_key is not None and inserted_primary_key[0] is not None:
+                    log.id = int(inserted_primary_key[0])
                 await self._session.commit()
-                # No refresh: every column is set explicitly before insert and
-                # expire_on_commit=False, so the round trip was pure overhead
-                # on every request's log write.
                 return log
             except sa_exc.ResourceClosedError:
                 return log

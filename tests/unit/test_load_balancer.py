@@ -111,16 +111,18 @@ def test_routing_eligibility_does_not_normalize_live_states() -> None:
 
 def test_opportunistic_account_cap_filter_keeps_pool_eligible_membership() -> None:
     now = 1_700_000_000.0
+    states = _opportunistic_pool(now)
+    states[0].inflight_streams = 1
 
     eligible, exhausted = _filter_states_for_usage_limit_and_account_caps(
-        _opportunistic_pool(now),
+        states,
         lease_kind="stream",
         caps=AccountConcurrencyCaps(response_create_limit=1, stream_limit=1),
         traffic_class="opportunistic",
     )
 
     assert not exhausted
-    assert [state.account_id for state in eligible] == ["near-floor", "peer"]
+    assert [state.account_id for state in eligible] == ["peer"]
 
 
 def test_select_account_never_uses_reached_limit_even_for_burn_first_policy() -> None:

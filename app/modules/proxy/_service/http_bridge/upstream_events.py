@@ -375,6 +375,7 @@ async def _persist_http_bridge_operation_event(
             if settlement_required:
                 if terminal_event_queue is not None:
                     await terminal_event_queue.put(event_block)
+                    await terminal_event_queue.put(None)
                     terminal_enqueued = True
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
 
@@ -1881,9 +1882,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                         terminal_state=grouped_operation_state,
                         terminal_event_queue=grouped_request_state.event_queue,
                     )
-                    if grouped_request_state.event_queue is not None:
-                        if grouped_terminal_enqueued is not True:
-                            await grouped_request_state.event_queue.put(grouped_event_block)
+                    if grouped_request_state.event_queue is not None and grouped_terminal_enqueued is not True:
+                        await grouped_request_state.event_queue.put(grouped_event_block)
                         await grouped_request_state.event_queue.put(None)
                     if grouped_operation_state is not None and grouped_operation_state != "failed":
                         await _update_http_bridge_operation_state(
@@ -2717,6 +2717,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         terminal_event_queue = (
             completed_event_queue if completed_event_queue_claimed else terminal_request_state.event_queue
         )
+        terminal_enqueued = matched_terminal_enqueued if terminal_request_state is matched_request_state else False
         if terminal_request_state is not matched_request_state:
             deferred_texts = _pop_websocket_deferred_reasoning_downstream_texts(terminal_request_state)
             for deferred_text in deferred_texts:
@@ -2730,7 +2731,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     )
                 if terminal_event_queue is not None:
                     await terminal_event_queue.put(deferred_text)
-            terminal_enqueued = False
             if not suppress_downstream_event:
                 terminal_enqueued = await _persist_http_bridge_operation_event(
                     self,
@@ -2748,7 +2748,8 @@ class _HTTPBridgeUpstreamEventsMixin:
             if terminal_event_queue is not None and terminal_enqueued is not True:
                 await terminal_event_queue.put(event_block)
         if terminal_event_queue is not None:
-            await terminal_event_queue.put(None)
+            if terminal_enqueued is not True:
+                await terminal_event_queue.put(None)
             if completed_event_queue_claimed and completed_delivery_scope is not None:
                 async with session.pending_lock:
                     # Keep the completed claim authoritative after its producer

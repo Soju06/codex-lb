@@ -5232,6 +5232,8 @@ async def test_terminal_append_failure_queues_before_stalled_fallback_settlement
     assert settlement_kwargs["expected_response_id"] == "resp-terminal-append-fallback-order"
     assert settlement_kwargs["response_id"] == "resp-client-visible-replay"
     assert await asyncio.wait_for(event_queue.get(), timeout=1.0) == event_block
+    assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
+    assert event_queue.empty()
     assert persist_task.done() is False
     release_settlement.set()
     with pytest.raises(asyncio.CancelledError):

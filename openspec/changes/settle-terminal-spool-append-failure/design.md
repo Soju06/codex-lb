@@ -21,7 +21,7 @@ The durable bridge exposes operation settlement under the same operation, sessio
 
 ## Decisions
 
-- On `append_terminal_operation_event` exception, return an incomplete append result that explicitly requires fallback settlement. The relay queues the selected terminal SSE block before awaiting a dedicated conditional settlement with the same operation ID, session ID, instance ID, owner epoch, intended terminal state, persisted upstream response ID, and client-visible response ID. The repository accepts only the acknowledged attempt matching the upstream identity or the already-committed terminal result matching the client-visible identity, without keeping the terminal event behind a stalled fallback write.
+- On `append_terminal_operation_event` exception, return an incomplete append result that explicitly requires fallback settlement. The relay queues the selected terminal SSE block and end-of-stream marker before awaiting a dedicated conditional settlement with the same operation ID, session ID, instance ID, owner epoch, intended terminal state, persisted upstream response ID, and client-visible response ID. The repository accepts only the acknowledged attempt matching the upstream identity or the already-committed terminal result matching the client-visible identity, without keeping the terminal event behind a stalled fallback write.
 - Keep append and fallback settlement structured in the relay task instead of detaching them. This bounds settlement concurrency to active relay operations, and the relay defers cancellation until the append and any required settlement finish before preserving the cancellation outcome.
 - Force `event_spool_complete=false` in the same conditional fallback update. This keeps replay disabled even when terminal append committed but its commit acknowledgement was lost before the caller observed success.
 - Log a rejected fence or fallback exception inside the batcher's settlement method and do not re-raise. The terminal event has already been queued for downstream delivery, so bookkeeping failure must not replace or delay that event.
@@ -29,7 +29,7 @@ The durable bridge exposes operation settlement under the same operation, sessio
 
 ## Risks / Trade-offs
 
-- [A transient database failure can affect both append and fallback update] -> Queue the terminal event before awaiting structured fallback settlement and emit a warning for operator diagnosis.
+- [A transient database failure can affect both append and fallback update] -> Queue the terminal event and end-of-stream marker before awaiting structured fallback settlement and emit a warning for operator diagnosis.
 - [Relay cancellation can interrupt an in-flight terminal append] -> Defer cancellation through the append and any required fallback, then preserve it.
 - [A stale owner could attempt to settle another owner's operation] -> Pass the unchanged session/instance/epoch fence and treat rejection as non-settlement.
 - [A delayed fallback could overwrite a newer retry under the same owner] -> Require the prior attempt's acknowledged/terminal state and response identity in the update predicate.

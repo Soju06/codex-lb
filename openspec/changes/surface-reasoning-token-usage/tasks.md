@@ -12,6 +12,7 @@
 - [x] 2.3 Include reasoning tokens in the daily CSV export
 - [x] 2.4 Add English, Korean, and Simplified Chinese labels
 - [x] 2.5 Render and export all-unknown daily reasoning usage distinctly from known zero
+- [x] 2.6 Document token-bucket semantics, dashboard surfaces, and missing-usage behavior in the docs site
 
 ## 3. Validation
 

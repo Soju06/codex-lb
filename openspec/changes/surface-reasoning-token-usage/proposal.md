@@ -21,4 +21,4 @@ None.
 
 ## Impact
 
-Reports API aggregation, dashboard schemas and components, localized labels, and focused backend/frontend tests. No database migration, configuration, routing, pricing, or proxy-protocol change.
+Reports API aggregation, dashboard schemas and components, localized labels, user-facing usage-reporting documentation, and focused backend/frontend tests. No database migration, configuration, routing, pricing, or proxy-protocol change.

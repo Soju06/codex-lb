@@ -590,6 +590,7 @@
   "common.status.deactivated": "Deactivated",
   "common.status.exceeded": "Quota exceeded",
   "common.status.limited": "Rate limited",
+  "common.status.limitReached": "Limit reached",
   "common.status.paused": "Paused",
   "common.status.reauth": "Re-auth required",
   "common.time.all": "All",

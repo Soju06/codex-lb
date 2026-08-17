@@ -116,7 +116,7 @@ An enabled maximum-usage policy MUST require current standard quota data. Elapse
 
 ### Requirement: Dashboard account controls expose usage-limit state and precision
 
-Account summaries SHALL expose the configured percentage, enabled flag, and evaluated state (`disabled`, `available`, `reached`, or `data_unavailable`). The Accounts dashboard SHALL allow an operator to set, edit, enable, disable, and remove the policy. The editable value and maximum-used summary MUST preserve every API-valid persisted numeric percentage without rounding it to a different value. It SHALL describe a value of 10 percent as a maximum of 10 percent used (90 percent reserved) and SHALL warn that delayed upstream observations or already in-flight requests can move actual usage past the displayed percentage before the gate observes it.
+Account summaries SHALL expose the configured percentage, enabled flag, and evaluated state (`disabled`, `available`, `reached`, or `data_unavailable`). The Accounts dashboard SHALL allow an operator to set, edit, enable, disable, and remove the policy. The main dashboard account card SHALL display `Limit reached` when an otherwise active account has evaluated state `reached`, without masking a non-active upstream account status. The editable value and maximum-used summary MUST preserve every API-valid persisted numeric percentage without rounding it to a different value. It SHALL describe a value of 10 percent as a maximum of 10 percent used (90 percent reserved) and SHALL warn that delayed upstream observations or already in-flight requests can move actual usage past the displayed percentage before the gate observes it.
 
 #### Scenario: Enabled limit is visible and toggleable
 
@@ -129,8 +129,15 @@ Account summaries SHALL expose the configured percentage, enabled flag, and eval
 
 - **GIVEN** an active account has reached its enabled maximum usage
 - **WHEN** the account is shown in the dashboard
-- **THEN** the dashboard identifies the local usage limit as reached
+- **THEN** its main dashboard account card displays `Limit reached`
 - **AND** it does not relabel the persisted account status as upstream quota exhausted
+
+#### Scenario: Upstream account status takes precedence
+
+- **GIVEN** an account has reached its enabled maximum usage
+- **AND** its persisted upstream status is not active
+- **WHEN** the account is shown in the main dashboard
+- **THEN** its account card displays the upstream account status instead of `Limit reached`
 
 #### Scenario: Fractional configured precision remains editable
 

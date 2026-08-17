@@ -590,6 +590,7 @@
   "common.status.deactivated": "已停用",
   "common.status.exceeded": "Quota 已超限",
   "common.status.limited": "速率受限",
+  "common.status.limitReached": "已达到限制",
   "common.status.paused": "暂停",
   "common.status.reauth": "需要重认证",
   "common.time.all": "全部",

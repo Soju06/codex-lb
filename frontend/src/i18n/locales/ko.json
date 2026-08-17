@@ -590,6 +590,7 @@
   "common.status.deactivated": "비활성화됨",
   "common.status.exceeded": "quota 초과",
   "common.status.limited": "rate limited",
+  "common.status.limitReached": "제한 도달",
   "common.status.paused": "일시정지",
   "common.status.reauth": "재인증 필요",
   "common.time.all": "전체",

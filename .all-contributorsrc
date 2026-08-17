@@ -1281,6 +1281,16 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "chaoxu",
+      "name": "Chao Xu",
+      "avatar_url": "https://avatars.githubusercontent.com/u/18860?v=4",
+      "profile": "https://chaoxu.prof/",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

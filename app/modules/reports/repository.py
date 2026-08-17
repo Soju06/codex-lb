@@ -34,6 +34,7 @@ class DailyReportAggregateRow:
     requests: int
     input_tokens: int
     output_tokens: int
+    reasoning_tokens: int | None
     cached_input_tokens: int
     cost_usd: float
     active_accounts: int
@@ -50,6 +51,8 @@ class SummaryAggregateRow:
     total_cost_usd: float
     total_input_tokens: int
     total_output_tokens: int
+    total_reasoning_tokens: int
+    reasoning_usage_known_requests: int
     total_cached_tokens: int
     total_requests: int
     total_errors: int
@@ -154,6 +157,7 @@ class ReportsRepository:
                     requests=int(row.requests or 0),
                     input_tokens=int(row.input_tokens or 0),
                     output_tokens=int(row.output_tokens or 0),
+                    reasoning_tokens=int(row.reasoning_tokens) if row.reasoning_tokens is not None else None,
                     cached_input_tokens=int(row.cached_input_tokens or 0),
                     cost_usd=float(row.cost_usd or 0.0),
                     active_accounts=int(row.active_accounts or 0),
@@ -190,7 +194,12 @@ class ReportsRepository:
         columns = [
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
             func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
-            func.coalesce(func.sum(RequestLog.output_tokens), 0).label("total_output_tokens"),
+            func.coalesce(
+                func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                0,
+            ).label("total_output_tokens"),
+            func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("total_reasoning_tokens"),
+            func.count(RequestLog.reasoning_tokens).label("reasoning_usage_known_requests"),
             func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("total_cached_tokens"),
             func.count().label("total_requests"),
             func.coalesce(
@@ -223,6 +232,8 @@ class ReportsRepository:
             total_cost_usd=float(row.total_cost_usd),
             total_input_tokens=int(row.total_input_tokens),
             total_output_tokens=int(row.total_output_tokens),
+            total_reasoning_tokens=int(row.total_reasoning_tokens),
+            reasoning_usage_known_requests=int(row.reasoning_usage_known_requests),
             total_cached_tokens=int(row.total_cached_tokens),
             total_requests=int(row.total_requests),
             total_errors=int(row.total_errors),
@@ -608,7 +619,11 @@ def _daily_rows_stmt(
         day_ranges_cte.c.report_date,
         func.count(RequestLog.id).label("requests"),
         func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-        func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
+        func.coalesce(
+            func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+            0,
+        ).label("output_tokens"),
+        func.sum(RequestLog.reasoning_tokens).label("reasoning_tokens"),
         func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
         func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
         func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),

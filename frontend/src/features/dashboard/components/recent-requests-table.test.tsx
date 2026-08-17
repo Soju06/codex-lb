@@ -458,6 +458,76 @@ describe("RecentRequestsTable", () => {
     expect(within(row as HTMLElement).getByText("200.0")).toBeInTheDocument();
   });
 
+  it("shows reasoning as secondary token metadata and an included-output detail", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-reasoning",
+            reasoningTokens: 80,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("1.2K")).toBeInTheDocument();
+    expect(screen.getByText("80 reasoning")).toBeInTheDocument();
+
+    const dialog = openRequestDetails();
+    const reasoningLabel = within(dialog).getByText(
+      "Reasoning tokens (included in output)",
+    );
+    expect(reasoningLabel.parentElement?.parentElement).toHaveTextContent("80");
+  });
+
+  it("renders a known zero reasoning count", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-zero-reasoning",
+            reasoningTokens: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("0 reasoning")).toBeInTheDocument();
+    const dialog = openRequestDetails();
+    const reasoningLabel = within(dialog).getByText(
+      "Reasoning tokens (included in output)",
+    );
+    expect(reasoningLabel.parentElement?.parentElement).toHaveTextContent("0");
+  });
+
+  it("omits unknown reasoning usage instead of estimating it", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          {
+            ...LAYOUT_REQUEST,
+            requestId: "req-unknown-reasoning",
+            reasoningTokens: null,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/reasoning/i)).not.toBeInTheDocument();
+    const dialog = openRequestDetails();
+    expect(
+      within(dialog).queryByText("Reasoning tokens (included in output)"),
+    ).not.toBeInTheDocument();
+  });
+
   it("does not calculate TPS from fallback output tokens", () => {
     render(
       <RecentRequestsTable

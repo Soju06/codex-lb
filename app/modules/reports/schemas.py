@@ -10,6 +10,7 @@ class DailyReportRow(DashboardModel):
     requests: int
     input_tokens: int
     output_tokens: int
+    reasoning_tokens: int | None
     cached_input_tokens: int
     cost_usd: float
     active_accounts: int
@@ -46,6 +47,8 @@ class ReportSummary(DashboardModel):
     total_cost_usd: float
     total_input_tokens: int
     total_output_tokens: int
+    total_reasoning_tokens: int
+    reasoning_usage_known_requests: int
     total_cached_tokens: int
     total_requests: int
     total_errors: int

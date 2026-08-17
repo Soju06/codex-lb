@@ -41,6 +41,7 @@ function createZeroRow(date: string): DailyReportRow {
     conversations: 0,
     inputTokens: 0,
     outputTokens: 0,
+    reasoningTokens: 0,
     cachedInputTokens: 0,
     costUsd: 0,
     activeAccounts: 0,

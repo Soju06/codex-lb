@@ -8,8 +8,13 @@ import {
   type ReportsSummaryCardsProps,
 } from "./reports-summary-cards";
 
-type ReportsSummaryFixture = Omit<ReportSummary, "totalCancelled"> & {
+type ReportsSummaryFixture = Omit<
+  ReportSummary,
+  "totalCancelled" | "totalReasoningTokens" | "reasoningUsageKnownRequests"
+> & {
   totalCancelled?: number;
+  totalReasoningTokens?: number;
+  reasoningUsageKnownRequests?: number;
 };
 
 function ReportsSummaryCards({
@@ -19,7 +24,12 @@ function ReportsSummaryCards({
   return (
     <ReportsSummaryCardsImpl
       {...props}
-      summary={{ totalCancelled: 0, ...summary }}
+      summary={{
+        totalCancelled: 0,
+        totalReasoningTokens: 0,
+        reasoningUsageKnownRequests: 0,
+        ...summary,
+      }}
     />
   );
 }
@@ -32,6 +42,8 @@ describe("ReportsSummaryCards", () => {
           totalCostUsd: 15,
           totalInputTokens: 1_600_000_000,
           totalOutputTokens: 13_000_000,
+          totalReasoningTokens: 8_000_000,
+          reasoningUsageKnownRequests: 1400,
           totalCachedTokens: 990_000_000,
           totalRequests: 1500,
           totalErrors: 0,
@@ -70,9 +82,48 @@ describe("ReportsSummaryCards", () => {
     );
 
     expect(
-      within(tokensCard).getByText("Input 1.6B · Cache 990M · Output 13.0M"),
+      within(tokensCard).getByText(
+        "Input 1.6B · Cache 990M · Output 13.0M",
+      ),
     ).toBeInTheDocument();
+    expect(within(tokensCard).getByText("Reported reasoning 8.0M (included in output) · 1400/1500 requests")).toBeInTheDocument();
+    expect(tokensCard.parentElement).toHaveClass("lg:grid-cols-3", "xl:grid-cols-6");
     expect(within(requestsCard).getByText("avg 500/day · 3 accounts")).toBeInTheDocument();
+  });
+
+  it("shows reported reasoning coverage without adding reasoning to the token total", () => {
+    render(
+      <ReportsSummaryCards
+        summary={{
+          totalCostUsd: 1,
+          totalInputTokens: 100,
+          totalOutputTokens: 40,
+          totalReasoningTokens: 30,
+          reasoningUsageKnownRequests: 2,
+          totalCachedTokens: 10,
+          totalRequests: 4,
+          totalErrors: 0,
+          totalConversations: 1,
+          activeAccounts: 1,
+          avgCostPerDay: 1,
+          avgRequestsPerDay: 4,
+        }}
+        comparison={{
+          canCompare: false,
+          previous: { totalCostUsd: 0, totalTokens: 0, totalRequests: 0 },
+        }}
+      />,
+    );
+
+    const tokensCard = screen.getByTestId("report-summary-card-tokens");
+    expect(within(tokensCard).getByText("140")).toBeInTheDocument();
+    expect(
+      within(tokensCard).getByText(
+        "Input 100 · Cache 10 · Output 40",
+      ),
+    ).toBeInTheDocument();
+    expect(within(tokensCard).getByText("Reported reasoning 30 (included in output) · 2/4 requests")).toBeInTheDocument();
+    expect(within(tokensCard).queryByText("170")).not.toBeInTheDocument();
   });
 
   it("hides comparison badges when unavailable or previous totals are zero", () => {
@@ -257,7 +308,37 @@ describe("ReportsSummaryCards", () => {
     const requestsCard = screen.getByTestId("report-summary-card-requests");
 
     expect(within(tokensCard).getByText("100.0B")).toBeInTheDocument();
-    expect(within(tokensCard).getByText("Input 100.0B · Cache 0 · Output 0")).toBeInTheDocument();
+    expect(
+      within(tokensCard).getByText(
+        "Input 100.0B · Cache 0 · Output 0",
+      ),
+    ).toBeInTheDocument();
+    expect(within(tokensCard).getByText("Reported reasoning 0 (included in output) · 0/100000 requests")).toBeInTheDocument();
     expect(within(requestsCard).getByText("100.0K")).toBeInTheDocument();
+  });
+
+  it("hides reasoning coverage when there are no requests", () => {
+    render(
+      <ReportsSummaryCards
+        summary={{
+          totalCostUsd: 0,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCachedTokens: 0,
+          totalRequests: 0,
+          totalErrors: 0,
+          totalConversations: 0,
+          activeAccounts: 0,
+          avgCostPerDay: 0,
+          avgRequestsPerDay: 0,
+        }}
+        comparison={{
+          canCompare: false,
+          previous: { totalCostUsd: 0, totalTokens: 0, totalRequests: 0 },
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/Reported reasoning/)).not.toBeInTheDocument();
   });
 });

@@ -12,6 +12,8 @@ vi.mock("@/lib/api-client", () => ({
       totalCostUsd: 0,
       totalInputTokens: 0,
       totalOutputTokens: 0,
+      totalReasoningTokens: 0,
+      reasoningUsageKnownRequests: 0,
       totalCachedTokens: 0,
       totalRequests: 0,
       totalErrors: 0,

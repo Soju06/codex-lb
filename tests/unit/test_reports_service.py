@@ -53,6 +53,8 @@ async def test_get_reports_averages_use_inclusive_local_calendar_days(
         total_cost_usd=60.0,
         total_input_tokens=0,
         total_output_tokens=0,
+        total_reasoning_tokens=0,
+        reasoning_usage_known_requests=0,
         total_cached_tokens=0,
         total_requests=30,
         conversation_count=0,
@@ -144,6 +146,8 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                     total_cost_usd=1.2,
                     total_input_tokens=12,
                     total_output_tokens=6,
+                    total_reasoning_tokens=4,
+                    reasoning_usage_known_requests=2,
                     total_cached_tokens=2,
                     total_requests=2,
                     conversation_count=1,
@@ -155,6 +159,8 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                     total_cost_usd=0.4,
                     total_input_tokens=4,
                     total_output_tokens=2,
+                    total_reasoning_tokens=2,
+                    reasoning_usage_known_requests=1,
                     total_cached_tokens=0,
                     total_requests=1,
                     conversation_count=0,
@@ -172,6 +178,7 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
                     conversation_count=1,
                     input_tokens=12,
                     output_tokens=6,
+                    reasoning_tokens=None,
                     cached_input_tokens=2,
                     cost_usd=1.2,
                     active_accounts=1,
@@ -247,8 +254,12 @@ async def test_get_reports_serializes_conversation_and_breakdown_request_counts(
     assert result.daily[0].conversations == 1
     assert result.daily[0].median_tps == 78.9
     assert result.daily[0].median_queue_ms == 45.68
+    assert result.daily[0].reasoning_tokens is None
     assert result.by_model[0].model == "gpt-5.1"
     assert result.summary.total_conversations == 1
+    assert result.summary.total_reasoning_tokens == 4
+    assert result.summary.reasoning_usage_known_requests == 2
+    assert result.comparison.previous.total_tokens == 6
     assert result.by_model[0].requests == 2
     assert result.by_useragent[0].useragent == "opencode"
     assert result.by_useragent[0].requests == 2

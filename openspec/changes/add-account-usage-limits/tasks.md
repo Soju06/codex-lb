@@ -10,5 +10,5 @@
 - [x] 8. Run focused backend/frontend tests, migration checks, lint/type checks, and the repository verification suite available in the checkout.
 - [x] 9. Address current-head review regressions for precision, error precedence, fair-share eligibility, opportunistic admission errors, and normalized telemetry freshness.
 - [x] 10. Revalidate continuity-pinned HTTP bridge turns and quota-planner synthetic warmups against the canonical account usage-limit policy.
-- [x] 11. Revalidate each logical request on an existing proxy WebSocket against the pinned account's usage-limit policy.
+- [x] 11. Revalidate each logical request on an existing proxy WebSocket against the pinned account's availability and usage-limit policy.
 - [x] 12. Surface a reached local usage limit on the main dashboard account card without masking non-active upstream status.

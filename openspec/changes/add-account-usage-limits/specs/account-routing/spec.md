@@ -65,6 +65,14 @@ Each newly admitted `response.create` on an existing proxy WebSocket MUST re-eva
 - **AND** already-admitted work remains pinned and settles normally
 - **AND** the bridge retires after that work drains
 
+#### Scenario: Reused WebSocket owner becomes administratively unavailable
+
+- **GIVEN** an existing proxy WebSocket is pinned to an account
+- **AND** that account is deleted, paused, deactivated, or requires reauthentication
+- **WHEN** the client submits a new `response.create` frame
+- **THEN** the new turn fails with `previous_response_owner_unavailable` before upstream dispatch
+- **AND** already-admitted work on the socket remains uninterrupted
+
 #### Scenario: Fresh weekly shape supersedes elapsed monthly telemetry
 
 - **GIVEN** a monthly-capable account has an old elapsed monthly observation

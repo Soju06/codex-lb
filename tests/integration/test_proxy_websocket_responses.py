@@ -4544,13 +4544,18 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
 
 
 @pytest.mark.parametrize(
-    "blocked_state",
-    [AccountUsageLimitState.REACHED, AccountUsageLimitState.DATA_UNAVAILABLE],
+    ("blocked_state", "expected_error_code"),
+    [
+        (AccountUsageLimitState.REACHED, "account_usage_limit_reached"),
+        (AccountUsageLimitState.DATA_UNAVAILABLE, "account_usage_limit_reached"),
+        (None, "previous_response_owner_unavailable"),
+    ],
 )
-def test_v1_responses_websocket_revalidates_usage_limit_before_each_request(
+def test_v1_responses_websocket_revalidates_account_before_each_request(
     app_instance,
     monkeypatch,
     blocked_state,
+    expected_error_code,
 ):
     upstream = _SequencedUpstreamWebSocket(
         [
@@ -4648,7 +4653,7 @@ def test_v1_responses_websocket_revalidates_usage_limit_before_each_request(
 
     assert [event["type"] for event in first_events] == ["response.created", "response.completed"]
     assert blocked["type"] == "response.failed"
-    assert blocked["response"]["error"]["code"] == "account_usage_limit_reached"
+    assert blocked["response"]["error"]["code"] == expected_error_code
     assert len(upstream.sent_text) == 1
 
 

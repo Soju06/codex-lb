@@ -200,6 +200,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_error_envelope as _http_bridge_previous_response_error_envelope,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_previous_response_owner_unavailable_error as _http_bridge_previous_response_owner_unavailable_error,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -2465,6 +2468,8 @@ class _WebSocketMixin:
                     )
                     if is_response_create:
                         usage_limit_state = await proxy._load_balancer.check_account_usage_limit(account.id)
+                        if usage_limit_state is None:
+                            raise _http_bridge_previous_response_owner_unavailable_error()
                         if usage_limit_state in {
                             AccountUsageLimitState.REACHED,
                             AccountUsageLimitState.DATA_UNAVAILABLE,

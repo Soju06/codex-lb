@@ -676,11 +676,21 @@ def _rewrite_websocket_downstream_response_id(
     if downstream_response_id is None:
         return payload
 
+    direct_response_id = payload.get("response_id")
+    rewrite_direct = isinstance(direct_response_id, str) and direct_response_id != downstream_response_id
+    response = payload.get("response")
+    nested_response_id = response.get("id") if isinstance(response, dict) else None
+    rewrite_nested = isinstance(nested_response_id, str) and nested_response_id != downstream_response_id
+    if not rewrite_direct and not rewrite_nested:
+        # Identity fast-path contract: callers skip re-serialization when the
+        # original payload object comes back, so an already-aligned frame must
+        # not be copied into an equal-but-new dict.
+        return payload
+
     rewritten = dict(payload)
-    if isinstance(rewritten.get("response_id"), str):
+    if rewrite_direct:
         rewritten["response_id"] = downstream_response_id
-    response = rewritten.get("response")
-    if isinstance(response, dict) and isinstance(response.get("id"), str):
+    if rewrite_nested and isinstance(response, dict):
         rewritten["response"] = {**response, "id": downstream_response_id}
     return rewritten
 

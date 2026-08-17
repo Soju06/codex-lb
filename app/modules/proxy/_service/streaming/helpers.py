@@ -647,6 +647,36 @@ def _mark_downstream_stream_cancelled(
     )
 
 
+def _rewrite_malformed_stream_error_event(
+    *,
+    enforce_openai_sdk_contract: bool,
+    event: OpenAIEvent | None,
+    event_type: str | None,
+    event_payload: dict[str, JsonValue] | None,
+    response_id: str,
+) -> tuple[str, OpenAIEvent | None, dict[str, JsonValue] | None, str | None] | None:
+    """Rewrite a schema-less upstream ``error`` frame under the SDK contract.
+
+    A malformed frame like ``{"type":"error","message":"..."}`` classifies as
+    ``error`` but carries no error envelope (``event`` is None or has no
+    ``error``), so it must become a terminal ``response.failed`` instead of
+    leaking the raw frame with a success settlement. Returns None when the
+    frame is not a malformed error (well-formed errors keep their
+    envelope-driven handling).
+    """
+    if not enforce_openai_sdk_contract or event_type != "error":
+        return None
+    if (event is not None and event.error is not None) or not isinstance(event_payload, dict):
+        return None
+    message_value = event_payload.get("message")
+    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else "Upstream error"
+    return _build_rewritten_stream_response_failed_event(
+        response_id=response_id,
+        error_code="upstream_error",
+        error_message=message,
+    )
+
+
 def _build_rewritten_stream_response_failed_event(
     *,
     response_id: str,

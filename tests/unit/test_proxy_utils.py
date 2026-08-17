@@ -46552,3 +46552,201 @@ async def test_process_upstream_websocket_text_validates_only_lifecycle_frames(m
     assert completed_event.response.usage is not None
     assert completed_event.response.usage.input_tokens == 11
     assert completed_event.response.usage.output_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_rewrites_malformed_error_when_it_is_the_first_frame(monkeypatch):
+    # Regression: a malformed first upstream frame like
+    # {"type":"error","message":"..."} classifies as "error" but carries no
+    # error envelope (event=None). The first-frame path must apply the same
+    # SDK-contract fallback as the later-frame loop: rewrite to a terminal
+    # response.failed and settle as an error instead of leaking the raw frame
+    # with a success settlement.
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_first_frame_error_rewrite")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"error","message":"upstream exploded first"}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-first-frame-error"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert chunks
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"]["message"] == "upstream exploded first"
+    assert terminal["response"]["error"]["code"] == "upstream_error"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] != "success"
+    assert request_logs.calls[0]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_keeps_frame_bytes_when_response_id_already_matches():
+    # Regression for the response-id rewrite identity fast-path: when the
+    # frame already carries the assigned downstream response id, the rewrite
+    # helper must hand back the original payload object so the relay forwards
+    # the upstream text without re-encoding it.
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_response_id_identity")
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_response_id_identity",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_identity",
+        replay_downstream_response_id="resp_ws_identity",
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    delta_text = json.dumps(
+        {
+            "type": "response.output_text.delta",
+            "response_id": "resp_ws_identity",
+            "sequence_number": 7,
+            "delta": "hello",
+        },
+        separators=(",", ":"),
+    )
+    downstream_delta = await service._process_upstream_websocket_text(
+        delta_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+    )
+
+    assert downstream_delta is delta_text
+    assert upstream_control.downstream_sequence_number == 7
+    assert upstream_control.downstream_sequence_request_state is request_state
+
+
+@pytest.mark.asyncio
+async def test_process_and_forward_upstream_websocket_text_decodes_once_and_validates_lifecycle_only(monkeypatch):
+    # Product-path regression for the parse-once requirement: every direct
+    # upstream websocket text frame flows through
+    # _process_and_forward_upstream_websocket_text, which must json-decode the
+    # frame exactly once (shared by archive attribution and relay processing)
+    # and run pydantic validation only for lifecycle frames.
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_forward_parse_once")
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    sent_downstream: list[str] = []
+
+    async def record_downstream(_websocket: object, *, text: str, **_kwargs: object) -> None:
+        sent_downstream.append(text)
+
+    monkeypatch.setattr(service, "_send_downstream_websocket_text", record_downstream)
+    ws_validate = MagicMock(wraps=websocket_mixin_module.parse_sse_event_payload)
+    monkeypatch.setattr(websocket_mixin_module, "parse_sse_event_payload", ws_validate)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_forward_parse_once",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_create_gate_acquired=True,
+        archive_request_id="archive_ws_forward_parse_once",
+    )
+    pending_requests = deque([request_state])
+    pending_lock = anyio.Lock()
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    downstream_activity = proxy_service._DownstreamWebSocketActivity()
+    archived: list[tuple[object, str | None]] = []
+
+    class _ArchivingUpstream:
+        def archive_received(self, message: object) -> None:
+            archived.append((message, get_request_id()))
+
+    upstream = _ArchivingUpstream()
+
+    frame_payloads: list[dict[str, Any]] = [
+        {"type": "response.created", "response": {"id": "resp_ws_forward_once", "status": "in_progress"}},
+        {"type": "response.output_text.delta", "response_id": "resp_ws_forward_once", "delta": "hello"},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_ws_forward_once",
+                "status": "completed",
+                "usage": {"input_tokens": 4, "output_tokens": 2},
+            },
+        },
+    ]
+    frame_texts = [json.dumps(frame, separators=(",", ":")) for frame in frame_payloads]
+
+    loads_spy = MagicMock(wraps=json.loads)
+    monkeypatch.setattr(websocket_mixin_module.json, "loads", loads_spy)
+
+    for frame_text in frame_texts:
+        terminal = await websocket_mixin_module._process_and_forward_upstream_websocket_text(
+            cast(Any, service),
+            cast(Any, SimpleNamespace()),
+            cast(Any, upstream),
+            message=SimpleNamespace(kind="text", text=frame_text),
+            text=frame_text,
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=pending_lock,
+            client_send_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+            downstream_activity=downstream_activity,
+            continuity_state=None,
+            codex_session_affinity=False,
+        )
+        assert terminal is False
+
+    # Exactly one json decode per frame across archive attribution and relay.
+    for frame_text in frame_texts:
+        decode_calls = [c for c in loads_spy.call_args_list if c.args and c.args[0] == frame_text]
+        assert len(decode_calls) == 1
+    # Only the created + completed lifecycle frames are pydantic-validated;
+    # the delta is classified from the parsed dict without validation.
+    assert ws_validate.call_count == 2
+    # Archive attribution still resolves the owning request from the shared
+    # parsed frame for every message.
+    assert [request_id for _message, request_id in archived] == ["archive_ws_forward_parse_once"] * 3
+    # The delta frame is forwarded downstream with its original bytes.
+    assert sent_downstream[1] is frame_texts[1]
+    finalize_request_state.assert_awaited_once()
+    assert finalize_request_state.await_args is not None
+    assert finalize_request_state.await_args.kwargs["event_type"] == "response.completed"

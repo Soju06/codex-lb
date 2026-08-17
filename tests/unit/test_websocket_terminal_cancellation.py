@@ -1102,12 +1102,14 @@ async def test_terminal_message_ownership_survives_relay_cancellation(
         *,
         pending_requests: deque[proxy_service._WebSocketRequestState],
         pending_lock: anyio.Lock,
+        parsed_frame: object | None = None,
     ) -> str | None:
         archive_attribution_started.set()
         return await original_archive_attribution(
             message,
             pending_requests=pending_requests,
             pending_lock=pending_lock,
+            parsed_frame=cast("websocket_mixin._ParsedUpstreamWebSocketFrame | None", parsed_frame),
         )
 
     async def _blocking_release_gate(

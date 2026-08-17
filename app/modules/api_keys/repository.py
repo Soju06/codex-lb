@@ -180,6 +180,20 @@ class ApiKeysRepository:
         loading. ``populate_existing`` stays required because the lazy limit
         reset commits mid-enforcement and the refetch must re-hydrate rows
         already in the identity map (sessions use ``expire_on_commit=False``).
+
+        Session-isolation invariant: ``populate_existing`` + ``raiseload``
+        would poison a *fully loaded* ``ApiKey`` already in this session's
+        identity map — re-populating it flips its unlisted columns and
+        relationships into raise-on-access state for every other holder of
+        that instance. That is unreachable today because every caller runs
+        this query in a dedicated short-lived session that never full-loads
+        an ``ApiKey`` first (``_enforce_request_limits`` and the websocket
+        reservation path open fresh background sessions/repo bundles; the
+        quota-planner warmup session never loads ``ApiKey`` rows), and the
+        only prior instance this query can re-populate is the one it loaded
+        itself with these same options. Do not call this on a session that
+        may already hold a fully loaded ``ApiKey`` (e.g. via ``get_by_id`` /
+        ``get_by_hash``) without dropping the narrowing first.
         """
         result = await self._session.execute(
             select(ApiKey)

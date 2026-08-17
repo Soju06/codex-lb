@@ -284,6 +284,22 @@ class StickySessionsRepository:
             )
         return StickyOwnerLookup(account_id=current_account_id, continuity_abandoned=False)
 
+    async def release_read_snapshot(self) -> None:
+        """End the session's current read transaction.
+
+        On the default SQLite/WAL configuration one transaction pins one read
+        snapshot at its first SELECT, so a session shared across successive
+        ownership lookups would leave every later lookup blind to owners
+        committed concurrently after the first read. Committing ends that
+        snapshot so the next SELECT begins a fresh transaction; on PostgreSQL
+        READ COMMITTED each statement already reads fresh committed state, so
+        this is a near-free no-op. COMMIT (not rollback) on purpose: rollback
+        expires all tracked ORM state regardless of ``expire_on_commit``,
+        while commit under the session factory's ``expire_on_commit=False``
+        keeps rows loaded by earlier lookups readable.
+        """
+        await self._session.commit()
+
     async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
         if not key:
             return None

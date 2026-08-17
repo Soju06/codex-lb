@@ -736,8 +736,14 @@ class LoadBalancer:
             # lookups. The SELECTs stay separate on purpose so the per-source
             # predicate semantics of get_account_id_and_abandonment (tombstone
             # visibility, max_age handling) are untouched; the saving is the
-            # 2-3 extra pool checkouts + BEGIN/COMMIT lifecycles per request.
+            # 2-3 extra pool checkouts + session create/teardown lifecycles
+            # per request. Each later source still starts a fresh read
+            # transaction (release_read_snapshot): on SQLite/WAL the shared
+            # session would otherwise pin one snapshot at the first SELECT
+            # and hide a hard sticky or seed owner committed concurrently
+            # between the reads, letting selection overwrite that mapping.
             async with self._repo_factory() as repos:
+                owner_snapshot_pinned = False
                 if legacy_sticky_key is not None:
                     legacy_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
                         legacy_sticky_key,
@@ -766,12 +772,18 @@ class LoadBalancer:
                             error_message="Account-owned continuity sources conflict; retry the logical turn",
                             error_code="continuity_owner_conflict",
                         )
+                    owner_snapshot_pinned = True
                 if sticky_seed_key is not None and sticky_seed_kind is not None:
+                    if owner_snapshot_pinned:
+                        await repos.sticky_sessions.release_read_snapshot()
                     sticky_seed_account_id = await repos.sticky_sessions.get_account_id(
                         sticky_seed_key,
                         kind=sticky_seed_kind,
                     )
+                    owner_snapshot_pinned = True
                 if sticky_key is not None and sticky_kind is not None:
+                    if owner_snapshot_pinned:
+                        await repos.sticky_sessions.release_read_snapshot()
                     # First-iteration owner read for run_sticky_selection_path,
                     # hoisted here so it shares this session. The selection
                     # loop consumes it exactly once; every retry (including

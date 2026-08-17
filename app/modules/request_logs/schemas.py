@@ -34,6 +34,11 @@ class RequestLogEntry(DashboardModel):
     client_ip: str | None = None
     transport: str | None = None
     upstream_transport: str | None = None
+    upstream_proxy_route_mode: str | None = None
+    upstream_proxy_pool_id: str | None = None
+    upstream_proxy_endpoint_id: str | None = None
+    upstream_proxy_fallback_used: bool | None = None
+    upstream_proxy_fail_closed_reason: str | None = None
     service_tier: str | None = None
     requested_service_tier: str | None = None
     actual_service_tier: str | None = None

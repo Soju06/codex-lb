@@ -177,6 +177,12 @@ export function AccountList({
         )}
       </div>
 
+      {accounts.length > 0 ? (
+        <p className="px-1 text-[11px] leading-snug text-muted-foreground/80">
+          {t("accounts.list.statusEligibilityNote")}
+        </p>
+      ) : null}
+
       <AddAccountDialog
         open={chooserOpen}
         onOpenChange={setChooserOpen}

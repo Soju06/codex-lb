@@ -1784,6 +1784,7 @@ class DurableBridgeRepository:
         event_text: str,
         max_bytes: int,
         state: str,
+        expected_recovery_dispatch_count: int = 0,
         response_id: str | None = None,
     ) -> bool:
         """Append a terminal event and expose its operation state atomically."""
@@ -1802,6 +1803,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
                 )
                 .with_for_update()
             )
@@ -2009,6 +2011,74 @@ class DurableBridgeRepository:
             .limit(1)
         )
         return _to_operation_snapshot(operation) if operation is not None else None
+
+    async def settle_terminal_append_failure(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        state: str,
+        expected_response_id: str | None,
+        expected_recovery_dispatch_count: int = 0,
+        alternate_expected_response_id: str | None = None,
+        response_id: str | None = None,
+    ) -> bool:
+        """Settle only the terminal attempt whose append outcome was ambiguous."""
+        async with sqlite_writer_section():
+            owner_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                )
+                .with_for_update()
+            )
+            if owner_exists is None:
+                await self._session.rollback()
+                return False
+            acknowledged_response_matches = (
+                HttpBridgeOperationRecord.response_id == expected_response_id
+                if expected_response_id is not None
+                else HttpBridgeOperationRecord.response_id.is_(None)
+            )
+            if alternate_expected_response_id is not None:
+                acknowledged_response_matches = or_(
+                    acknowledged_response_matches,
+                    HttpBridgeOperationRecord.response_id == alternate_expected_response_id,
+                )
+            terminal_response_matches = (
+                HttpBridgeOperationRecord.response_id == response_id
+                if response_id is not None
+                else HttpBridgeOperationRecord.response_id.is_(None)
+            )
+            values: dict[str, object] = {
+                "state": state,
+                "event_spool_complete": False,
+                "updated_at": utcnow(),
+            }
+            if response_id is not None:
+                values["response_id"] = response_id
+            result = await self._session.execute(
+                update(HttpBridgeOperationRecord)
+                .where(
+                    HttpBridgeOperationRecord.operation_id == operation_id,
+                    HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
+                    or_(
+                        and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
+                        and_(
+                            HttpBridgeOperationRecord.state == state,
+                            or_(acknowledged_response_matches, terminal_response_matches),
+                        ),
+                    ),
+                )
+                .values(**values)
+            )
+            await self._session.commit()
+        return bool(getattr(result, "rowcount", 0))
 
     async def update_operation(
         self,

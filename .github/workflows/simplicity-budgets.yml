@@ -6,10 +6,8 @@ name: Simplicity budgets
 # This is deliberately a SEPARATE workflow from ci.yml, with different
 # pull_request trigger types: `labeled`/`unlabeled` re-evaluate the
 # simplicity-budget-approved override the moment a maintainer toggles it.
-# Adding those types to ci.yml instead would re-run the full CI matrix on
-# every label churn from codex-review-labels.yml (15-minute cron +
-# workflow_run syncs of the codex labels), which is why they live here on a
-# seconds-long job.
+# They remain scoped to this seconds-long workflow so override-label changes
+# do not re-run the full CI matrix.
 #
 # The override label is fetched live from the API (not read from the event
 # payload): fork PR payloads and re-runs of old runs would otherwise see a

@@ -2219,18 +2219,19 @@ def test_connection_request_kind_migration_is_additive_without_backfill(tmp_path
         engine.dispose()
 
 
-def test_api_key_reasoning_policy_migration_round_trips_and_has_single_head(tmp_path: Path) -> None:
+def test_api_key_reasoning_policy_migration_round_trips_from_current_parent(tmp_path: Path) -> None:
     from alembic.script import ScriptDirectory
 
     db_path = tmp_path / "api-key-reasoning-policy.db"
     url = _db_url(db_path)
-    parent_revision = "20260811_000000_add_hourly_rollup_cancelled_count"
+    parent_revision = "20260816_000000_add_account_pending_deletion"
     target_revision = "20260806_030000_add_api_key_allowed_reasoning_efforts"
 
     run_upgrade(url, parent_revision, bootstrap_legacy=False)
     config = _build_alembic_config(url)
     script_directory = ScriptDirectory.from_config(config)
-    assert len(script_directory.get_heads()) == 1
+    assert script_directory.get_revision(target_revision).down_revision == parent_revision
+    assert target_revision in script_directory.get_heads()
 
     engine = create_engine(to_sync_database_url(url))
     try:
@@ -2408,6 +2409,33 @@ def test_http_bridge_operation_migrations_round_trip_existing_rows_and_rebuild_s
                 == 0
             )
             assert inspector.has_table("http_bridge_operation_events")
+    finally:
+        engine.dispose()
+
+
+def test_sticky_abandonment_scope_migration_is_additive_and_reversible(tmp_path: Path) -> None:
+    db_path = tmp_path / "sticky-abandonment-scope.db"
+    url = _db_url(db_path)
+    parent_revision = "20260813_000000_add_file_account_pins"
+    target_revision = "20260812_120000_add_sticky_abandonment_scope"
+
+    run_upgrade(url, parent_revision, bootstrap_legacy=False)
+    config = _build_alembic_config(url)
+    engine = create_engine(to_sync_database_url(url))
+    try:
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("sticky_sessions")}
+            assert "continuity_abandonment_scope" not in columns
+
+        command.upgrade(config, target_revision)
+        with engine.connect() as connection:
+            columns = {column["name"]: column for column in inspect(connection).get_columns("sticky_sessions")}
+            assert columns["continuity_abandonment_scope"]["nullable"] is True
+
+        command.downgrade(config, parent_revision)
+        with engine.connect() as connection:
+            columns = {column["name"] for column in inspect(connection).get_columns("sticky_sessions")}
+            assert "continuity_abandonment_scope" not in columns
     finally:
         engine.dispose()
 

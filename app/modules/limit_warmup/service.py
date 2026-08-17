@@ -41,9 +41,9 @@ _IDLE_PRIMARY_WINDOW = "primary_idle"
 # Minimum reset_at forward jump (in seconds) to confirm a real quota window reset.
 # Upstream timestamp jitter of ~1 second must not trigger a warm-up.
 _RESET_CONFIRMED_MIN_JUMP_SECONDS = 60
-# Persist the upstream value, but treat nearby values as the same staggered-idle
-# cycle. This avoids every boundary inherent in stateless timestamp bucketing.
-_IDLE_RESET_AT_JITTER_TOLERANCE_SECONDS = 5
+# Persist the upstream value, but treat nearby values as the same reset. This
+# avoids duplicate attempts when reset_at jitters between refresh cycles.
+_RESET_AT_JITTER_TOLERANCE_SECONDS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,6 +163,24 @@ class StreamingLimitWarmupSender:
         try:
             async with self._auth_lock:
                 fresh_account = await self._ensure_fresh(account)
+                if (
+                    fresh_account is None
+                    or not _account_is_safe_candidate(fresh_account)
+                    or not fresh_account.limit_warmup_enabled
+                ):
+                    if fresh_account is None:
+                        error_message = "Account no longer exists"
+                    elif not fresh_account.limit_warmup_enabled:
+                        error_message = "Limit warm-up is disabled for this account"
+                    else:
+                        error_message = f"Account status is {fresh_account.status.value}"
+                    return LimitWarmupSendResult(
+                        request_id=request_id,
+                        success=False,
+                        latency_ms=_elapsed_ms(started),
+                        error_code="account_not_active",
+                        error_message=error_message,
+                    )
                 access_token = self._encryptor.decrypt(fresh_account.access_token_encrypted)
                 chatgpt_account_id = fresh_account.chatgpt_account_id
         except RefreshError as exc:
@@ -174,14 +192,6 @@ class StreamingLimitWarmupSender:
                 error_message=exc.message,
             )
 
-        if fresh_account.status != AccountStatus.ACTIVE:
-            return LimitWarmupSendResult(
-                request_id=request_id,
-                success=False,
-                latency_ms=_elapsed_ms(started),
-                error_code="account_not_active",
-                error_message=f"Account status is {fresh_account.status.value}",
-            )
         try:
             route = await self._resolve_upstream_route(fresh_account)
         except UpstreamProxyRouteError as exc:
@@ -273,14 +283,23 @@ class StreamingLimitWarmupSender:
             upstream_proxy_fallback_used=route_trace.fallback_used,
         )
 
-    async def _ensure_fresh(self, account: Account) -> Account:
+    async def _ensure_fresh(self, account: Account) -> Account | None:
         if self._accounts_repo_factory is None:
-            return await self._auth_manager.ensure_fresh(account)
+            current = await self._accounts_repo.get_by_id_fresh(account.id)
+            if current is None or not _account_is_safe_candidate(current) or not current.limit_warmup_enabled:
+                return current
+            await self._auth_manager.ensure_fresh(current)
+            return await self._accounts_repo.get_by_id_fresh(account.id)
         async with self._accounts_repo_factory() as accounts_repo:
-            return await AuthManager(
+            current = await accounts_repo.get_by_id_fresh(account.id)
+            if current is None or not _account_is_safe_candidate(current) or not current.limit_warmup_enabled:
+                return current
+            await AuthManager(
                 accounts_repo,
                 refresh_repo_factory=self._accounts_repo_factory,
-            ).ensure_fresh(account)
+            ).ensure_fresh(current)
+        async with self._accounts_repo_factory() as accounts_repo:
+            return await accounts_repo.get_by_id_fresh(account.id)
 
     async def _resolve_upstream_route(self, account: Account) -> ResolvedUpstreamRoute | None:
         if self._accounts_repo_factory is not None:
@@ -353,11 +372,6 @@ class LimitWarmupService:
             if not account.limit_warmup_enabled:
                 continue
             latest_attempt = latest_attempts.get(account.id)
-            if _in_cooldown(
-                latest_attempt,
-                cooldown_seconds=settings.limit_warmup_cooldown_seconds,
-            ):
-                continue
 
             windows_to_evaluate = list(selected_windows)
             if settings.limit_warmup_staggered_idle_enabled and "primary" not in windows_to_evaluate:
@@ -372,10 +386,14 @@ class LimitWarmupService:
                         before_secondary=before_secondary,
                         after_primary=after_primary,
                         after_secondary=after_secondary,
-                        exhausted_threshold_percent=settings.limit_warmup_exhausted_threshold_percent,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
-                if candidate is None and settings.limit_warmup_staggered_idle_enabled and window == "primary":
+                if (
+                    candidate is None
+                    and _account_is_safe_candidate(account)
+                    and settings.limit_warmup_staggered_idle_enabled
+                    and window == "primary"
+                ):
                     candidate = _build_staggered_idle_candidate(
                         account=account,
                         accounts=staggered_accounts,
@@ -386,6 +404,11 @@ class LimitWarmupService:
                         idle_threshold_percent=settings.limit_warmup_idle_threshold_percent,
                     )
                 if candidate is None:
+                    continue
+                if candidate.window == _IDLE_PRIMARY_WINDOW and _in_cooldown(
+                    latest_attempt,
+                    cooldown_seconds=settings.limit_warmup_cooldown_seconds,
+                ):
                     continue
 
                 model = self._resolve_model(settings.limit_warmup_model, account)
@@ -667,7 +690,6 @@ def _build_candidate(
     before_secondary: dict[str, UsageHistory],
     after_primary: dict[str, UsageHistory],
     after_secondary: dict[str, UsageHistory],
-    exhausted_threshold_percent: float,
     min_available_percent: float,
 ) -> _WarmupCandidate | None:
     before = _effective_usage_entry(
@@ -684,24 +706,43 @@ def _build_candidate(
     )
     if before is None or after is None:
         return None
-    if before.reset_at is None or after.reset_at is None:
-        return None
-    if (before.window or "primary") != (after.window or "primary"):
-        return None
-    if before.used_percent < exhausted_threshold_percent:
-        return None
-    if after.used_percent >= 100.0:
-        return None
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None
-    # Require a meaningful reset_at forward jump (not just upstream timestamp jitter).
-    # Upstream can report reset_at values that fluctuate by ~1 second between
-    # refresh cycles; only treat a jump of at least 60 seconds as a real reset.
-    if after.reset_at - before.reset_at < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
+    if not usage_reset_confirmed(before=before, after=after):
         return None
+    assert after.reset_at is not None
     candidate_window = "monthly" if after.window == "monthly" else window
     return _WarmupCandidate(reset_at=after.reset_at, window=candidate_window)
+
+
+def usage_reset_confirmed(*, before: UsageHistory | None, after: UsageHistory | None) -> bool:
+    """Return whether consecutive samples prove a real, newly available quota window."""
+    if before is None or after is None:
+        return False
+    if before.reset_at is None or after.reset_at is None:
+        return False
+    if (before.window or "primary") != (after.window or "primary"):
+        return False
+    if after.used_percent >= 100.0:
+        return False
+    reset_at_jump = after.reset_at - before.reset_at
+    if reset_at_jump < _RESET_CONFIRMED_MIN_JUMP_SECONDS:
+        return False
+    before_observed_at = naive_utc_to_epoch(before.recorded_at)
+    observed_at = naive_utc_to_epoch(after.recorded_at)
+    window_started_at = after.reset_at - _rolling_window_seconds(after)
+    quota_recovered = after.used_percent < before.used_percent
+    crossed_previous_reset = before_observed_at <= before.reset_at <= observed_at < after.reset_at
+    reanchored_between_samples = (
+        quota_recovered and before_observed_at <= window_started_at <= observed_at < after.reset_at
+    )
+    # Scheduled resets cross the previous boundary. Early resets can happen
+    # when upstream restores quota and reanchors a complete window from the
+    # sampling interval. A reset_at update outside that interval is not a reset.
+    if not crossed_previous_reset and not reanchored_between_samples:
+        return False
+    return True
 
 
 def _build_staggered_idle_candidate(
@@ -867,6 +908,4 @@ def _truncate(value: str | None, limit: int = 1000) -> str | None:
 
 
 def _attempt_reset_at_tolerance(candidate: _WarmupCandidate) -> int:
-    if candidate.window == _IDLE_PRIMARY_WINDOW:
-        return _IDLE_RESET_AT_JITTER_TOLERANCE_SECONDS
-    return 0
+    return _RESET_AT_JITTER_TOLERANCE_SECONDS

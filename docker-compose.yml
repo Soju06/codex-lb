@@ -92,6 +92,13 @@ services:
         fi
         exec docker-entrypoint.sh "$@"
       - codex-lb-postgres-entrypoint-guard
+    # Docker's default /dev/shm is 64MB. PostgreSQL parallel workers exchange
+    # tuples through dynamic shared memory under /dev/shm, so hash joins that
+    # spill past 64MB abort with "could not resize shared memory segment ...
+    # No space left on device". 1GB gives parallel query realistic headroom.
+    # (The Helm chart needs no equivalent: the bundled Bitnami PostgreSQL
+    # sub-chart mounts a memory-backed /dev/shm by default via shmVolume.)
+    shm_size: 1gb
     environment:
       POSTGRES_USER: codex_lb
       POSTGRES_PASSWORD: codex_lb

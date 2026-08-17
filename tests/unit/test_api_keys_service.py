@@ -94,6 +94,9 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             row.source_assignments = self._source_assignments.get(key_id, [])
         return row
 
+    async def get_for_limit_enforcement(self, key_id: str) -> ApiKey | None:
+        return await self.get_by_id(key_id)
+
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         for row in self.rows.values():
             if row.key_hash == key_hash:
@@ -1496,6 +1499,7 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
         request_service_tier="priority",
         request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8192, output_tokens=8192),
     )
+    assert priority_reservation is not None
     assert priority_reservation.key_id == priority_created.id
 
     priority_limits = await repo.get_limits_by_key(priority_created.id)
@@ -1518,6 +1522,7 @@ async def test_enforce_limits_reserves_tier_aware_cost_budget() -> None:
         request_service_tier=None,
         request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8192, output_tokens=8192),
     )
+    assert standard_reservation is not None
     assert standard_reservation.key_id == standard_created.id
 
     standard_limits = await repo.get_limits_by_key(standard_created.id)
@@ -1557,7 +1562,9 @@ async def test_enforce_limits_default_budget_allows_eight_priority_lanes_under_f
     )
 
     assert len(reservations) == 8
-    assert {reservation.key_id for reservation in reservations} == {created.id}
+    granted = [reservation for reservation in reservations if reservation is not None]
+    assert len(granted) == 8
+    assert {reservation.key_id for reservation in granted} == {created.id}
     limits = await repo.get_limits_by_key(created.id)
     cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
     assert 0 < cost_limit.current_value < 5_000_000
@@ -1614,6 +1621,7 @@ async def test_finalize_usage_reservation_accounts_for_zero_reserved_limit_item(
         request_model="gpt-5.5",
         request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=0, output_tokens=0),
     )
+    assert reservation is not None
 
     limits = await repo.get_limits_by_key(created.id)
     output_limit = next(limit for limit in limits if limit.limit_type == LimitType.OUTPUT_TOKENS)
@@ -1657,13 +1665,107 @@ async def test_enforce_limits_retries_sqlite_busy_reservation_commit(monkeypatch
     repo = _BusyRepo()
     service = ApiKeysService(repo)
     monkeypatch.setattr("app.modules.api_keys.service.asyncio.sleep", _async_noop)
-    created = await service.create_key(ApiKeyCreateData(name="busy-retry-key", allowed_models=None, expires_at=None))
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="busy-retry-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000)],
+        )
+    )
     initial_commit_count = repo.commit_count
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
 
+    assert reservation is not None
     assert reservation.key_id == created.id
     assert repo.create_usage_reservation_calls == 3
+    assert repo.commit_count == initial_commit_count + 1
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_without_limits_skips_reservation_and_commit() -> None:
+    repo = _FakeApiKeysRepository()
+    coalescer = ApiKeyLastUsedCoalescer()
+    service = ApiKeysService(repo, last_used_coalescer=coalescer)
+    created = await service.create_key(ApiKeyCreateData(name="unlimited-key", allowed_models=None, expires_at=None))
+    initial_commit_count = repo.commit_count
+    initial_rollback_calls = repo.rollback_calls
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+
+    assert reservation is None
+    assert repo._reservations == {}
+    # The implicit transaction opened by the admission SELECTs must be closed
+    # on the limit-free path (long-lived sessions would otherwise idle in
+    # transaction across the upstream round-trip) — via commit(), never
+    # rollback(): rollback expires every ORM object tracked by a shared
+    # session even with expire_on_commit=False, which broke quota-planner
+    # warmup probes. The commit is read-only (no reservation was inserted).
+    assert repo.commit_count == initial_commit_count + 1
+    assert repo.rollback_calls == initial_rollback_calls
+    # Settlement never runs without a reservation, so admission itself must
+    # record the last-used touch for limit-free keys.
+    pending = coalescer.pending_snapshot()
+    assert set(pending) == {created.id}
+    assert pending[created.id] <= utcnow()
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_with_no_applicable_limits_skips_reservation_and_leaves_limits_untouched() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="filtered-limits-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(
+                    limit_type="total_tokens",
+                    limit_window="weekly",
+                    max_value=10_000,
+                    model_filter="gpt-5.1",
+                ),
+            ],
+        )
+    )
+    initial_commit_count = repo.commit_count
+    initial_rollback_calls = repo.rollback_calls
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.5")
+
+    assert reservation is None
+    assert repo._reservations == {}
+    # One read-only commit closes the admission transaction; no rollback
+    # (rollback would expire shared-session ORM state — see the limit-free
+    # transaction-close comment in _enforce_limits_for_request_once).
+    assert repo.commit_count == initial_commit_count + 1
+    assert repo.rollback_calls == initial_rollback_calls
+    limits = await repo.get_limits_by_key(created.id)
+    assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_enforce_limits_with_applicable_limit_still_creates_reservation() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="limited-regression-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000)],
+        )
+    )
+    initial_commit_count = repo.commit_count
+
+    reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+
+    assert reservation is not None
+    assert reservation.key_id == created.id
+    assert reservation.has_applicable_limits is True
+    assert reservation.reservation_id in repo._reservations
     assert repo.commit_count == initial_commit_count + 1
 
 
@@ -1712,6 +1814,7 @@ async def test_enforce_limits_retries_sqlite_busy_during_lazy_reset_rolls_back(m
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5")
 
+    assert reservation is not None
     assert reservation.key_id == created.id
     assert repo.reset_limit_calls == 3
     assert repo.rollback_calls >= 2
@@ -1958,6 +2061,7 @@ async def test_usage_reservation_uses_gpt_5_6_personality_pricing(
         request_model=model,
         request_usage_budget=ApiKeyRequestUsageBudget(input_tokens=8_192, output_tokens=8_192),
     )
+    assert reservation is not None
 
     limits = await repo.get_limits_by_key(created.id)
     cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
@@ -1989,6 +2093,7 @@ async def test_release_usage_reservation_restores_reserved_counter() -> None:
     )
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
     limits = await repo.get_limits_by_key(created.id)
     assert limits[0].current_value == 100
 
@@ -2013,6 +2118,7 @@ async def test_touch_usage_reservation_only_updates_reserved_reservation() -> No
     )
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
 
     assert await service.touch_usage_reservation(reservation.reservation_id) is True
     await service.release_usage_reservation(reservation.reservation_id)
@@ -2036,6 +2142,7 @@ async def test_finalize_usage_reservation_is_idempotent() -> None:
     )
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
     await service.finalize_usage_reservation(
         reservation.reservation_id,
         model="gpt-5.1",
@@ -2073,6 +2180,7 @@ async def test_finalize_usage_reservation_records_last_used_in_coalescer() -> No
     initial_commit_count = repo.commit_count
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
     assert repo.commit_count == initial_commit_count + 1
 
     await service.finalize_usage_reservation(
@@ -2123,6 +2231,7 @@ async def test_finalize_usage_reservation_retries_sqlite_busy_settlement(
         )
     )
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
 
     await service.finalize_usage_reservation(
         reservation.reservation_id,
@@ -2170,6 +2279,7 @@ async def test_release_usage_reservation_retries_sqlite_busy_settlement(
         )
     )
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
 
     await service.release_usage_reservation(reservation.reservation_id)
 
@@ -2198,6 +2308,7 @@ async def test_fail_usage_reservation_preserves_failed_request_record() -> None:
     )
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
     await service.fail_usage_reservation(
         reservation.reservation_id,
         model="gpt-5.1",
@@ -2230,6 +2341,7 @@ async def test_release_after_finalize_is_noop() -> None:
     )
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
     limits = await repo.get_limits_by_key(created.id)
     assert limits[0].current_value == 100  # reserved
 
@@ -2268,6 +2380,7 @@ async def test_finalize_after_release_is_noop() -> None:
     )
 
     reservation = await service.enforce_limits_for_request(created.id, request_model="gpt-5.1")
+    assert reservation is not None
 
     await service.release_usage_reservation(reservation.reservation_id)
 

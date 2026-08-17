@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
 
@@ -17,12 +17,13 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.repository import ApiKeysRepository
+from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyData, ApiKeysService
 from app.modules.proxy._service.realtime_live import (
     _REALTIME_CALL_AFFINITY_MAX_AGE_SECONDS,
     realtime_call_affinity_key,
 )
-from app.modules.proxy.affinity import _codex_session_selection_key
+from app.modules.proxy.affinity import _codex_backend_identity, _codex_session_selection_key
 from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
@@ -93,6 +94,7 @@ def _install_proxy_settings_cache(
     openai_cache_affinity_max_age_seconds: int = 300,
     sticky_reallocation_budget_threshold_pct: float = 95.0,
     openai_prompt_cache_key_derivation_enabled: bool = True,
+    proxy_request_budget_seconds: float = 75.0,
 ) -> None:
     settings = SimpleNamespace(
         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
@@ -101,13 +103,14 @@ def _install_proxy_settings_cache(
         sticky_reallocation_budget_threshold_pct=sticky_reallocation_budget_threshold_pct,
         openai_prompt_cache_key_derivation_enabled=openai_prompt_cache_key_derivation_enabled,
         routing_strategy="usage_weighted",
-        proxy_request_budget_seconds=75.0,
+        proxy_request_budget_seconds=proxy_request_budget_seconds,
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
         upstream_stream_transport="auto",
         trace_channels=frozenset(),
         http_responses_session_bridge_enabled=False,
+        http_responses_session_bridge_instance_id="sticky-session-test",
         http_responses_session_bridge_idle_ttl_seconds=120.0,
         http_responses_session_bridge_codex_idle_ttl_seconds=900.0,
         http_responses_session_bridge_max_sessions=128,
@@ -240,6 +243,548 @@ async def test_proxy_stream_bare_session_spills_under_cap_without_rebinding(asyn
             kind=StickySessionKind.CODEX_SESSION,
         )
     assert mapped_account_id == owner_id
+
+
+@pytest.mark.asyncio
+async def test_codex_goal_restart_retires_unavailable_legacy_owner_and_stays_on_replacement(
+    async_client,
+    monkeypatch,
+):
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    _install_proxy_settings_cache(monkeypatch, sticky_threads_enabled=False)
+    owner_id = await _import_account(async_client, "acc_goal_restart_owner", "goal-restart-owner@example.com")
+    replacement_id = await _import_account(
+        async_client,
+        "acc_goal_restart_replacement",
+        "goal-restart-replacement@example.com",
+    )
+    raw_session = "goal-restart-session"
+    selection_key = _codex_session_selection_key(raw_session)
+
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=owner_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=replacement_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        seen.append(account_id)
+        yield f'data: {{"type":"response.completed","response":{{"id":"resp_goal_{len(seen)}"}}}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    headers = {"session_id": raw_session}
+    restart_payload = {
+        "model": "gpt-5.1",
+        "instructions": "Continue the existing task.",
+        "input": [
+            {
+                "role": "developer",
+                "content": ('<codex_internal_context source="goal">\nContinue working toward the active thread goal.'),
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+        "stream": True,
+    }
+
+    # The restart marker is not enough to move a healthy owner.
+    healthy_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=restart_payload,
+        headers=headers,
+    )
+    assert healthy_response.status_code == 200
+    assert seen == ["acc_goal_restart_owner"]
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner_id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.commit()
+
+    restart_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=restart_payload,
+        headers=headers,
+    )
+    assert restart_response.status_code == 200
+    assert seen == ["acc_goal_restart_owner", "acc_goal_restart_replacement"]
+
+    # A later ordinary turn uses the replacement's namespaced session affinity.
+    follow_up_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "continue", "input": [], "stream": True},
+        headers=headers,
+    )
+    assert follow_up_response.status_code == 200
+    assert seen == [
+        "acc_goal_restart_owner",
+        "acc_goal_restart_replacement",
+        "acc_goal_restart_replacement",
+    ]
+
+    # The raw compatibility text can also be a different client's explicit
+    # turn state. Session-header abandonment must not erase that hard owner or
+    # dispatch the turn-state continuation on the replacement account.
+    turn_state_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "continue", "input": [], "stream": True},
+        headers={"x-codex-turn-state": raw_session},
+    )
+    assert turn_state_response.status_code == 502
+    assert turn_state_response.json()["error"]["code"] == "turn_state_owner_unavailable"
+    assert seen == [
+        "acc_goal_restart_owner",
+        "acc_goal_restart_replacement",
+        "acc_goal_restart_replacement",
+    ]
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        rows = {
+            row.key: row
+            for row in (
+                await session.execute(
+                    select(StickySession).where(
+                        StickySession.key.in_((raw_session, selection_key)),
+                        StickySession.kind == StickySessionKind.CODEX_SESSION,
+                    )
+                )
+            ).scalars()
+        }
+        session_header_lookup = await repo.get_account_id_and_abandonment(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="session_header",
+        )
+        turn_state_owner = await repo.get_account_id(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="turn_state",
+        )
+    assert rows[raw_session].account_id == owner_id
+    assert rows[raw_session].continuity_abandoned_at is None
+    assert rows[raw_session].continuity_abandonment_scope == "session_header"
+    assert rows[selection_key].account_id == replacement_id
+    assert rows[selection_key].continuity_abandoned_at is None
+    assert rows[selection_key].continuity_abandonment_scope is None
+    assert session_header_lookup.account_id is None
+    assert session_header_lookup.continuity_abandoned is True
+    assert session_header_lookup.abandoned_account_id == owner_id
+    assert turn_state_owner == owner_id
+    # Parent-version readers know only the timestamp tombstone. Keeping it
+    # NULL makes them fail closed on the retained owner during rollout.
+    legacy_replica_owner = (
+        None if rows[raw_session].continuity_abandoned_at is not None else rows[raw_session].account_id
+    )
+    assert legacy_replica_owner == owner_id
+
+
+@pytest.mark.asyncio
+async def test_codex_goal_restart_with_thread_id_retires_unavailable_legacy_owner_and_stays_on_replacement(
+    async_client,
+    monkeypatch,
+):
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    _install_proxy_settings_cache(monkeypatch, sticky_threads_enabled=False)
+    owner_id = await _import_account(
+        async_client,
+        "acc_goal_restart_thread_owner",
+        "goal-restart-thread-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_goal_restart_thread_replacement",
+        "goal-restart-thread-replacement@example.com",
+    )
+    raw_session = "goal-restart-thread-session"
+    thread_id = "goal-restart-thread"
+    headers = {"session_id": raw_session, "thread-id": thread_id}
+    thread_key = _codex_backend_identity(headers).thread_selection_key
+    assert thread_key is not None
+
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=owner_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=replacement_id,
+            used_percent=20.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        seen.append(account_id)
+        yield f'data: {{"type":"response.completed","response":{{"id":"resp_goal_thread_{len(seen)}"}}}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    restart_payload = {
+        "model": "gpt-5.1",
+        "instructions": "Continue the existing task.",
+        "input": [
+            {
+                "role": "developer",
+                "content": ('<codex_internal_context source="goal">\nContinue working toward the active thread goal.'),
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+        ],
+        "stream": True,
+    }
+
+    healthy_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=restart_payload,
+        headers=headers,
+    )
+    assert healthy_response.status_code == 200
+    assert seen == ["acc_goal_restart_thread_owner"]
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner_id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.commit()
+
+    restart_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json=restart_payload,
+        headers=headers,
+    )
+    assert restart_response.status_code == 200
+    assert seen == ["acc_goal_restart_thread_owner", "acc_goal_restart_thread_replacement"]
+
+    follow_up_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "continue", "input": [], "stream": True},
+        headers=headers,
+    )
+    assert follow_up_response.status_code == 200
+    assert seen == [
+        "acc_goal_restart_thread_owner",
+        "acc_goal_restart_thread_replacement",
+        "acc_goal_restart_thread_replacement",
+    ]
+
+    turn_state_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "continue", "input": [], "stream": True},
+        headers={"x-codex-turn-state": raw_session},
+    )
+    assert turn_state_response.status_code == 502
+    assert turn_state_response.json()["error"]["code"] == "turn_state_owner_unavailable"
+    assert seen == [
+        "acc_goal_restart_thread_owner",
+        "acc_goal_restart_thread_replacement",
+        "acc_goal_restart_thread_replacement",
+    ]
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        raw_row = (
+            await session.execute(
+                select(StickySession).where(
+                    StickySession.key == raw_session,
+                    StickySession.kind == StickySessionKind.CODEX_SESSION,
+                )
+            )
+        ).scalar_one()
+        thread_row = (
+            await session.execute(
+                select(StickySession).where(
+                    StickySession.key == thread_key,
+                    StickySession.kind == StickySessionKind.PROMPT_CACHE,
+                )
+            )
+        ).scalar_one()
+        session_header_lookup = await repo.get_account_id_and_abandonment(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="session_header",
+        )
+        thread_legacy_lookup = await repo.get_account_id_and_abandonment(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="thread_header",
+        )
+        turn_state_owner = await repo.get_account_id(
+            raw_session,
+            kind=StickySessionKind.CODEX_SESSION,
+            continuity_source="turn_state",
+        )
+    assert raw_row.account_id == owner_id
+    assert raw_row.continuity_abandonment_scope == "session_header"
+    assert thread_row.account_id == replacement_id
+    assert session_header_lookup.account_id is None
+    assert session_header_lookup.continuity_abandoned is True
+    assert thread_legacy_lookup.account_id == owner_id
+    assert turn_state_owner == owner_id
+
+
+@pytest.mark.asyncio
+async def test_codex_goal_restart_cas_miss_reloads_concurrently_rebound_raw_owner(
+    async_client,
+    monkeypatch,
+):
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    _install_proxy_settings_cache(monkeypatch, sticky_threads_enabled=False)
+    stale_owner_id = await _import_account(
+        async_client,
+        "acc_goal_restart_stale_owner",
+        "goal-restart-stale-owner@example.com",
+    )
+    rebound_owner_id = await _import_account(
+        async_client,
+        "acc_goal_restart_rebound_owner",
+        "goal-restart-rebound-owner@example.com",
+    )
+    raw_session = "goal-restart-cas-reread"
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        for account_id, used_percent in (
+            (stale_owner_id, 10.0),
+            (rebound_owner_id, 20.0),
+        ):
+            await usage_repo.add_entry(
+                account_id=account_id,
+                used_percent=used_percent,
+                window="primary",
+                reset_at=now_epoch + 3600,
+                window_minutes=300,
+            )
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            stale_owner_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+        await session.execute(
+            update(Account).where(Account.id == stale_owner_id).values(status=AccountStatus.QUOTA_EXCEEDED)
+        )
+        await session.commit()
+
+    original_tombstone = StickySessionsRepository.abandon_legacy_session_header_owner_if_unavailable
+    race_count = 0
+
+    async def rebind_before_tombstone(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        expected_account_id: str,
+    ) -> bool:
+        nonlocal race_count
+        if key == raw_session and race_count == 0:
+            race_count += 1
+            # Simulate another selector establishing a newer raw owner after
+            # this request cached the stale owner but before its CAS executes.
+            await self.upsert(key, rebound_owner_id, kind=kind)
+        return await original_tombstone(
+            self,
+            key,
+            kind=kind,
+            expected_account_id=expected_account_id,
+        )
+
+    seen: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, base_url, raise_for_status, kwargs
+        seen.append(account_id)
+        yield 'data: {"type":"response.completed","response":{"id":"resp_goal_cas_reread"}}\n\n'
+
+    monkeypatch.setattr(
+        StickySessionsRepository,
+        "abandon_legacy_session_header_owner_if_unavailable",
+        rebind_before_tombstone,
+    )
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers={"session_id": raw_session},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Continue the existing task.",
+            "input": [
+                {
+                    "role": "developer",
+                    "content": (
+                        '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                    ),
+                },
+                {"role": "user", "content": "continue"},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert race_count == 1
+    assert seen == ["acc_goal_restart_rebound_owner"]
+    async with SessionLocal() as session:
+        raw_row = await session.scalar(
+            select(StickySession).where(
+                StickySession.key == raw_session,
+                StickySession.kind == StickySessionKind.CODEX_SESSION,
+            )
+        )
+    assert raw_row is not None
+    assert raw_row.account_id == rebound_owner_id
+    assert raw_row.continuity_abandoned_at is None
+
+
+@pytest.mark.asyncio
+async def test_codex_goal_restart_cannot_retire_owner_outside_api_key_scope(
+    async_client,
+    monkeypatch,
+):
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    settings_response = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert settings_response.status_code == 200
+    owner_id = await _import_account(
+        async_client,
+        "acc_goal_restart_out_of_scope_owner",
+        "goal-restart-out-of-scope-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_goal_restart_scoped_replacement",
+        "goal-restart-scoped-replacement@example.com",
+    )
+    raw_session = "goal-restart-scoped-session"
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=replacement_id,
+            used_percent=10.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner_id,
+            kind=StickySessionKind.CODEX_SESSION,
+        )
+        await session.execute(update(Account).where(Account.id == owner_id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.commit()
+    async with SessionLocal() as session:
+        created_key = await ApiKeysService(ApiKeysRepository(session)).create_key(
+            ApiKeyCreateData(
+                name="goal restart scoped replacement",
+                allowed_models=None,
+                assigned_account_ids=[replacement_id],
+            )
+        )
+
+    _install_proxy_settings_cache(
+        monkeypatch,
+        sticky_threads_enabled=False,
+        proxy_request_budget_seconds=0.05,
+    )
+
+    async def fail_stream(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("an out-of-scope owner must fail closed before upstream dispatch")
+        if False:
+            yield ""
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers={
+            "Authorization": f"Bearer {created_key.key}",
+            "session_id": raw_session,
+        },
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Continue the existing task.",
+            "input": [
+                {
+                    "role": "developer",
+                    "content": (
+                        '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                    ),
+                },
+                {"role": "user", "content": "continue"},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+    failed_event = next(event for event in events if event.get("type") == "response.failed")
+    assert failed_event["response"]["error"]["code"] == "hard_affinity_saturated"
+    async with SessionLocal() as session:
+        raw_row = await session.scalar(
+            select(StickySession).where(
+                StickySession.key == raw_session,
+                StickySession.kind == StickySessionKind.CODEX_SESSION,
+            )
+        )
+    assert raw_row is not None
+    assert raw_row.account_id == owner_id
+    assert raw_row.continuity_abandoned_at is None
 
 
 @pytest.mark.asyncio
@@ -492,6 +1037,70 @@ async def test_proxy_codex_session_id_pins_responses_and_compact_without_sticky_
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload, headers=headers)
     assert response.status_code == 200
     assert stream_seen == ["acc_sid_a", "acc_sid_a"]
+
+
+@pytest.mark.asyncio
+async def test_backend_thread_rows_route_sibling_responses_and_compact_independently(
+    async_client,
+    monkeypatch,
+):
+    from app.modules.proxy.affinity import _codex_backend_identity
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _set_routing_settings(async_client, sticky_threads_enabled=False)
+    account_a_id = await _import_account(async_client, "acc_thread_route_a", "thread-route-a@example.com")
+    account_b_id = await _import_account(async_client, "acc_thread_route_b", "thread-route-b@example.com")
+    process_session = "process-thread-route-shared"
+    root_headers = {"session-id": process_session, "thread-id": "thread-route-root"}
+    child_headers = {"session-id": process_session, "thread-id": "thread-route-child"}
+    root_key = _codex_backend_identity(root_headers).thread_selection_key
+    child_key = _codex_backend_identity(child_headers).thread_selection_key
+    assert root_key is not None
+    assert child_key is not None
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        await repo.upsert(root_key, account_a_id, kind=StickySessionKind.PROMPT_CACHE)
+        await repo.upsert(child_key, account_b_id, kind=StickySessionKind.PROMPT_CACHE)
+
+    observed: list[tuple[str, str, str | None]] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, **kwargs):
+        del headers, access_token, kwargs
+        observed.append(("responses", account_id, payload.prompt_cache_key))
+        yield 'data: {"type":"response.completed","response":{"id":"resp_thread_route"}}\n\n'
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del headers, access_token
+        observed.append(("compact", account_id, payload.prompt_cache_key))
+        return OpenAIResponsePayload.model_validate({"output": []})
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "prompt_cache_key": process_session,
+    }
+
+    responses_response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={**payload, "stream": True},
+        headers=root_headers,
+    )
+    compact_response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json=payload,
+        headers=child_headers,
+    )
+
+    assert responses_response.status_code == 200
+    assert compact_response.status_code == 200
+    assert observed == [
+        ("responses", "acc_thread_route_a", process_session),
+        ("compact", "acc_thread_route_b", process_session),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1666,6 +2275,132 @@ async def test_sticky_insert_if_absent_never_rebinds_existing_owner(db_setup):
 
 
 @pytest.mark.asyncio
+async def test_seeded_sticky_upsert_is_atomic_and_preserves_first_seed_owner(db_setup, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.sql import Insert
+
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        accounts = AccountsRepository(session)
+        for account_id in ("acc_seeded_a", "acc_seeded_b"):
+            await accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=AccountStatus.ACTIVE,
+                    deactivation_reason=None,
+                )
+            )
+
+    seed_key = "seeded-process"
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        first_thread = await repo.upsert_with_seed_if_absent(
+            "seeded-thread-a",
+            "acc_seeded_a",
+            kind=StickySessionKind.PROMPT_CACHE,
+            seed_key=seed_key,
+            seed_kind=StickySessionKind.CODEX_SESSION,
+        )
+        second_thread = await repo.upsert_with_seed_if_absent(
+            "seeded-thread-b",
+            "acc_seeded_b",
+            kind=StickySessionKind.PROMPT_CACHE,
+            seed_key=seed_key,
+            seed_kind=StickySessionKind.CODEX_SESSION,
+        )
+
+        assert first_thread.account_id == "acc_seeded_a"
+        assert second_thread.account_id == "acc_seeded_b"
+        assert await repo.get_account_id(seed_key, kind=StickySessionKind.CODEX_SESSION) == "acc_seeded_a"
+
+        original_build_upsert = repo._build_upsert_statement
+
+        def _build_failing_upsert(key: str, account_id: str, kind: StickySessionKind) -> Insert:
+            del account_id
+            return original_build_upsert(key, "missing-account", kind)
+
+        monkeypatch.setattr(repo, "_build_upsert_statement", _build_failing_upsert)
+        with pytest.raises(IntegrityError):
+            await repo.upsert_with_seed_if_absent(
+                "seeded-thread-failing",
+                "acc_seeded_a",
+                kind=StickySessionKind.PROMPT_CACHE,
+                seed_key="seeded-process-failing",
+                seed_kind=StickySessionKind.CODEX_SESSION,
+            )
+
+        # The repository rolls back both statements itself, so even a caller
+        # that catches the failure cannot accidentally commit the seed later.
+        assert (
+            await repo.get_account_id(
+                "seeded-process-failing",
+                kind=StickySessionKind.CODEX_SESSION,
+            )
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_unavailable_owner_tombstone_compare_and_set_preserves_concurrent_rebind(db_setup):
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        accounts = AccountsRepository(session)
+        for account_id, status in (
+            ("acc_restart_cas_old", AccountStatus.QUOTA_EXCEEDED),
+            ("acc_restart_cas_new", AccountStatus.ACTIVE),
+        ):
+            await accounts.upsert(
+                Account(
+                    id=account_id,
+                    email=f"{account_id}@example.com",
+                    plan_type="plus",
+                    access_token_encrypted=encryptor.encrypt("access"),
+                    refresh_token_encrypted=encryptor.encrypt("refresh"),
+                    id_token_encrypted=encryptor.encrypt("id"),
+                    last_refresh=utcnow(),
+                    status=status,
+                    deactivation_reason=None,
+                )
+            )
+
+    key = "restart-owner-cas"
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        await repo.upsert(key, "acc_restart_cas_old", kind=StickySessionKind.CODEX_SESSION)
+        # Simulate a newer claim landing after selection read the old owner.
+        await repo.upsert(key, "acc_restart_cas_new", kind=StickySessionKind.CODEX_SESSION)
+        retired = await repo.abandon_legacy_session_header_owner_if_unavailable(
+            key,
+            kind=StickySessionKind.CODEX_SESSION,
+            expected_account_id="acc_restart_cas_old",
+        )
+        row = await session.scalar(
+            select(StickySession).where(
+                StickySession.key == key,
+                StickySession.kind == StickySessionKind.CODEX_SESSION,
+            )
+        )
+
+    assert retired is False
+    assert row is not None
+    assert row.account_id == "acc_restart_cas_new"
+    assert row.continuity_abandoned_at is None
+
+
+@pytest.mark.asyncio
 async def test_stale_expiry_cleanup_cannot_delete_fresh_rebound_owner(async_client) -> None:
     from sqlalchemy import select, update
 
@@ -1807,6 +2542,7 @@ async def test_stale_expiry_race_reread_reports_concurrent_tombstone() -> None:
 
     assert resolved.account_id is None
     assert resolved.continuity_abandoned is True
+    assert resolved.abandoned_account_id is None
     assert persisted_row is not None
     assert persisted_row.continuity_abandoned_at is not None
 
@@ -2190,3 +2926,198 @@ async def test_seed_hard_sticky_outage_grace_on_startup_refreshes_only_unavailab
             entry = await repo.get_entry(f"turn_{account_id}", kind=StickySessionKind.CODEX_SESSION)
             assert entry is not None
             assert entry.updated_at == long_ago
+
+
+async def _create_account(account_id: str) -> None:
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            Account(
+                id=account_id,
+                email=f"{account_id}@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+
+async def _backdate_sticky_row(key: str, kind: StickySessionKind, *, age_seconds: float) -> None:
+    from app.db.models import StickySession
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == kind)
+            .values(updated_at=utcnow() - timedelta(seconds=age_seconds))
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_sticky_lookup_refresh_skippable_only_for_fresh_unmarked_rows(db_setup):
+    """refresh_skip_deadline is set only when a same-owner upsert would be a
+    pure updated_at rewrite: fresh within min(15s, 1% of TTL), not stamped in
+    the future, and free of any abandonment marker."""
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _create_account("acc_refresh_skip")
+    key = "key_refresh_skip"
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        await repo.upsert(key, "acc_refresh_skip", kind=StickySessionKind.PROMPT_CACHE)
+
+        fresh = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert fresh.account_id == "acc_refresh_skip"
+        assert isinstance(fresh.refresh_skip_deadline, datetime)
+        # The deadline is observed_updated_at + window: never further out
+        # than the full window from now.
+        assert fresh.refresh_skip_deadline <= utcnow() + timedelta(seconds=15.0)
+
+        # Without a TTL there is no refresh write to skip.
+        durable = await repo.get_account_id_and_abandonment(key, kind=StickySessionKind.PROMPT_CACHE)
+        assert durable.account_id == "acc_refresh_skip"
+        assert durable.refresh_skip_deadline is None
+
+    # 10s old: inside the 15s cap for an 1800s TTL, but outside 1% of a 600s
+    # TTL (6s) — the window scales with the TTL it protects.
+    await _backdate_sticky_row(key, StickySessionKind.PROMPT_CACHE, age_seconds=10.0)
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        within_cap = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert within_cap.account_id == "acc_refresh_skip"
+        assert isinstance(within_cap.refresh_skip_deadline, datetime)
+        beyond_fraction = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=600,
+        )
+        assert beyond_fraction.account_id == "acc_refresh_skip"
+        assert beyond_fraction.refresh_skip_deadline is None
+
+    # A future updated_at (database clock ahead of the application, or a
+    # restored row) is never skippable: an upper-bound-only age check would
+    # otherwise satisfy the window for longer than the documented bound.
+    await _backdate_sticky_row(key, StickySessionKind.PROMPT_CACHE, age_seconds=-30.0)
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        future_stamped = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert future_stamped.account_id == "acc_refresh_skip"
+        assert future_stamped.refresh_skip_deadline is None
+
+    # An abandonment marker disqualifies the skip even on a fresh row: the
+    # upsert that would be skipped also clears the marker columns.
+    async with SessionLocal() as session:
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.PROMPT_CACHE)
+            .values(updated_at=utcnow(), continuity_abandonment_scope="session_header")
+        )
+        await session.commit()
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        marked = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+            continuity_source="turn_state",
+        )
+        # Non-matching source keeps the owner, but the marker still makes a
+        # same-owner upsert semantic (it would clear the scope).
+        assert marked.account_id == "acc_refresh_skip"
+        assert marked.refresh_skip_deadline is None
+
+
+@pytest.mark.asyncio
+async def test_sticky_upsert_concurrent_same_key_semantics(db_setup):
+    """Concurrent upserts on one (key, kind) must each observe their own
+    write in RETURNING, keep exactly one row, and settle on one of the
+    written owners."""
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _create_account("acc_conc_a")
+    await _create_account("acc_conc_b")
+    key = "key_concurrent_upsert"
+    started_at = utcnow()
+
+    async def _one_upsert(index: int) -> str:
+        account_id = "acc_conc_a" if index % 2 == 0 else "acc_conc_b"
+        async with SessionLocal() as session:
+            repo = StickySessionsRepository(session)
+            row = await repo.upsert(key, account_id, kind=StickySessionKind.PROMPT_CACHE)
+            assert row.key == key
+            # RETURNING must reflect this statement's own write, not a
+            # concurrent winner's row.
+            assert row.account_id == account_id
+            assert row.continuity_abandoned_at is None
+            return row.account_id
+
+    results = await asyncio.gather(*(_one_upsert(index) for index in range(12)))
+    assert set(results) == {"acc_conc_a", "acc_conc_b"}
+
+    async with SessionLocal() as session:
+        row_count = await session.scalar(
+            select(sa_func.count())
+            .select_from(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.PROMPT_CACHE)
+        )
+        assert row_count == 1
+        final = await StickySessionsRepository(session).get_entry(key, kind=StickySessionKind.PROMPT_CACHE)
+        assert final is not None
+        assert final.account_id in {"acc_conc_a", "acc_conc_b"}
+        # Backend timestamps may carry second precision only.
+        assert final.updated_at >= started_at.replace(microsecond=0)
+
+
+@pytest.mark.asyncio
+async def test_sticky_refresh_skip_never_clobbers_concurrent_rebind(db_setup):
+    """A request that observed a fresh same-owner row and skipped its refresh
+    write must leave a concurrent rebind to another account intact."""
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _create_account("acc_skip_old")
+    await _create_account("acc_skip_new")
+    key = "key_skip_vs_rebind"
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        await repo.upsert(key, "acc_skip_old", kind=StickySessionKind.PROMPT_CACHE)
+        lookup = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert lookup.account_id == "acc_skip_old"
+        # The selection layer would skip its same-owner refresh here.
+        assert isinstance(lookup.refresh_skip_deadline, datetime)
+
+    # Concurrent request rebinds the mapping while the first request is still
+    # in flight; the first request performs no compensating write.
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(key, "acc_skip_new", kind=StickySessionKind.PROMPT_CACHE)
+
+    async with SessionLocal() as session:
+        final = await StickySessionsRepository(session).get_account_id(key, kind=StickySessionKind.PROMPT_CACHE)
+        assert final == "acc_skip_new"

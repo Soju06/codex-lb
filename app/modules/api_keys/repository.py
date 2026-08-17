@@ -6,9 +6,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from sqlalchemy import BigInteger, Integer, cast, delete, func, or_, select, true, update
+from sqlalchemy import BigInteger, Integer, cast, delete, func, insert, literal, or_, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only, selectinload
+from sqlalchemy.orm import load_only, raiseload, selectinload
 
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -168,6 +168,46 @@ class ApiKeysRepository:
         result = await self._session.execute(self._select_api_key().where(ApiKey.id == key_id))
         return result.scalar_one_or_none()
 
+    async def get_for_limit_enforcement(self, key_id: str) -> ApiKey | None:
+        """Admission-path load for ``enforce_limits_for_request``.
+
+        The enforcement transaction reads only ``is_active``/``expires_at``
+        plus the ``limits`` collection, so this skips the
+        ``account_assignments``/``source_assignments`` selectin round trips
+        that ``get_by_id`` pays on every proxied request. ``raiseload`` keeps
+        the narrowing fail-loud: any future enforcement code that touches an
+        unlisted column or relationship raises instead of silently lazy
+        loading. ``populate_existing`` stays required because the lazy limit
+        reset commits mid-enforcement and the refetch must re-hydrate rows
+        already in the identity map (sessions use ``expire_on_commit=False``).
+
+        Session-isolation invariant: ``populate_existing`` + ``raiseload``
+        would poison a *fully loaded* ``ApiKey`` already in this session's
+        identity map — re-populating it flips its unlisted columns and
+        relationships into raise-on-access state for every other holder of
+        that instance. That is unreachable today because every caller runs
+        this query in a dedicated short-lived session that never full-loads
+        an ``ApiKey`` first (``_enforce_request_limits`` and the websocket
+        reservation path open fresh background sessions/repo bundles; the
+        quota-planner warmup session never loads ``ApiKey`` rows), and the
+        only prior instance this query can re-populate is the one it loaded
+        itself with these same options. Do not call this on a session that
+        may already hold a fully loaded ``ApiKey`` (e.g. via ``get_by_id`` /
+        ``get_by_hash``) without dropping the narrowing first.
+        """
+        result = await self._session.execute(
+            select(ApiKey)
+            .execution_options(populate_existing=True)
+            .options(
+                load_only(ApiKey.is_active, ApiKey.expires_at, raiseload=True),
+                selectinload(ApiKey.limits),
+                raiseload(ApiKey.account_assignments),
+                raiseload(ApiKey.source_assignments),
+            )
+            .where(ApiKey.id == key_id)
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         result = await self._session.execute(self._select_api_key().where(ApiKey.key_hash == key_hash))
         return result.scalar_one_or_none()
@@ -183,6 +223,11 @@ class ApiKeysRepository:
             select(Account)
             .options(load_only(Account.id, Account.plan_type, Account.status))
             .where(Account.id.in_(account_ids))
+            # An account marked for background deletion is already deleted
+            # from the operator's point of view: assignment validation must
+            # reject it (the synchronous delete removed the row outright) and
+            # pooled-usage projections must not count it while its rows drain.
+            .where(Account.delete_requested_at.is_(None))
         )
         return list(result.scalars().all())
 
@@ -199,6 +244,11 @@ class ApiKeysRepository:
             .where(
                 ~Account.status.in_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
             )
+            # Status alone is not enough: an unfenced pre-upgrade replica can
+            # briefly replace a marked account's terminal status during a
+            # rolling deploy, and a deleted account must never re-enter the
+            # unscoped pooled-usage projections.
+            .where(Account.delete_requested_at.is_(None))
         )
         return list(result.scalars().all())
 
@@ -440,9 +490,33 @@ class ApiKeysRepository:
         return await self.get_limits_by_key(key_id)
 
     async def replace_account_assignments(self, key_id: str, account_ids: list[str], *, commit: bool = True) -> None:
+        # Re-check the pending-deletion marker atomically with the write:
+        # validation ran in an earlier transaction, and an account DELETE can
+        # commit in between — the marked row still exists (background drain),
+        # so a plain FK insert would succeed and resurrect an assignment
+        # begin_delete just removed. The FOR SHARE lock (PostgreSQL)
+        # conflicts with begin_delete's row update, so either this
+        # transaction commits first (and begin_delete's assignment cleanup
+        # removes its rows) or the marker is visible below and the account is
+        # skipped. The account locks are taken BEFORE the assignment-row
+        # delete to match begin_delete's order (account row, then assignment
+        # rows) — taking them after would form a lock cycle with a
+        # concurrent begin_delete and deadlock. SQLite serializes writers,
+        # so the marker predicate alone is race-free there.
+        if account_ids and self._session.get_bind().dialect.name == "postgresql":
+            await self._session.execute(
+                select(Account.id).where(Account.id.in_(account_ids)).with_for_update(read=True)
+            )
         await self._session.execute(delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.api_key_id == key_id))
-        for account_id in account_ids:
-            self._session.add(ApiKeyAccountAssignment(api_key_id=key_id, account_id=account_id))
+        if account_ids:
+            assignment_source = (
+                select(literal(key_id), Account.id)
+                .where(Account.id.in_(account_ids))
+                .where(Account.delete_requested_at.is_(None))
+            )
+            await self._session.execute(
+                insert(ApiKeyAccountAssignment).from_select(["api_key_id", "account_id"], assignment_source)
+            )
         if commit:
             await self._session.commit()
         parent = await self._session.get(ApiKey, key_id)

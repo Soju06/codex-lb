@@ -135,7 +135,7 @@ from app.modules.usage.mappers import usage_history_to_window_row
 
 if TYPE_CHECKING:
     from app.modules.accounts.repository import AccountsRepository
-    from app.modules.proxy.sticky_repository import StickySessionsRepository
+    from app.modules.proxy.sticky_repository import StickyOwnerLookup, StickySessionsRepository
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +228,11 @@ class _SelectionInputs(SelectionInputsProtocol):
     # exclusion, runtime-health, budget, and account-cap filters. Keep that
     # stronger candidate pool alongside the effective routing pool.
     continuity_owner_candidates: list[Account] | None = None
+    # Sticky-row mutation is authorized by account assignment and security
+    # policy, before model/service-tier eligibility. Keep this separate from
+    # continuity ambiguity: a model-ineligible account can still own the raw
+    # row that this authenticated request is allowed to retire.
+    sticky_mutation_authority_account_ids: frozenset[str] | None = None
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
@@ -243,6 +248,12 @@ class _SelectionInputs(SelectionInputsProtocol):
         if self.continuity_owner_candidates is None:
             return self.accounts
         return self.continuity_owner_candidates
+
+    @property
+    def effective_sticky_mutation_authority_account_ids(self) -> frozenset[str]:
+        if self.sticky_mutation_authority_account_ids is None:
+            return frozenset(account.id for account in self.effective_continuity_owner_candidates)
+        return self.sticky_mutation_authority_account_ids
 
 
 def _required_continuity_owner_failure(
@@ -521,7 +532,11 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         sticky_source: _CodexSessionSource | None = None,
         legacy_sticky_key: str | None = None,
+        legacy_continuity_source: _CodexSessionSource | None = None,
+        sticky_seed_key: str | None = None,
+        sticky_seed_kind: StickySessionKind | None = None,
         spill_bare_session_on_account_cap: bool = False,
+        abandon_unavailable_legacy_owner: bool = False,
         require_unambiguous_account: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
@@ -570,6 +585,20 @@ class LoadBalancer:
                 # Ownership scope and routing availability are separate. Even
                 # an already-empty routing pool must have its owner candidates
                 # security-filtered before conversation ambiguity is decided.
+                security_scope_accounts = (
+                    selection_inputs.runtime_accounts
+                    if selection_inputs.runtime_accounts is not None
+                    else [
+                        *selection_inputs.effective_continuity_owner_candidates,
+                        *selection_inputs.accounts,
+                    ]
+                )
+                security_authorized_account_ids = frozenset(
+                    account.id for account in security_scope_accounts if bool(account.security_work_authorized)
+                )
+                authorized_mutation_account_ids = (
+                    selection_inputs.effective_sticky_mutation_authority_account_ids & security_authorized_account_ids
+                )
                 authorized_owner_candidates = [
                     account
                     for account in selection_inputs.effective_continuity_owner_candidates
@@ -585,6 +614,7 @@ class LoadBalancer:
                         latest_secondary={},
                         latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=authorized_owner_candidates,
+                        sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
@@ -596,6 +626,7 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=authorized_owner_candidates,
+                    sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -617,6 +648,9 @@ class LoadBalancer:
                         latest_secondary={},
                         latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
+                        sticky_mutation_authority_account_ids=(
+                            selection_inputs.effective_sticky_mutation_authority_account_ids
+                        ),
                         quota_planner_settings=selection_inputs.quota_planner_settings,
                         runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
@@ -628,6 +662,9 @@ class LoadBalancer:
                     latest_secondary=selection_inputs.latest_secondary,
                     latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
+                    sticky_mutation_authority_account_ids=(
+                        selection_inputs.effective_sticky_mutation_authority_account_ids
+                    ),
                     quota_planner_settings=selection_inputs.quota_planner_settings,
                     runtime_accounts=selection_inputs.runtime_accounts,
                     error_message=selection_inputs.error_message,
@@ -686,24 +723,78 @@ class LoadBalancer:
         selection_error_code: str | None = None
         selection_resets_at: int | None = None
         legacy_existing_account_id: str | None = None
-        if sticky_source == "session_header" and legacy_sticky_key is not None:
+        legacy_abandoned_account_id: str | None = None
+        sticky_seed_account_id: str | None = None
+        initial_sticky_owner_lookup: StickyOwnerLookup | None = None
+        needs_owner_lookups = (
+            legacy_sticky_key is not None
+            or (sticky_seed_key is not None and sticky_seed_kind is not None)
+            or (sticky_key is not None and sticky_kind is not None)
+        )
+        if needs_owner_lookups:
+            # One shared session serves the legacy/seed/first-sticky owner
+            # lookups. The SELECTs stay separate on purpose so the per-source
+            # predicate semantics of get_account_id_and_abandonment (tombstone
+            # visibility, max_age handling) are untouched; the saving is the
+            # 2-3 extra pool checkouts + session create/teardown lifecycles
+            # per request. Each later source still starts a fresh read
+            # transaction (release_read_snapshot): on SQLite/WAL the shared
+            # session would otherwise pin one snapshot at the first SELECT
+            # and hide a hard sticky or seed owner committed concurrently
+            # between the reads, letting selection overwrite that mapping.
             async with self._repo_factory() as repos:
-                legacy_existing_account_id = await repos.sticky_sessions.get_account_id(
-                    legacy_sticky_key,
-                    kind=StickySessionKind.CODEX_SESSION,
-                    max_age_seconds=sticky_max_age_seconds,
-                )
-            if required_account_id is not None and (
-                legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
-            ):
-                # The required owner came from a file/response/bridge index,
-                # while the raw row may be legacy turn-state ownership. Neither
-                # source can be discarded or rewritten to resolve a conflict.
-                return AccountSelection(
-                    account=None,
-                    error_message="Account-owned continuity sources conflict; retry the logical turn",
-                    error_code="continuity_owner_conflict",
-                )
+                owner_snapshot_pinned = False
+                if legacy_sticky_key is not None:
+                    legacy_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
+                        legacy_sticky_key,
+                        kind=StickySessionKind.CODEX_SESSION,
+                        # Raw rows may be historical turn-state ownership. The
+                        # bounded thread TTL must never age out that hard evidence.
+                        max_age_seconds=None,
+                        # Process-session raw text is session_header even when
+                        # request locality is thread_header. Thread-only raw keys
+                        # keep thread_header so a session_header tombstone cannot
+                        # hide a distinct thread owner.
+                        continuity_source=legacy_continuity_source or "session_header",
+                    )
+                    legacy_existing_account_id = legacy_owner_lookup.account_id
+                    abandoned_account_id = legacy_owner_lookup.abandoned_account_id
+                    if legacy_owner_lookup.continuity_abandoned is True and isinstance(abandoned_account_id, str):
+                        legacy_abandoned_account_id = abandoned_account_id
+                    if required_account_id is not None and (
+                        legacy_existing_account_id is not None and legacy_existing_account_id != required_account_id
+                    ):
+                        # The required owner came from a file/response/bridge index,
+                        # while the raw row may be legacy turn-state ownership. Neither
+                        # source can be discarded or rewritten to resolve a conflict.
+                        return AccountSelection(
+                            account=None,
+                            error_message="Account-owned continuity sources conflict; retry the logical turn",
+                            error_code="continuity_owner_conflict",
+                        )
+                    owner_snapshot_pinned = True
+                if sticky_seed_key is not None and sticky_seed_kind is not None:
+                    if owner_snapshot_pinned:
+                        await repos.sticky_sessions.release_read_snapshot()
+                    sticky_seed_account_id = await repos.sticky_sessions.get_account_id(
+                        sticky_seed_key,
+                        kind=sticky_seed_kind,
+                    )
+                    owner_snapshot_pinned = True
+                if sticky_key is not None and sticky_kind is not None:
+                    if owner_snapshot_pinned:
+                        await repos.sticky_sessions.release_read_snapshot()
+                    # First-iteration owner read for run_sticky_selection_path,
+                    # hoisted here so it shares this session. The selection
+                    # loop consumes it exactly once; every retry (including
+                    # post-reset attempts) still re-reads fresh ownership
+                    # evidence through its own repo bundle.
+                    initial_sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
+                        sticky_key,
+                        kind=sticky_kind,
+                        max_age_seconds=sticky_max_age_seconds,
+                        continuity_source=sticky_source,
+                    )
         # Resolve uniqueness from the model/API-key/security-scoped pool before
         # runtime health, budget, or cap filtering. Transient pressure cannot
         # prove that another candidate does not own an upstream conversation.
@@ -766,6 +857,27 @@ class LoadBalancer:
                     error_message=error_message,
                     error_code=selection_error_code,
                 )
+            if (
+                selected_snapshot is not None
+                and selected_lease is not None
+                and sticky_seed_key is not None
+                and sticky_seed_kind is not None
+                and sticky_seed_account_id is None
+            ):
+                # Required-owner selection bypasses the thread row, but a
+                # first-ever process preference still has to land so later
+                # unpinned siblings inherit that exact owner.
+                try:
+                    async with self._repo_factory() as repos:
+                        await repos.sticky_sessions.insert_if_absent(
+                            sticky_seed_key,
+                            selected_snapshot.id,
+                            sticky_seed_kind,
+                        )
+                except BaseException:
+                    await self.release_account_lease(selected_lease)
+                    selected_lease = None
+                    raise
         else:
             sticky_outcome = await run_sticky_selection_path(
                 self,
@@ -776,7 +888,12 @@ class LoadBalancer:
                     sticky_source=sticky_source,
                     legacy_sticky_key=legacy_sticky_key,
                     legacy_existing_account_id=legacy_existing_account_id,
+                    legacy_abandoned_account_id=legacy_abandoned_account_id,
+                    sticky_seed_key=sticky_seed_key,
+                    sticky_seed_kind=sticky_seed_kind,
+                    sticky_seed_account_id=sticky_seed_account_id,
                     spill_bare_session_on_account_cap=spill_bare_session_on_account_cap,
+                    abandon_unavailable_legacy_owner=abandon_unavailable_legacy_owner,
                     require_unambiguous_account=require_unambiguous_account,
                     sticky_max_age_seconds=sticky_max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
@@ -800,6 +917,7 @@ class LoadBalancer:
                     reload_inputs=load_selection_inputs,
                     record_account_cap_rejection=_record_account_cap_rejection,
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
+                    initial_sticky_owner_lookup=initial_sticky_owner_lookup,
                 ),
             )
             selection_inputs = sticky_outcome.selection_inputs
@@ -1039,6 +1157,7 @@ class LoadBalancer:
             if account_ids is not None:
                 allowed_account_ids = set(account_ids)
                 scoped_accounts = [account for account in scoped_accounts if account.id in allowed_account_ids]
+            sticky_mutation_authority_account_ids = frozenset(account.id for account in scoped_accounts)
             accounts = _selectable_accounts(scoped_accounts)
             pre_model_filter_accounts = accounts
             model_catalog_omitted_account_ids: frozenset[str] = frozenset()
@@ -1080,6 +1199,7 @@ class LoadBalancer:
                         continuity_owner_candidates=[
                             _clone_account(account) for account in continuity_owner_candidates
                         ],
+                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -1094,6 +1214,7 @@ class LoadBalancer:
                         latest_secondary={},
                         latest_monthly={},
                         continuity_owner_candidates=[],
+                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -1110,6 +1231,7 @@ class LoadBalancer:
                         continuity_owner_candidates=[
                             _clone_account(account) for account in continuity_owner_candidates
                         ],
+                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
@@ -1123,6 +1245,7 @@ class LoadBalancer:
                     latest_secondary={},
                     latest_monthly={},
                     continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
+                    sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                     error_message=(
@@ -1156,6 +1279,7 @@ class LoadBalancer:
                         continuity_owner_candidates=[
                             _clone_account(account) for account in continuity_owner_candidates
                         ],
+                        sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                         quota_planner_settings=quota_planner_settings,
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                         error_message=additional_filter.error_message,
@@ -1172,6 +1296,7 @@ class LoadBalancer:
                     latest_secondary={},
                     latest_monthly={},
                     continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
+                    sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                     quota_planner_settings=quota_planner_settings,
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
@@ -1232,6 +1357,7 @@ class LoadBalancer:
                     account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
                 },
                 continuity_owner_candidates=[_clone_account(account) for account in continuity_owner_candidates],
+                sticky_mutation_authority_account_ids=sticky_mutation_authority_account_ids,
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 ignore_standard_quota_account_ids=ignore_standard_quota_account_ids,
@@ -1539,11 +1665,13 @@ class LoadBalancer:
         sticky_repo: StickySessionsRepository | None,
         routing_costs_by_account_id: RoutingCostsByAccount | None = None,
         sticky_existing_account_id: str | None | object = _STICKY_EXISTING_UNSET,
+        initial_preferred_account_id: str | None = None,
         preserve_existing_mapping_on_fallback: bool = False,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
         ignore_standard_quota: bool = False,
         allow_usage_exhaustion_error: bool = True,
         usage_exhaustion_states: Iterable[AccountState] | None = None,
+        sticky_refresh_skip_deadline: datetime | None = None,
     ) -> _StickySelectionOutcome:
         return await _run_select_with_stickiness(
             states=states,
@@ -1562,11 +1690,13 @@ class LoadBalancer:
             sticky_repo=sticky_repo,
             routing_costs_by_account_id=routing_costs_by_account_id,
             sticky_existing_account_id=sticky_existing_account_id,
+            initial_preferred_account_id=initial_preferred_account_id,
             preserve_existing_mapping_on_fallback=preserve_existing_mapping_on_fallback,
             traffic_class=traffic_class,
             ignore_standard_quota=ignore_standard_quota,
             allow_usage_exhaustion_error=allow_usage_exhaustion_error,
             usage_exhaustion_states=usage_exhaustion_states,
+            sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
         )
 
     _persist_sticky_mutation = staticmethod(_persist_sticky_mutation)
@@ -2933,6 +3063,11 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
             None
             if selection_inputs.continuity_owner_candidates is None
             else [_clone_account(account) for account in selection_inputs.continuity_owner_candidates]
+        ),
+        sticky_mutation_authority_account_ids=(
+            None
+            if selection_inputs.sticky_mutation_authority_account_ids is None
+            else frozenset(selection_inputs.sticky_mutation_authority_account_ids)
         ),
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(

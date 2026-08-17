@@ -7,16 +7,32 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from threading import RLock
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from anyio import to_thread
-from sqlalchemy import Integer, and_, delete, func, literal_column, or_, select, true, tuple_
+from sqlalchemy import (
+    Integer,
+    String,
+    and_,
+    column,
+    delete,
+    func,
+    literal_column,
+    or_,
+    select,
+    text,
+    true,
+    tuple_,
+    union_all,
+    values,
+)
 from sqlalchemy import cast as sqlalchemy_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.core.usage.types import UsageAggregateRow, UsageTrendBucket
 from app.core.utils.time import utcnow
+from app.db.account_identity_lock import lock_postgresql_account_identities
 from app.db.models import Account, AdditionalUsageHistory, UsageHistory
 from app.db.session import relax_commit_durability, sqlite_writer_section
 from app.db.sqlite_utils import sqlite_db_path_from_url
@@ -48,6 +64,35 @@ class UsageWindowWrite:
     credits_has: bool | None = None
     credits_unlimited: bool | None = None
     credits_balance: float | None = None
+
+
+class LiveSnapshotOwnerIdentityRelockError(RuntimeError):
+    """The selected live-snapshot owner's identity changed twice."""
+
+
+def _account_snapshot_entries(
+    account_id: str,
+    windows: Collection[UsageWindowWrite],
+    *,
+    recorded_at: datetime | None = None,
+) -> list[UsageHistory]:
+    captured_at = recorded_at or utcnow()
+    return [
+        UsageHistory(
+            account_id=account_id,
+            used_percent=window.used_percent,
+            input_tokens=None,
+            output_tokens=None,
+            window=window.window,
+            reset_at=window.reset_at,
+            window_minutes=window.window_minutes,
+            credits_has=window.credits_has,
+            credits_unlimited=window.credits_unlimited,
+            credits_balance=window.credits_balance,
+            recorded_at=captured_at,
+        )
+        for window in windows
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,23 +680,7 @@ class UsageRepository:
         """Persist one account's standard usage windows atomically."""
         if not windows:
             return []
-        captured_at = recorded_at or utcnow()
-        entries = [
-            UsageHistory(
-                account_id=account_id,
-                used_percent=window.used_percent,
-                input_tokens=None,
-                output_tokens=None,
-                window=window.window,
-                reset_at=window.reset_at,
-                window_minutes=window.window_minutes,
-                credits_has=window.credits_has,
-                credits_unlimited=window.credits_unlimited,
-                credits_balance=window.credits_balance,
-                recorded_at=captured_at,
-            )
-            for window in windows
-        ]
+        entries = _account_snapshot_entries(account_id, windows, recorded_at=recorded_at)
         try:
             async with sqlite_writer_section():
                 # Telemetry write: this transaction only appends usage-history
@@ -663,6 +692,133 @@ class UsageRepository:
             await self._session.rollback()
             raise
         return entries
+
+    async def _resolve_postgresql_live_snapshot_owner(
+        self,
+        account_id: str | None,
+        chatgpt_account_id: str | None,
+    ) -> str | None:
+        locked_identities = (chatgpt_account_id,)
+        fallback_identity = chatgpt_account_id
+        relocked = False
+
+        while True:
+            await lock_postgresql_account_identities(self._session, locked_identities)
+            locked_identity_values = frozenset(identity for identity in locked_identities if identity)
+            identity_to_relock: str | None = None
+
+            if account_id is not None:
+                # Read before taking the row lock so MVCC preserves the
+                # current recovery identity even when its writer has already
+                # deleted the local row but not committed yet.
+                observed = (
+                    await self._session.execute(
+                        select(Account.id, Account.chatgpt_account_id).where(Account.id == account_id)
+                    )
+                ).one_or_none()
+                if observed is not None:
+                    observed_identity = observed.chatgpt_account_id
+                    if observed_identity and observed_identity not in locked_identity_values:
+                        identity_to_relock = observed_identity
+                    else:
+                        locked = (
+                            await self._session.execute(
+                                select(Account.id, Account.chatgpt_account_id)
+                                .where(Account.id == account_id)
+                                .with_for_update(key_share=True)
+                            )
+                        ).one_or_none()
+                        if locked is not None:
+                            if locked.chatgpt_account_id and locked.chatgpt_account_id not in locked_identity_values:
+                                identity_to_relock = locked.chatgpt_account_id
+                            else:
+                                return locked.id
+
+            if identity_to_relock is not None:
+                if relocked:
+                    raise LiveSnapshotOwnerIdentityRelockError(
+                        "Live snapshot owner identity changed during PostgreSQL relock"
+                    )
+                # Release the first lock before adding another identity; the
+                # shared helper can then reacquire the full set in canonical
+                # order without inverting an account writer's lock order.
+                await self._session.rollback()
+                fallback_identity = identity_to_relock
+                locked_identities = (chatgpt_account_id, identity_to_relock)
+                relocked = True
+                continue
+
+            if fallback_identity:
+                upstream_stmt = (
+                    select(Account.id)
+                    .where(Account.chatgpt_account_id == fallback_identity)
+                    .with_for_update(key_share=True)
+                )
+                matches = list((await self._session.execute(upstream_stmt)).scalars().all())
+                if len(matches) == 1:
+                    return matches[0]
+            return None
+
+    async def settle_live_account_snapshot(
+        self,
+        *,
+        account_id: str | None,
+        chatgpt_account_id: str | None,
+        windows: Collection[UsageWindowWrite],
+        should_skip: Callable[[str], bool],
+    ) -> str | None:
+        """Resolve a live snapshot owner and atomically persist its windows."""
+        if not windows:
+            return None
+
+        try:
+            async with sqlite_writer_section():
+                bind = self._session.get_bind()
+                dialect_name = bind.dialect.name if bind is not None else "sqlite"
+                if dialect_name == "sqlite":
+                    # Acquire SQLite's database-wide writer slot before owner
+                    # lookup. Consolidation then commits before this lookup or
+                    # waits until the snapshot commit, so the chosen FK owner
+                    # cannot disappear between SELECT and INSERT.
+                    await self._session.execute(text("BEGIN IMMEDIATE"))
+                    resolved_account_id = None
+                    if account_id is not None:
+                        resolved_account_id = await self._session.scalar(
+                            select(Account.id).where(Account.id == account_id)
+                        )
+                    if resolved_account_id is None and chatgpt_account_id:
+                        matches = list(
+                            (
+                                await self._session.execute(
+                                    select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)
+                                )
+                            )
+                            .scalars()
+                            .all()
+                        )
+                        if len(matches) == 1:
+                            resolved_account_id = matches[0]
+                else:
+                    resolved_account_id = await self._resolve_postgresql_live_snapshot_owner(
+                        account_id,
+                        chatgpt_account_id,
+                    )
+
+                if resolved_account_id is None or should_skip(resolved_account_id):
+                    await self._session.rollback()
+                    return None
+
+                entries = _account_snapshot_entries(resolved_account_id, windows)
+                # Telemetry write: this transaction only locks the owner and
+                # appends usage-history rows, so it may skip synchronous WAL
+                # flush just like add_account_snapshot().
+                await relax_commit_durability(self._session)
+                self._session.add_all(entries)
+                await self._session.commit()
+        except BaseException:
+            await self._session.rollback()
+            raise
+        return resolved_account_id
 
     async def aggregate_since(
         self,
@@ -779,7 +935,7 @@ class UsageRepository:
                 _window_clause(window),
                 UsageHistory.recorded_at >= since,
             )
-            .order_by(UsageHistory.recorded_at.asc())
+            .order_by(UsageHistory.recorded_at.asc(), UsageHistory.id.asc())
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -791,6 +947,8 @@ class UsageRepository:
         since: datetime,
         *,
         cutoffs: dict[str, datetime] | None = None,
+        per_account_row_cap: int | None = None,
+        uncapped_recent_floor: datetime | None = None,
     ) -> dict[str, list[UsageHistorySnapshot]]:
         """Fetch minimal usage history fields for multiple accounts in a single query.
 
@@ -801,6 +959,24 @@ class UsageRepository:
         ignores ``cutoffs`` (its snapshot cache is keyed on the shared
         floor); callers keep their own per-account trimming, so honoring the
         bound here only changes how many rows are read, never the result.
+
+        ``per_account_row_cap`` additionally bounds each account's slice to
+        its newest rows inside the cutoff (PostgreSQL only). Live snapshot
+        ingestion appends usage rows per proxied request, so a busy account's
+        7-day window can hold tens of thousands of rows while the projection
+        consumers (EWMA depletion, weekly-pace burn/smoothing) only read the
+        recent tail. Each capped slice keeps oldest-first ordering. The
+        SQLite snapshot-cache path ignores the cap the same way it ignores
+        ``cutoffs``.
+
+        ``uncapped_recent_floor`` exempts rows at or after the given time
+        from the row cap: every in-cutoff row newer than the floor is always
+        returned, and the cap bounds only the older remainder. Consumers
+        whose math weighs every sample in a fixed time window equally (the
+        weekly-pace smoothing mean) pass their window start here so a
+        write-rate burst can never silently truncate that window, while
+        tail-weighted consumers (EWMA) stay covered by the cap alone.
+        Ignored unless ``per_account_row_cap`` is set on PostgreSQL.
         """
         if not account_ids:
             return {}
@@ -814,6 +990,16 @@ class UsageRepository:
                 list(account_ids),
                 window,
                 since,
+            )
+
+        if per_account_row_cap is not None and dialect == "postgresql":
+            return await self._bulk_history_since_capped_postgresql(
+                account_ids,
+                window,
+                since,
+                cutoffs=cutoffs,
+                per_account_row_cap=per_account_row_cap,
+                uncapped_recent_floor=uncapped_recent_floor,
             )
 
         if cutoffs:
@@ -858,6 +1044,103 @@ class UsageRepository:
                 window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
             )
             grouped.setdefault(snapshot.account_id, []).append(snapshot)
+        return grouped
+
+    async def _bulk_history_since_capped_postgresql(
+        self,
+        account_ids: list[str],
+        window: str,
+        since: datetime,
+        *,
+        cutoffs: dict[str, datetime] | None,
+        per_account_row_cap: int,
+        uncapped_recent_floor: datetime | None,
+    ) -> dict[str, list[UsageHistorySnapshot]]:
+        """Per-account newest-first capped fetch (PostgreSQL).
+
+        One lateral top-N probe per account instead of one shared range scan:
+        the probe descends idx_usage_window_account_time_covering (or its
+        raw-window twin) backward and stops at the cap or the account's
+        cutoff, whichever comes first, so the read never touches the bulk of
+        a dense account's window. The OR-of-cutoffs shape this replaces
+        returned every in-window row (hundreds of thousands on dense
+        deployments) to Python only for the projection consumers to use the
+        recent tail.
+
+        With ``uncapped_recent_floor`` the probe splits into two disjoint
+        branches over the same covering index: rows at or after the floor are
+        returned in full (time-bounded, so still cheap), and the top-N cap
+        applies only to rows between the cutoff and the floor. Snapshot
+        ingestion writes per proxied request whenever the usage fingerprint
+        moves, so a fixed row cap alone cannot guarantee it out-lasts a
+        burst inside an equal-weight consumer window.
+        """
+        value_columns = [
+            column("account_id", String()),
+            column("cutoff", UsageHistory.recorded_at.type),
+        ]
+        if uncapped_recent_floor is not None:
+            value_columns.append(column("uncapped_floor", UsageHistory.recorded_at.type))
+        value_rows: list[tuple] = []
+        for account_id in account_ids:
+            cutoff = max(cutoffs.get(account_id, since), since) if cutoffs else since
+            if uncapped_recent_floor is None:
+                value_rows.append((account_id, cutoff))
+            else:
+                value_rows.append((account_id, cutoff, max(cutoff, uncapped_recent_floor)))
+        account_cutoffs = values(*value_columns, name="account_cutoffs").data(value_rows)
+        snapshot_columns = (
+            UsageHistory.id,
+            UsageHistory.account_id,
+            UsageHistory.used_percent,
+            UsageHistory.recorded_at,
+            UsageHistory.reset_at,
+            UsageHistory.window_minutes,
+        )
+        capped_tail = (
+            select(*snapshot_columns)
+            .where(
+                UsageHistory.account_id == account_cutoffs.c.account_id,
+                UsageHistory.recorded_at >= account_cutoffs.c.cutoff,
+                *(
+                    (UsageHistory.recorded_at < account_cutoffs.c.uncapped_floor,)
+                    if uncapped_recent_floor is not None
+                    else ()
+                ),
+                _window_clause(window),
+            )
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(per_account_row_cap)
+            .correlate(account_cutoffs)
+        )
+        if uncapped_recent_floor is not None:
+            uncapped_recent = (
+                select(*snapshot_columns)
+                .where(
+                    UsageHistory.account_id == account_cutoffs.c.account_id,
+                    UsageHistory.recorded_at >= account_cutoffs.c.uncapped_floor,
+                    _window_clause(window),
+                )
+                .correlate(account_cutoffs)
+            )
+            recent = union_all(uncapped_recent, capped_tail).lateral("recent")
+        else:
+            recent = capped_tail.lateral("recent")
+        stmt = select(recent).select_from(account_cutoffs.join(recent, true()))
+        result = await self._session.execute(stmt)
+        grouped: dict[str, list[UsageHistorySnapshot]] = {}
+        for row in result.all():
+            snapshot = UsageHistorySnapshot(
+                id=int(row.id),
+                account_id=row.account_id,
+                used_percent=float(row.used_percent),
+                recorded_at=row.recorded_at,
+                reset_at=float(row.reset_at) if row.reset_at is not None else None,
+                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+            )
+            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+        for snapshots in grouped.values():
+            snapshots.sort(key=lambda snapshot: (snapshot.recorded_at, snapshot.id))
         return grouped
 
     async def trends_by_bucket(

@@ -32,6 +32,7 @@ const BASE_ROW = {
   cachedInputTokens: 0,
   costUsd: 0.5,
   activeAccounts: 1,
+  cancelledCount: 0,
   errorCount: 0,
   medianTtftMs: 200,
   medianTps: 25,

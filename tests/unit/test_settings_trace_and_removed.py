@@ -153,7 +153,7 @@ def test_phase_3_removed_settings_are_listed_and_ignored(monkeypatch):
     settings = Settings()
     assert not hasattr(settings, "database_pool_recycle_seconds")
     assert not hasattr(settings, "drain_primary_threshold_pct")
-    assert settings.database_pool_size == 15
+    assert settings.database_pool_size == 25
     assert settings.soft_drain_enabled is True
     found = warn_removed_settings(
         {

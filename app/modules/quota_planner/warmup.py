@@ -151,7 +151,9 @@ class QuotaWarmupService:
                         output_tokens=WARMUP_DEFAULT_OUTPUT_BUDGET,
                     ),
                 )
-                reservation_id = reservation.reservation_id
+                # ``None`` means no configured limit applies to the warmup
+                # probe; there is nothing to finalize afterwards.
+                reservation_id = reservation.reservation_id if reservation is not None else None
             except ApiKeyNotFoundError:
                 row = await self._planner.update_decision_status(
                     decision.id,

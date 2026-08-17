@@ -610,6 +610,65 @@ describe("RoutingSettings", () => {
     expect(screen.getByText(/No strategy can guarantee account-safety outcomes/i)).toBeInTheDocument();
   });
 
+  it("explains soft sticky routing versus hard Codex continuation affinity", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(
+      screen.getByText(/does not disable hard Codex continuation affinity/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/soft preference, not a guarantee/i)).toBeInTheDocument();
+  });
+
+  it("explains primary versus secondary quota windows and threshold units", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText("Primary vs secondary quota")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Primary quota is the short 5-hour usage window/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/5-hour \(primary\) window has been used/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/secondary window \(weekly, or monthly on monthly-only plans\) has been used/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the remaining-percent equivalent for sticky thresholds", async () => {
+    const user = userEvent.setup();
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    // Defaults: primary 95% used, secondary 100% used.
+    expect(screen.getByText("95% used · 5% remaining in quota terms")).toBeInTheDocument();
+    expect(screen.getByText("100% used · 0% remaining in quota terms")).toBeInTheDocument();
+
+    const secondary = screen.getByRole("spinbutton", { name: "Sticky secondary threshold" });
+    await user.clear(secondary);
+    await user.type(secondary, "70");
+
+    expect(screen.getByText("70% used · 30% remaining in quota terms")).toBeInTheDocument();
+
+    // Decimal thresholds keep the two displayed values complementary.
+    await user.clear(secondary);
+    await user.type(secondary, "12.5");
+
+    expect(screen.getByText("12.5% used · 87.5% remaining in quota terms")).toBeInTheDocument();
+  });
+
+  it("describes prefer-earlier-reset selection behavior", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(
+      screen.getByText(/prefer those whose selected quota window resets sooner/i),
+    ).toBeInTheDocument();
+  });
+
+  it("describes what limit warm-up sends and that probes consume quota", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText(/consume a small amount of quota/i)).toBeInTheDocument();
+  });
+
   it("saves staggered idle warm-up when limit warm-up is enabled", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);

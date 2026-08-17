@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator
 import pytest
 from httpx import ASGITransport, AsyncByteStream, AsyncClient
 from starlette.datastructures import Headers
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.types import Message, Scope
 
@@ -22,6 +21,7 @@ from app.core.middleware.multipart_content_encoding import (
 )
 from app.core.middleware.path_rewrite import BackendApiCodexV1AliasMiddleware
 from app.core.middleware.request_body_limit import RequestBodyLimitMiddleware
+from app.core.middleware.request_decompression import RequestDecompressionMiddleware
 from app.main import create_app
 
 pytestmark = pytest.mark.unit
@@ -360,9 +360,7 @@ def test_production_middleware_order_composes_route_and_generic_ingress_guards()
     )
     limit_index = next(index for index, item in enumerate(middleware) if item.cls is RequestBodyLimitMiddleware)
     decompression_index = next(
-        index
-        for index, item in enumerate(middleware)
-        if item.cls is BaseHTTPMiddleware and item.kwargs.get("dispatch").__name__ == "request_decompression_middleware"
+        index for index, item in enumerate(middleware) if item.cls is RequestDecompressionMiddleware
     )
 
     assert alias_index < multipart_index < limit_index < decompression_index

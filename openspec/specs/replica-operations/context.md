@@ -116,9 +116,6 @@ programmatic shutdown, instead of returning an unbounded task to asyncio runner 
 
 ## Known limitations (triaged follow-ups)
 
-- **`file_id` → account pins are process-local best-effort** — file finalize/input_file requests
-  landing on another replica can route to an account that does not own the file. Follow-up:
-  `persist-file-account-pins`.
 - **Concurrent cross-replica usage refresh can transiently tear `additional_usage_history`** —
   the per-account delete+insert rewrite is non-transactional across refreshers; the tear
   self-heals within one refresh interval. Documented limitation; no follow-up scheduled.

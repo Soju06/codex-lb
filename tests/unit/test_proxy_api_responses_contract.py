@@ -165,6 +165,48 @@ async def test_rate_limit_header_failure_survives_release_failure(
     assert "Failed to release API key reservation after rate-limit header failure" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_rate_limit_header_failure_uses_reservation_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reservation = object()
+    header_failure = RuntimeError("rate-limit header failure")
+    released: list[str] = []
+
+    async def fail_headers(*_args: object) -> dict[str, str]:
+        raise header_failure
+
+    async def record_release(
+        value: object,
+        *,
+        action: str,
+        scheduler: object,
+        request_id: str,
+    ) -> None:
+        del value, scheduler, request_id
+        released.append(action)
+
+    monkeypatch.setattr(proxy_api_module, "_rate_limit_headers_for_request", fail_headers)
+    monkeypatch.setattr(proxy_api_module, "_release_reservation_best_effort", record_release)
+    cleanup = proxy_api_module._ResponsesReservationCleanup(
+        owns_reservation=True,
+        reservation=cast(Any, reservation),
+        scheduler=None,
+        request_id="req_header_cleanup",
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        await proxy_api_module._rate_limit_headers_with_reservation_cleanup(
+            cast(Any, object()),
+            None,
+            cast(Any, reservation),
+            reservation_cleanup=cleanup,
+        )
+
+    assert caught.value is header_failure
+    assert released == ["rate limit headers"]
+
+
 def test_strip_blank_reasoning_comment_preserves_unmatched_whitespace_and_inline_comments() -> None:
     assert proxy_api_module._strip_blank_html_comment_lines("Need more steps\n") == "Need more steps\n"
     assert proxy_api_module._strip_blank_html_comment_lines("Hard break  \n") == "Hard break  \n"
@@ -1762,6 +1804,38 @@ async def test_normalize_public_stream_passes_canonical_unmutated_blocks_verbati
 
     assert blocks[0] == created
     assert delta in blocks
+
+
+@pytest.mark.asyncio
+async def test_normalize_public_stream_passes_raw_utf8_verbatim_blocks_byte_identically() -> None:
+    """Upstream-verbatim delta blocks (raw UTF-8, upstream key spacing — not
+    the ensure_ascii canonical re-encode) still satisfy the identity
+    pass-through gate: it compares parsed-payload object identity plus the
+    `event:` framing prefix, never re-serialized bytes."""
+    created = proxy_api_module.format_sse_event(
+        {"type": "response.created", "response": {"id": "resp_utf8", "output": []}}
+    )
+    verbatim_delta = (
+        "event: response.output_text.delta\n"
+        'data: {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "delta": "안녕"}\n\n'
+    )
+    completed_payload: dict[str, Any] = {
+        "type": "response.completed",
+        "response": {
+            "id": "resp_utf8",
+            "output": [{"type": "message", "id": "msg_1", "content": [{"type": "output_text", "text": "안녕"}]}],
+        },
+    }
+    completed = proxy_api_module.format_sse_event(completed_payload)
+
+    blocks = [
+        block
+        async for block in proxy_api_module._normalize_public_responses_stream(
+            _iter_blocks(created, verbatim_delta, completed)
+        )
+    ]
+
+    assert verbatim_delta in blocks
 
 
 @pytest.mark.asyncio

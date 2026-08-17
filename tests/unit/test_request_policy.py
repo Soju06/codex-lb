@@ -6,6 +6,7 @@ from typing import cast
 import pytest
 
 from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.types import JsonValue
@@ -14,6 +15,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
     normalize_source_reasoning_aliases,
+    responses_source_route_excluded,
     validate_model_access,
 )
 
@@ -855,3 +857,44 @@ def test_source_chat_reasoning_policy_materializes_model_alias_effort_for_canoni
     )
 
     assert payload == {"reasoning_effort": "xhigh"}
+
+
+def _responses_request_with_input(input_value: object) -> ResponsesRequest:
+    return ResponsesRequest.model_validate({"model": "gpt-5", "instructions": "", "input": input_value})
+
+
+def test_source_route_excluded_is_false_for_plain_turns() -> None:
+    request = _responses_request_with_input([{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}])
+
+    assert responses_source_route_excluded(request) is False
+
+
+def test_source_route_excluded_for_input_file_references() -> None:
+    request = _responses_request_with_input(
+        [{"role": "user", "content": [{"type": "input_file", "file_id": "file_123"}]}]
+    )
+
+    assert responses_source_route_excluded(request) is True
+
+
+def test_source_route_excluded_for_terminal_compaction_trigger() -> None:
+    request = _responses_request_with_input(
+        [
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "compaction_trigger"},
+        ]
+    )
+
+    assert responses_source_route_excluded(request) is True
+
+
+def test_source_route_excluded_raises_for_malformed_compaction_trigger() -> None:
+    request = _responses_request_with_input(
+        [
+            {"type": "compaction_trigger"},
+            {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+        ]
+    )
+
+    with pytest.raises(ClientPayloadError):
+        responses_source_route_excluded(request)

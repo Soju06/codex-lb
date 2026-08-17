@@ -3,13 +3,15 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from typing import cast as typing_cast
 
 import anyio
-from sqlalchemy import Integer, String, and_, case, cast, func, or_, select
+from sqlalchemy import Integer, String, and_, case, cast, func, insert, or_, select
 from sqlalchemy import exc as sa_exc
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.orm import InstrumentedAttribute, make_transient_to_detached
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.usage.logs import (
@@ -67,6 +69,14 @@ class _RequestLogFilters:
 # Earliest representable listing lower bound for the rollup-count window.
 _ROLLUP_EPOCH = datetime(1970, 1, 1)
 
+# Column keys for the Core request-log insert in ``add_log``. Every non-PK
+# column is read off the fully built transient instance; columns ``add_log``
+# never sets are nullable with no Python/server default the flush would have
+# applied, so an explicit NULL is identical to the old unit-of-work insert.
+_REQUEST_LOG_INSERT_COLUMN_KEYS: tuple[str, ...] = tuple(
+    column.key for column in RequestLog.__table__.columns if column.key != "id"
+)
+
 
 def _naive_utc(value: datetime) -> datetime:
     """FastAPI parses ISO `Z` query bounds as offset-aware datetimes;
@@ -96,6 +106,7 @@ class _DemandCountParams:
     models: list[str] | None
     reasoning_efforts: list[str] | None
     include_success: bool
+    include_cancelled: bool
     include_error_other: bool
 
 
@@ -1107,12 +1118,28 @@ class RequestLogsRepository:
                 if model_source_id is not None
                 else calculated_cost_from_log(typing_cast(RequestLogLike, log))
             )
-            self._session.add(log)
+            # Core insert instead of unit-of-work: the row is fully built
+            # above, so the ORM flush (relationship cascade scan,
+            # per-attribute history snapshots) is pure overhead on every
+            # request's log write. No refresh: every column is set explicitly
+            # before insert. Once the primary key is known, the instance is
+            # re-attached as *persistent* (clean, no pending SQL) so callers
+            # that mutate the returned log and commit through the same
+            # session get a tracked UPDATE instead of a silent no-op
+            # (sessions run with ``expire_on_commit=False``, so the attach
+            # never triggers post-commit lazy loads).
+            insert_values = {key: getattr(log, key) for key in _REQUEST_LOG_INSERT_COLUMN_KEYS}
             try:
+                result = typing_cast(
+                    CursorResult[Any],
+                    await self._session.execute(insert(RequestLog).values(insert_values)),
+                )
+                inserted_primary_key = result.inserted_primary_key
+                if inserted_primary_key is not None and inserted_primary_key[0] is not None:
+                    log.id = int(inserted_primary_key[0])
+                    make_transient_to_detached(log)
+                    self._session.add(log)
                 await self._session.commit()
-                # No refresh: every column is set explicitly before insert and
-                # expire_on_commit=False, so the round trip was pure overhead
-                # on every request's log write.
                 return log
             except sa_exc.ResourceClosedError:
                 return log
@@ -1206,6 +1233,7 @@ class RequestLogsRepository:
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         include_success: bool = True,
+        include_cancelled: bool = True,
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
@@ -1225,6 +1253,7 @@ class RequestLogsRepository:
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=include_success,
+            include_cancelled=include_cancelled,
             include_error_other=include_error_other,
             error_codes_in=error_codes_in,
             error_codes_excluding=error_codes_excluding,
@@ -1258,6 +1287,7 @@ class RequestLogsRepository:
                 models=models,
                 reasoning_efforts=reasoning_efforts,
                 include_success=include_success,
+                include_cancelled=include_cancelled,
                 include_error_other=include_error_other,
             )
 
@@ -1275,6 +1305,7 @@ class RequestLogsRepository:
             tuple(models or ()),
             tuple(reasoning_efforts or ()),
             include_success,
+            include_cancelled,
             include_error_other,
             tuple(sorted(error_codes_in)) if error_codes_in else None,
             tuple(sorted(error_codes_excluding)) if error_codes_excluding else None,
@@ -1363,6 +1394,8 @@ class RequestLogsRepository:
         statuses = []
         if params.include_success:
             statuses.append("success")
+        if params.include_cancelled:
+            statuses.append(CANCELLED_STATUS)
         if params.include_error_other:
             statuses.append("error")
         if statuses:
@@ -1427,6 +1460,7 @@ class RequestLogsRepository:
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=True,
+            include_cancelled=True,
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
@@ -1441,6 +1475,7 @@ class RequestLogsRepository:
             models=models,
             reasoning_efforts=reasoning_efforts,
             include_success=True,
+            include_cancelled=True,
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
@@ -1569,6 +1604,7 @@ class RequestLogsRepository:
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
         include_success: bool = True,
+        include_cancelled: bool = True,
         include_error_other: bool = True,
         error_codes_in: list[str] | None = None,
         error_codes_excluding: list[str] | None = None,
@@ -1610,6 +1646,8 @@ class RequestLogsRepository:
         status_conditions = []
         if include_success:
             status_conditions.append(RequestLog.status == "success")
+        if include_cancelled:
+            status_conditions.append(RequestLog.status == CANCELLED_STATUS)
         if error_codes_in:
             status_conditions.append(and_(RequestLog.status == "error", RequestLog.error_code.in_(error_codes_in)))
         if include_error_other:

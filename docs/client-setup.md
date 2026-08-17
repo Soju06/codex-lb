@@ -4,7 +4,7 @@ Point any OpenAI-compatible client at codex-lb. If [API key auth](api-keys.md) i
 
 Model availability is discovered from the upstream Codex model catalog and can vary by account plan, workspace, rollout, and upstream deprecation state. Prefer the live `GET /v1/models` or `GET /backend-api/codex/models` response over a copied static table when configuring clients or API-key model allowlists.
 
-The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest), **`gpt-5.6-terra`** (balanced), and **`gpt-5.6-luna`** (fast) — all 372k context. `gpt-5.5` and `gpt-5.4` are still served for older pinned clients; retired slugs such as `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `gpt-5.1-codex-mini` were dropped from the upstream bundled catalog and should no longer be used in new configs.
+The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest), **`gpt-5.6-terra`** (balanced), and **`gpt-5.6-luna`** (fast) — all 272k context. `gpt-5.5` and `gpt-5.4` are still served for older pinned clients; retired slugs such as `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `gpt-5.1-codex-mini` were dropped from the upstream bundled catalog and should no longer be used in new configs.
 
 | Client | Endpoint | Config |
 |--------|----------|--------|
@@ -222,19 +222,19 @@ jq 'del(.openai)' ~/.local/share/opencode/auth.json > auth.json.tmp && mv auth.j
           "name": "GPT-5.6-Sol",
           "reasoning": true,
           "options": { "reasoningEffort": "xhigh", "reasoningSummary": "detailed" },
-          "limit": { "context": 372000, "output": 65536 }
+          "limit": { "context": 272000, "output": 65536 }
         },
         "gpt-5.6-terra": {
           "name": "GPT-5.6-Terra",
           "reasoning": true,
           "options": { "reasoningEffort": "high", "reasoningSummary": "detailed" },
-          "limit": { "context": 372000, "output": 65536 }
+          "limit": { "context": 272000, "output": 65536 }
         },
         "gpt-5.6-luna": {
           "name": "GPT-5.6-Luna",
           "reasoning": true,
           "options": { "reasoningEffort": "medium", "reasoningSummary": "detailed" },
-          "limit": { "context": 372000, "output": 65536 }
+          "limit": { "context": 272000, "output": 65536 }
         },
         "gpt-5.5": {
           "name": "GPT-5.5",
@@ -283,8 +283,8 @@ opencode
           {
             "id": "gpt-5.6-sol",
             "name": "gpt-5.6-sol (codex-lb)",
-            "contextWindow": 372000,
-            "contextTokens": 372000,
+            "contextWindow": 272000,
+            "contextTokens": 272000,
             "maxTokens": 4096,
             "input": ["text"],
             "reasoning": false
@@ -292,8 +292,8 @@ opencode
           {
             "id": "gpt-5.6-terra",
             "name": "gpt-5.6-terra (codex-lb)",
-            "contextWindow": 372000,
-            "contextTokens": 372000,
+            "contextWindow": 272000,
+            "contextTokens": 272000,
             "maxTokens": 4096,
             "input": ["text"],
             "reasoning": false
@@ -301,8 +301,8 @@ opencode
           {
             "id": "gpt-5.6-luna",
             "name": "gpt-5.6-luna (codex-lb)",
-            "contextWindow": 372000,
-            "contextTokens": 372000,
+            "contextWindow": 272000,
+            "contextTokens": 272000,
             "maxTokens": 4096,
             "input": ["text"],
             "reasoning": false

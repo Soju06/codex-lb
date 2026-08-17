@@ -2966,6 +2966,66 @@ async def test_codex_route_stream_responses_starts_event_keepalive_before_first_
 
 
 @pytest.mark.asyncio
+async def test_codex_route_stream_responses_keeps_client_alive_while_bridge_cooldown_delays_first_event(
+    monkeypatch,
+):
+    upstream_started = asyncio.Event()
+    release_upstream = asyncio.Event()
+
+    class _FakeService:
+        async def rate_limit_headers(self):
+            return {}
+
+        async def stream_responses(self, *args, **kwargs):
+            del args, kwargs
+            upstream_started.set()
+            _signal_propagated_capacity_startup_ready()
+            await release_upstream.wait()
+            yield _sse_event({"type": "response.in_progress", "response": {"id": "resp_cooldown_wait"}})
+            yield _sse_event({"type": "response.completed", "response": {"id": "resp_cooldown_wait"}})
+
+    settings = SimpleNamespace(
+        http_responses_session_bridge_enabled=False,
+        sse_keepalive_interval_seconds=0.01,
+        proxy_account_stream_recovery_reserve=1,
+        proxy_api_key_fair_share_congestion_threshold_pct=0,
+    )
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module.proxy_service_module, "get_settings", lambda: settings)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "headers": [],
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    response = await proxy_api_module._stream_responses(
+        request,
+        payload,
+        ProxyContext(service=cast(proxy_module.ProxyService, _FakeService())),
+        api_key=None,
+        enforce_openai_sdk_contract=False,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert upstream_started.is_set() is True
+    iterator = response.body_iterator.__aiter__()
+    first_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first_chunk == CODEX_KEEPALIVE_FRAME
+    release_upstream.set()
+    second_chunk = cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2))
+    third_chunk = cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2))
+    assert "response.in_progress" in second_chunk
+    assert "response.completed" in third_chunk
+
+
+@pytest.mark.asyncio
 async def test_proxy_stream_retries_rate_limit_then_success(async_client, monkeypatch):
     expected_account_id_1 = await _import_account(async_client, "acc_1", "one@example.com")
     expected_account_id_2 = await _import_account(async_client, "acc_2", "two@example.com")

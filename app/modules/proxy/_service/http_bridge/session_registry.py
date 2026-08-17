@@ -15,6 +15,7 @@ from app.core.metrics.prometheus import (
 )
 from app.db.models import StickySessionKind
 from app.modules.proxy._service.http_bridge.helpers import (
+    _await_task_deferring_cancellation,
     _http_bridge_allow_durable_takeover,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_live_previous_response_alias_owner,
@@ -90,6 +91,56 @@ class _HTTPBridgeSessionRegistryMixin:
         self._schedule_http_bridge_session_closes(pruned_sessions, reason="idle_sweep")
         return len(pruned_sessions)
 
+    def _initialize_http_bridge_session_registry(self: _HTTPBridgeServiceProtocol) -> None:
+        # Canonical and detached registries both own live generations until
+        # common resource finalization removes the latter entry.
+        self._http_bridge_sessions = {}
+        self._http_bridge_detached_sessions = {}
+
+    async def close_all_http_bridge_sessions(self: _HTTPBridgeServiceProtocol) -> None:
+        async with self._http_bridge_lock:
+            sessions_to_close, inflight_futures = self._take_all_http_bridge_sessions_locked()
+        shutdown_error = ProxyResponseError(
+            503,
+            openai_error(
+                "upstream_unavailable",
+                "HTTP responses session bridge is shutting down",
+                error_type="server_error",
+            ),
+        )
+
+        async def finish_shutdown() -> None:
+            for inflight_future in inflight_futures:
+                if inflight_future.done():
+                    continue
+                inflight_future.set_exception(shutdown_error)
+                inflight_future.exception()
+            # The registry snapshot is no longer discoverable after the lock is
+            # released. Start every close concurrently, then await every result,
+            # so cancellation cannot strand the tail of a sequential close loop.
+            close_results = await asyncio.gather(
+                *(self._close_http_bridge_session(session) for session in sessions_to_close),
+                return_exceptions=True,
+            )
+            await self._drain_http_bridge_background_cleanup_tasks(reason="shutdown")
+            # Session/background cleanup may still enqueue durable operation
+            # events, so the spooler must outlive both. Close it before
+            # propagating an individual session-close failure: the batcher's
+            # flusher is a service-owned task and must not leak merely because
+            # one detached generation remains registered for a later retry.
+            event_batcher = getattr(self, "_http_bridge_operation_event_batcher", None)
+            close_batcher = getattr(event_batcher, "close", None)
+            if callable(close_batcher):
+                await close_batcher()
+            for result in close_results:
+                if isinstance(result, BaseException):
+                    raise result
+
+        shutdown_task = asyncio.create_task(finish_shutdown(), name="http-bridge-shutdown-close-all")
+        _, cancellation = await _await_task_deferring_cancellation(shutdown_task)
+        if cancellation is not None:
+            raise cancellation
+
     async def _register_http_bridge_turn_state(
         self: _HTTPBridgeServiceProtocol,
         session: _HTTPBridgeSession,
@@ -135,7 +186,13 @@ class _HTTPBridgeSessionRegistryMixin:
         defer_durable_publication = False
         deferred_live_alias_owner: _HTTPBridgeSession | None = None
         async with self._http_bridge_lock:
-            if session.closed:
+            if session.closed or (
+                session.upstream_control.retire_after_drain
+                and self._http_bridge_sessions.get(session.key) is not session
+            ):
+                # A detached predecessor may finish its admitted response, but
+                # publishing continuity aliases under its reused key would make
+                # them resolve to the replacement generation (and account).
                 return False, None
             account_neutral_recovery = is_http_bridge_account_neutral_replay(
                 kind=session.key.affinity_kind,
@@ -384,9 +441,30 @@ class _HTTPBridgeSessionRegistryMixin:
         self._http_bridge_sessions.pop(key, None)
         if mark_closed:
             session.closed = True
+        # Detachment removes only canonical routing. Even an idle generation
+        # marked closed may retain a slow-closing socket, reader, durable lease,
+        # or account lease, so lifecycle/capacity ownership lasts through the
+        # common resource-close finalizer for every detached generation.
+        self._http_bridge_detached_sessions[id(session)] = session
         self._unregister_http_bridge_turn_states_locked(session)
         self._unregister_http_bridge_previous_response_ids_locked(session)
         return session
+
+    def _take_all_http_bridge_sessions_locked(
+        self: _HTTPBridgeServiceProtocol,
+    ) -> tuple[list[_HTTPBridgeSession], list[asyncio.Future[_HTTPBridgeSession]]]:
+        sessions = [*self._http_bridge_sessions.values(), *self._http_bridge_detached_sessions.values()]
+        inflight_futures = list(self._http_bridge_inflight_sessions.values())
+        # Shutdown removes canonical routing immediately, but resource ownership
+        # remains discoverable until each close succeeds. A failed close can
+        # then be retried by a later shutdown pass instead of orphaning its
+        # socket, durable lease, account lease, or unsettled requests.
+        for session in self._http_bridge_sessions.values():
+            self._http_bridge_detached_sessions[id(session)] = session
+        self._http_bridge_sessions.clear()
+        self._http_bridge_inflight_sessions.clear()
+        self._http_bridge_previous_response_index.clear()
+        return sessions, inflight_futures
 
     def _unregister_http_bridge_turn_states_locked(
         self: _HTTPBridgeServiceProtocol,

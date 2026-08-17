@@ -3,14 +3,14 @@ from __future__ import annotations
 import gzip
 import io
 import zlib
-from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 import zstandard as zstd
-from fastapi import FastAPI, Request
-from fastapi.responses import Response
+from fastapi import FastAPI
 from starlette._utils import get_route_path
-from starlette.requests import ClientDisconnect
+from starlette.datastructures import Headers
+from starlette.requests import ClientDisconnect, Request
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.middleware.request_body_limit import (
     REQUEST_BODY_TOO_LARGE_MESSAGE,
@@ -108,58 +108,110 @@ def _decompress_body(data: bytes, encodings: list[str], max_size: int) -> bytes:
     return result
 
 
-def _replace_request_body(request: Request, body: bytes) -> None:
-    request._body = body
+def _rewrite_scope_headers_for_body(scope: Scope, body_length: int) -> None:
+    """Drop content-encoding/content-length and declare the decompressed length."""
     headers: list[tuple[bytes, bytes]] = []
-    for key, value in request.scope.get("headers", []):
+    for key, value in scope.get("headers", []):
         if key.lower() in (b"content-encoding", b"content-length"):
             continue
         headers.append((key, value))
-    headers.append((b"content-length", str(len(body)).encode("ascii")))
-    request.scope["headers"] = headers
-    # Ensure subsequent request.headers reflects the updated scope headers.
-    request.__dict__.pop("_headers", None)
+    headers.append((b"content-length", str(body_length).encode("ascii")))
+    scope["headers"] = headers
 
 
-def add_request_decompression_middleware(app: FastAPI) -> None:
-    @app.middleware("http")
-    async def request_decompression_middleware(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        content_encoding = request.headers.get("content-encoding")
+async def _drain_request_body(receive: Receive) -> bytes:
+    """Read the full request body from ``receive``.
+
+    Mirrors ``Request.body()`` semantics: a mid-body ``http.disconnect`` raises
+    ``ClientDisconnect``, and receive failures propagate. The caller's
+    ``receive`` is the body-limit middleware's limited receive, so the wire-size
+    cap (``_RequestBodyTooLarge``) propagates through this drain unchanged.
+    """
+    chunks = bytearray()
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            raise ClientDisconnect()
+        chunks.extend(message.get("body", b""))
+        if not message.get("more_body", False):
+            return bytes(chunks)
+
+
+class RequestDecompressionMiddleware:
+    """Decompress zstd/gzip/deflate request bodies with per-layer decode budgets.
+
+    Pure ASGI replacement for the previous ``BaseHTTPMiddleware`` dispatch:
+    requests without ``Content-Encoding`` (the common case) pass straight
+    through. Encoded requests are drained through the upstream receive (the
+    body-limit middleware's limited receive, so the wire-size cap still applies
+    to the compressed bytes), decompressed under the per-path budget, and the
+    downstream app is given a replay receive that yields the decompressed body
+    once and then delegates to the original receive so ``http.disconnect`` is
+    still observed (this replaces the ``_CachedRequest`` body replay the
+    BaseHTTP wrapper used to provide).
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        content_encoding = Headers(scope=scope).get("content-encoding")
         if not content_encoding:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
         encodings = [enc.strip().lower() for enc in content_encoding.split(",") if enc.strip()]
         if not encodings:
-            return await call_next(request)
-        max_size = request_body_limit_for_path(get_route_path(request.scope))
-        try:
-            body = await request.body()
-        except ClientDisconnect:
-            raise
+            await self.app(scope, receive, send)
+            return
+
+        max_size = request_body_limit_for_path(get_route_path(scope))
+        body = await _drain_request_body(receive)
         try:
             decompressed = _decompress_body(body, encodings, max_size)
         except _DecompressedBodyTooLarge:
-            return request_ingress_error_response(
-                request,
+            response = request_ingress_error_response(
+                Request(scope),
                 status_code=413,
                 code="payload_too_large",
                 message=REQUEST_BODY_TOO_LARGE_MESSAGE,
             )
+            await response(scope, receive, send)
+            return
         except ValueError:
-            return request_ingress_error_response(
-                request,
+            response = request_ingress_error_response(
+                Request(scope),
                 status_code=400,
                 code="invalid_request",
                 message="Unsupported Content-Encoding",
             )
+            await response(scope, receive, send)
+            return
         except Exception:
-            return request_ingress_error_response(
-                request,
+            response = request_ingress_error_response(
+                Request(scope),
                 status_code=400,
                 code="invalid_request",
                 message="Request body is compressed but could not be decompressed",
             )
-        _replace_request_body(request, decompressed)
-        return await call_next(request)
+            await response(scope, receive, send)
+            return
+
+        _rewrite_scope_headers_for_body(scope, len(decompressed))
+        body_replayed = False
+
+        async def replay_receive() -> Message:
+            nonlocal body_replayed
+            if not body_replayed:
+                body_replayed = True
+                return {"type": "http.request", "body": decompressed, "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+
+def add_request_decompression_middleware(app: FastAPI) -> None:
+    app.add_middleware(RequestDecompressionMiddleware)

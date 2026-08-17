@@ -35,7 +35,6 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.accounts.usage_rollup import FOLD_LAG
 from app.modules.accounts.usage_time_rollup import (
     floor_to_hour,
     run_conversation_fold_pass,
@@ -50,10 +49,24 @@ pytestmark = pytest.mark.integration
 
 _EPOCH = datetime(1970, 1, 1)
 
+# The 10-day corpus geometry below (TARGET_W at BASE + 9d, prune floor at
+# BASE + 8d, unaligned windows and boundary rows placed between them) was
+# authored against a 24h fold lag. The parity semantics under test are
+# lag-independent, so the lag is pinned here to keep the corpus exercising
+# every boundary it was designed around; the production FOLD_LAG's own
+# tail/absorption behavior is covered in test_account_usage_rollup.py.
+CORPUS_FOLD_LAG = timedelta(hours=24)
+
+
+@pytest.fixture(autouse=True)
+def _pin_corpus_fold_lag(monkeypatch):
+    monkeypatch.setattr("app.modules.accounts.usage_time_rollup.FOLD_LAG", CORPUS_FOLD_LAG)
+
+
 # Fixed 10-day corpus timeline (all naive UTC, matching requested_at).
 BASE = datetime(2025, 7, 1)
 NOW = BASE + timedelta(days=10, minutes=37)
-TARGET_W = floor_to_hour(NOW - FOLD_LAG)  # BASE + 9d
+TARGET_W = floor_to_hour(NOW - CORPUS_FOLD_LAG)  # BASE + 9d
 MID_W = BASE + timedelta(days=5, hours=3)  # whole hour mid-history
 
 SINCE_ALIGNED = BASE + timedelta(days=2)
@@ -140,9 +153,9 @@ def _corpus() -> list[RequestLog]:
     for offset in (timedelta(hours=30), timedelta(days=5, hours=1), timedelta(days=9, hours=20)):
         rows.append(_log(BASE + offset, request_id_suffix="w", request_kind="warmup", cost_usd=0.002))
         rows.append(_log(BASE + offset + timedelta(minutes=20), request_id_suffix="lw", request_kind="limit_warmup"))
-    # Cancelled rows on both sides of every candidate watermark: the listing
-    # count's default status split (success+error) must exclude them from
-    # the folded sum and the raw tail alike.
+    # Cancelled rows on both sides of every candidate watermark: the default
+    # listing must include them as a distinct status in both the folded sum
+    # and the raw tail.
     for offset in (timedelta(days=1, hours=5), timedelta(days=9, hours=23)):
         rows.append(
             _log(
@@ -330,9 +343,18 @@ async def _listing_totals(logs: RequestLogsRepository, lead_since: datetime) -> 
 
     return {
         "default": await _total(),
-        "success_only": await _total(include_error_other=False),
-        "error_only": await _total(include_success=False),
-        "no_status_filter": await _total(include_success=False, include_error_other=False),
+        "success_only": await _total(include_cancelled=False, include_error_other=False),
+        "cancelled_only": await _total(
+            include_success=False,
+            include_cancelled=True,
+            include_error_other=False,
+        ),
+        "error_only": await _total(include_success=False, include_cancelled=False),
+        "no_status_filter": await _total(
+            include_success=False,
+            include_cancelled=False,
+            include_error_other=False,
+        ),
         "windowed": await _total(since=lead_since, until=UNTIL_UNALIGNED),
         "folded_only": await _total(since=FOLDED_ONLY_WINDOW[0], until=FOLDED_ONLY_WINDOW[1]),
         "tail_only": await _total(since=TAIL_ONLY_WINDOW[0], until=TAIL_ONLY_WINDOW[1]),
@@ -453,10 +475,10 @@ async def test_switched_readers_match_legacy_across_watermark_states(db_setup):
     # Watermark state 2 — mid-history whole hour. The hourly and conversation
     # folds advance separately (mixed-watermark states in between must hold
     # parity too: each satellite degrades on its own watermark).
-    await run_hourly_fold_pass(now=MID_W + FOLD_LAG)
+    await run_hourly_fold_pass(now=MID_W + CORPUS_FOLD_LAG)
     assert await _watermark() == MID_W
     _assert_snapshots_equal(await _snapshot(), reference)
-    await run_conversation_fold_pass(now=MID_W + FOLD_LAG)
+    await run_conversation_fold_pass(now=MID_W + CORPUS_FOLD_LAG)
     assert await _conversation_watermark() == MID_W
     _assert_snapshots_equal(await _snapshot(), reference)
 
@@ -477,8 +499,8 @@ async def test_reader_is_consistent_under_concurrent_fold_commit(db_setup, monke
     came from, and folding never deletes raw rows."""
     await _seed_corpus()
     reference = await _snapshot()
-    await run_hourly_fold_pass(now=MID_W + FOLD_LAG)
-    await run_conversation_fold_pass(now=MID_W + FOLD_LAG)
+    await run_hourly_fold_pass(now=MID_W + CORPUS_FOLD_LAG)
+    await run_conversation_fold_pass(now=MID_W + CORPUS_FOLD_LAG)
 
     real_read_hourly_window = request_logs_repository_module.read_hourly_window
     fold_injections = {"count": 0}
@@ -559,7 +581,7 @@ async def test_escape_hatch_reset_degrades_to_legacy_then_rebackfills(db_setup):
 @pytest.mark.asyncio
 async def test_statistics_survive_retention_pruning_folded_raw(db_setup, monkeypatch):
     """The headline guarantee: after raw rows below the retention gate
-    (watermark - FOLD_LAG) are physically deleted, every rollup-served
+    (watermark - fold lag) are physically deleted, every rollup-served
     statistic is unchanged — INCLUDING the distinct-conversation metrics,
     which the conversation presence satellite now serves for folded history
     (they used to be raw-bound and shrink here). earliest_activity_at falls
@@ -575,7 +597,7 @@ async def test_statistics_survive_retention_pruning_folded_raw(db_setup, monkeyp
     lead_ceil = floor_to_hour(SINCE_UNALIGNED) + timedelta(hours=1)
     leadless = await _snapshot(lead_since=lead_ceil)
 
-    prune_cutoff = TARGET_W - FOLD_LAG
+    prune_cutoff = TARGET_W - CORPUS_FOLD_LAG
     async with SessionLocal() as session:
         await session.execute(delete(RequestLog).where(RequestLog.requested_at < prune_cutoff))
         await session.commit()
@@ -684,7 +706,7 @@ async def test_dashboard_overview_json_is_identical_before_and_after_fold(async_
     before = await async_client.get("/api/dashboard/overview?timeframe=7d")
     assert before.status_code == 200
 
-    folded_slices = await run_hourly_fold_pass()  # real now: rows are > FOLD_LAG old
+    folded_slices = await run_hourly_fold_pass()  # real now: rows are > fold lag old
     assert folded_slices > 0
     assert await run_conversation_fold_pass() > 0
     async with SessionLocal() as session:

@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -676,11 +676,21 @@ def _rewrite_websocket_downstream_response_id(
     if downstream_response_id is None:
         return payload
 
+    direct_response_id = payload.get("response_id")
+    rewrite_direct = isinstance(direct_response_id, str) and direct_response_id != downstream_response_id
+    response = payload.get("response")
+    nested_response_id = response.get("id") if isinstance(response, dict) else None
+    rewrite_nested = isinstance(nested_response_id, str) and nested_response_id != downstream_response_id
+    if not rewrite_direct and not rewrite_nested:
+        # Identity fast-path contract: callers skip re-serialization when the
+        # original payload object comes back, so an already-aligned frame must
+        # not be copied into an equal-but-new dict.
+        return payload
+
     rewritten = dict(payload)
-    if isinstance(rewritten.get("response_id"), str):
+    if rewrite_direct:
         rewritten["response_id"] = downstream_response_id
-    response = rewritten.get("response")
-    if isinstance(response, dict) and isinstance(response.get("id"), str):
+    if rewrite_nested and isinstance(response, dict):
         rewritten["response"] = {**response, "id": downstream_response_id}
     return rewritten
 
@@ -1661,6 +1671,7 @@ async def _release_websocket_response_create_gate(
     request_state: _WebSocketRequestState,
     response_create_gate: asyncio.Semaphore,
 ) -> None:
+    cancellation: asyncio.CancelledError | None = None
     account_response_create_lease = request_state.account_response_create_lease
     account_response_create_release = request_state.account_response_create_release
     request_state.account_response_create_lease = None
@@ -1669,13 +1680,36 @@ async def _release_websocket_response_create_gate(
         request_state.response_create_admission.release()
         request_state.response_create_admission = None
     if account_response_create_lease is not None and account_response_create_release is not None:
-        await account_response_create_release(account_response_create_lease)
+        cancellation = await _await_cleanup_deferring_cancellation(
+            account_response_create_release(account_response_create_lease)
+        )
     request_state.awaiting_response_created = False
     request_state.response_create_gate = None
     if not request_state.response_create_gate_acquired:
+        if cancellation is not None:
+            raise cancellation
         return
     request_state.response_create_gate_acquired = False
     response_create_gate.release()
+    if cancellation is not None:
+        raise cancellation
+
+
+async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> asyncio.CancelledError | None:
+    """Finish response-create lease cleanup before propagating cancellation."""
+
+    task = asyncio.ensure_future(awaitable)
+    cancellation: asyncio.CancelledError | None = None
+    with anyio.CancelScope(shield=True):
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+                if task.cancelled():
+                    raise
+    return cancellation
 
 
 def _pop_terminal_websocket_request_state(

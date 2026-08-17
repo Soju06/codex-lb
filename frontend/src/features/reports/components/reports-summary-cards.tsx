@@ -54,10 +54,20 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
       label: t("reports.summary.conversations"),
       value: formatNumber(summary.totalConversations),
     },
+    {
+      id: "cancelled",
+      label: t("reports.summary.cancelled"),
+      value: formatNumber(summary.totalCancelled),
+    },
+    {
+      id: "errors",
+      label: t("reports.summary.errors"),
+      value: formatNumber(summary.totalErrors),
+    },
   ];
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
       {cards.map((card) => (
         <div
           key={card.id}

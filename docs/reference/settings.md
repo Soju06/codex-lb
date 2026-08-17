@@ -32,11 +32,11 @@ the host side of the compose `ports` mapping instead.
 | Environment variable | Type | Default |
 | --- | --- | --- |
 | `CODEX_LB_DATABASE_ALEMBIC_AUTO_REMAP_ENABLED` | `bool` | `True` |
-| `CODEX_LB_DATABASE_MAX_OVERFLOW` | `int` | `10` |
+| `CODEX_LB_DATABASE_MAX_OVERFLOW` | `int` | `15` |
 | `CODEX_LB_DATABASE_MIGRATE_ON_STARTUP` | `bool` | `True` |
 | `CODEX_LB_DATABASE_MIGRATION_LOCK_TIMEOUT_SECONDS` | `float` | `300.0` |
 | `CODEX_LB_DATABASE_MIGRATIONS_FAIL_FAST` | `bool` | `True` |
-| `CODEX_LB_DATABASE_POOL_SIZE` | `int` | `15` |
+| `CODEX_LB_DATABASE_POOL_SIZE` | `int` | `25` |
 | `CODEX_LB_DATABASE_SQLITE_PRE_MIGRATE_BACKUP_ENABLED` | `bool` | `True` |
 | `CODEX_LB_DATABASE_SQLITE_PRE_MIGRATE_BACKUP_MAX_FILES` | `int` | `5` |
 | `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE` | `'quick' \| 'full' \| 'off'` | `'quick'` |

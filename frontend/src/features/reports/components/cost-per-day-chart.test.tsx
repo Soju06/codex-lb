@@ -44,6 +44,7 @@ describe("CostPerDayChart", () => {
             cachedInputTokens: 0,
             costUsd: 3.77,
             activeAccounts: 2,
+            cancelledCount: 0,
             errorCount: 0,
           },
         ]}
@@ -68,6 +69,7 @@ describe("CostPerDayChart", () => {
             cachedInputTokens: 0,
             costUsd: 3.77,
             activeAccounts: 2,
+            cancelledCount: 0,
             errorCount: 0,
           },
           {
@@ -79,6 +81,7 @@ describe("CostPerDayChart", () => {
             cachedInputTokens: 0,
             costUsd: 4.54,
             activeAccounts: 2,
+            cancelledCount: 0,
             errorCount: 0,
           },
         ]}

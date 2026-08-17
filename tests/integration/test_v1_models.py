@@ -281,7 +281,7 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
 
     sol = entries["gpt-5.6-sol"]
     assert sol["display_name"] == "GPT-5.6-Sol"
-    assert sol["context_window"] == 372_000
+    assert sol["context_window"] == 272_000
     assert sol["default_reasoning_level"] == "low"
     assert {level["effort"] for level in sol["supported_reasoning_levels"]} == {
         "low",
@@ -314,10 +314,11 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
         "max",
     }
 
-    # Upstream-exact GPT-5.6 metadata as served on the Codex catalog wire
-    # (codex-rs/models-manager/models.json at rust-v0.144.1).
+    # Reproducible upstream catalog evidence:
+    # codex-rs/models-manager/models.json at rust-v0.145.0.
     for gpt56 in (sol, terra, luna):
         assert gpt56["minimal_client_version"] == "0.144.0"
+        assert gpt56["context_window"] == 272_000
         assert gpt56["tool_mode"] == "code_mode_only"
         assert gpt56["use_responses_lite"] is True
         assert gpt56["apply_patch_tool_type"] == "freeform"
@@ -327,7 +328,7 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
         assert gpt56["reasoning_summary_format"] == "experimental"
         assert gpt56["comp_hash"] == "3000"
         assert gpt56["experimental_supported_tools"] == []
-        assert gpt56["max_context_window"] == 372_000
+        assert gpt56["max_context_window"] == 272_000
         assert gpt56["service_tiers"] == [
             {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
         ]
@@ -795,6 +796,37 @@ async def test_backend_codex_models_unions_service_tiers_across_accounts(async_c
     tier_slugs = {t.get("slug") for t in (model.get("service_tiers") or [])}
     assert "fast" in tier_slugs
     assert "fast" in (model.get("additional_speed_tiers") or [])
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_models_filters_unknown_reasoning_efforts(async_client):
+    registry = get_model_registry()
+    model = replace(
+        _make_upstream_model(
+            "source-gpt",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+        supported_reasoning_levels=tuple(
+            ReasoningLevel(effort=effort, description=effort)
+            for effort in ("none", "high", "provider-specific", "ultra")
+        ),
+        default_reasoning_level="provider-specific",
+    )
+    await registry.update({"plus": [model], "pro": [model]})
+
+    resp = await async_client.get("/backend-api/codex/models")
+
+    assert resp.status_code == 200
+    entry = next(m for m in resp.json()["models"] if m["slug"] == "source-gpt")
+    assert [level["effort"] for level in entry["supported_reasoning_levels"]] == [
+        "none",
+        "high",
+        "ultra",
+    ]
+    assert entry["default_reasoning_level"] is None
 
 
 @pytest.mark.asyncio

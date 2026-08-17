@@ -416,6 +416,7 @@ async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch
     assert "ping_interval" not in kwargs
     assert kwargs["ping_timeout"] == 120.0
     assert kwargs["max_size"] == 4321
+    assert kwargs["compression"] is None
     assert "subprotocols" not in kwargs
     additional_headers = cast(dict[str, str], kwargs["additional_headers"])
     assert additional_headers["Authorization"] == "Bearer access-token"

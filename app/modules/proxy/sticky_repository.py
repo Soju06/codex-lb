@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -23,6 +24,21 @@ from app.modules.sticky_sessions.schemas import StickySessionSortBy, StickySessi
 # ships with current Python interpreters. Postgres allows up to 65535
 # bind parameters, which this chunk size also respects.
 _DELETE_ENTRIES_CHUNK_SIZE = 250
+
+_ContinuitySource = Literal["session_header", "thread_header", "turn_state"]
+_SESSION_HEADER_ABANDONMENT_SCOPE = "session_header"
+
+# A same-owner TTL refresh upsert only rewrites ``updated_at``. On hot
+# (key, kind) rows, concurrent requests serialize on that row lock, so the
+# selection path may skip the rewrite while the row is younger than this
+# window, revalidating the observed deadline at write time. The window is
+# bounded to at most 1% of the mapping TTL (so expiry moves by at most 1% of
+# the window it protects) and to a small absolute ceiling; a rebind to a
+# different owner, a row carrying any abandonment marker, or a row stamped in
+# the future is never skippable because those writes change state beyond
+# freshness (or the observation itself is untrustworthy).
+_REFRESH_SKIP_TTL_FRACTION = 0.01
+_REFRESH_SKIP_MAX_SECONDS = 15.0
 
 # Only the Live-call ownership namespace is reserved. Other LF-prefixed keys
 # (e.g. the pre-existing "\ncodex-lb-affinity-v1" selection affinities) remain
@@ -49,12 +65,102 @@ class StickyOwnerLookup:
 
     account_id: str | None
     continuity_abandoned: bool
+    # Source-qualified abandonment makes account_id ownerless only for the
+    # matching source, but selection must still remember which durable owner
+    # was retired. Global stale-hard tombstones leave this unset because their
+    # established recovery path may legitimately reselect a recovered owner.
+    abandoned_account_id: str | None = None
+    # Set only when the row was observed in this lookup with a fresh
+    # ``updated_at`` (within the refresh-skip window derived from
+    # ``max_age_seconds``) and no abandonment marker, so a same-owner TTL
+    # refresh upsert would be a pure ``updated_at`` rewrite. The value is the
+    # naive-UTC instant (``observed_updated_at`` + skip window) after which
+    # the skip is no longer valid; consumers must isinstance-check
+    # ``datetime`` (test doubles may auto-vivify attributes), must revalidate
+    # the deadline against the clock immediately before omitting the write,
+    # and must never skip a write that changes the owner account.
+    refresh_skip_deadline: datetime | None = None
 
 
-def _owner_lookup_from_row(row: StickySession) -> StickyOwnerLookup:
-    if row.continuity_abandoned_at is not None:
-        return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
-    return StickyOwnerLookup(account_id=row.account_id, continuity_abandoned=False)
+def _continuity_is_abandoned_for_source(
+    abandoned_at: datetime | None,
+    abandonment_scope: str | None,
+    continuity_source: _ContinuitySource | None,
+) -> bool:
+    if abandonment_scope is not None:
+        # A scope is itself the source-qualified marker. Goal-restart writers
+        # deliberately leave the legacy timestamp NULL so pre-scope binaries
+        # keep treating account_id as hard ownership during rollout/rollback.
+        # Unknown and nonmatching typed callers likewise fail closed.
+        return abandonment_scope == continuity_source
+    # Historical stale-hard tombstones have a timestamp and NULL scope, and
+    # therefore continue to abandon ownership globally for every source.
+    return abandoned_at is not None
+
+
+def _source_scoped_abandoned_account_id(
+    account_id: str,
+    abandonment_scope: str | None,
+    continuity_source: _ContinuitySource | None,
+) -> str | None:
+    if abandonment_scope is not None and abandonment_scope == continuity_source:
+        return account_id
+    return None
+
+
+def _owner_lookup_from_row(
+    row: StickySession,
+    *,
+    continuity_source: _ContinuitySource | None,
+    refresh_skip_deadline: datetime | None = None,
+) -> StickyOwnerLookup:
+    if _continuity_is_abandoned_for_source(
+        row.continuity_abandoned_at,
+        row.continuity_abandonment_scope,
+        continuity_source,
+    ):
+        return StickyOwnerLookup(
+            account_id=None,
+            continuity_abandoned=True,
+            abandoned_account_id=_source_scoped_abandoned_account_id(
+                row.account_id,
+                row.continuity_abandonment_scope,
+                continuity_source,
+            ),
+        )
+    return StickyOwnerLookup(
+        account_id=row.account_id,
+        continuity_abandoned=False,
+        refresh_skip_deadline=refresh_skip_deadline,
+    )
+
+
+def _same_owner_refresh_skip_deadline(
+    row: StickySession,
+    *,
+    observed_updated_at: datetime,
+    now: datetime,
+    max_age_seconds: int,
+) -> datetime | None:
+    """Deadline until which a same-owner upsert of this row stays skippable.
+
+    Any abandonment marker disqualifies the skip: an upsert re-establishes
+    ownership by clearing both marker columns, so that write is semantic even
+    when the owner account is unchanged. A row whose ``updated_at`` sits in
+    the future (database clock ahead of this process, or a restored row) is
+    also never skippable: an upper-bound-only age comparison would let such a
+    row satisfy the window for longer than the documented bound.
+    """
+
+    if row.continuity_abandoned_at is not None or row.continuity_abandonment_scope is not None:
+        return None
+    age_seconds = (now - observed_updated_at).total_seconds()
+    if age_seconds < 0:
+        return None
+    skip_window_seconds = min(_REFRESH_SKIP_MAX_SECONDS, max_age_seconds * _REFRESH_SKIP_TTL_FRACTION)
+    if age_seconds > skip_window_seconds:
+        return None
+    return observed_updated_at + timedelta(seconds=skip_window_seconds)
 
 
 class StickySessionsRepository:
@@ -67,8 +173,14 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: _ContinuitySource | None = None,
     ) -> str | None:
-        lookup = await self.get_account_id_and_abandonment(key, kind=kind, max_age_seconds=max_age_seconds)
+        lookup = await self.get_account_id_and_abandonment(
+            key,
+            kind=kind,
+            max_age_seconds=max_age_seconds,
+            continuity_source=continuity_source,
+        )
         return lookup.account_id
 
     async def get_account_id_and_abandonment(
@@ -77,17 +189,14 @@ class StickySessionsRepository:
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: _ContinuitySource | None = None,
     ) -> StickyOwnerLookup:
-        """Resolve a mapping's owner, and whether it's a purge tombstone.
+        """Resolve a mapping's owner and applicable abandonment marker.
 
-        A tombstoned row (``continuity_abandoned_at`` set — see
-        ``purge_stale_hard_codex_session_mappings``) is deliberately reported
-        as ownerless here, same as a missing row, so every existing caller of
-        ``get_account_id`` keeps treating it as "no live pin" without change.
-        The extra flag lets ``run_sticky_selection_path`` additionally
-        distinguish "this key was purged" from "this key was never seen",
-        which matters only for the `conversation`-continuity ambiguous-owner
-        check that has no other index to fall back on.
+        Global stale-hard tombstones remain ownerless for every source. A
+        source-scoped marker is ownerless only for its matching typed source;
+        explicit turn-state and unknown callers retain the stored owner when a
+        goal restart abandoned only session-header interpretation.
         """
         if not key:
             return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
@@ -95,11 +204,21 @@ class StickySessionsRepository:
         if row is None:
             return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
         if max_age_seconds is None:
-            return _owner_lookup_from_row(row)
-        cutoff = utcnow() - timedelta(seconds=max_age_seconds)
+            return _owner_lookup_from_row(row, continuity_source=continuity_source)
+        now = utcnow()
+        cutoff = now - timedelta(seconds=max_age_seconds)
         observed_updated_at = to_utc_naive(row.updated_at)
         if observed_updated_at >= cutoff:
-            return _owner_lookup_from_row(row)
+            return _owner_lookup_from_row(
+                row,
+                continuity_source=continuity_source,
+                refresh_skip_deadline=_same_owner_refresh_skip_deadline(
+                    row,
+                    observed_updated_at=observed_updated_at,
+                    now=now,
+                    max_age_seconds=max_age_seconds,
+                ),
+            )
 
         # Release the read snapshot before attempting a SQLite write upgrade.
         # The DELETE remains safe because every value observed above participates
@@ -116,7 +235,7 @@ class StickySessionsRepository:
             )
             .returning(StickySession.key)
         )
-        current: tuple[str, datetime, datetime | None] | None = None
+        current: tuple[str, datetime, datetime | None, str | None] | None = None
         async with sqlite_writer_section():
             deleted_key = (await self._session.execute(statement)).scalar_one_or_none()
             if deleted_key is None:
@@ -127,6 +246,7 @@ class StickySessionsRepository:
                                 StickySession.account_id,
                                 StickySession.updated_at,
                                 StickySession.continuity_abandoned_at,
+                                StickySession.continuity_abandonment_scope,
                             ).where(
                                 StickySession.key == key,
                                 StickySession.kind == kind,
@@ -140,12 +260,45 @@ class StickySessionsRepository:
 
         if deleted_key is not None or current is None:
             return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
-        current_account_id, current_updated_at, current_continuity_abandoned_at = current
+        (
+            current_account_id,
+            current_updated_at,
+            current_continuity_abandoned_at,
+            current_continuity_abandonment_scope,
+        ) = current
         if to_utc_naive(current_updated_at) < cutoff:
             return StickyOwnerLookup(account_id=None, continuity_abandoned=False)
-        if current_continuity_abandoned_at is not None:
-            return StickyOwnerLookup(account_id=None, continuity_abandoned=True)
+        if _continuity_is_abandoned_for_source(
+            current_continuity_abandoned_at,
+            current_continuity_abandonment_scope,
+            continuity_source,
+        ):
+            return StickyOwnerLookup(
+                account_id=None,
+                continuity_abandoned=True,
+                abandoned_account_id=_source_scoped_abandoned_account_id(
+                    current_account_id,
+                    current_continuity_abandonment_scope,
+                    continuity_source,
+                ),
+            )
         return StickyOwnerLookup(account_id=current_account_id, continuity_abandoned=False)
+
+    async def release_read_snapshot(self) -> None:
+        """End the session's current read transaction.
+
+        On the default SQLite/WAL configuration one transaction pins one read
+        snapshot at its first SELECT, so a session shared across successive
+        ownership lookups would leave every later lookup blind to owners
+        committed concurrently after the first read. Committing ends that
+        snapshot so the next SELECT begins a fresh transaction; on PostgreSQL
+        READ COMMITTED each statement already reads fresh committed state, so
+        this is a near-free no-op. COMMIT (not rollback) on purpose: rollback
+        expires all tracked ORM state regardless of ``expire_on_commit``,
+        while commit under the session factory's ``expire_on_commit=False``
+        keeps rows loaded by earlier lookups readable.
+        """
+        await self._session.commit()
 
     async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
         if not key:
@@ -191,6 +344,42 @@ class StickySessionsRepository:
             raise RuntimeError("StickySession immutable insert did not resolve an owner")
         return owner_id
 
+    async def upsert_with_seed_if_absent(
+        self,
+        key: str,
+        account_id: str,
+        *,
+        kind: StickySessionKind,
+        seed_key: str,
+        seed_kind: StickySessionKind,
+    ) -> StickySession:
+        """Upsert one mapping and initialize its immutable seed atomically."""
+
+        # Keep these writes in one transaction. A process seed without the
+        # initiating thread row is false placement evidence, while a thread
+        # row without its seed makes the first admitted thread invisible to
+        # later siblings. Do not replace the seed's DO NOTHING with an upsert:
+        # another thread may have won first-writer initialization already.
+        seed_statement = self._build_insert_do_nothing_statement(seed_key, account_id, seed_kind)
+        mapping_statement = self._build_upsert_statement(key, account_id, kind).returning(StickySession)
+        async with sqlite_writer_section():
+            try:
+                await self._session.execute(seed_statement)
+                result = await self._session.execute(
+                    mapping_statement,
+                    execution_options={"populate_existing": True},
+                )
+                row = result.scalar_one_or_none()
+                if row is None:
+                    raise RuntimeError(f"StickySession seeded upsert failed for key={key!r} kind={kind.value!r}")
+                await self._session.commit()
+            except BaseException:
+                # This method owns both writes as one unit even when a caller
+                # catches the error and keeps using the same session.
+                await self._session.rollback()
+                raise
+        return row
+
     async def delete(self, key: str, *, kind: StickySessionKind) -> bool:
         if not key:
             return False
@@ -200,6 +389,69 @@ class StickySessionsRepository:
         )
         async with sqlite_writer_section():
             result = await self._session.execute(statement.returning(StickySession.key))
+            await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def abandon_legacy_session_header_owner_if_unavailable(
+        self,
+        key: str,
+        *,
+        kind: StickySessionKind,
+        expected_account_id: str,
+    ) -> bool:
+        """Abandon only session-header interpretation of an unavailable raw owner."""
+
+        if not key or not expected_account_id:
+            return False
+        unavailable_statuses = (
+            AccountStatus.PAUSED,
+            AccountStatus.RATE_LIMITED,
+            AccountStatus.QUOTA_EXCEEDED,
+        )
+        # PostgreSQL evaluates the status subquery from the UPDATE statement's
+        # snapshot. Without first locking the Account row, a concurrent status
+        # recovery can commit while that statement waits for the StickySession
+        # row and the stale snapshot can still authorize a tombstone. Locking
+        # the status owner makes recovery and retirement serialize; the sticky
+        # owner predicate below independently keeps concurrent rebinds safe.
+        owner_status_lock = select(Account.status).where(Account.id == expected_account_id).with_for_update()
+        # Retain account status inside the UPDATE as a second, database-level
+        # invariant. The lock is the concurrency guarantee; this predicate
+        # prevents future refactors from turning a prior status observation
+        # into unconditional retirement.
+        unavailable_owner = select(Account.id).where(
+            Account.id == expected_account_id,
+            Account.status.in_(unavailable_statuses),
+        )
+        statement = (
+            update(StickySession)
+            .where(
+                StickySession.key == key,
+                StickySession.kind == kind,
+                StickySession.account_id == expected_account_id,
+                StickySession.continuity_abandoned_at.is_(None),
+                StickySession.continuity_abandonment_scope.is_(None),
+                StickySession.account_id.in_(unavailable_owner),
+            )
+            # The scope column is the new reader's marker. Keep the legacy
+            # timestamp NULL: older replicas know only that timestamp, so they
+            # continue to treat account_id as hard ownership instead of
+            # globally abandoning and rebinding a colliding explicit turn
+            # state. New readers use typed scope, never key shape, to decide
+            # which source may ignore the retained owner.
+            .values(
+                updated_at=func.now(),
+                continuity_abandoned_at=None,
+                continuity_abandonment_scope=_SESSION_HEADER_ABANDONMENT_SCOPE,
+            )
+            .returning(StickySession.key)
+        )
+        async with sqlite_writer_section():
+            owner_status = await self._session.scalar(owner_status_lock)
+            if owner_status not in unavailable_statuses:
+                await self._session.commit()
+                return False
+            result = await self._session.execute(statement)
             await self._session.commit()
         return result.scalar_one_or_none() is not None
 
@@ -239,7 +491,12 @@ class StickySessionsRepository:
                     StickySession.kind == kind,
                     StickySession.account_id == expected_account_id,
                 )
-                .values(account_id=restore_account_id, updated_at=func.now(), continuity_abandoned_at=None)
+                .values(
+                    account_id=restore_account_id,
+                    updated_at=func.now(),
+                    continuity_abandoned_at=None,
+                    continuity_abandonment_scope=None,
+                )
                 .returning(StickySession.key)
             )
 
@@ -452,15 +709,25 @@ class StickySessionsRepository:
             update(StickySession)
             .where(
                 StickySession.kind == StickySessionKind.CODEX_SESSION,
-                StickySession.continuity_abandoned_at.is_(None),
+                or_(
+                    StickySession.continuity_abandoned_at.is_(None),
+                    StickySession.continuity_abandonment_scope.is_not(None),
+                ),
                 StickySession.updated_at < cutoff_naive,
                 StickySession.account_id.in_(unavailable_account_ids),
             )
-            .values(continuity_abandoned_at=to_utc_naive(now))
+            # Stale-hard cleanup is global. It may promote a younger
+            # session-header-only marker once the original row itself crosses
+            # the normal stale-hard threshold.
+            .values(
+                continuity_abandoned_at=to_utc_naive(now),
+                continuity_abandonment_scope=None,
+            )
         )
         delete_stmt = delete(StickySession).where(
             StickySession.kind == StickySessionKind.CODEX_SESSION,
             StickySession.continuity_abandoned_at.is_not(None),
+            StickySession.continuity_abandonment_scope.is_(None),
             StickySession.continuity_abandoned_at < cutoff_naive,
         )
         async with sqlite_writer_section():
@@ -490,6 +757,7 @@ class StickySessionsRepository:
                 # no longer applies — otherwise this row would keep reporting
                 # itself as abandoned even though it now has a live owner.
                 "continuity_abandoned_at": None,
+                "continuity_abandonment_scope": None,
             },
         )
 

@@ -10,6 +10,7 @@ The dashboard SHALL render non-compact USD Cost values on `/reports` through the
 - **THEN** the Total Cost summary value renders `$1,400.00`
 - **AND** the average-cost-per-day subtitle, when its amount is `1400`, renders `$1,400.00`
 - **AND** a Daily Breakdown Cost cell whose amount is `1400` renders `$1,400.00`
+- **AND** a Cost by Day axis tick whose amount is `1400` renders `$1,400.00`
 - **AND** a Cost by Day tooltip whose amount is `1400` renders `$1,400.00`
 
 #### Scenario: Intentionally compact Cost visualization remains compact

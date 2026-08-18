@@ -7,6 +7,7 @@ import { CostPerDayChart } from "./cost-per-day-chart";
 type ChartProps = { children: ReactNode; margin?: unknown; data?: unknown };
 
 let capturedProps: ChartProps | null = null;
+let capturedYAxisProps: { tickFormatter?: (value: number) => string } | null = null;
 
 function findTooltipContent(node: ReactNode): ReactElement<{ formatValue?: (value: number) => string }> | null {
   if (!node || typeof node !== "object") return null;
@@ -35,7 +36,10 @@ vi.mock("@/components/lazy-recharts", async (importOriginal) => {
     },
     Area: () => null,
     XAxis: () => null,
-    YAxis: () => null,
+    YAxis: (props: { tickFormatter?: (value: number) => string }) => {
+      capturedYAxisProps = props;
+      return null;
+    },
     CartesianGrid: () => null,
     Tooltip: () => null,
   };
@@ -44,6 +48,7 @@ vi.mock("@/components/lazy-recharts", async (importOriginal) => {
 describe("CostPerDayChart", () => {
   beforeEach(() => {
     capturedProps = null;
+    capturedYAxisProps = null;
   });
 
   it("uses equal left and right chart margins", () => {
@@ -72,7 +77,7 @@ describe("CostPerDayChart", () => {
     expect(capturedProps?.margin).toEqual({ top: 5, right: 10, left: 10, bottom: 0 });
   });
 
-  it("formats full-value Cost tooltip amounts with grouping separators", () => {
+  it("formats full-value Cost axis and tooltip amounts with grouping separators", () => {
     render(
       <CostPerDayChart
         startDate="2026-06-05"
@@ -96,6 +101,7 @@ describe("CostPerDayChart", () => {
     );
 
     const tooltip = findTooltipContent(capturedProps?.children);
+    expect(capturedYAxisProps?.tickFormatter?.(1400)).toBe("$1,400.00");
     expect(tooltip?.props.formatValue?.(1400)).toBe("$1,400.00");
   });
 

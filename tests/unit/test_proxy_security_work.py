@@ -204,10 +204,6 @@ def test_http_bridge_buffers_entire_reasoning_prelude_before_security_decision()
     assert not _websocket_request_can_replay_before_visible_output(request_state)
 
 
-@pytest.mark.available_websocket_owner(
-    "acc_ws_security_gate_regular_e2e",
-    "acc_ws_security_gate_authorized_e2e",
-)
 @pytest.mark.asyncio
 async def test_direct_websocket_security_replay_reacquires_create_admission(
     monkeypatch: pytest.MonkeyPatch,
@@ -218,10 +214,15 @@ async def test_direct_websocket_security_replay_reacquires_create_admission(
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     regular_account = _make_account("acc_ws_security_gate_regular_e2e")
     authorized_account = _make_account("acc_ws_security_gate_authorized_e2e")
     authorized_account.security_work_authorized = True
+    service = proxy_service.ProxyService(
+        _repo_factory(
+            _RequestLogsRecorder(),
+            accounts=[regular_account, authorized_account],
+        )
+    )
     cyber_message = (
         "This chat was flagged for possible cybersecurity risk. "
         "To get authorized for security work, join the Trusted Access for Cyber program. "

@@ -319,7 +319,6 @@ async def test_first_turn_reaches_connect_guard_not_the_reuse_guard(
     )
 
 
-@pytest.mark.available_websocket_owner("acc_ws_source_guard_reuse")
 @pytest.mark.asyncio
 async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     """A second turn that switches to a source-owned model must not be forwarded.
@@ -334,8 +333,8 @@ async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_reuse")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
     upstream = _QueuedTestUpstreamWebSocket(_completed_turn("resp_turn_one"))
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -480,7 +479,6 @@ class _TurnDrivenUpstream:
         self.close_seen.set()
 
 
-@pytest.mark.available_websocket_owner("acc_ws_source_guard_alias")
 @pytest.mark.asyncio
 async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     """A later turn asking for an alias-only source model must be rejected.
@@ -503,8 +501,8 @@ async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPa
     catalog.install(monkeypatch)
 
     api_key = _alias_allowlist_api_key()
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_alias")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -700,7 +698,6 @@ class _TurnSerializedDownstream:
         self.done.set()
 
 
-@pytest.mark.available_websocket_owner("acc_ws_source_guard_file_pin")
 @pytest.mark.asyncio
 async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypatch: pytest.MonkeyPatch) -> None:
     """A later source-owned turn that references an uploaded file must be forwarded.
@@ -718,8 +715,8 @@ async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypat
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_file_pin")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
@@ -754,7 +751,6 @@ async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypat
     assert any("resp_turn_two" in text for text in downstream.sent_text), "the file-pinned turn must complete"
 
 
-@pytest.mark.available_websocket_owner("acc_ws_source_guard_compact")
 @pytest.mark.asyncio
 async def test_reuse_guard_forwards_a_terminal_compaction_trigger_turn(
     monkeypatch: pytest.MonkeyPatch,
@@ -773,8 +769,8 @@ async def test_reuse_guard_forwards_a_terminal_compaction_trigger_turn(
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
 
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     account = _make_account("acc_ws_source_guard_compact")
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder(), accounts=[account]))
     upstream = _TurnDrivenUpstream([_completed_turn("resp_turn_one"), _completed_turn("resp_turn_two")])
 
     async def fake_connect(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202

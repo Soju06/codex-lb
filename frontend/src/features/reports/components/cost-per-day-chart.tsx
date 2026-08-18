@@ -11,6 +11,7 @@ import {
 } from "@/components/lazy-recharts";
 import type { DailyReportRow } from "../schemas";
 import { buildContinuousDailyRows } from "../daily-series";
+import { formatCurrency } from "@/utils/formatters";
 import { ChartTooltip } from "./chart-tooltip";
 import { ReportChartCard } from "./report-chart-card";
 
@@ -48,10 +49,10 @@ export function CostPerDayChart({ startDate, endDate, data }: CostPerDayChartPro
               tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
               axisLine={false}
               tickLine={false}
-              tickFormatter={(v: number) => `$${v}`}
+              tickFormatter={formatCurrency}
             />
             <Tooltip
-              content={<ChartTooltip names={{ cost: t("reports.dailyBreakdown.columns.cost") }} formatValue={(v) => `$${v.toFixed(2)}`} />}
+              content={<ChartTooltip names={{ cost: t("reports.dailyBreakdown.columns.cost") }} formatValue={formatCurrency} />}
             />
             <Area
               type="monotone"

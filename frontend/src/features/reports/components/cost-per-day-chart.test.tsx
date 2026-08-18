@@ -1,10 +1,27 @@
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CostPerDayChart } from "./cost-per-day-chart";
 
-let capturedProps: { margin?: unknown; data?: unknown } | null = null;
+type ChartProps = { children: ReactNode; margin?: unknown; data?: unknown };
+
+let capturedProps: ChartProps | null = null;
+
+function findTooltipContent(node: ReactNode): ReactElement<{ formatValue?: (value: number) => string }> | null {
+  if (!node || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findTooltipContent(child);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const element = node as ReactElement<{ content?: ReactElement<{ formatValue?: (value: number) => string }>; children?: ReactNode }>;
+  if (element.props.content) return element.props.content;
+  return findTooltipContent(element.props.children);
+}
 
 vi.mock("@/components/lazy-recharts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/components/lazy-recharts")>();
@@ -14,7 +31,7 @@ vi.mock("@/components/lazy-recharts", async (importOriginal) => {
     ResponsiveContainer: ({ children }: { children: ReactNode }) => <div>{children}</div>,
     AreaChart: (props: { children: ReactNode; margin?: unknown; data?: unknown }) => {
       capturedProps = props;
-      return <div data-testid="cost-area-chart" />;
+      return <div data-testid="cost-area-chart">{props.children}</div>;
     },
     Area: () => null,
     XAxis: () => null,
@@ -53,6 +70,33 @@ describe("CostPerDayChart", () => {
     );
 
     expect(capturedProps?.margin).toEqual({ top: 5, right: 10, left: 10, bottom: 0 });
+  });
+
+  it("formats full-value Cost tooltip amounts with grouping separators", () => {
+    render(
+      <CostPerDayChart
+        startDate="2026-06-05"
+        endDate="2026-06-05"
+        data={[
+          {
+            date: "2026-06-05",
+            requests: 1,
+            conversations: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            reasoningTokens: 0,
+            cachedInputTokens: 0,
+            costUsd: 1400,
+            activeAccounts: 1,
+            cancelledCount: 0,
+            errorCount: 0,
+          },
+        ]}
+      />,
+    );
+
+    const tooltip = findTooltipContent(capturedProps?.children);
+    expect(tooltip?.props.formatValue?.(1400)).toBe("$1,400.00");
   });
 
   it("fills missing selected days with zero-value rows", () => {

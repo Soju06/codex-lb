@@ -126,6 +126,30 @@ describe("ReportsSummaryCards", () => {
     expect(within(tokensCard).queryByText("170")).not.toBeInTheDocument();
   });
 
+  it("renders grouped currency for full-value Cost displays", () => {
+    render(
+      <ReportsSummaryCards
+        summary={{
+          totalCostUsd: 1400,
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCachedTokens: 0,
+          totalRequests: 0,
+          totalErrors: 0,
+          totalConversations: 0,
+          activeAccounts: 0,
+          avgCostPerDay: 1400,
+          avgRequestsPerDay: 0,
+        }}
+        comparison={{ canCompare: false, previous: { totalCostUsd: 0, totalTokens: 0, totalRequests: 0 } }}
+      />,
+    );
+
+    const costCard = screen.getByTestId("report-summary-card-total-cost");
+    expect(within(costCard).getByText("$1,400.00")).toBeInTheDocument();
+    expect(costCard).toHaveTextContent("avg $1,400.00/day");
+  });
+
   it("hides comparison badges when unavailable or previous totals are zero", () => {
     const { rerender } = render(
       <ReportsSummaryCards

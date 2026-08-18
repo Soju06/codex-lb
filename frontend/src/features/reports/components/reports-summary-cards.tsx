@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
+import { formatCurrency } from "@/utils/formatters";
 
 import type { ReportComparison, ReportSummary } from "../schemas";
 
@@ -20,8 +21,8 @@ export function ReportsSummaryCards({ summary, comparison }: ReportsSummaryCards
     {
       id: "total-cost",
       label: t("reports.summary.totalCost"),
-      value: `$${summary.totalCostUsd.toFixed(2)}`,
-      sub: t("reports.summary.avgCostPerDay", { cost: `$${summary.avgCostPerDay.toFixed(2)}` }),
+      value: formatCurrency(summary.totalCostUsd),
+      sub: t("reports.summary.avgCostPerDay", { cost: formatCurrency(summary.avgCostPerDay) }),
       comparison: buildComparison(summary.totalCostUsd, comparison.previous.totalCostUsd, comparison.canCompare),
     },
     {

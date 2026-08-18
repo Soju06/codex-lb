@@ -123,6 +123,30 @@ describe("DailyDetailTable", () => {
     );
   });
 
+  it("renders grouped currency in full-value Cost cells", () => {
+    render(
+      <DailyDetailTable
+        startDate="2026-06-05"
+        endDate="2026-06-05"
+        data={[
+          {
+            date: "2026-06-05",
+            requests: 1,
+            conversations: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedInputTokens: 0,
+            costUsd: 1400,
+            activeAccounts: 1,
+            errorCount: 0,
+          },
+        ]}
+      />,
+    );
+
+    expect(within(screen.getByTestId("daily-breakdown-row-2026-06-05")).getByText("$1,400.00")).toBeInTheDocument();
+  });
+
   it("zero-fills cancelled counts for dates missing from the response", () => {
     const rows = buildContinuousDailyRows("2026-06-05", "2026-06-06", [
       {

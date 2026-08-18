@@ -7,6 +7,7 @@ import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { buildContinuousDailyRows } from "../daily-series";
 import type { DailyReportRow } from "../schemas";
 import { formatReportBucketDate } from "../date";
+import { formatCurrency } from "@/utils/formatters";
 
 export type DailyDetailTableProps = {
   startDate: string;
@@ -156,7 +157,7 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
                   {row.reasoningTokens == null ? "—" : formatTokens(row.reasoningTokens)}
                 </td>
                 <td className="py-2.5 pr-4 text-right font-medium text-emerald-600 dark:text-emerald-400">
-                  ${row.costUsd.toFixed(2)}
+                  {formatCurrency(row.costUsd)}
                 </td>
                 <td className="py-2.5 pr-4 text-right text-muted-foreground">
                   {row.activeAccounts}

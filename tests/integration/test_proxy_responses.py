@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import Mapping
@@ -20,6 +21,7 @@ from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import Account, DashboardSettings, RequestLog
 from app.db.session import SessionLocal
+from app.modules.api_keys.service import ApiKeyUsageReservationData
 from app.modules.proxy._service.streaming import retry as streaming_retry_module
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import AdditionalUsageRepository
@@ -2053,6 +2055,311 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
         assert log.request_id == "resp_1"
         assert log.archive_request_id == request_id
         assert log.transport == "http"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_terminal_disconnect_finalizes_settlement_and_success(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    email = "terminal-disconnect@example.com"
+    raw_account_id = "acc_terminal_disconnect"
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_terminal_disconnect",
+        key_id="key_terminal_disconnect",
+        model="gpt-5.1",
+    )
+    stream_closed = asyncio.Event()
+    settle_calls: list[dict[str, object]] = []
+    success_account_ids: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        try:
+            yield (
+                'data: {"type":"response.completed","response":{"id":"resp_terminal_disconnect",'
+                '"object":"response","status":"completed","output":[],"usage":'
+                '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+            )
+            await asyncio.Event().wait()
+        finally:
+            stream_closed.set()
+
+    async def fake_enforce_request_limits(*_args: object, **_kwargs: object):
+        return reservation
+
+    async def fake_settle_stream_api_key_usage(self, api_key, api_key_reservation, settlement, request_id, **kwargs):
+        del self, api_key
+        settle_calls.append(
+            {
+                "reservation": api_key_reservation,
+                "status": settlement.status,
+                "request_id": request_id,
+                "input_tokens": settlement.input_tokens,
+                "output_tokens": settlement.output_tokens,
+                "wait_for_settlement": kwargs.get("wait_for_settlement", False),
+            }
+        )
+        return True
+
+    async def fake_record_success(self, account):
+        del self
+        success_account_ids.append(account.id)
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", fake_enforce_request_limits)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_settle_stream_api_key_usage",
+        fake_settle_stream_api_key_usage,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_success", fake_record_success)
+
+    request_id = "req_terminal_disconnect"
+    request_body = json.dumps(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request_sent = False
+    disconnect_allowed = asyncio.Event()
+    first_terminal_sent = asyncio.Event()
+    response_started: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": request_body, "more_body": False}
+        await disconnect_allowed.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.start":
+            response_started.append(message)
+            return
+        body = message.get("body")
+        if (
+            message["type"] == "http.response.body"
+            and isinstance(body, bytes)
+            and b'"type":"response.completed"' in body
+        ):
+            first_terminal_sent.set()
+            disconnect_allowed.set()
+
+    await app_instance(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/backend-api/codex/responses",
+            "raw_path": b"/backend-api/codex/responses",
+            "query_string": b"",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", b"application/json"),
+                (b"x-request-id", request_id.encode("ascii")),
+            ],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        },
+        receive,
+        send,
+    )
+    assert response_started and response_started[0]["status"] == 200
+    assert first_terminal_sent.is_set() is True
+
+    await asyncio.wait_for(stream_closed.wait(), timeout=1.0)
+    await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+
+    assert settle_calls == [
+        {
+            "reservation": reservation,
+            "status": "success",
+            "request_id": request_id,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "wait_for_settlement": False,
+        }
+    ]
+    assert success_account_ids == [expected_account_id]
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.request_id == "resp_terminal_disconnect"))
+        log = result.scalars().one()
+        assert log.archive_request_id == request_id
+        assert log.account_id == expected_account_id
+        assert log.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_post_refresh_terminal_disconnect_finalizes_settlement(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    email = "post-refresh-terminal-disconnect@example.com"
+    raw_account_id = "acc_post_refresh_terminal_disconnect"
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    auth_json = _make_auth_json(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_post_refresh_terminal_disconnect",
+        key_id="key_post_refresh_terminal_disconnect",
+        model="gpt-5.1",
+    )
+    stream_calls: list[int] = []
+    stream_closed = asyncio.Event()
+    settle_calls: list[dict[str, object]] = []
+    success_account_ids: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        stream_calls.append(len(stream_calls) + 1)
+        if len(stream_calls) == 1:
+            raise proxy_module.ProxyResponseError(
+                401,
+                {"error": {"code": "invalid_api_key", "message": "token invalidated"}},
+            )
+        try:
+            yield (
+                'data: {"type":"response.completed","response":{"id":"resp_post_refresh_disconnect",'
+                '"object":"response","status":"completed","output":[],"usage":'
+                '{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+            )
+            await asyncio.Event().wait()
+        finally:
+            stream_closed.set()
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    async def fake_enforce_request_limits(*_args: object, **_kwargs: object):
+        return reservation
+
+    async def fake_settle_stream_api_key_usage(self, api_key, api_key_reservation, settlement, request_id, **kwargs):
+        del self, api_key
+        settle_calls.append(
+            {
+                "reservation": api_key_reservation,
+                "status": settlement.status,
+                "request_id": request_id,
+                "input_tokens": settlement.input_tokens,
+                "output_tokens": settlement.output_tokens,
+                "wait_for_settlement": kwargs.get("wait_for_settlement", False),
+            }
+        )
+        return True
+
+    async def fake_record_success(self, account):
+        del self
+        success_account_ids.append(account.id)
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", fake_enforce_request_limits)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_settle_stream_api_key_usage",
+        fake_settle_stream_api_key_usage,
+    )
+    monkeypatch.setattr(proxy_module.LoadBalancer, "record_success", fake_record_success)
+
+    request_id = "req_post_refresh_terminal_disconnect"
+    request_body = json.dumps(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request_sent = False
+    disconnect_allowed = asyncio.Event()
+    first_terminal_sent = asyncio.Event()
+    response_started: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": request_body, "more_body": False}
+        await disconnect_allowed.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.start":
+            response_started.append(message)
+            return
+        body = message.get("body")
+        if (
+            message["type"] == "http.response.body"
+            and isinstance(body, bytes)
+            and b'"type":"response.completed"' in body
+        ):
+            first_terminal_sent.set()
+            disconnect_allowed.set()
+
+    await app_instance(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/backend-api/codex/responses",
+            "raw_path": b"/backend-api/codex/responses",
+            "query_string": b"",
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", b"application/json"),
+                (b"x-request-id", request_id.encode("ascii")),
+            ],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        },
+        receive,
+        send,
+    )
+    assert response_started and response_started[0]["status"] == 200
+    assert stream_calls == [1, 2]
+    assert first_terminal_sent.is_set() is True
+
+    await asyncio.wait_for(stream_closed.wait(), timeout=1.0)
+    await app_instance.state.proxy_service.drain_persistence_tasks(timeout_seconds=5)
+
+    assert settle_calls == [
+        {
+            "reservation": reservation,
+            "status": "success",
+            "request_id": request_id,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "wait_for_settlement": False,
+        }
+    ]
+    assert success_account_ids == [expected_account_id]
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(RequestLog).where(RequestLog.request_id == "resp_post_refresh_disconnect")
+        )
+        log = result.scalars().one()
+        assert log.archive_request_id == request_id
+        assert log.account_id == expected_account_id
+        assert log.status == "success"
 
 
 @pytest.mark.asyncio

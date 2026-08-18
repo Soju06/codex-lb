@@ -44,6 +44,7 @@ function createZeroRow(date: string): DailyReportRow {
     cachedInputTokens: 0,
     costUsd: 0,
     activeAccounts: 0,
+    cancelledCount: 0,
     errorCount: 0,
     medianTtftMs: 0,
     medianTps: 0,

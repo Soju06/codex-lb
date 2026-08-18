@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM ghcr.io/astral-sh/uv:0.12.3 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.12.5 AS uv-bin
 
 FROM oven/bun:1.3.14-alpine AS frontend-build
 
@@ -40,7 +40,8 @@ WORKDIR /app
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
-        libc-bin libc6 libcap2 libssl3t64 libsystemd0 libudev1 openssl sed \
+        bsdutils libblkid1 libc-bin libc6 libcap2 libmount1 libsmartcols1 libssl3t64 \
+        libsystemd0 libudev1 libuuid1 openssl sed util-linux \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssl-provider-legacy \
     && rm -rf /var/lib/apt/lists/*

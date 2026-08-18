@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 from datetime import timedelta, timezone
 from typing import cast
 from unittest.mock import AsyncMock
@@ -22,6 +23,7 @@ from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -84,6 +86,7 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
             request_service_tier=None,
             request_usage_budget=estimate_api_key_request_usage(compact_model),
         )
+        assert reservation is not None
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
@@ -1457,6 +1460,7 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
             request_service_tier=None,
             request_usage_budget=estimate_api_key_request_usage(compact_model),
         )
+        assert reservation is not None
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
         assert row is not None
@@ -1655,3 +1659,388 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
 
     assert response.status_code == 200
     assert seen_inputs == [compact_window["output"]]
+
+
+_NEUTRAL_FULL_RESEND_INPUT: list[dict[str, object]] = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+    {"role": "user", "content": "please compact"},
+]
+
+
+async def _import_account(async_client, *, email: str, raw_account_id: str) -> str:
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+    return generate_unique_account_id(raw_account_id, email)
+
+
+async def _mark_account_status(account_id: str, status: AccountStatus) -> None:
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        account.status = status
+        if status in (AccountStatus.RATE_LIMITED, AccountStatus.QUOTA_EXCEEDED):
+            account.reset_at = int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 3600
+        await session.commit()
+    get_account_selection_cache().invalidate()
+
+
+def _pin_previous_response_owner(monkeypatch, owner_account_id: str) -> None:
+    async def fake_owner(self, *, previous_response_id, api_key, session_id=None, surface, **kwargs):
+        del self, previous_response_id, api_key, session_id, surface, kwargs
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
+
+
+def _recording_compact(
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]],
+    *,
+    fail_accounts_with: dict[str, ProxyResponseError] | None = None,
+):
+    async def fake_compact(payload, headers, access_token, account_id):
+        del access_token
+        calls.append((account_id, cast(dict[str, object], payload.to_payload()), dict(headers)))
+        if fail_accounts_with and account_id in fail_accounts_with:
+            raise fail_accounts_with[account_id]
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    return fake_compact
+
+
+def _usage_limit_429() -> ProxyResponseError:
+    return ProxyResponseError(
+        429,
+        {
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "limit reached",
+                "plan_type": "plus",
+                "resets_at": int(utcnow().replace(tzinfo=timezone.utc).timestamp()) + 3600,
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_selection_time_quota_loss_replays_account_neutral_full_resend(
+    async_client, monkeypatch
+):
+    """A previous-response-pinned compact whose owner is quota-excluded at
+    selection time recovers by dropping the anchor and replaying the verified
+    account-neutral full resend on a healthy account instead of wedging."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-quota-owner@example.com", raw_account_id="acc_quota_owner"
+    )
+    await _import_account(async_client, email="compact-quota-alt@example.com", raw_account_id="acc_quota_alt")
+    await _mark_account_status(owner_account_id, AccountStatus.RATE_LIMITED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_quota_anchor",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert [account_id for account_id, _payload, _headers in calls] == ["acc_quota_alt"]
+    replay_payload = calls[0][1]
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == _NEUTRAL_FULL_RESEND_INPUT
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_in_request_quota_429_replays_account_neutral_full_resend(
+    async_client, monkeypatch
+):
+    """An owner that 429s mid-request (pre-visible quota failover) is excluded
+    and the verified account-neutral full resend recovers on the other account
+    instead of re-raising the owner's 429 forever."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-429-owner@example.com", raw_account_id="acc_429_owner"
+    )
+    await _import_account(async_client, email="compact-429-alt@example.com", raw_account_id="acc_429_alt")
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(
+        proxy_module,
+        "core_compact_responses",
+        _recording_compact(calls, fail_accounts_with={"acc_429_owner": _usage_limit_429()}),
+    )
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_429_anchor",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert [account_id for account_id, _payload, _headers in calls] == ["acc_429_owner", "acc_429_alt"]
+    owner_payload, replay_payload = calls[0][1], calls[1][1]
+    assert owner_payload["previous_response_id"] == "resp_429_anchor"
+    assert "previous_response_id" not in replay_payload
+    assert replay_payload["input"] == owner_payload["input"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_post_selection_401_stays_owner_bound(async_client, monkeypatch):
+    """A repeated 401 after the forced refresh excludes the owner for a
+    non-quota reason, so account-neutral replay must not activate and the
+    owner's authentication failure surfaces unchanged."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-401-owner@example.com", raw_account_id="acc_401_owner"
+    )
+    await _import_account(async_client, email="compact-401-alt@example.com", raw_account_id="acc_401_alt")
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    async def fake_ensure_fresh(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        return account
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    unauthorized = ProxyResponseError(401, openai_error("unauthorized", "token rejected"))
+    monkeypatch.setattr(
+        proxy_module,
+        "core_compact_responses",
+        _recording_compact(calls, fail_accounts_with={"acc_401_owner": unauthorized}),
+    )
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_401_anchor",
+        },
+    )
+
+    assert response.status_code == 401
+    assert [account_id for account_id, _payload, _headers in calls] == ["acc_401_owner", "acc_401_owner"]
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_quota_loss_stays_owner_bound_without_retained_prior_output(
+    async_client, monkeypatch
+):
+    """A multi-item history without retained assistant output cannot be proven
+    a full resend (it may be a delta the owner account resolves through the
+    anchor), so nothing is sent to another account."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-delta-owner@example.com", raw_account_id="acc_delta_owner"
+    )
+    await _import_account(async_client, email="compact-delta-alt@example.com", raw_account_id="acc_delta_alt")
+    await _mark_account_status(owner_account_id, AccountStatus.RATE_LIMITED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"role": "user", "content": "first delta turn"},
+                {"role": "user", "content": "second delta turn"},
+            ],
+            "previous_response_id": "resp_delta_anchor",
+        },
+    )
+
+    assert response.status_code >= 400
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_quota_loss_stays_owner_bound_with_account_scoped_history(
+    async_client, monkeypatch
+):
+    """A history carrying account-scoped state (an encrypted compaction item)
+    fails the shared account-neutral fresh-replay gate and never crosses
+    accounts."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-scoped-owner@example.com", raw_account_id="acc_scoped_owner"
+    )
+    await _import_account(async_client, email="compact-scoped-alt@example.com", raw_account_id="acc_scoped_alt")
+    await _mark_account_status(owner_account_id, AccountStatus.RATE_LIMITED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [
+                {"type": "compaction", "encrypted_content": "enc_owner_scoped_state"},
+                *_NEUTRAL_FULL_RESEND_INPUT,
+            ],
+            "previous_response_id": "resp_scoped_anchor",
+        },
+    )
+
+    assert response.status_code >= 400
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_quota_loss_stays_owner_bound_with_session_identity(async_client, monkeypatch):
+    """A session identity on the request can bind live or durable HTTP-bridge
+    continuity that still names the lost owner; without rebinding machinery the
+    request stays owner-bound."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-session-owner@example.com", raw_account_id="acc_session_owner"
+    )
+    await _import_account(async_client, email="compact-session-alt@example.com", raw_account_id="acc_session_alt")
+    await _mark_account_status(owner_account_id, AccountStatus.RATE_LIMITED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_session_anchor",
+        },
+        headers={"session_id": "sid-compact-session-bound"},
+    )
+
+    assert response.status_code >= 400
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_non_quota_loss_stays_owner_bound(async_client, monkeypatch):
+    """An owner unselectable for a non-quota reason (operator pause) keeps
+    today's fail-closed surface; recovery requires quota-caused owner loss."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-paused-owner@example.com", raw_account_id="acc_paused_owner"
+    )
+    await _import_account(async_client, email="compact-paused-alt@example.com", raw_account_id="acc_paused_alt")
+    await _mark_account_status(owner_account_id, AccountStatus.PAUSED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_paused_anchor",
+        },
+    )
+
+    assert response.status_code >= 400
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_policy_skip_stays_owner_bound_despite_quota_status(async_client, monkeypatch):
+    """An owner the selector skips for routing policy (API-key assignment
+    scope) must stay owner-bound even when its persisted status happens to be
+    quota-exhausted: policy, not quota, caused the selection loss."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-policy-owner@example.com", raw_account_id="acc_policy_owner"
+    )
+    alt_account_id = await _import_account(
+        async_client, email="compact-policy-alt@example.com", raw_account_id="acc_policy_alt"
+    )
+    await _mark_account_status(owner_account_id, AccountStatus.RATE_LIMITED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    settings_resp = await async_client.put(
+        "/api/settings",
+        json={"totpRequiredOnLogin": False, "apiKeyAuthEnabled": True},
+    )
+    assert settings_resp.status_code == 200
+    _key_id, key = await _create_api_key(
+        name="compact-policy-scope-key",
+        assigned_account_ids=[alt_account_id],
+    )
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    response = await async_client.post(
+        "/backend-api/codex/responses/compact",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": _NEUTRAL_FULL_RESEND_INPUT,
+            "previous_response_id": "resp_policy_anchor",
+        },
+        headers={"authorization": f"Bearer {key}"},
+    )
+
+    assert response.status_code >= 400
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_pinned_owner_with_additional_turn_state_pin_records_fail_closed(
+    async_client, monkeypatch, caplog
+):
+    """A previous-response pin accompanied by a turn-state pin on the same
+    owner stays owner-bound (recovery never activates for additional owner
+    pins), but the unavailable owner must still record the compact
+    continuity_fail_closed outcome on the common pinned-selection failure
+    path instead of skipping the recording branch entirely."""
+    owner_account_id = await _import_account(
+        async_client, email="compact-multipin-owner@example.com", raw_account_id="acc_multipin_owner"
+    )
+    await _import_account(async_client, email="compact-multipin-alt@example.com", raw_account_id="acc_multipin_alt")
+    await _mark_account_status(owner_account_id, AccountStatus.RATE_LIMITED)
+    _pin_previous_response_owner(monkeypatch, owner_account_id)
+
+    async def fake_turn_state_owner(self, *, turn_state, api_key, fail_on_missing=True):
+        del self, turn_state, api_key, fail_on_missing
+        return owner_account_id
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_resolve_compact_turn_state_owner", fake_turn_state_owner)
+
+    calls: list[tuple[str | None, dict[str, object], dict[str, str]]] = []
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _recording_compact(calls))
+
+    with caplog.at_level(logging.INFO):
+        response = await async_client.post(
+            "/backend-api/codex/responses/compact",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "hi",
+                "input": _NEUTRAL_FULL_RESEND_INPUT,
+                "previous_response_id": "resp_multipin_anchor",
+            },
+            headers={"x-codex-turn-state": "ts-multipin-owner-bound"},
+        )
+
+    assert response.status_code >= 400
+    assert calls == []
+    assert "blocked_reason=additional_owner_pins" in caplog.text
+    assert "continuity_fail_closed surface=compact reason=owner_account_unavailable" in caplog.text

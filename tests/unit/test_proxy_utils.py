@@ -63,7 +63,7 @@ from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind
 from app.modules.accounts import auth_manager as auth_manager_module
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import request_policy as proxy_request_policy
@@ -2091,6 +2091,200 @@ def test_normalize_unsupported_reasoning_effort_rewrites_minimal_to_low(caplog):
     assert payload.reasoning is not None
     assert payload.reasoning.effort == "low"
     assert any("reasoning_effort_normalized" in record.message for record in caplog.records)
+
+
+def test_normalize_unsupported_reasoning_effort_rewrites_a_model_absent_from_the_snapshot():
+    """Snapshot membership must not decide whether the workaround applies.
+
+    A populated snapshot can omit a genuine subscription model -- a partial
+    refresh, an account unavailable during refresh, or an operator-mapped slug
+    outside the bootstrap set -- and those requests still reach the ChatGPT
+    backend through the unfiltered fallback. Skipping the rewrite for them
+    would restore the no-completion hang it exists to prevent, so the rewrite
+    is unconditional here and only undone once a source is actually selected.
+    """
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "qwen3.8-max",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="minimal")
+    # Snapshot is populated, but only with an unrelated subscription model.
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "low"
+    assert replaced == "minimal", "the replaced effort must be reported so a source route can restore it"
+
+
+def test_normalize_unsupported_reasoning_effort_still_rewrites_known_subscription_model():
+    """The workaround must stay in place for models the registry does know."""
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "hello",
+            "input": [],
+        }
+    )
+    payload.reasoning = ResponsesReasoning(effort="minimal")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning is not None
+    assert payload.reasoning.effort == "low"
+
+
+def _reasoning_model_source(levels: list[str]) -> "ModelSource":
+    import json as _json
+
+    from app.core.openai.model_registry import MODEL_SOURCE_KIND_OPENAI_COMPATIBLE
+    from app.db.models import ModelSource, ModelSourceModel
+
+    return ModelSource(
+        id="src_restore",
+        name="Restore",
+        kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
+        base_url="http://127.0.0.1:8000/v1",
+        is_enabled=True,
+        supports_chat_completions=True,
+        supports_responses=True,
+        supports_audio_transcriptions=False,
+        models=[
+            ModelSourceModel(
+                model="qwen3.8-max",
+                is_enabled=True,
+                supports_streaming=True,
+                raw_metadata_json=_json.dumps({"supports_reasoning": True, "supported_reasoning_levels": levels}),
+            )
+        ],
+    )
+
+
+def _payload_with_effort(model: str, effort: str):
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = ResponsesRequest.model_validate({"model": model, "instructions": "hello", "input": []})
+    payload.reasoning = ResponsesReasoning(effort=effort)
+    return payload
+
+
+def test_restore_source_reasoning_effort_undoes_the_rewrite_for_a_declared_effort():
+    """The workaround targets a ChatGPT backend quirk that model sources do not
+    have, so a source that declared the effort must receive it unchanged."""
+    payload = _payload_with_effort("qwen3.8-max", "minimal")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+    assert payload.reasoning is not None and payload.reasoning.effort == "low"
+
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["minimal", "low", "high"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning.effort == "minimal"
+
+
+def test_restore_source_reasoning_effort_skips_an_undeclared_effort():
+    """Sources without the effort in their declared set keep the safe value, so
+    a source that never advertised ``minimal`` is not sent it."""
+    payload = _payload_with_effort("qwen3.8-max", "minimal")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["low", "high"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning is not None and payload.reasoning.effort == "low"
+
+
+def test_ultra_alias_is_never_restored_for_a_source():
+    """The ultra -> max alias must hold on every upstream surface.
+
+    An existing requirement makes the proxy forward ``ultra`` as ``max`` on any
+    outbound Responses payload, with no source carve-out, and real Codex clients
+    already rewrite it client-side. So the normalizer must not report the alias
+    as restorable, even for a source that declares ``ultra``.
+    """
+    payload = _payload_with_effort("qwen3.8-max", "ultra")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+
+    assert payload.reasoning is not None and payload.reasoning.effort == "max"
+    assert replaced is None, "the wire alias must not be reported as restorable"
+
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["ultra", "max", "high"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning.effort == "max"
+
+
+def test_restore_source_reasoning_effort_uses_the_normalized_effort():
+    """The restored value must be normalized, not the raw client string.
+
+    Pre-PR a source would have received the normalized rewrite, so forwarding
+    ``" MINIMAL "`` verbatim would be a new behaviour with no operator opt-in.
+    """
+    payload = _payload_with_effort("qwen3.8-max", " MINIMAL ")
+    registry = _build_registry_with_model("gpt-5.5", ["low", "medium", "high", "xhigh"])
+
+    replaced = proxy_request_policy.normalize_unsupported_reasoning_effort(payload, registry=registry)
+    assert replaced == "minimal"
+
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["minimal", "low"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning is not None and payload.reasoning.effort == "minimal"
+
+
+def test_restore_source_reasoning_effort_cannot_resurrect_an_enforced_effort():
+    """The captured value is post-enforcement, so an API key that pinned an
+    effort still wins after the restore."""
+    from app.core.openai.requests import ResponsesReasoning
+
+    payload = _payload_with_effort("qwen3.8-max", "minimal")
+    api_key = proxy_service.ApiKeyData(
+        id="key_effort",
+        name="effort-enforcement-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort="high",
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    replaced = proxy_request_policy.apply_api_key_enforcement(payload, api_key).pre_normalization_reasoning_effort
+
+    assert payload.reasoning is not None and payload.reasoning.effort == "high"
+    assert replaced is None, "nothing was rewritten, so there is nothing to restore"
+
+    proxy_request_policy.restore_source_reasoning_effort(
+        payload,
+        _reasoning_model_source(["minimal", "low", "high"]),
+        pre_normalization_effort=replaced,
+    )
+    assert payload.reasoning.effort == "high"
+    assert isinstance(payload.reasoning, ResponsesReasoning)
 
 
 def test_normalize_unsupported_reasoning_effort_falls_back_to_low_without_registry():
@@ -8604,7 +8798,7 @@ async def test_stream_responses_via_websocket_counts_connect_and_send_against_to
         del enforce_openai_sdk_contract
         recorded["total_timeout_seconds"] = total_timeout_seconds
         if False:
-            yield ""
+            yield "", None
 
     monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
     monkeypatch.setattr(proxy_module, "_stream_websocket_events", fake_stream_websocket_events)
@@ -8683,7 +8877,9 @@ async def test_stream_responses_via_websocket_preserves_raw_error_when_sdk_contr
     ]
 
     assert len(events) == 1
-    assert parse_sse_data_json(events[0]) == raw_payload
+    event_block, event_type = events[0]
+    assert parse_sse_data_json(event_block) == raw_payload
+    assert event_type == "error"
     assert successes == 1
     assert failures == []
 
@@ -8713,8 +8909,109 @@ async def test_stream_codex_websocket_events_treats_raw_error_as_terminal_when_s
     ]
 
     assert len(events) == 1
-    assert parse_sse_data_json(events[0]) == raw_payload
+    event_block, event_type = events[0]
+    assert parse_sse_data_json(event_block) == raw_payload
+    assert event_type == "error"
     assert websocket._index == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_decodes_each_frame_once_and_skips_error_validation(monkeypatch):
+    # Regression for the parse-once requirement on the websocket hot path:
+    # each upstream frame is json-decoded exactly once in the receive loop,
+    # the relay and outer stream loops reuse the threaded event type instead
+    # of re-parsing the formatted block, and no error-envelope validation
+    # runs for non-error-shaped frames.
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        trace_channels = frozenset()
+        proxy_request_budget_seconds = 75.0
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    frame_payloads = [
+        {"type": "response.created", "response": {"id": "resp_ws_once"}},
+        {"type": "response.output_text.delta", "delta": "a"},
+        {"type": "response.output_text.delta", "delta": "b"},
+        {"type": "response.completed", "response": {"id": "resp_ws_once"}},
+    ]
+    frame_texts = [json.dumps(payload, ensure_ascii=True, separators=(",", ":")) for payload in frame_payloads]
+    websocket = _WsResponse([_WsMessage(proxy_module.aiohttp.WSMsgType.TEXT, text) for text in frame_texts])
+    session = _WsSession(websocket)
+
+    loads_spy = MagicMock(wraps=json.loads)
+    monkeypatch.setattr(proxy_module.json, "loads", loads_spy)
+    parse_spy = MagicMock(wraps=proxy_module.parse_sse_data_json)
+    monkeypatch.setattr(proxy_module, "parse_sse_data_json", parse_spy)
+    error_validate_spy = MagicMock(wraps=proxy_module.parse_error_payload)
+    monkeypatch.setattr(proxy_module, "parse_error_payload", error_validate_spy)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+    )
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_ws_parse_once",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    assert events == [proxy_module.format_sse_event(payload) for payload in frame_payloads]
+    for text in frame_texts:
+        decode_calls = [c for c in loads_spy.call_args_list if c.args and c.args[0] == text]
+        assert len(decode_calls) == 1
+    assert parse_spy.call_count == 0
+    assert error_validate_spy.call_count == 0
+
+
+def test_normalize_stream_event_payload_validates_error_envelope_only_for_error_shaped_frames(monkeypatch):
+    # Delta frames never reach the pydantic error-envelope adapter; error
+    # frames are still validated and rewritten exactly as before.
+    from app.core.openai import parsing as parsing_module
+
+    adapter_spy = MagicMock(wraps=parsing_module._ERROR_ADAPTER)
+    monkeypatch.setattr(parsing_module, "_ERROR_ADAPTER", adapter_spy)
+
+    delta_payload: dict[str, Any] = {"type": "response.output_text.delta", "delta": "a"}
+    assert proxy_module._normalize_stream_event_payload(delta_payload) is delta_payload
+    in_progress_payload: dict[str, Any] = {"type": "response.in_progress", "response": {"id": "resp_np"}}
+    assert proxy_module._normalize_stream_event_payload(in_progress_payload) is in_progress_payload
+    assert adapter_spy.validate_python.call_count == 0
+
+    envelope_payload: dict[str, Any] = {
+        "error": {"message": "quota exhausted", "type": "server_error", "code": "insufficient_quota"}
+    }
+    rewritten: Any = proxy_module._normalize_stream_event_payload(envelope_payload)
+    assert adapter_spy.validate_python.call_count == 1
+    assert rewritten["type"] == "response.failed"
+    envelope_error = rewritten["response"]["error"]
+    assert envelope_error["message"] == "quota exhausted"
+    assert envelope_error["code"] == proxy_module._normalize_error_code("insufficient_quota", "server_error")
+    assert envelope_error["type"] == "server_error"
+
+    bare_error_payload: dict[str, Any] = {"type": "error", "code": "rate_limit_exceeded", "message": "slow down"}
+    rewritten_bare: Any = proxy_module._normalize_stream_event_payload(bare_error_payload)
+    assert adapter_spy.validate_python.call_count == 2
+    assert rewritten_bare["type"] == "response.failed"
+    bare_error = rewritten_bare["response"]["error"]
+    assert bare_error["code"] == proxy_module._normalize_error_code("rate_limit_exceeded", "error")
+    assert bare_error["message"] == "slow down"
 
 
 @pytest.mark.asyncio
@@ -11735,6 +12032,89 @@ async def test_stream_once_marks_downstream_cancel_after_visible_event(monkeypat
     assert settlement.status == "cancelled"
     assert settlement.error == {"message": "Downstream client disconnected before response.completed"}
     assert settlement.account_health_error is False
+
+
+@pytest.mark.asyncio
+async def test_stream_once_keeps_first_terminal_frame_success_after_downstream_close(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_stream_first_terminal_close")
+    settlement = proxy_service._StreamSettlement()
+    completed_line = (
+        'data: {"type":"response.completed","response":{"id":"resp_first_terminal_close","status":"completed"}}\n\n'
+    )
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        enforce_openai_sdk_contract=True,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, enforce_openai_sdk_contract
+        yield completed_line
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.4", "instructions": "hi", "input": [], "stream": True})
+    stream = service._stream_once(
+        account,
+        payload,
+        {"session_id": "sid-stream"},
+        "req_stream_first_terminal_close",
+        False,
+        request_started_at=0.0,
+        api_key=None,
+        api_key_reservation=None,
+        settlement=settlement,
+        suppress_text_done_events=False,
+        upstream_stream_transport=None,
+        request_transport="http",
+    )
+
+    first_chunk = await anext(stream)
+    assert "event: response.completed" in first_chunk
+    assert '"id":"resp_first_terminal_close"' in first_chunk
+    await cast(Any, stream).aclose()
+
+    assert settlement.status == "success"
+    assert settlement.error is None
+    assert settlement.account_health_error is False
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["error_code"] is None
+    assert request_logs.calls[0]["request_id"] == "resp_first_terminal_close"
+
+
+@pytest.mark.asyncio
+async def test_streaming_retry_cleanup_helper_finishes_task_before_reporting_cancellation():
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def cleanup() -> str:
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
+        return "settled"
+
+    cleanup_task = asyncio.create_task(cleanup())
+    waiter_task = asyncio.create_task(streaming_retry_module._await_task_deferring_cancellation(cleanup_task))
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+
+    waiter_task.cancel()
+    await asyncio.sleep(0)
+    assert not cleanup_task.done()
+    assert not waiter_task.done()
+
+    release_cleanup.set()
+    result, cancellation = await asyncio.wait_for(waiter_task, timeout=1)
+
+    assert result == "settled"
+    assert cancellation is not None
+    assert cleanup_finished.is_set()
 
 
 @pytest.mark.asyncio
@@ -15697,6 +16077,73 @@ async def test_stream_responses_post_yield_upstream_error_emits_terminal_failure
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_finalizes_generated_terminal_failure_before_downstream_close(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_retry_generated_terminal_close")
+    record_error = AsyncMock()
+    record_success = AsyncMock()
+    settle_stream_usage = AsyncMock(return_value=True)
+    reservation = ApiKeyUsageReservationData(
+        reservation_id="resv_retry_generated_terminal_close",
+        key_id="key_retry_generated_terminal_close",
+        model="gpt-5.1",
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service._load_balancer, "record_error", record_error)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_stream_usage)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_stream_once(*args: object, **kwargs: object):
+        settlement = cast(proxy_service._StreamSettlement, kwargs["settlement"])
+        settlement.downstream_visible = True
+        settlement.response_id = "resp_retry_generated_terminal_close"
+        yield (
+            'data: {"type":"response.created","response":{"id":"resp_retry_generated_terminal_close",'
+            '"status":"in_progress","output":[]}}\n\n'
+        )
+        raise streaming_retry_module._TransientStreamError(
+            "upstream_unavailable",
+            {"message": "transport exploded after first event"},
+        )
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    stream = service._stream_with_retry(
+        payload,
+        {"session_id": "sid-retry-generated-terminal-close"},
+        codex_session_affinity=False,
+        propagate_http_errors=False,
+        openai_cache_affinity=False,
+        api_key=None,
+        api_key_reservation=reservation,
+        suppress_text_done_events=False,
+        request_transport="http",
+        upstream_stream_transport_override=None,
+    )
+
+    first_chunk = await anext(stream)
+    terminal_chunk = await anext(stream)
+    assert "response.created" in first_chunk
+    assert "response.failed" in terminal_chunk
+    await cast(Any, stream).aclose()
+
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    settle_stream_usage.assert_awaited_once()
+    record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_first_event_connection_reset_surfaces_without_replay(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -16002,7 +16449,10 @@ async def test_stream_responses_visible_upstream_unavailable_with_response_id_do
     assert event["response"]["id"] == "resp_reset_event"
     assert event["response"]["error"]["code"] == "upstream_unavailable"
     assert seen_excluded_account_ids == [set()]
-    assert request_logs.calls == []
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["account_id"] == account_a.id
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
     record_error.assert_not_awaited()
     record_errors.assert_not_awaited()
     record_success.assert_not_awaited()
@@ -38170,6 +38620,57 @@ async def test_response_create_gate_release_waits_for_account_lease_release():
 
 
 @pytest.mark.asyncio
+async def test_response_create_gate_release_reraises_caller_cancellation_after_cleanup():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_gate_cancel",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    response_create_gate = asyncio.Semaphore(1)
+    await response_create_gate.acquire()
+    request_state.response_create_gate_acquired = True
+    request_state.response_create_gate = response_create_gate
+    lease = AccountLease(
+        lease_id="lease_gate_cancel",
+        account_id="acc_gate_cancel",
+        kind="response_create",
+        acquired_at=0.0,
+    )
+    request_state.account_response_create_lease = lease
+    release_started = asyncio.Event()
+    release_allowed = asyncio.Event()
+
+    async def release_account_lease(received_lease: AccountLease | None) -> None:
+        assert received_lease == lease
+        release_started.set()
+        await release_allowed.wait()
+
+    request_state.account_response_create_release = release_account_lease
+
+    release_task = asyncio.create_task(
+        proxy_service._release_websocket_response_create_gate(request_state, response_create_gate)
+    )
+    await release_started.wait()
+    release_task.cancel()
+    await asyncio.sleep(0)
+
+    assert response_create_gate.locked() is True
+    assert request_state.response_create_gate_acquired is True
+
+    release_allowed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await release_task
+
+    assert response_create_gate.locked() is False
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.account_response_create_lease is None
+    assert request_state.account_response_create_release is None
+
+
+@pytest.mark.asyncio
 async def test_compact_selection_budget_exhaustion_returns_request_timeout(monkeypatch):
     settings = _make_proxy_settings()
     request_logs = _RequestLogsRecorder()
@@ -39885,6 +40386,21 @@ def test_classify_upstream_close_clean_for_clean_close_before_any_response_event
     assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "clean"
     assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
+
+
+def test_account_neutral_transport_drop_requires_no_close_frame_and_no_response_events():
+    # Issue #1754: only a frame-less drop before any application-layer
+    # response event is account-neutral; any close frame or streamed events
+    # keep the account penalty semantics.
+    assert proxy_service._is_account_neutral_transport_drop(None, response_events_seen=0) is True
+    assert proxy_service._is_account_neutral_transport_drop(None, response_events_seen=8) is False
+    assert proxy_service._is_account_neutral_transport_drop(1000, response_events_seen=0) is False
+    assert proxy_service._is_account_neutral_transport_drop(1008, response_events_seen=0) is False
+    assert proxy_service._is_account_neutral_transport_drop(1011, response_events_seen=0) is False
+    # RFC 6455 reserves 1006: it never travels in an actual close frame, so a
+    # synthesized abnormal-closure code counts as frame-less.
+    assert proxy_service._is_account_neutral_transport_drop(1006, response_events_seen=0) is True
+    assert proxy_service._is_account_neutral_transport_drop(1006, response_events_seen=1) is False
 
 
 @pytest.mark.asyncio
@@ -45692,3 +46208,756 @@ async def test_inline_http_bridge_image_urls_rejects_when_fetch_fails(monkeypatc
 
     assert exc_info.value.status_code == 400
     assert "image_download_failed" in json.dumps(exc_info.value.payload)
+
+
+_COMPACT_REPLAY_NEUTRAL_INPUT: list[dict[str, object]] = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+    {"role": "user", "content": "please compact"},
+]
+
+
+def _compact_replay_request(**overrides: object) -> ResponsesCompactRequest:
+    source: dict[str, object] = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": _COMPACT_REPLAY_NEUTRAL_INPUT,
+        "previous_response_id": "resp_anchor",
+    }
+    source.update(overrides)
+    return ResponsesCompactRequest.model_validate(source)
+
+
+def test_compact_account_neutral_replay_payload_accepts_verified_full_resend() -> None:
+    replay = proxy_compact_service._compact_account_neutral_replay_payload(_compact_replay_request())
+    assert replay is not None
+    assert getattr(replay, "previous_response_id", None) is None
+    assert replay.input == _COMPACT_REPLAY_NEUTRAL_INPUT
+    assert "previous_response_id" not in replay.to_payload()
+
+
+def test_compact_account_neutral_replay_payload_requires_previous_response_anchor() -> None:
+    payload = ResponsesCompactRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": _COMPACT_REPLAY_NEUTRAL_INPUT}
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_single_item_and_string_inputs() -> None:
+    single_item = _compact_replay_request(input=[{"role": "user", "content": "hello"}])
+    assert proxy_compact_service._compact_account_neutral_replay_payload(single_item) is None
+    string_input = _compact_replay_request(input="hello there")
+    assert proxy_compact_service._compact_account_neutral_replay_payload(string_input) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_server_assigned_item_ids() -> None:
+    payload = _compact_replay_request(
+        input=[
+            {"role": "user", "content": "hello"},
+            {
+                "type": "message",
+                "id": "msg_server_assigned",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi there"}],
+            },
+            {"role": "user", "content": "please compact"},
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_encrypted_compaction_state() -> None:
+    payload = _compact_replay_request(
+        input=[
+            {"type": "compaction", "encrypted_content": "enc_owner_scoped"},
+            *_COMPACT_REPLAY_NEUTRAL_INPUT,
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_history_without_retained_output() -> None:
+    # Two fresh user turns may be a delta the owner resolves through the
+    # anchor; without retained assistant output the full resend is unproven.
+    payload = _compact_replay_request(
+        input=[
+            {"role": "user", "content": "first delta turn"},
+            {"role": "user", "content": "second delta turn"},
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_history_without_fresh_followup() -> None:
+    # A transcript that ends on assistant output has no new client input after
+    # the retained output, so the retained-prior-output proof fails closed.
+    payload = _compact_replay_request(
+        input=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_rejects_wire_trimmed_history() -> None:
+    # An oversized history is trimmed on the wire to a head, marker, and tail;
+    # replaying that shortened transcript would compact an incomplete
+    # conversation, so the wire input must stay item-for-item identical.
+    oversized = "x" * 600_000
+    payload = _compact_replay_request(
+        input=[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [{"type": "output_text", "text": oversized}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+            {"role": "user", "content": "please compact"},
+        ]
+    )
+    assert proxy_compact_service._compact_account_neutral_replay_payload(payload) is None
+
+
+def test_compact_account_neutral_replay_payload_accepts_canonical_lite_full_resend() -> None:
+    # A Responses-Lite history opens with the additional_tools bundle and its
+    # canonical developer instruction; the shared projection must recognize
+    # that developer message so the Lite surface stays recoverable.
+    payload = _compact_replay_request(
+        input=[
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{"type": "function", "name": "exec", "parameters": {"type": "object"}}],
+            },
+            {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "instructions"}]},
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "hi there"}]},
+            {"role": "user", "content": "please compact"},
+        ]
+    )
+    replay = proxy_compact_service._compact_account_neutral_replay_payload(payload)
+    assert replay is not None
+    assert getattr(replay, "previous_response_id", None) is None
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_validates_only_lifecycle_frames_and_settles_usage(monkeypatch):
+    # Delta frames must skip pydantic validation entirely (event=None) while
+    # lifecycle frames keep it, with byte-identical SSE output and unchanged
+    # usage settlement from the validated response.completed frame.
+    from app.modules.proxy import tool_call_dedupe
+    from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_lifecycle_only_validation")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    mixin_validate = MagicMock(wraps=streaming_mixin_module.parse_sse_event_payload)
+    monkeypatch.setattr(streaming_mixin_module, "parse_sse_event_payload", mixin_validate)
+    dedupe_validate = MagicMock(wraps=tool_call_dedupe.parse_sse_event_payload)
+    monkeypatch.setattr(tool_call_dedupe, "parse_sse_event_payload", dedupe_validate)
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.created","response":{"id":"resp_lifecycle_only"}}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"a"}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"b"}\n\n'
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_lifecycle_only",'
+            '"usage":{"input_tokens":3,"output_tokens":5,'
+            '"input_tokens_details":{"cached_tokens":2},'
+            '"output_tokens_details":{"reasoning_tokens":1}}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-lifecycle-only"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    # Only the created + completed lifecycle frames are validated; the two
+    # deltas are classified from the parsed dict and never re-validated by
+    # the parallel-tool-call rewrite either.
+    assert mixin_validate.call_count == 2
+    assert dedupe_validate.call_count == 0
+    # SSE output stays byte-identical to the canonical re-encode.
+    assert chunks[1] == 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"a"}\n\n'
+    assert json.loads(chunks[-1].split("data: ", 1)[1])["type"] == "response.completed"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["request_id"] == "resp_lifecycle_only"
+    assert request_logs.calls[0]["input_tokens"] == 3
+    assert request_logs.calls[0]["output_tokens"] == 5
+    assert request_logs.calls[0]["cached_input_tokens"] == 2
+    assert request_logs.calls[0]["reasoning_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_rewrites_terminal_error_after_unvalidated_deltas(monkeypatch):
+    # A bare upstream ``error`` frame after unvalidated deltas must still be
+    # rewritten to a terminal response.failed under the SDK contract and
+    # settle as an error.
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_lifecycle_error_rewrite")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.created","response":{"id":"resp_lifecycle_err"}}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"a"}\n\n'
+        yield 'data: {"type":"error","message":"upstream exploded"}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-lifecycle-error"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"]["message"] == "upstream exploded"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_validates_only_lifecycle_frames(monkeypatch):
+    # Websocket relay: response.created keeps validated response-id
+    # assignment, deltas skip validation and are relayed with their original
+    # bytes when no response-id rewrite applies, and response.completed still
+    # hands a validated usage-bearing event to finalization.
+    from app.core.openai.models import OpenAIEvent
+    from app.modules.proxy import tool_call_dedupe
+    from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
+
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_lifecycle_validation")
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    ws_validate = MagicMock(wraps=websocket_mixin_module.parse_sse_event_payload)
+    monkeypatch.setattr(websocket_mixin_module, "parse_sse_event_payload", ws_validate)
+    dedupe_validate = MagicMock(wraps=tool_call_dedupe.parse_sse_event_payload)
+    monkeypatch.setattr(tool_call_dedupe, "parse_sse_event_payload", dedupe_validate)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_lifecycle_validation",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_create_gate_acquired=True,
+    )
+    pending_requests = deque([request_state])
+    pending_lock = anyio.Lock()
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    response_create_gate = asyncio.Semaphore(0)
+
+    async def relay(text: str) -> str:
+        return await service._process_upstream_websocket_text(
+            text,
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=pending_lock,
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=response_create_gate,
+        )
+
+    created_text = json.dumps(
+        {"type": "response.created", "response": {"id": "resp_ws_lifecycle", "status": "in_progress"}},
+        separators=(",", ":"),
+    )
+    await relay(created_text)
+    assert request_state.response_id == "resp_ws_lifecycle"
+    assert ws_validate.call_count == 1
+
+    delta_text = json.dumps(
+        {
+            "type": "response.output_text.delta",
+            "response_id": "resp_ws_lifecycle",
+            "sequence_number": 3,
+            "delta": "hello",
+        },
+        separators=(",", ":"),
+    )
+    downstream_delta = await relay(delta_text)
+    assert ws_validate.call_count == 1
+    assert dedupe_validate.call_count == 0
+    assert downstream_delta == delta_text
+    finalize_request_state.assert_not_awaited()
+
+    completed_text = json.dumps(
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_ws_lifecycle",
+                "status": "completed",
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            },
+        },
+        separators=(",", ":"),
+    )
+    await relay(completed_text)
+    assert ws_validate.call_count == 2
+    finalize_request_state.assert_awaited_once()
+    finalize_call = finalize_request_state.await_args
+    assert finalize_call is not None
+    assert finalize_call.kwargs["event_type"] == "response.completed"
+    completed_event = finalize_call.kwargs["event"]
+    assert isinstance(completed_event, OpenAIEvent)
+    assert completed_event.response is not None
+    assert completed_event.response.usage is not None
+    assert completed_event.response.usage.input_tokens == 11
+    assert completed_event.response.usage.output_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_rewrites_malformed_error_when_it_is_the_first_frame(monkeypatch):
+    # Regression: a malformed first upstream frame like
+    # {"type":"error","message":"..."} classifies as "error" but carries no
+    # error envelope (event=None). The first-frame path must apply the same
+    # SDK-contract fallback as the later-frame loop: rewrite to a terminal
+    # response.failed and settle as an error instead of leaking the raw frame
+    # with a success settlement.
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_first_frame_error_rewrite")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"error","message":"upstream exploded first"}\n\n'
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-first-frame-error"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert chunks
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["type"] == "response.failed"
+    assert terminal["response"]["error"]["message"] == "upstream exploded first"
+    assert terminal["response"]["error"]["code"] == "upstream_error"
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] != "success"
+    assert request_logs.calls[0]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_keeps_frame_bytes_when_response_id_already_matches():
+    # Regression for the response-id rewrite identity fast-path: when the
+    # frame already carries the assigned downstream response id, the rewrite
+    # helper must hand back the original payload object so the relay forwards
+    # the upstream text without re-encoding it.
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_response_id_identity")
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_response_id_identity",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_identity",
+        replay_downstream_response_id="resp_ws_identity",
+    )
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    delta_text = json.dumps(
+        {
+            "type": "response.output_text.delta",
+            "response_id": "resp_ws_identity",
+            "sequence_number": 7,
+            "delta": "hello",
+        },
+        separators=(",", ":"),
+    )
+    downstream_delta = await service._process_upstream_websocket_text(
+        delta_text,
+        account=account,
+        account_id_value=account.id,
+        pending_requests=pending_requests,
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(0),
+    )
+
+    assert downstream_delta is delta_text
+    assert upstream_control.downstream_sequence_number == 7
+    assert upstream_control.downstream_sequence_request_state is request_state
+
+
+@pytest.mark.asyncio
+async def test_process_and_forward_upstream_websocket_text_decodes_once_and_validates_lifecycle_only(monkeypatch):
+    # Product-path regression for the parse-once requirement: every direct
+    # upstream websocket text frame flows through
+    # _process_and_forward_upstream_websocket_text, which must json-decode the
+    # frame exactly once (shared by archive attribution and relay processing)
+    # and run pydantic validation only for lifecycle frames.
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_forward_parse_once")
+    finalize_request_state = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    sent_downstream: list[str] = []
+
+    async def record_downstream(_websocket: object, *, text: str, **_kwargs: object) -> None:
+        sent_downstream.append(text)
+
+    monkeypatch.setattr(service, "_send_downstream_websocket_text", record_downstream)
+    ws_validate = MagicMock(wraps=websocket_mixin_module.parse_sse_event_payload)
+    monkeypatch.setattr(websocket_mixin_module, "parse_sse_event_payload", ws_validate)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_forward_parse_once",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_create_gate_acquired=True,
+        archive_request_id="archive_ws_forward_parse_once",
+    )
+    pending_requests = deque([request_state])
+    pending_lock = anyio.Lock()
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    downstream_activity = proxy_service._DownstreamWebSocketActivity()
+    archived: list[tuple[object, str | None]] = []
+
+    class _ArchivingUpstream:
+        def archive_received(self, message: object) -> None:
+            archived.append((message, get_request_id()))
+
+    upstream = _ArchivingUpstream()
+
+    frame_payloads: list[dict[str, Any]] = [
+        {"type": "response.created", "response": {"id": "resp_ws_forward_once", "status": "in_progress"}},
+        {"type": "response.output_text.delta", "response_id": "resp_ws_forward_once", "delta": "hello"},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_ws_forward_once",
+                "status": "completed",
+                "usage": {"input_tokens": 4, "output_tokens": 2},
+            },
+        },
+    ]
+    frame_texts = [json.dumps(frame, separators=(",", ":")) for frame in frame_payloads]
+
+    loads_spy = MagicMock(wraps=json.loads)
+    monkeypatch.setattr(websocket_mixin_module.json, "loads", loads_spy)
+
+    for frame_text in frame_texts:
+        terminal = await websocket_mixin_module._process_and_forward_upstream_websocket_text(
+            cast(Any, service),
+            cast(Any, SimpleNamespace()),
+            cast(Any, upstream),
+            message=SimpleNamespace(kind="text", text=frame_text),
+            text=frame_text,
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=pending_lock,
+            client_send_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(0),
+            downstream_activity=downstream_activity,
+            continuity_state=None,
+            codex_session_affinity=False,
+        )
+        assert terminal is False
+
+    # Exactly one json decode per frame across archive attribution and relay.
+    for frame_text in frame_texts:
+        decode_calls = [c for c in loads_spy.call_args_list if c.args and c.args[0] == frame_text]
+        assert len(decode_calls) == 1
+    # Only the created + completed lifecycle frames are pydantic-validated;
+    # the delta is classified from the parsed dict without validation.
+    assert ws_validate.call_count == 2
+    # Archive attribution still resolves the owning request from the shared
+    # parsed frame for every message.
+    assert [request_id for _message, request_id in archived] == ["archive_ws_forward_parse_once"] * 3
+    # The delta frame is forwarded downstream with its original bytes.
+    assert sent_downstream[1] is frame_texts[1]
+    finalize_request_state.assert_awaited_once()
+    assert finalize_request_state.await_args is not None
+    assert finalize_request_state.await_args.kwargs["event_type"] == "response.completed"
+
+
+def test_normalize_sse_event_block_rewrites_alias_on_both_event_and_data_lines():
+    # A legacy alias must be rewritten on the SSE `event:` framing line too,
+    # not just inside the JSON payload — under verbatim relay a stale
+    # `event:` line would otherwise reach clients with mismatched framing.
+    block = 'event: response.text.delta\ndata: {"type":"response.text.delta","delta":"hi"}\n\n'
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert normalized == (
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+    )
+
+
+def test_normalize_sse_event_block_rewrites_alias_split_across_data_lines():
+    # A legal SSE payload split across multiple `data:` lines is only
+    # decodable as the combined value (fragments joined with "\n"); the alias
+    # rewrite must still land on both the payload and the `event:` line.
+    block = 'event: response.text.delta\ndata: {"type":"response.text.delta",\ndata: "delta":"hi"}\n\n'
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert normalized == (
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+    )
+
+
+def test_normalize_sse_event_block_leaves_undecodable_multi_line_data_untouched():
+    # When the combined multi-line payload cannot be decoded, neither surface
+    # may be rewritten: rewriting only the `event:` framing line would emit a
+    # frame whose framing and payload disagree about the event type.
+    block = 'event: response.text.delta\ndata: {"type":"response.te\ndata: xt.delta","delta":"hi"}\n\n'
+
+    normalized = proxy_module._normalize_sse_event_block(block)
+
+    assert normalized == block
+
+
+def test_normalize_sse_event_block_skips_json_parsing_for_non_alias_types(monkeypatch) -> None:
+    # The alias normalizer only inspects blocks carrying one of the legacy
+    # alias names; canonical event types pass through without a JSON parse.
+    block = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    def fail_json_parse(_: str) -> object:
+        raise AssertionError("json.loads should not run for blocks without an alias marker")
+
+    monkeypatch.setattr(proxy_module.json, "loads", fail_json_parse)
+
+    assert proxy_module._normalize_sse_event_block(block) == block
+
+
+def test_normalize_stream_payload_for_http_block_skips_parse_for_canonical_frames(monkeypatch) -> None:
+    block = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    def fail_json_parse(_: str) -> object:
+        raise AssertionError("json.loads should not run for canonical non-error frames")
+
+    monkeypatch.setattr(proxy_module.json, "loads", fail_json_parse)
+
+    assert proxy_module._normalize_stream_payload_for_http_block(block) == (block, "response.output_text.delta")
+    assert proxy_module._normalize_stream_payload_for_http_block(block, enforce_openai_sdk_contract=False) == (
+        block,
+        "response.output_text.delta",
+    )
+
+
+def test_normalize_stream_payload_for_http_block_still_rewrites_error_frames():
+    block = 'event: error\ndata: {"type":"error","message":"boom"}\n\n'
+
+    normalized_block, normalized_type = proxy_module._normalize_stream_payload_for_http_block(block)
+
+    assert normalized_type == "response.failed"
+    assert '"boom"' in normalized_block
+
+
+def test_normalize_stream_payload_for_http_block_still_rewrites_error_envelopes_on_non_error_types():
+    # A payload carrying a top-level error envelope is rewritten regardless of
+    # its event type; the `"error"` substring guard keeps it on the full-parse
+    # path.
+    block = (
+        "event: response.output_text.delta\n"
+        'data: {"type":"response.output_text.delta","error":{"message":"broken"},"delta":"hi"}\n\n'
+    )
+
+    normalized_block, normalized_type = proxy_module._normalize_stream_payload_for_http_block(block)
+
+    assert normalized_type == "response.failed"
+    assert '"broken"' in normalized_block
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_relays_unmodified_canonical_delta_frames_verbatim(monkeypatch):
+    # After the TTFT window settles, canonically framed delta frames are
+    # relayed with upstream bytes (raw UTF-8, upstream spacing) and are never
+    # JSON-parsed; usage settlement from the parsed terminal frame is
+    # unchanged.
+    from app.modules.proxy._service.streaming import mixin as streaming_mixin_module
+
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_verbatim_relay")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    mixin_parse = MagicMock(wraps=streaming_mixin_module.parse_sse_data_json)
+    monkeypatch.setattr(streaming_mixin_module, "parse_sse_data_json", mixin_parse)
+
+    verbatim_delta = (
+        'event: response.output_text.delta\ndata: {"type": "response.output_text.delta", "delta": "안녕 upstream"}\n\n'
+    )
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_verbatim"}}\n\n'
+        yield 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"a"}\n\n'
+        yield verbatim_delta
+        yield (
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_verbatim",'
+            '"usage":{"input_tokens":3,"output_tokens":5}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-verbatim-relay"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    # created (lifecycle), the first delta (TTFT window still open), and
+    # completed (lifecycle) are parsed; the settled second delta is relayed
+    # without any JSON parse.
+    assert mixin_parse.call_count == 3
+    # Upstream bytes are preserved exactly: raw UTF-8 and upstream key
+    # spacing, not the ensure_ascii canonical re-encode.
+    assert chunks[2] == verbatim_delta
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "success"
+    assert request_logs.calls[0]["input_tokens"] == 3
+    assert request_logs.calls[0]["output_tokens"] == 5
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_reframes_data_only_delta_frames_after_ttft(monkeypatch):
+    # Data-only frames (no `event:` line, e.g. bridge rewrite leftovers) never
+    # take the verbatim path: they are parsed and re-serialized with canonical
+    # `event: <type>` framing so named-event (EventSource) clients keep seeing
+    # the event name — the 5ee532cb regression class.
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    account = _make_account("acc_verbatim_data_only")
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget_compatible",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+
+    async def fake_core_stream_responses(*_args: object, **_kwargs: object):
+        yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_data_only"}}\n\n'
+        yield 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"a"}\n\n'
+        yield 'data: {"type":"response.output_text.delta","delta":"b"}\n\n'
+        yield (
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_data_only",'
+            '"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+        )
+
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_core_stream_responses)
+
+    payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-verbatim-data-only"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    assert chunks[2] == 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"b"}\n\n'
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["status"] == "success"

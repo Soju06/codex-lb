@@ -799,6 +799,37 @@ async def test_backend_codex_models_unions_service_tiers_across_accounts(async_c
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_models_filters_unknown_reasoning_efforts(async_client):
+    registry = get_model_registry()
+    model = replace(
+        _make_upstream_model(
+            "source-gpt",
+            raw={
+                "shell_type": "shell_command",
+                "visibility": "list",
+            },
+        ),
+        supported_reasoning_levels=tuple(
+            ReasoningLevel(effort=effort, description=effort)
+            for effort in ("none", "high", "provider-specific", "ultra")
+        ),
+        default_reasoning_level="provider-specific",
+    )
+    await registry.update({"plus": [model], "pro": [model]})
+
+    resp = await async_client.get("/backend-api/codex/models")
+
+    assert resp.status_code == 200
+    entry = next(m for m in resp.json()["models"] if m["slug"] == "source-gpt")
+    assert [level["effort"] for level in entry["supported_reasoning_levels"]] == [
+        "none",
+        "high",
+        "ultra",
+    ]
+    assert entry["default_reasoning_level"] is None
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_does_not_reunion_stale_global_service_tiers(async_client):
     registry = get_model_registry()
     fast = _make_upstream_model(

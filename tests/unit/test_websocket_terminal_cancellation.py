@@ -152,6 +152,176 @@ async def test_transport_end_replay_requires_send_boundary_only_for_direct_webso
 @pytest.mark.asyncio
 async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains_drain_owned(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        yield SimpleNamespace(request_logs=_RequestLogsRecorder(), api_keys=object())
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    settings = SimpleNamespace(
+        prefer_earlier_reset_accounts=False,
+        sticky_threads_enabled=False,
+        openai_cache_affinity_max_age_seconds=0,
+        prohibit_fast_mode=False,
+        proxy_downstream_websocket_idle_timeout_seconds=30.0,
+        proxy_request_budget_seconds=30.0,
+        stream_idle_timeout_seconds=30.0,
+        sse_keepalive_interval_seconds=0.0,
+    )
+
+    class _SettingsCache:
+        async def get(self) -> SimpleNamespace:
+            return settings
+
+    request_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.6-sol",
+            "input": "pending cleanup",
+        },
+        separators=(",", ":"),
+    )
+    request_state = _request_state("request_pending_cleanup")
+    request_state.request_text = request_text
+    request_sent = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_request_ids: list[str] = []
+
+    class _BlockingDownstreamWebSocket:
+        def __init__(self) -> None:
+            self._received = False
+
+        async def receive(self) -> dict[str, object]:
+            if not self._received:
+                self._received = True
+                return {"type": "websocket.receive", "text": request_text}
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def send_text(self, _text: str) -> None:
+            return None
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+
+    class _PendingUpstream:
+        async def send_text(self, _text: str) -> None:
+            request_sent.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            raise AssertionError("binary send is not expected")
+
+        async def close(self) -> None:
+            return None
+
+    upstream = _PendingUpstream()
+
+    async def prepare_request(*_args: object, **_kwargs: object) -> proxy_service._PreparedWebSocketRequest:
+        return proxy_service._PreparedWebSocketRequest(
+            text_data=request_text,
+            request_state=request_state,
+            affinity_policy=proxy_service._AffinityPolicy(),
+        )
+
+    async def acquire_admission(
+        state: proxy_service._WebSocketRequestState,
+        *,
+        response_create_gate: asyncio.Semaphore,
+    ) -> None:
+        state.response_create_gate = response_create_gate
+        await response_create_gate.acquire()
+        state.response_create_gate_acquired = True
+        state.awaiting_response_created = True
+
+    async def connect_upstream(*_args: object, **_kwargs: object) -> tuple[Account, UpstreamWebSocket]:
+        account = cast(Account, SimpleNamespace(id="account_pending_cleanup", codex_installation_id=None))
+        return account, cast(UpstreamWebSocket, upstream)
+
+    async def relay_until_cancelled(*_args: object, **_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    async def block_cleanup(
+        *_args: object,
+        pending_requests: deque[proxy_service._WebSocketRequestState],
+        **_kwargs: object,
+    ) -> None:
+        cleanup_request_ids.extend(state.request_id for state in pending_requests)
+        cleanup_started.set()
+        try:
+            await release_cleanup.wait()
+        except asyncio.CancelledError:
+            cleanup_cancelled.set()
+            raise
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache())
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_routing_strategy", lambda _settings: "usage_weighted")
+    monkeypatch.setattr(proxy_service, "_enforce_response_create_size_limit", lambda _request_state: None)
+    monkeypatch.setattr(websocket_mixin, "effective_account_concurrency_caps", lambda _settings: object())
+    monkeypatch.setattr(service, "_websocket_continuity_state_for_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_prepare_websocket_response_create_request", prepare_request)
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", acquire_admission)
+    monkeypatch.setattr(service, "_connect_proxy_websocket", connect_upstream)
+    monkeypatch.setattr(service, "_relay_upstream_websocket_messages", relay_until_cancelled)
+    monkeypatch.setattr(service, "_acquire_account_response_create_lease_or_overload", AsyncMock(return_value=object()))
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", block_cleanup)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+
+    scope_task = asyncio.create_task(
+        service.proxy_responses_websocket(
+            cast(WebSocket, _BlockingDownstreamWebSocket()),
+            {},
+            codex_session_affinity=False,
+            openai_cache_affinity=False,
+            api_key=None,
+        )
+    )
+    await asyncio.wait_for(request_sent.wait(), timeout=1)
+
+    caplog.set_level(logging.WARNING)
+    shutdown_state.commit_shutdown(timeout_seconds=0.1)
+    started_at = asyncio.get_running_loop().time()
+    scope_task.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+    await asyncio.sleep(0.01)
+    assert scope_task.done() is False
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(scope_task, timeout=1)
+    elapsed = asyncio.get_running_loop().time() - started_at
+
+    assert cleanup_cancelled.is_set() is False
+    assert cleanup_request_ids == [request_state.request_id]
+    assert 0.05 <= elapsed < 0.3
+    assert any(
+        task.get_name() == "proxy-websocket-finalization-scope-cleanup"
+        for task in service._background_cleanup_tasks
+        if not task.done()
+    )
+    assert any(
+        "Websocket scope cleanup exceeded its cleanup budget" in message and "cleanup_phase=pending_requests" in message
+        for message in caplog.messages
+    )
+
+    persistence_drain = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=1))
+    await asyncio.sleep(0)
+    assert persistence_drain.done() is False
+    release_cleanup.set()
+    assert await asyncio.wait_for(persistence_drain, timeout=1)
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_normal_websocket_scope_cleanup_uses_separate_scope_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     @asynccontextmanager
     async def repo_factory() -> AsyncIterator[SimpleNamespace]:
@@ -171,7 +341,6 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
 
     receive_started = asyncio.Event()
     cleanup_started = asyncio.Event()
-    cleanup_cancelled = asyncio.Event()
     release_cleanup = asyncio.Event()
 
     class _BlockingDownstreamWebSocket:
@@ -185,12 +354,10 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
 
     async def block_cleanup(*_args: object, **_kwargs: object) -> None:
         cleanup_started.set()
-        try:
-            await release_cleanup.wait()
-        except asyncio.CancelledError:
-            cleanup_cancelled.set()
-            raise
+        await release_cleanup.wait()
 
+    monkeypatch.setattr(proxy_service, "_TASK_CANCEL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(websocket_mixin, "_WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS", 0.08)
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache())
     monkeypatch.setattr(
         proxy_service,
@@ -201,6 +368,7 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
     monkeypatch.setattr(service, "_websocket_continuity_state_for_request", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", block_cleanup)
     monkeypatch.setattr(service._load_balancer, "release_account_lease", AsyncMock())
+    caplog.set_level(logging.WARNING)
 
     scope_task = asyncio.create_task(
         service.proxy_responses_websocket(
@@ -213,30 +381,19 @@ async def test_cancelled_websocket_scope_cleanup_is_deadline_bounded_and_remains
     )
     await asyncio.wait_for(receive_started.wait(), timeout=1)
 
-    shutdown_state.commit_shutdown(timeout_seconds=0.1)
-    started_at = asyncio.get_running_loop().time()
     scope_task.cancel()
     await asyncio.wait_for(cleanup_started.wait(), timeout=1)
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0.03)
     assert scope_task.done() is False
+    release_cleanup.set()
 
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(scope_task, timeout=1)
-    elapsed = asyncio.get_running_loop().time() - started_at
-
-    assert cleanup_cancelled.is_set() is False
-    assert 0.05 <= elapsed < 0.3
-    assert any(
-        task.get_name() == "proxy-websocket-finalization-scope-cleanup"
-        for task in service._background_cleanup_tasks
-        if not task.done()
-    )
-
-    persistence_drain = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=1))
+        await asyncio.wait_for(scope_task, timeout=0.5)
     await asyncio.sleep(0)
-    assert persistence_drain.done() is False
-    release_cleanup.set()
-    assert await asyncio.wait_for(persistence_drain, timeout=1)
+
+    assert not any(
+        message.startswith("Websocket scope cleanup exceeded its cleanup budget") for message in caplog.messages
+    )
     assert service._background_cleanup_tasks == set()
 
 
@@ -945,12 +1102,14 @@ async def test_terminal_message_ownership_survives_relay_cancellation(
         *,
         pending_requests: deque[proxy_service._WebSocketRequestState],
         pending_lock: anyio.Lock,
+        parsed_frame: object | None = None,
     ) -> str | None:
         archive_attribution_started.set()
         return await original_archive_attribution(
             message,
             pending_requests=pending_requests,
             pending_lock=pending_lock,
+            parsed_frame=cast("websocket_mixin._ParsedUpstreamWebSocketFrame | None", parsed_frame),
         )
 
     async def _blocking_release_gate(

@@ -446,6 +446,35 @@ describe("AccountList", () => {
     expect(screen.getByText("No accounts yet")).toBeInTheDocument();
     expect(screen.getByText("Add an account to start routing.")).toBeInTheDocument();
     expect(screen.queryByText("Adjust filters")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Individual requests can still skip an Active account/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a visible status-vs-eligibility note when accounts exist", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-1",
+            email: "primary@example.com",
+            displayName: "Primary",
+            planType: "plus",
+            status: "active",
+            limitWarmupEnabled: false,
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId={null}
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Individual requests can still skip an Active account/i),
+    ).toBeInTheDocument();
   });
 
   it("keeps the add account action outside the scrollable account list", () => {

@@ -125,6 +125,12 @@ def _load_graceful_drain_server():
     return GracefulDrainServer
 
 
+def _load_http_protocol_class() -> Any:
+    from app.core.http_protocol import load_http_protocol_class
+
+    return load_http_protocol_class()
+
+
 def _load_shutdown_drain_timeout_seconds() -> int:
     from app.core.config.settings import get_settings
 
@@ -140,6 +146,11 @@ def _run_server(app: str, **kwargs: Any) -> None:
         # this explicitly prevents Uvicorn from treating ambient
         # WEB_CONCURRENCY as an unsupported multiprocess launch.
         workers=1,
+        # Serve valid HTTP/1.1 requests that opportunistically offer an h2c
+        # upgrade (JetBrains/Ktor clients) instead of rejecting them; the
+        # stock httptools protocol drops the body or answers 400. See
+        # app/core/http_protocol.py and issue #1757.
+        http=_load_http_protocol_class(),
         timeout_graceful_shutdown=drain_timeout_seconds,
         **kwargs,
     )

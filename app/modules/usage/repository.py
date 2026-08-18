@@ -10,7 +10,22 @@ from threading import RLock
 from typing import Any, Callable, cast
 
 from anyio import to_thread
-from sqlalchemy import Integer, and_, delete, func, literal_column, or_, select, text, true, tuple_
+from sqlalchemy import (
+    Integer,
+    String,
+    and_,
+    column,
+    delete,
+    func,
+    literal_column,
+    or_,
+    select,
+    text,
+    true,
+    tuple_,
+    union_all,
+    values,
+)
 from sqlalchemy import cast as sqlalchemy_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -932,6 +947,8 @@ class UsageRepository:
         since: datetime,
         *,
         cutoffs: dict[str, datetime] | None = None,
+        per_account_row_cap: int | None = None,
+        uncapped_recent_floor: datetime | None = None,
     ) -> dict[str, list[UsageHistorySnapshot]]:
         """Fetch minimal usage history fields for multiple accounts in a single query.
 
@@ -942,6 +959,24 @@ class UsageRepository:
         ignores ``cutoffs`` (its snapshot cache is keyed on the shared
         floor); callers keep their own per-account trimming, so honoring the
         bound here only changes how many rows are read, never the result.
+
+        ``per_account_row_cap`` additionally bounds each account's slice to
+        its newest rows inside the cutoff (PostgreSQL only). Live snapshot
+        ingestion appends usage rows per proxied request, so a busy account's
+        7-day window can hold tens of thousands of rows while the projection
+        consumers (EWMA depletion, weekly-pace burn/smoothing) only read the
+        recent tail. Each capped slice keeps oldest-first ordering. The
+        SQLite snapshot-cache path ignores the cap the same way it ignores
+        ``cutoffs``.
+
+        ``uncapped_recent_floor`` exempts rows at or after the given time
+        from the row cap: every in-cutoff row newer than the floor is always
+        returned, and the cap bounds only the older remainder. Consumers
+        whose math weighs every sample in a fixed time window equally (the
+        weekly-pace smoothing mean) pass their window start here so a
+        write-rate burst can never silently truncate that window, while
+        tail-weighted consumers (EWMA) stay covered by the cap alone.
+        Ignored unless ``per_account_row_cap`` is set on PostgreSQL.
         """
         if not account_ids:
             return {}
@@ -955,6 +990,16 @@ class UsageRepository:
                 list(account_ids),
                 window,
                 since,
+            )
+
+        if per_account_row_cap is not None and dialect == "postgresql":
+            return await self._bulk_history_since_capped_postgresql(
+                account_ids,
+                window,
+                since,
+                cutoffs=cutoffs,
+                per_account_row_cap=per_account_row_cap,
+                uncapped_recent_floor=uncapped_recent_floor,
             )
 
         if cutoffs:
@@ -999,6 +1044,103 @@ class UsageRepository:
                 window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
             )
             grouped.setdefault(snapshot.account_id, []).append(snapshot)
+        return grouped
+
+    async def _bulk_history_since_capped_postgresql(
+        self,
+        account_ids: list[str],
+        window: str,
+        since: datetime,
+        *,
+        cutoffs: dict[str, datetime] | None,
+        per_account_row_cap: int,
+        uncapped_recent_floor: datetime | None,
+    ) -> dict[str, list[UsageHistorySnapshot]]:
+        """Per-account newest-first capped fetch (PostgreSQL).
+
+        One lateral top-N probe per account instead of one shared range scan:
+        the probe descends idx_usage_window_account_time_covering (or its
+        raw-window twin) backward and stops at the cap or the account's
+        cutoff, whichever comes first, so the read never touches the bulk of
+        a dense account's window. The OR-of-cutoffs shape this replaces
+        returned every in-window row (hundreds of thousands on dense
+        deployments) to Python only for the projection consumers to use the
+        recent tail.
+
+        With ``uncapped_recent_floor`` the probe splits into two disjoint
+        branches over the same covering index: rows at or after the floor are
+        returned in full (time-bounded, so still cheap), and the top-N cap
+        applies only to rows between the cutoff and the floor. Snapshot
+        ingestion writes per proxied request whenever the usage fingerprint
+        moves, so a fixed row cap alone cannot guarantee it out-lasts a
+        burst inside an equal-weight consumer window.
+        """
+        value_columns = [
+            column("account_id", String()),
+            column("cutoff", UsageHistory.recorded_at.type),
+        ]
+        if uncapped_recent_floor is not None:
+            value_columns.append(column("uncapped_floor", UsageHistory.recorded_at.type))
+        value_rows: list[tuple] = []
+        for account_id in account_ids:
+            cutoff = max(cutoffs.get(account_id, since), since) if cutoffs else since
+            if uncapped_recent_floor is None:
+                value_rows.append((account_id, cutoff))
+            else:
+                value_rows.append((account_id, cutoff, max(cutoff, uncapped_recent_floor)))
+        account_cutoffs = values(*value_columns, name="account_cutoffs").data(value_rows)
+        snapshot_columns = (
+            UsageHistory.id,
+            UsageHistory.account_id,
+            UsageHistory.used_percent,
+            UsageHistory.recorded_at,
+            UsageHistory.reset_at,
+            UsageHistory.window_minutes,
+        )
+        capped_tail = (
+            select(*snapshot_columns)
+            .where(
+                UsageHistory.account_id == account_cutoffs.c.account_id,
+                UsageHistory.recorded_at >= account_cutoffs.c.cutoff,
+                *(
+                    (UsageHistory.recorded_at < account_cutoffs.c.uncapped_floor,)
+                    if uncapped_recent_floor is not None
+                    else ()
+                ),
+                _window_clause(window),
+            )
+            .order_by(UsageHistory.recorded_at.desc(), UsageHistory.id.desc())
+            .limit(per_account_row_cap)
+            .correlate(account_cutoffs)
+        )
+        if uncapped_recent_floor is not None:
+            uncapped_recent = (
+                select(*snapshot_columns)
+                .where(
+                    UsageHistory.account_id == account_cutoffs.c.account_id,
+                    UsageHistory.recorded_at >= account_cutoffs.c.uncapped_floor,
+                    _window_clause(window),
+                )
+                .correlate(account_cutoffs)
+            )
+            recent = union_all(uncapped_recent, capped_tail).lateral("recent")
+        else:
+            recent = capped_tail.lateral("recent")
+        stmt = select(recent).select_from(account_cutoffs.join(recent, true()))
+        result = await self._session.execute(stmt)
+        grouped: dict[str, list[UsageHistorySnapshot]] = {}
+        for row in result.all():
+            snapshot = UsageHistorySnapshot(
+                id=int(row.id),
+                account_id=row.account_id,
+                used_percent=float(row.used_percent),
+                recorded_at=row.recorded_at,
+                reset_at=float(row.reset_at) if row.reset_at is not None else None,
+                window_minutes=int(row.window_minutes) if row.window_minutes is not None else None,
+            )
+            grouped.setdefault(snapshot.account_id, []).append(snapshot)
+        for snapshots in grouped.values():
+            snapshots.sort(key=lambda snapshot: (snapshot.recorded_at, snapshot.id))
         return grouped
 
     async def trends_by_bucket(

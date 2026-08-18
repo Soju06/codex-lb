@@ -22,7 +22,12 @@ def _clear_recent_count_cache_between_tests():
 
 
 @pytest.mark.asyncio
-async def test_add_log_ignores_closed_transaction(monkeypatch) -> None:
+async def test_add_log_ignores_closed_transaction(monkeypatch, db_setup) -> None:
+    # The insert now executes eagerly (Core insert instead of a unit-of-work
+    # flush inside commit), so the schema must exist; the contract under test
+    # is unchanged: a ResourceClosedError commit is swallowed and the built
+    # log row is still returned.
+    del db_setup
     async with SessionLocal() as session:
         repo = RequestLogsRepository(session)
 

@@ -39,7 +39,11 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.errors import response_failed_event
 from app.core.openai.models import OpenAIEvent
-from app.core.openai.parsing import parse_sse_event_payload
+from app.core.openai.parsing import (
+    _LIFECYCLE_EVENT_TYPES,
+    classify_event_type,
+    parse_sse_event_payload,
+)
 from app.core.types import JsonValue
 from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
@@ -78,6 +82,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _classify_upstream_close,
     _find_websocket_request_state_by_response_id,
     _http_error_status_from_payload,
+    _is_account_neutral_transport_drop,
     _is_missing_tool_output_error,
     _is_previous_response_not_found_error,
     _is_security_work_authorization_required_error,
@@ -137,7 +142,6 @@ from app.modules.proxy._service.support import (
     _clear_websocket_deferred_reasoning_downstream_texts,
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
-    _event_type_from_payload,
     _HTTPBridgeCompletedDeliveryScope,
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
@@ -227,13 +231,16 @@ _HTTP_BRIDGE_ACCOUNT_TIMEOUT_EJECTION_THRESHOLD = 3
 async def _record_http_bridge_account_timeout_signal(
     service: Any,
     session: "_HTTPBridgeSession",
+    *,
+    detail: str = _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
 ) -> None:
-    """Drain an account after repeated eventless upstream timeouts.
+    """Drain an account after repeated eventless upstream failures.
 
     This is deliberately separate from the per-session retry circuit. A
-    timeout cannot be replayed safely for a continuity-bound turn, but three
-    independent eventless failures are enough evidence to keep *new* turns
-    away from that account until its normal health probe succeeds.
+    timeout or abrupt eventless transport drop cannot be replayed safely for a
+    continuity-bound turn, but three independent eventless failures are enough
+    evidence to keep *new* turns away from that account until its normal
+    health probe succeeds.
     """
 
     account_id = session.account.id
@@ -265,9 +272,10 @@ async def _record_http_bridge_account_timeout_signal(
         )
     else:
         logger.warning(
-            "HTTP bridge account temporarily drained after repeated eventless upstream timeouts "
-            "account_id=%s threshold=%s window_seconds=%.0f",
+            "HTTP bridge account temporarily drained after repeated eventless upstream failures "
+            "account_id=%s detail=%s threshold=%s window_seconds=%.0f",
             account_id,
+            detail,
             _HTTP_BRIDGE_ACCOUNT_TIMEOUT_EJECTION_THRESHOLD,
             _HTTP_BRIDGE_ACCOUNT_TIMEOUT_WINDOW_SECONDS,
         )
@@ -1012,6 +1020,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         response_events_seen: int | None = None,
         transport_classification: str | None = None,
         retry_circuit_attempt_selection: _HTTPBridgeRetryCircuitAttemptSelection | None = None,
+        account_neutral_transport_drop: bool = False,
     ) -> bool:
         session.closed = True
         async with session.pending_lock:
@@ -1128,12 +1137,27 @@ class _HTTPBridgeUpstreamEventsMixin:
                 failed_pending_count > 0
                 and reservations_settled is not False
                 and observed_response_events == 0
-                and retire_detail == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+                and (
+                    retire_detail == _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+                    or account_neutral_transport_drop
+                )
             ):
                 # Only penalize the account after pending-request cleanup has
                 # settled its API-key reservations. A failed release must not
                 # be hidden behind an already-recorded timeout health signal.
-                await _record_http_bridge_account_timeout_signal(self, session)
+                # Account-neutral abrupt drops share the same windowed signal:
+                # one drop is infrastructure noise, but repeated eventless
+                # drops on the same account remain evidence of an account-side
+                # fault and must still drain it (issue #1754).
+                await _record_http_bridge_account_timeout_signal(
+                    self,
+                    session,
+                    detail=(
+                        "eventless_transport_drop"
+                        if account_neutral_transport_drop
+                        else _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL
+                    ),
+                )
         finally:
             poison_after_deferred_failures = False
             if session.admission_waiter_count > 0 and not force_retire:
@@ -1481,6 +1505,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
                     )
+                    # Buffered reasoning preludes are suppressed from
+                    # response_event_count on purpose, but they are still
+                    # application-layer output: a drop after one is not an
+                    # eventless drop for account-health purposes.
+                    upstream_output_observed = any(
+                        getattr(request_state, "upstream_model_output_seen", False)
+                        for request_state in session.pending_requests
+                    )
                     reader_failure_retry_circuit_attempt_selection = (
                         _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
                             tuple(session.pending_requests)
@@ -1505,6 +1537,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if message.close_code is not None
                     else None
                 )
+                # An abrupt drop with no close frame and no response events is
+                # weaker account-health evidence than a graceful pre-created
+                # close, which is already exempted below. Keep the individual
+                # drop account-neutral; repeated eventless drops still feed
+                # the windowed account drain signal inside the failure path.
+                # Only terminal transport messages qualify: a protocol-invalid
+                # binary frame also carries no close code but did not end the
+                # socket, so it keeps the existing penalty semantics.
+                account_neutral_transport_drop = (
+                    message.kind in ("close", "error")
+                    and not account_neutral
+                    and not upstream_output_observed
+                    and _is_account_neutral_transport_drop(
+                        message.close_code, response_events_seen=response_events_seen
+                    )
+                )
                 async with session.lifecycle_lock:
                     if (
                         session.liveness_settlement_owner == "send"
@@ -1528,8 +1576,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                         ),
                         retry_circuit_attempt_selection=reader_failure_retry_circuit_attempt_selection,
                         penalize_account=(
-                            not account_neutral and not (message.kind == "close" and close_classification == "clean")
+                            not account_neutral
+                            and not account_neutral_transport_drop
+                            and not (message.kind == "close" and close_classification == "clean")
                         ),
+                        account_neutral_transport_drop=account_neutral_transport_drop,
                         **(
                             # An admission waiter must not inherit a socket whose
                             # heartbeat already proved it dead. Other failures
@@ -1604,8 +1655,8 @@ class _HTTPBridgeUpstreamEventsMixin:
     ) -> None:
         event_block = f"data: {text}\n\n"
         payload = parse_sse_data_json(event_block)
-        event = parse_sse_event_payload(payload)
-        event_type = _event_type_from_payload(event, payload)
+        event_type = classify_event_type(payload)
+        event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
         completed_delivery_scope = _HTTPBridgeCompletedDeliveryScope() if event_type == "response.completed" else None
         claimed_terminal_request_states: list[_WebSocketRequestState] = []
         try:

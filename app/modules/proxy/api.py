@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from typing import Any, Final, Literal, Protocol, cast
+from typing import Any, Final, Literal, Protocol, TypeVar, cast
 from uuid import uuid4
 
 import anyio
@@ -203,6 +203,11 @@ from app.modules.model_sources.forwarding import (
     stream_responses as stream_source_responses,
 )
 from app.modules.model_sources.repository import ModelSourcesRepository
+from app.modules.model_sources.selection import (
+    allowed_source_ids_for_api_key,
+    effective_model_for_api_key,
+    select_responses_model_source,
+)
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
@@ -244,6 +249,8 @@ from app.modules.proxy.request_policy import (
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
+    responses_source_route_excluded,
+    restore_source_reasoning_effort,
     sanitize_source_chat_payload,
     strip_terminal_compaction_trigger_input,
     validate_model_access,
@@ -288,6 +295,7 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 _REASONING_SUMMARY_DELTA_TYPES = frozenset({"response.reasoning_summary_text.delta"})
 _REASONING_SUMMARY_DONE_TYPES = frozenset(
@@ -1063,19 +1071,25 @@ async def responses(
         return _logged_error_json_response(request, 400, error)
 
     raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
-    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
-        responses_payload, api_key
-    )
+    (
+        prohibit_fast_mode,
+        service_tier_was_enforced,
+        pre_normalization_effort,
+    ) = await _apply_api_key_enforcement_with_fast_mode_policy(responses_payload, api_key)
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        compact_trigger_input = strip_terminal_compaction_trigger_input(responses_payload)
+        # Terminal compaction triggers run the upstream compact flow on the
+        # turn's owner account, and file-referencing requests are pinned to
+        # the account that received the upload; the shared predicate keeps
+        # this gate and the WebSocket source-ownership guards in agreement.
+        source_route_excluded = responses_source_route_excluded(responses_payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
     source = None
-    if compact_trigger_input is None and not extract_input_file_ids(responses_payload.input):
+    if not source_route_excluded:
         source_selection = await _select_responses_model_source(
             responses_payload.model,
             api_key,
@@ -1097,6 +1111,7 @@ async def responses(
             source=source,
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
+            pre_normalization_effort=pre_normalization_effort,
         )
 
     apply_enforced_service_tier_model_fallback(
@@ -1208,9 +1223,11 @@ async def v1_responses(
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error)
     raw_source_model = _effective_optional_model_for_api_key(api_key, responses_payload.model)
-    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
-        responses_payload, api_key
-    )
+    (
+        prohibit_fast_mode,
+        service_tier_was_enforced,
+        pre_normalization_effort,
+    ) = await _apply_api_key_enforcement_with_fast_mode_policy(responses_payload, api_key)
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
@@ -1241,6 +1258,7 @@ async def v1_responses(
             source=source,
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
+            pre_normalization_effort=pre_normalization_effort,
         )
     apply_enforced_service_tier_model_fallback(
         responses_payload,
@@ -1696,7 +1714,9 @@ async def _ensure_v1_reset_credit_account_fresh(account_id: str) -> _V1ResetCred
     async with get_background_session() as session:
         repo = AccountsRepository(session)
         account = await repo.get_by_id(account_id)
-        if account is None:
+        # An account marked for background deletion is already deleted from
+        # every consumer's point of view (its credentials are wiped).
+        if account is None or account.delete_requested_at is not None:
             raise HTTPException(status_code=404, detail="Account not found")
         auth_manager = AuthManager(
             repo,
@@ -1737,6 +1757,11 @@ async def v1_redeem_reset_credit(
         return capability_transport_denial
     async with get_background_session() as session:
         account = await AccountsRepository(session).get_by_id(payload.account_id)
+        # A pending-deletion account is gone (credentials wiped): treat it
+        # exactly like an account outside the pool. ``getattr`` because pool
+        # membership tests stub the account with plain namespaces.
+        if account is not None and getattr(account, "delete_requested_at", None) is not None:
+            account = None
         if not _is_reset_credit_account_in_api_key_pool(account, api_key):
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
         if account is None:
@@ -2019,14 +2044,18 @@ async def _hide_upstream_quota_for_api_key_clients(api_key: ApiKeyData | None) -
 async def _apply_api_key_enforcement_with_fast_mode_policy(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, str | None]:
     prohibit_fast_mode = await _prohibit_fast_mode_enabled()
-    service_tier_was_enforced = apply_api_key_enforcement(
+    enforcement = apply_api_key_enforcement(
         payload,
         api_key,
         prohibit_fast_mode=prohibit_fast_mode,
     )
-    return prohibit_fast_mode, service_tier_was_enforced
+    return (
+        prohibit_fast_mode,
+        enforcement.service_tier_was_enforced,
+        enforcement.pre_normalization_reasoning_effort,
+    )
 
 
 async def _prohibit_fast_mode_enabled() -> bool:
@@ -2050,15 +2079,28 @@ async def _rate_limit_headers_for_request(
 async def _release_reservation_deferring_cancellation(
     reservation: ApiKeyUsageReservationData,
 ) -> None:
+    await _await_cleanup_deferring_cancellation(_release_reservation(reservation))
+
+
+async def _await_result_deferring_cancellation(awaitable: Awaitable[_T]) -> tuple[_T, bool]:
+    """Finish an owned awaitable despite repeated cancellation and report whether cancellation arrived."""
+
+    task = asyncio.ensure_future(awaitable)
+    cancellation_deferred = False
     with anyio.CancelScope(shield=True):
-        task = asyncio.create_task(_release_reservation(reservation))
         while True:
             try:
-                await asyncio.shield(task)
-                return
+                return await asyncio.shield(task), cancellation_deferred
             except asyncio.CancelledError:
                 if task.cancelled():
                     raise
+                cancellation_deferred = True
+
+
+async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
+    """Finish a required cleanup operation despite repeated cancellation delivery."""
+
+    await _await_result_deferring_cancellation(awaitable)
 
 
 async def _rate_limit_headers_with_reservation_cleanup(
@@ -3769,6 +3811,9 @@ def _is_codex_backend_catalog_model(model: UpstreamModel) -> bool:
     return model.raw.get("shell_type") == "shell_command"
 
 
+_CODEX_WIRE_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+
+
 def _codex_model_truncation_policy(model: UpstreamModel) -> CodexTruncationPolicy:
     if "truncation_policy" in model.raw:
         try:
@@ -3786,8 +3831,24 @@ def _codex_model_experimental_supported_tools(model: UpstreamModel) -> list[str]
     return [tool for tool in tools if isinstance(tool, str)]
 
 
+def _codex_wire_reasoning_levels(model: UpstreamModel) -> list[ReasoningLevelSchema]:
+    return [
+        ReasoningLevelSchema(effort=level.effort, description=level.description)
+        for level in model.supported_reasoning_levels
+        if level.effort in _CODEX_WIRE_REASONING_EFFORTS
+    ]
+
+
+def _codex_wire_default_reasoning_level(model: UpstreamModel) -> str | None:
+    default = model.default_reasoning_level
+    if default in _CODEX_WIRE_REASONING_EFFORTS:
+        return default
+    return None
+
+
 def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None) -> CodexModelEntry:
     raw = model.raw
+    reasoning_levels = _codex_wire_reasoning_levels(model)
 
     extra: dict[str, JsonValue] = {}
     skip_keys = {
@@ -3826,11 +3887,8 @@ def _to_codex_model_entry(model: UpstreamModel, *, visibility: str | None = None
         display_name=model.display_name,
         description=model.description,
         base_instructions=model.base_instructions,
-        default_reasoning_level=model.default_reasoning_level,
-        supported_reasoning_levels=[
-            ReasoningLevelSchema(effort=rl.effort, description=rl.description)
-            for rl in model.supported_reasoning_levels
-        ],
+        default_reasoning_level=_codex_wire_default_reasoning_level(model),
+        supported_reasoning_levels=reasoning_levels,
         supported_in_api=model.supported_in_api,
         priority=model.priority,
         minimal_client_version=model.minimal_client_version,
@@ -3893,8 +3951,8 @@ def _v1_model_capabilities(model: UpstreamModel) -> dict[str, JsonValue]:
 def _v1_supports_reasoning(model: UpstreamModel) -> bool:
     if bool(model.supported_reasoning_levels) or model.supports_reasoning_summaries:
         return True
-    # OpenAI-compatible source models advertise no reasoning levels; their
-    # catalog entries opt in via raw metadata so /v1/models reflects reality.
+    # Source models whose operator declared no levels and no summary support
+    # opt in via raw metadata instead, so /v1/models reflects reality.
     return model.raw.get("supports_reasoning") is True
 
 
@@ -4023,7 +4081,11 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
-    prohibit_fast_mode, service_tier_was_enforced = await _apply_api_key_enforcement_with_fast_mode_policy(
+    # The replaced effort is discarded: the enforced Responses payload built
+    # here is only ever forwarded to a subscription. This endpoint does
+    # source-route, but that branch forwards the untouched original chat
+    # payload, so there is nothing for a restore to undo.
+    prohibit_fast_mode, service_tier_was_enforced, _ = await _apply_api_key_enforcement_with_fast_mode_policy(
         responses_payload, api_key
     )
     if prohibit_fast_mode and _is_fast_mode_model_alias(effective_model):
@@ -4210,35 +4272,14 @@ async def _select_responses_model_source(
     raw_model: str | None = None,
     require_streaming: bool = False,
 ) -> tuple[ModelSource, str] | None:
-    assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
-    candidates = [candidate for candidate in (raw_model, model) if candidate]
-    if not candidates:
-        return None
-    deduped_candidates = list(dict.fromkeys(candidates))
-    registry_models = get_model_registry().get_models_with_fallback()
-    async with get_background_session() as session:
-        repository = ModelSourcesRepository(session)
-        for candidate in deduped_candidates:
-            if exact_allowed_models is not None and candidate not in exact_allowed_models:
-                continue
-            subscription_model = registry_models.get(candidate)
-            if assigned_source_ids is None and subscription_model is not None:
-                continue
-            source = await repository.find_responses_source_for_model(
-                candidate,
-                allowed_source_ids=assigned_source_ids,
-                require_streaming=require_streaming,
-            )
-            if source is not None:
-                break
-        else:
-            source = None
-        # ``close_session`` rolls back the read transaction, which would
-        # expire the loaded row; detach it so the forwarding path can read
-        # its attributes after this session boundary.
-        detach_session_objects(session)
-        return (source, candidate) if source is not None else None
+    # Shared with the WebSocket path so both transports agree on which models
+    # belong to a model source.
+    return await select_responses_model_source(
+        model,
+        api_key,
+        raw_model=raw_model,
+        require_streaming=require_streaming,
+    )
 
 
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
@@ -4258,9 +4299,7 @@ async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyD
 
 
 def _allowed_source_ids_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
-    if api_key is None or not api_key.source_assignment_scope_enabled:
-        return None
-    return set(api_key.assigned_source_ids)
+    return allowed_source_ids_for_api_key(api_key)
 
 
 async def _parse_transcription_multipart(
@@ -4406,7 +4445,16 @@ async def _source_responses_response(
     source: ModelSource,
     api_key: ApiKeyData | None,
     rate_limit_headers: Mapping[str, str],
+    pre_normalization_effort: str | None,
 ) -> Response:
+    # This is the first point where the request is known to be served by a
+    # model source rather than a subscription account, so it is the only place
+    # the reasoning-effort workaround can be undone safely.
+    restore_source_reasoning_effort(
+        payload,
+        source,
+        pre_normalization_effort=pre_normalization_effort,
+    )
     reservation = await _enforce_request_limits(
         api_key,
         request_model=payload.model,
@@ -4749,6 +4797,36 @@ async def _source_chat_completion_response(
                 upstream_status_code=exc.upstream_status_code,
             )
             return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+        except asyncio.CancelledError:
+            release_exc: BaseException | None = None
+            if reservation is not None:
+                try:
+                    await _release_reservation_deferring_cancellation(reservation)
+                except BaseException as exc:
+                    release_exc = exc
+            await _await_cleanup_deferring_cancellation(
+                _log_source_chat_completion(
+                    request,
+                    source=source,
+                    api_key=api_key,
+                    model=model,
+                    status="cancelled",
+                    error_code="client_disconnected",
+                    error_message="client disconnected during source stream setup",
+                )
+            )
+            if release_exc is not None:
+                logger.warning(
+                    "Failed to release source stream setup reservation after client disconnect source_id=%s model=%s",
+                    source.id,
+                    model,
+                    exc_info=release_exc,
+                )
+            raise
+        except BaseException:
+            if reservation is not None:
+                await _release_reservation_deferring_cancellation(reservation)
+            raise
         if _reservation_requires_usage(reservation):
             return await _buffered_limited_source_chat_stream_response(
                 request,
@@ -4790,6 +4868,36 @@ async def _source_chat_completion_response(
             upstream_status_code=exc.upstream_status_code,
         )
         return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+    except asyncio.CancelledError:
+        release_exc: BaseException | None = None
+        if reservation is not None:
+            try:
+                await _release_reservation_deferring_cancellation(reservation)
+            except BaseException as exc:
+                release_exc = exc
+        await _await_cleanup_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="cancelled",
+                error_code="client_disconnected",
+                error_message="client disconnected during source request setup",
+            )
+        )
+        if release_exc is not None:
+            logger.warning(
+                "Failed to release source request setup reservation after client disconnect source_id=%s model=%s",
+                source.id,
+                model,
+                exc_info=release_exc,
+            )
+        raise
+    except BaseException:
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
+        raise
 
     if result.usage is None and _reservation_requires_usage(reservation):
         await _release_reservation(reservation)
@@ -4810,34 +4918,60 @@ async def _source_chat_completion_response(
         )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
 
-    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=result.usage)
-    if not settled:
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=model,
-            status="error",
-            error_code="usage_settlement_failed",
-            error_message="source usage settlement failed",
-            upstream_status_code=result.upstream_status_code,
+    settled, settlement_deferred_cancellation = await _await_result_deferring_cancellation(
+        _settle_source_reservation(reservation, source=source, model=model, usage=result.usage)
+    )
+    if settlement_deferred_cancellation:
+        await _await_cleanup_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="cancelled",
+                usage=result.usage,
+                timings=result.timings,
+                error_code="client_disconnected",
+                error_message="client disconnected during source usage settlement",
+                upstream_status_code=result.upstream_status_code,
+            )
         )
+        raise asyncio.CancelledError
+    if not settled:
+        _, log_deferred_cancellation = await _await_result_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="error",
+                error_code="usage_settlement_failed",
+                error_message="source usage settlement failed",
+                upstream_status_code=result.upstream_status_code,
+            )
+        )
+        if log_deferred_cancellation:
+            raise asyncio.CancelledError
         return _logged_error_json_response(
             request,
             502,
             _source_usage_settlement_failed_error(),
             headers=rate_limit_headers,
         )
-    await _log_source_chat_completion(
-        request,
-        source=source,
-        api_key=api_key,
-        model=model,
-        status="success",
-        usage=result.usage,
-        timings=result.timings,
-        upstream_status_code=result.upstream_status_code,
+    _, log_deferred_cancellation = await _await_result_deferring_cancellation(
+        _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="success",
+            usage=result.usage,
+            timings=result.timings,
+            upstream_status_code=result.upstream_status_code,
+        )
     )
+    if log_deferred_cancellation:
+        raise asyncio.CancelledError
     return JSONResponse(content=result.payload, status_code=200, headers=rate_limit_headers)
 
 
@@ -4883,13 +5017,44 @@ async def _buffered_limited_source_chat_stream_response(
                 error_message="source stream buffer limit exceeded",
             )
             return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancel_exc:
         # Starlette cancels this task when the downstream client disconnects;
         # CancelledError is a BaseException, so without this branch the
         # reservation would stay charged until stale-reservation cleanup.
-        await _aclose_stream(stream)
-        await _release_reservation(reservation)
-        raise
+        close_exc: BaseException | None = None
+        release_exc: BaseException | None = None
+        try:
+            await _await_cleanup_deferring_cancellation(_aclose_stream(stream))
+        except BaseException as exc:
+            close_exc = exc
+        if reservation is not None:
+            try:
+                await _release_reservation_deferring_cancellation(reservation)
+            except BaseException as exc:
+                release_exc = exc
+        await _await_cleanup_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="cancelled",
+                usage=usage_holder.usage,
+                timings=usage_holder.timings,
+                error_code="client_disconnected",
+                error_message="client disconnected during source stream buffering",
+            )
+        )
+        if release_exc is not None:
+            logger.warning(
+                "Failed to release buffered source stream reservation after client disconnect source_id=%s model=%s",
+                source.id,
+                model,
+                exc_info=release_exc,
+            )
+        if close_exc is not None:
+            raise close_exc
+        raise cancel_exc
     except ModelSourceForwardingError as exc:
         await _release_reservation(reservation)
         await _log_source_chat_completion(
@@ -4939,32 +5104,57 @@ async def _buffered_limited_source_chat_stream_response(
         )
         return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
 
-    settled = await _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
-    if not settled:
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=model,
-            status="error",
-            error_code="usage_settlement_failed",
-            error_message="source usage settlement failed",
+    settled, settlement_deferred_cancellation = await _await_result_deferring_cancellation(
+        _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
+    )
+    if settlement_deferred_cancellation:
+        await _await_cleanup_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="cancelled",
+                usage=usage_holder.usage,
+                timings=usage_holder.timings,
+                error_code="client_disconnected",
+                error_message="client disconnected during source stream usage settlement",
+            )
         )
+        raise asyncio.CancelledError
+    if not settled:
+        _, log_deferred_cancellation = await _await_result_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status="error",
+                error_code="usage_settlement_failed",
+                error_message="source usage settlement failed",
+            )
+        )
+        if log_deferred_cancellation:
+            raise asyncio.CancelledError
         return _logged_error_json_response(
             request,
             502,
             _source_usage_settlement_failed_error(),
             headers=rate_limit_headers,
         )
-    await _log_source_chat_completion(
-        request,
-        source=source,
-        api_key=api_key,
-        model=model,
-        status="success",
-        usage=usage_holder.usage,
-        timings=usage_holder.timings,
+    _, log_deferred_cancellation = await _await_result_deferring_cancellation(
+        _log_source_chat_completion(
+            request,
+            source=source,
+            api_key=api_key,
+            model=model,
+            status="success",
+            usage=usage_holder.usage,
+            timings=usage_holder.timings,
+        )
     )
+    if log_deferred_cancellation:
+        raise asyncio.CancelledError
 
     async def body() -> AsyncIterator[bytes]:
         for chunk in chunks:
@@ -5004,8 +5194,11 @@ async def _source_chat_stream_with_settlement(
         status = "cancelled"
         error_code = "client_disconnected"
         error_message = "client disconnected before stream completed"
-        await _aclose_stream(stream)
-        await _release_reservation(reservation)
+        try:
+            await _await_cleanup_deferring_cancellation(_aclose_stream(stream))
+        finally:
+            if reservation is not None:
+                await _release_reservation_deferring_cancellation(reservation)
         raise
     except ModelSourceForwardingError as exc:
         status = "error"
@@ -5020,7 +5213,14 @@ async def _source_chat_stream_with_settlement(
         await _release_reservation(reservation)
         raise
     else:
-        settled = await _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
+        settled, settlement_deferred_cancellation = await _await_result_deferring_cancellation(
+            _settle_source_reservation(reservation, source=source, model=model, usage=usage_holder.usage)
+        )
+        if settlement_deferred_cancellation:
+            status = "cancelled"
+            error_code = "client_disconnected"
+            error_message = "client disconnected during source usage settlement"
+            raise asyncio.CancelledError
         if not settled:
             status = "error"
             error_code = "usage_settlement_failed"
@@ -5036,17 +5236,19 @@ async def _source_chat_stream_with_settlement(
                 model,
             )
     finally:
-        await _log_source_chat_completion(
-            request,
-            source=source,
-            api_key=api_key,
-            model=model,
-            status=status,
-            usage=usage_holder.usage,
-            timings=usage_holder.timings,
-            error_code=error_code,
-            error_message=error_message,
-            upstream_status_code=None,
+        await _await_cleanup_deferring_cancellation(
+            _log_source_chat_completion(
+                request,
+                source=source,
+                api_key=api_key,
+                model=model,
+                status=status,
+                usage=usage_holder.usage,
+                timings=usage_holder.timings,
+                error_code=error_code,
+                error_message=error_message,
+                upstream_status_code=None,
+            )
         )
 
 
@@ -5086,7 +5288,7 @@ async def _stream_responses(
         payload,
         api_key,
         prohibit_fast_mode=prohibit_fast_mode,
-    )
+    ).service_tier_was_enforced
     if forwarded_request:
         payload.service_tier = forwarded_effective_service_tier
     else:
@@ -5537,11 +5739,13 @@ async def _collect_responses(
     prefer_http_bridge: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
+    # The replaced effort is discarded: this path is subscription-only, so the
+    # rewrite that works around the backend hang must stick.
     service_tier_was_enforced = apply_api_key_enforcement(
         payload,
         api_key,
         prohibit_fast_mode=prohibit_fast_mode,
-    )
+    ).service_tier_was_enforced
     apply_enforced_service_tier_model_fallback(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
@@ -5763,11 +5967,13 @@ async def _compact_responses(
     openai_cache_affinity: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> JSONResponse:
+    # The replaced effort is discarded: this path is subscription-only, so the
+    # rewrite that works around the backend hang must stick.
     service_tier_was_enforced = apply_api_key_enforcement(
         payload,
         api_key,
         prohibit_fast_mode=prohibit_fast_mode,
-    )
+    ).service_tier_was_enforced
     apply_enforced_service_tier_model_fallback(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,
@@ -7552,9 +7758,7 @@ def _effective_model_for_api_key(api_key: ApiKeyData | None, requested_model: st
 
 
 def _effective_optional_model_for_api_key(api_key: ApiKeyData | None, requested_model: str | None) -> str | None:
-    if api_key is None or api_key.enforced_model is None:
-        return requested_model
-    return api_key.enforced_model
+    return effective_model_for_api_key(api_key, requested_model)
 
 
 def _compact_request_service_tier(payload: ResponsesCompactRequest) -> str | None:

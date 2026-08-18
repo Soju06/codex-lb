@@ -477,6 +477,31 @@ def _classify_upstream_close(
     return "transient"
 
 
+def _is_account_neutral_transport_drop(
+    close_code: int | None,
+    *,
+    response_events_seen: int,
+) -> bool:
+    """Return whether an upstream websocket ending is account-neutral evidence.
+
+    An abrupt transport drop that carries no close frame and arrived before
+    any application-layer response event is the weakest possible evidence of
+    account ill-health: the account never spoke at the application layer for
+    this request. Charging the account lets a few infrastructure resets push
+    it into error backoff and 502 continuity-bound follow-ups while healthy
+    pool siblings idle (issue #1754). Any close frame — even a non-clean one —
+    is upstream-authored evidence and keeps the existing penalty semantics, as
+    does a drop after response events started streaming.
+
+    Close code 1006 (abnormal closure) is reserved by RFC 6455 and can never
+    appear in an actual close frame: adapters synthesize it locally when the
+    socket dies without one (aiohttp stores 1006 on ``close_code`` for an
+    abnormal CLOSED), so it counts as frame-less here.
+    """
+
+    return close_code in (None, 1006) and response_events_seen == 0
+
+
 def _should_infer_upstream_status_from_proxy_error(exc: ProxyResponseError, upstream_error_code: str | None) -> bool:
     if exc.failure_phase == "status":
         return True
@@ -619,6 +644,36 @@ def _mark_downstream_stream_cancelled(
         failure_phase="downstream",
         failure_detail="client_disconnected_before_terminal_event",
         account_health_error=False,
+    )
+
+
+def _rewrite_malformed_stream_error_event(
+    *,
+    enforce_openai_sdk_contract: bool,
+    event: OpenAIEvent | None,
+    event_type: str | None,
+    event_payload: dict[str, JsonValue] | None,
+    response_id: str,
+) -> tuple[str, OpenAIEvent | None, dict[str, JsonValue] | None, str | None] | None:
+    """Rewrite a schema-less upstream ``error`` frame under the SDK contract.
+
+    A malformed frame like ``{"type":"error","message":"..."}`` classifies as
+    ``error`` but carries no error envelope (``event`` is None or has no
+    ``error``), so it must become a terminal ``response.failed`` instead of
+    leaking the raw frame with a success settlement. Returns None when the
+    frame is not a malformed error (well-formed errors keep their
+    envelope-driven handling).
+    """
+    if not enforce_openai_sdk_contract or event_type != "error":
+        return None
+    if (event is not None and event.error is not None) or not isinstance(event_payload, dict):
+        return None
+    message_value = event_payload.get("message")
+    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else "Upstream error"
+    return _build_rewritten_stream_response_failed_event(
+        response_id=response_id,
+        error_code="upstream_error",
+        error_message=message,
     )
 
 

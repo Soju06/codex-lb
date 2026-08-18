@@ -88,6 +88,77 @@ async def test_process_websocket_security_retry_releases_response_create_gate() 
     gate.release()
 
 
+@pytest.mark.asyncio
+async def test_websocket_security_cleanup_finishes_after_cancellation() -> None:
+    """The externally exercised WebSocket path cannot orphan a response lease."""
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account = _make_account("acc_ws_security_gate_cancel")
+    gate = asyncio.Semaphore(1)
+    await gate.acquire()
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_security_gate_cancel",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        transport="websocket",
+        request_text='{"type":"response.create","model":"gpt-5.1","input":[]}',
+    )
+    request_state.response_create_gate = gate
+    request_state.response_create_gate_acquired = True
+    lease = proxy_service.AccountLease("lease-ws-security-gate-cancel", account.id, "response_create", 1.0)
+    release_started = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    async def release_account_lease(value):
+        assert value is lease
+        release_started.set()
+        await release_finished.wait()
+
+    request_state.account_response_create_lease = lease
+    request_state.account_response_create_release = release_account_lease
+    pending_requests = deque([request_state])
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    text = json.dumps(
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_ws_security_gate_cancel",
+                "status": "failed",
+                "error": {"code": "invalid_request_error", "type": "invalid_request_error", "message": "cancel"},
+            },
+        },
+        separators=(",", ":"),
+    )
+
+    task = asyncio.create_task(
+        service._process_upstream_websocket_text(
+            text,
+            account=account,
+            account_id_value=account.id,
+            pending_requests=pending_requests,
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=gate,
+        )
+    )
+    await release_started.wait()
+    task.cancel()
+    release_finished.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert request_state.account_response_create_lease is None
+    assert request_state.account_response_create_release is None
+    assert request_state.response_create_gate_acquired is False
+    assert request_state.response_create_gate is None
+    await asyncio.wait_for(gate.acquire(), timeout=0.1)
+    gate.release()
+
+
 def test_http_bridge_deferred_reasoning_blocks_previsible_replay() -> None:
     request_state = proxy_service._WebSocketRequestState(
         request_id="http_security_deferred_reasoning",

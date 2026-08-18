@@ -1,5 +1,11 @@
 import { Inbox } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import { isEmailLabel } from "@/components/blur-email";
@@ -26,9 +32,20 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
+import {
+  ALL_REQUEST_LOG_COLUMNS,
+  MAX_REQUEST_LOG_COLUMN_WIDTH,
+  MIN_REQUEST_LOG_COLUMN_WIDTH,
+  REQUEST_LOG_COLUMN_DEFAULT_WIDTHS,
+  REQUEST_LOG_COLUMN_WIDTH_STEP,
+  clampRequestLogColumnWidth,
+  type RequestLogColumnId,
+  type RequestLogColumnWidths,
+} from "@/features/dashboard/request-log-columns";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
+import { cn } from "@/lib/utils";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatDateTimeInline,
@@ -84,10 +101,131 @@ export type RecentRequestsTableProps = {
   offset: number;
   hasMore: boolean;
   filtersApplied?: boolean;
+  visibleColumns?: readonly RequestLogColumnId[];
+  columnWidths?: RequestLogColumnWidths;
+  onColumnWidthChange?: (column: RequestLogColumnId, width: number) => void;
   onLimitChange: (limit: number) => void;
   onOffsetChange: (offset: number) => void;
   onConversationClick?: (conversationId: string) => void;
 };
+
+type RequestLogTableHeadProps = {
+  column: RequestLogColumnId;
+  label: string;
+  resizeLabel: string;
+  className?: string;
+  width?: number;
+  onWidthChange?: (column: RequestLogColumnId, width: number) => void;
+};
+
+function RequestLogTableHead({
+  column,
+  label,
+  resizeLabel,
+  className,
+  width,
+  onWidthChange,
+}: RequestLogTableHeadProps) {
+  const resizeState = useRef<{
+    pointerId: number;
+    startX: number;
+    startWidth: number;
+  } | null>(null);
+  const resolvedWidth = clampRequestLogColumnWidth(
+    width ?? REQUEST_LOG_COLUMN_DEFAULT_WIDTHS[column],
+  );
+
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    if (!onWidthChange) {
+      return;
+    }
+
+    event.preventDefault();
+    const measuredWidth = event.currentTarget.parentElement?.getBoundingClientRect().width;
+    resizeState.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: measuredWidth && measuredWidth > 0 ? measuredWidth : resolvedWidth,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const state = resizeState.current;
+    if (!state || state.pointerId !== event.pointerId || !onWidthChange) {
+      return;
+    }
+
+    onWidthChange(
+      column,
+      clampRequestLogColumnWidth(state.startWidth + event.clientX - state.startX),
+    );
+  };
+
+  const handlePointerEnd = (event: PointerEvent<HTMLDivElement>) => {
+    if (resizeState.current?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    resizeState.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!onWidthChange || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) {
+      return;
+    }
+
+    event.preventDefault();
+    const direction = event.key === "ArrowLeft" ? -1 : 1;
+    onWidthChange(
+      column,
+      clampRequestLogColumnWidth(
+        resolvedWidth + direction * REQUEST_LOG_COLUMN_WIDTH_STEP,
+      ),
+    );
+  };
+
+  return (
+    <TableHead
+      aria-label={label}
+      className={cn(
+        "relative text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80",
+        className,
+      )}
+      style={onWidthChange ? { width: resolvedWidth } : undefined}
+    >
+      {label}
+      {onWidthChange ? (
+        <div
+          role="separator"
+          aria-label={resizeLabel}
+          aria-orientation="vertical"
+          aria-valuemin={MIN_REQUEST_LOG_COLUMN_WIDTH}
+          aria-valuemax={MAX_REQUEST_LOG_COLUMN_WIDTH}
+          aria-valuenow={resolvedWidth}
+          tabIndex={0}
+          className="group absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none select-none outline-none"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          onLostPointerCapture={() => {
+            resizeState.current = null;
+          }}
+          onKeyDown={handleKeyDown}
+        >
+          <span
+            aria-hidden="true"
+            className="absolute left-1/2 top-1 h-[calc(100%-0.5rem)] w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-primary group-focus-visible:bg-primary"
+          />
+        </div>
+      ) : null}
+    </TableHead>
+  );
+}
 
 function formatRequestCostSummary(request: RequestLog | null, t: ReturnType<typeof useTranslation>["t"]): string | null {
   if (!request || request.status !== "ok") {
@@ -173,6 +311,9 @@ export function RecentRequestsTable({
   offset,
   hasMore,
   filtersApplied = false,
+  visibleColumns: configuredVisibleColumns,
+  columnWidths,
+  onColumnWidthChange,
   onLimitChange,
   onOffsetChange,
   onConversationClick,
@@ -183,6 +324,25 @@ export function RecentRequestsTable({
   const isAdmin = useAuthStore((state) => state.role === "admin");
   const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest, t);
+  const visibleColumns = configuredVisibleColumns ?? ALL_REQUEST_LOG_COLUMNS;
+  const visibleColumnSet = useMemo(() => new Set(visibleColumns), [visibleColumns]);
+  const hasConfiguredLayout =
+    configuredVisibleColumns !== undefined ||
+    columnWidths !== undefined ||
+    onColumnWidthChange !== undefined;
+  const tableWidth = hasConfiguredLayout
+    ? visibleColumns.reduce(
+        (totalWidth, column) =>
+          totalWidth +
+          clampRequestLogColumnWidth(
+            columnWidths?.[column] ?? REQUEST_LOG_COLUMN_DEFAULT_WIDTHS[column],
+          ),
+        0,
+      )
+    : undefined;
+  const isColumnVisible = (column: RequestLogColumnId) => visibleColumnSet.has(column);
+  const resizeLabel = (label: string) =>
+    t("dashboard.requests.resizeColumn", { column: label });
 
   const accountLabelMap = useMemo(() => {
     const index = new Map<string, string>();
@@ -227,21 +387,24 @@ export function RecentRequestsTable({
     <div className="space-y-3">
     <div className="rounded-xl border bg-card">
       <div className="relative overflow-x-auto">
-        <Table className="w-full table-fixed">
+        <Table
+          className="w-full table-fixed"
+          style={tableWidth === undefined ? undefined : { width: tableWidth, minWidth: tableWidth }}
+        >
           <TableHeader>
             <TableRow className="hover:bg-transparent">
-              <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.time")}</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.account")}</TableHead>
-              <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.plan")}</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.apiKey")}</TableHead>
-              <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.model")}</TableHead>
-              <TableHead className="w-32 pr-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.transport")}</TableHead>
-              <TableHead className="w-24 pl-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.status")}</TableHead>
-              <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">TTFT</TableHead>
-              <TableHead className="w-20 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">TPS</TableHead>
-              <TableHead className="w-24 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.tokens")}</TableHead>
-              <TableHead className="w-16 text-right text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.cost")}</TableHead>
-              <TableHead className="w-72 pr-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">{t("dashboard.requests.columns.details")}</TableHead>
+              {isColumnVisible("time") ? <RequestLogTableHead column="time" label={t("dashboard.requests.columns.time")} resizeLabel={resizeLabel(t("dashboard.requests.columns.time"))} className="pl-4" width={columnWidths?.time} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("account") ? <RequestLogTableHead column="account" label={t("dashboard.requests.columns.account")} resizeLabel={resizeLabel(t("dashboard.requests.columns.account"))} width={columnWidths?.account} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("plan") ? <RequestLogTableHead column="plan" label={t("dashboard.requests.columns.plan")} resizeLabel={resizeLabel(t("dashboard.requests.columns.plan"))} width={columnWidths?.plan} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("apiKey") ? <RequestLogTableHead column="apiKey" label={t("dashboard.requests.columns.apiKey")} resizeLabel={resizeLabel(t("dashboard.requests.columns.apiKey"))} width={columnWidths?.apiKey} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("model") ? <RequestLogTableHead column="model" label={t("dashboard.requests.columns.model")} resizeLabel={resizeLabel(t("dashboard.requests.columns.model"))} width={columnWidths?.model} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("transport") ? <RequestLogTableHead column="transport" label={t("dashboard.requests.columns.transport")} resizeLabel={resizeLabel(t("dashboard.requests.columns.transport"))} className="pr-3" width={columnWidths?.transport} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("status") ? <RequestLogTableHead column="status" label={t("dashboard.requests.columns.status")} resizeLabel={resizeLabel(t("dashboard.requests.columns.status"))} className="pl-3" width={columnWidths?.status} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("ttft") ? <RequestLogTableHead column="ttft" label={t("dashboard.requests.columns.ttft")} resizeLabel={resizeLabel(t("dashboard.requests.columns.ttft"))} className="text-right" width={columnWidths?.ttft} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("tps") ? <RequestLogTableHead column="tps" label={t("dashboard.requests.columns.tps")} resizeLabel={resizeLabel(t("dashboard.requests.columns.tps"))} className="text-right" width={columnWidths?.tps} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("tokens") ? <RequestLogTableHead column="tokens" label={t("dashboard.requests.columns.tokens")} resizeLabel={resizeLabel(t("dashboard.requests.columns.tokens"))} className="text-right" width={columnWidths?.tokens} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("cost") ? <RequestLogTableHead column="cost" label={t("dashboard.requests.columns.cost")} resizeLabel={resizeLabel(t("dashboard.requests.columns.cost"))} className="text-right" width={columnWidths?.cost} onWidthChange={onColumnWidthChange} /> : null}
+              {isColumnVisible("details") ? <RequestLogTableHead column="details" label={t("dashboard.requests.columns.details")} resizeLabel={resizeLabel(t("dashboard.requests.columns.details"))} className="pr-4" width={columnWidths?.details} onWidthChange={onColumnWidthChange} /> : null}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -261,20 +424,20 @@ export function RecentRequestsTable({
 
               return (
                 <TableRow key={request.requestId}>
-                  <TableCell className="pl-4 align-top">
+                  {isColumnVisible("time") ? <TableCell className="pl-4 align-top">
                     <div className="leading-tight">
                       <div className="text-sm font-medium">{time.primary}</div>
                       <div className="text-xs text-muted-foreground">{time.secondary}</div>
                     </div>
-                  </TableCell>
-                  <TableCell className="truncate align-top text-sm">
+                  </TableCell> : null}
+                  {isColumnVisible("account") ? <TableCell className="truncate align-top text-sm">
                     {isEmailLabel && blurred ? (
                       <span className="privacy-blur">{accountLabel}</span>
                     ) : (
                       accountLabel
                     )}
-                  </TableCell>
-                  <TableCell className="align-top">
+                  </TableCell> : null}
+                  {isColumnVisible("plan") ? <TableCell className="align-top">
                     {planType ? (
                       <Badge
                         variant="outline"
@@ -285,11 +448,11 @@ export function RecentRequestsTable({
                     ) : (
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
-                  </TableCell>
-                  <TableCell className="truncate align-top text-xs text-muted-foreground">
+                  </TableCell> : null}
+                  {isColumnVisible("apiKey") ? <TableCell className="truncate align-top text-xs text-muted-foreground">
                     {request.apiKeyName || "--"}
-                  </TableCell>
-                  <TableCell className="truncate align-top">
+                  </TableCell> : null}
+                  {isColumnVisible("model") ? <TableCell className="truncate align-top">
                     <div className="leading-tight">
                       <span className="font-mono text-xs">
                         {formatModelLabel(request.model, request.reasoningEffort, visibleServiceTier)}
@@ -305,8 +468,8 @@ export function RecentRequestsTable({
                         </div>
                       ) : null}
                     </div>
-                  </TableCell>
-                  <TableCell className="pr-3 align-top">
+                  </TableCell> : null}
+                  {isColumnVisible("transport") ? <TableCell className="pr-3 align-top">
                     {request.transport ? (
                       <div className="space-y-1">
                         <Badge
@@ -325,22 +488,22 @@ export function RecentRequestsTable({
                     ) : (
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
-                  </TableCell>
-                  <TableCell className="pl-3 align-top">
+                  </TableCell> : null}
+                  {isColumnVisible("status") ? <TableCell className="pl-3 align-top">
                     <Badge
                       variant="outline"
                       className={STATUS_CLASS_MAP[request.status] ?? STATUS_CLASS_MAP.error}
                     >
                       {t(`dashboard.requestStatus.${request.status}`, { defaultValue: REQUEST_STATUS_LABELS[request.status] ?? request.status })}
                     </Badge>
-                  </TableCell>
-                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  </TableCell> : null}
+                  {isColumnVisible("ttft") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {formatCompactElapsed(request.latencyFirstTokenMs) ?? "--"}
-                  </TableCell>
-                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  </TableCell> : null}
+                  {isColumnVisible("tps") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {generationSpeed ?? "--"}
-                  </TableCell>
-                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  </TableCell> : null}
+                  {isColumnVisible("tokens") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     <div className="leading-tight">
                       <div>{formatCompactNumber(request.tokens)}</div>
                       {request.cachedInputTokens != null && request.cachedInputTokens > 0 && (
@@ -349,11 +512,11 @@ export function RecentRequestsTable({
                         </div>
                       )}
                     </div>
-                  </TableCell>
-                  <TableCell className="text-right align-top font-mono text-xs tabular-nums">
+                  </TableCell> : null}
+                  {isColumnVisible("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
                     {formatCurrency(request.costUsd)}
-                  </TableCell>
-                  <TableCell className="pr-4 align-top whitespace-normal">
+                  </TableCell> : null}
+                  {isColumnVisible("details") ? <TableCell className="pr-4 align-top whitespace-normal">
                     {hasError ? (
                       <div className="space-y-2">
                         {request.errorCode ? (
@@ -387,7 +550,7 @@ export function RecentRequestsTable({
                         {t("dashboard.requests.viewDetails")}
                       </Button>
                     )}
-                  </TableCell>
+                  </TableCell> : null}
                 </TableRow>
               );
             })}

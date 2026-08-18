@@ -413,7 +413,10 @@ async def _validate_proxy_pool_id(context: SettingsContext, pool_id: str | None)
 
 async def _get_account_or_error(context: SettingsContext, account_id: str) -> Account:
     account = await context.session.get(Account, account_id)
-    if account is None:
+    # An account marked for background deletion is already deleted from the
+    # operator's point of view: binding mutations must report not-found, as
+    # the synchronous delete did once the row was removed.
+    if account is None or account.delete_requested_at is not None:
         raise DashboardBadRequestError("Account not found", code="account_not_found")
     return account
 

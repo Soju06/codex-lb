@@ -856,3 +856,52 @@ async def test_live_ingestion_kill_switch_disables_publishing(monkeypatch, db_se
     finally:
         await live_ingest.stop_live_usage_ingestor()
         get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_nested_lifespan_stop_does_not_orphan_or_kill_the_outer_ingestor(db_setup) -> None:
+    del db_setup
+
+    # Two app lifespans can be live in one process: the suite's async_client
+    # runs one on the session loop while a test opens a TestClient whose
+    # portal runs another. Each lifespan owns the instance start returned and
+    # stops exactly that instance. Before instance-scoped stop, the nested
+    # startup overwrote the module global, orphaned the outer ingestor as an
+    # unreferenced cycle, and the cyclic GC destroyed its consumer mid-await
+    # ("cannot reuse already awaited coroutine" — issue #1755's integration
+    # signature); the nested shutdown then cleared the global so the outer
+    # shutdown stopped nothing. And a nested shutdown that merely cleared the
+    # registration would leave the still-running outer ingestor deaf: it must
+    # instead restore the outer instance as the current registration.
+    def _pending_consumers() -> list[asyncio.Task[object]]:
+        return [t for t in asyncio.all_tasks() if not t.done() and t.get_name() == "live-usage-ingestor"]
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(_make_account("acc_live_nested", "live-nested@example.com"))
+
+    outer = live_ingest.start_live_usage_ingestor()
+    assert outer is not None
+    inner = live_ingest.start_live_usage_ingestor()
+    assert inner is not None and inner is not outer
+    assert live_ingest._ingestor is inner
+
+    # Nested lifespan shutdown: releases the registration it owns and
+    # restores the still-running outer instance in its place.
+    await live_ingest.stop_live_usage_ingestor(inner)
+    assert live_ingest._ingestor is outer
+    assert live_ingest._displaced_ingestors == []
+    assert outer._consumer is not None and not outer._consumer.done()
+
+    # Outer ingestion RESUMES: a hub publication after the nested exit must
+    # flow to the outer instance and be ingested end to end.
+    live_hub.publish_live_usage(_snapshot(), account_id="acc_live_nested")
+    primary, secondary = await _wait_for_rows("acc_live_nested")
+    assert primary is not None and secondary is not None
+    assert primary.used_percent == pytest.approx(33.0)
+
+    # Outer lifespan shutdown: stops its own instance, clears the restored
+    # registration, and no consumer survives for the suite fence.
+    await live_ingest.stop_live_usage_ingestor(outer)
+    assert live_ingest._ingestor is None
+    assert live_hub._publisher is None
+    assert _pending_consumers() == []

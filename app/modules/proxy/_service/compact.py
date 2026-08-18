@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, NoReturn, Protocol, TypeVar, cast
 
 import aiohttp
+from pydantic import ValidationError
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import ResetPreferenceWindow, RoutingStrategy, failover_decision
@@ -23,6 +24,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
+from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
 from app.core.resilience.network_recovery import ProcessNetworkRecovery
@@ -30,7 +32,7 @@ from app.core.types import JsonValue
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.retry import backoff_seconds
-from app.db.models import Account, DashboardSettings, StickySessionKind
+from app.db.models import Account, AccountStatus, DashboardSettings, StickySessionKind
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyRequestUsageBudget,
@@ -51,7 +53,10 @@ from app.modules.proxy.affinity import (
     _thread_codex_session_affinity,
 )
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.continuity import resolve_required_account_id
+from app.modules.proxy.continuity import (
+    resolve_required_account_id,
+    without_http_bridge_session_affinity_headers,
+)
 from app.modules.proxy.helpers import (
     _header_account_id,
     _normalize_error_code,
@@ -63,6 +68,11 @@ from app.modules.proxy.load_balancer import (
     AccountLease,
     AccountSelection,
     effective_account_concurrency_caps,
+)
+from app.modules.proxy.replay_safety import (
+    project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_suffix_retains_prior_output,
+    responses_payload_is_account_neutral_fresh_replay,
 )
 from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.work_admission import AdmissionLease, WorkAdmissionController
@@ -138,6 +148,8 @@ class _CompactServiceProtocol(Protocol):
         api_key: ApiKeyData | None,
         fail_on_missing: bool = True,
     ) -> str | None: ...
+
+    async def _compact_owner_selection_loss_is_quota_caused(self, account_id: str) -> bool: ...
 
     async def _ensure_fresh_with_budget(
         self, account: Account, *, force: bool = False, timeout_seconds: float | None = None
@@ -480,7 +492,160 @@ def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str 
     return normalize(payload.service_tier)
 
 
+# Account statuses that prove the pinned owner's selection-time loss is caused
+# by upstream quota/rate-limit state rather than authentication, deactivation,
+# or an operator pause. Only these authorize account-neutral replay recovery.
+_COMPACT_OWNER_QUOTA_UNAVAILABLE_STATUSES = (
+    AccountStatus.RATE_LIMITED,
+    AccountStatus.QUOTA_EXCEEDED,
+)
+
+
+def _compact_replay_history_retains_prior_output(input_items: list[JsonValue]) -> bool:
+    """Prove the carried history retains prior assistant output before new input.
+
+    A self-contained account-neutral ``input`` is not by itself a full resend:
+    a client could send only the turns after ``previous_response_id`` (for
+    example two fresh user messages) and rely on the owner account to hold the
+    earlier conversation, so replaying without the anchor would compact a
+    truncated history. Without durable prefix metadata for the compact surface,
+    the strongest client-side evidence of a full resend is the same
+    retained-prior-output shape the HTTP bridge replay path trusts: the input
+    must parse as a clean transcript whose final segment is the previous
+    response's completed assistant output followed only by fresh client input.
+    The split is anchored at the last assistant message so the shared suffix
+    walk proves exactly that segment; anything it cannot prove stays
+    owner-bound.
+
+    This is the evidence ceiling of the #1490 rescope: completeness relative to
+    the anchored conversation is not provable from the payload alone, and the
+    durable prefix metadata that could prove it is deliberately not consulted
+    here. A delta resend that itself carries a completed assistant exchange
+    ahead of the fresh input is indistinguishable from a full resend and is
+    recovered as the client's authoritative local history — the same trust the
+    shared account-neutral fresh-replay rules already grant a normal turn that
+    abandons an unavailable owner. The rejected shapes below are the ones the
+    transcript walk can actually refute.
+    """
+
+    last_assistant_index: int | None = None
+    for index in range(len(input_items) - 1, -1, -1):
+        item = input_items[index]
+        if isinstance(item, dict) and item.get("type") in (None, "message") and item.get("role") == "assistant":
+            last_assistant_index = index
+            break
+    # ``responses_input_suffix_retains_prior_output`` requires a non-empty
+    # stored prefix, so a history that opens with (or lacks) assistant output
+    # cannot be proven and stays owner-bound.
+    if last_assistant_index is None or last_assistant_index == 0:
+        return False
+    # The projection is an identity transform for input that already passed
+    # the account-neutral fresh-replay gate (no server-assigned ids, no
+    # reasoning or omitted bookkeeping types survive that gate), but it is the
+    # shared authority for recognizing the canonical Responses-Lite developer
+    # instruction behind an ``additional_tools`` bundle — without that index
+    # the suffix walk would reject every Lite full resend.
+    projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=last_assistant_index,
+    )
+    if projection is None:
+        return False
+    return responses_input_suffix_retains_prior_output(
+        projection.input_items,
+        stored_count=projection.stored_prefix_count,
+        canonical_lite_developer_index=projection.canonical_lite_developer_index,
+    )
+
+
+def _compact_account_neutral_replay_payload(
+    payload: ResponsesCompactRequest,
+) -> ResponsesCompactRequest | None:
+    """Return the anchor-free replay payload for a verified full resend.
+
+    A compact request pinned only by ``previous_response_id`` may move off an
+    unselectable owner account when the history it carries is provably
+    account-neutral: the upstream-bound payload without the anchor must pass
+    the shared fresh-replay validation, so no encrypted or compaction state,
+    server-assigned item ids, account-scoped file/container handles,
+    conversation/prompt handles, or hosted/MCP state can reach the replacement
+    account.
+
+    Neutrality is checked on the serialized upstream-bound payload
+    (``to_payload``), never on the request model, matching how the HTTP bridge
+    replay paths apply the shared gate to pre-transport serializations. The
+    compact transport applies two further mutations after this serialization —
+    the Responses-Lite ``reasoning.context`` control and inline image
+    fetching — both proxy-injected, account-agnostic, and applied identically
+    to the owner send and the replay send, so they are not part of the client
+    payload being proven. The serialized history must additionally be a
+    complete resend. ``to_payload`` can still drop history on the wire: it
+    strips poisoned local-compact fallback messages together with their
+    trailing encrypted compaction item, and it trims oversized inputs down to a
+    head, a trim marker, and a tail. Both remain multi-item account-neutral
+    lists. Sending either to a replacement account without the anchor would
+    compact an incomplete conversation, because only the owner can resolve the
+    omitted context from the dropped anchor. So the wire input must be
+    item-for-item identical to the validated request input, must still carry
+    more than one item, and must retain prior assistant output ahead of the new
+    client input (see ``_compact_replay_history_retains_prior_output``).
+    """
+
+    previous_response_id = getattr(payload, "previous_response_id", None)
+    if not isinstance(previous_response_id, str) or not previous_response_id.strip():
+        return None
+    if not isinstance(payload.input, list):
+        return None
+    replay_source = payload.model_dump(mode="json", exclude_none=True)
+    replay_source.pop("previous_response_id", None)
+    request_input = replay_source.get("input")
+    if not isinstance(request_input, list) or len(request_input) <= 1:
+        return None
+    try:
+        replay_payload = ResponsesCompactRequest.model_validate(replay_source)
+        replay_wire_payload = replay_payload.to_payload()
+    except (ValidationError, ClientPayloadError):
+        return None
+    replay_wire_input = replay_wire_payload.get("input")
+    if not isinstance(replay_wire_input, list) or len(replay_wire_input) <= 1:
+        return None
+    if replay_wire_input != request_input:
+        return None
+    if not responses_payload_is_account_neutral_fresh_replay(replay_wire_payload):
+        return None
+    if not _compact_replay_history_retains_prior_output(cast(list[JsonValue], replay_wire_input)):
+        return None
+    return replay_payload
+
+
 class _CompactMixin:
+    async def _compact_owner_selection_loss_is_quota_caused(self, account_id: str) -> bool:
+        """Return whether the pinned owner is unselectable because of quota state.
+
+        Account-neutral replay off a pinned previous-response owner is legal
+        only for owner loss the owner's quota state caused. At selection time
+        that evidence is the owner's own persisted status: ``RATE_LIMITED`` or
+        ``QUOTA_EXCEEDED`` is the same upstream usage-exhaustion state the
+        selector consulted. Authentication loss (``REAUTH_REQUIRED``,
+        ``DEACTIVATED``), operator pauses, local capacity caps on an ``ACTIVE``
+        account, and a failed lookup all stay owner-bound.
+        """
+
+        proxy = cast(_CompactServiceProtocol, self)
+        try:
+            async with proxy._repo_factory() as repos:
+                account = await repos.accounts.get_by_id_fresh(account_id)
+                # Read inside the repository scope: the session expires ORM
+                # attributes when it closes.
+                status = account.status if account is not None else None
+        except Exception:
+            logger.warning(
+                "Compact previous-response owner status lookup failed; keeping the request owner-bound",
+                exc_info=True,
+            )
+            return False
+        return status in _COMPACT_OWNER_QUOTA_UNAVAILABLE_STATUSES
+
     async def _resolve_compact_turn_state_owner(
         self,
         *,
@@ -1063,6 +1228,15 @@ class _CompactMixin:
             last_exc: ProxyResponseError | None = None
             network_recovery = ProcessNetworkRecovery(transport="compact", request_id=request_id)
             excluded_account_ids: set[str] = set()
+            # Account-neutral replay off a pinned previous-response owner is only
+            # legal for owner loss the owner's quota state caused: either the
+            # owner was never usable at selection time, or it was excluded
+            # mid-request by a pre-visible quota / rate-limit failure. Post-
+            # selection authentication, refresh, transport, and transient
+            # failures also exclude the owner, and those keep their existing
+            # owner-bound handling instead of moving the history to another
+            # account.
+            owner_quota_failover_eligible = False
             require_security_work_authorized = False
             estimated_lease_tokens = _estimated_lease_tokens_from_request_usage_budget(
                 estimate_api_key_request_usage(payload)
@@ -1118,6 +1292,136 @@ class _CompactMixin:
                             fallback_on_preferred_account_unavailable=preferred_account_id is None,
                         )
                         account = selection.account
+                    if (
+                        account is None
+                        and previous_response_preferred_account_id is not None
+                        and preferred_account_id == previous_response_preferred_account_id
+                    ):
+                        # Narrowed alias: the structural gate above proves the
+                        # selection pin names the previous-response owner.
+                        unavailable_owner_account_id = previous_response_preferred_account_id
+                        # The pinned previous-response owner cannot be selected.
+                        # A full resend that is provably account-neutral on the
+                        # wire needs nothing from the owner, so the stale anchor
+                        # can be dropped and the compact can move to a healthy
+                        # account instead of wedging the session until the
+                        # owner's quota window resets — the same selection-time
+                        # escape normal turns already have. Turn-state and file
+                        # pins keep the request owner-bound (the first blocked
+                        # reason below), but their selection failure still
+                        # records the fail-closed outcome on the common path.
+                        recovery_blocked_reason: str | None = None
+                        if turn_state_owner_account_id is not None or rewritten_file_account_id is not None:
+                            # The previous-response owner is also pinned by a
+                            # turn-state or input-file owner. Those pins are
+                            # account ownership this recovery must never move,
+                            # so the request stays owner-bound regardless of
+                            # the owner's quota state — but the unavailable
+                            # owner still fails closed and must be recorded.
+                            recovery_blocked_reason = "additional_owner_pins"
+                        elif previous_response_lookup_session_id is not None:
+                            # A session/turn-state identity on the request can
+                            # bind live or durable HTTP-bridge continuity rows
+                            # that still name the lost owner. Without the
+                            # rebinding machinery this recovery deliberately
+                            # avoids, moving the history would strand that
+                            # continuity, so session-scoped requests stay
+                            # owner-bound.
+                            recovery_blocked_reason = "session_scoped_continuity"
+                        elif (
+                            affinity.kind == StickySessionKind.CODEX_SESSION
+                            or affinity.legacy_selection_key is not None
+                            or affinity.require_unambiguous_account
+                        ):
+                            # CODEX_SESSION affinity (turn-state, thread, or
+                            # session-header keys, including raw legacy rows)
+                            # is session ownership this recovery would have to
+                            # rebind, so those requests stay owner-bound.
+                            # PROMPT_CACHE / STICKY_THREAD keys are soft cache
+                            # locality the sticky selection path already falls
+                            # back from on an unavailable account — the compact
+                            # routes derive one unconditionally — so they gate
+                            # nothing here and the recovery reselection flows
+                            # through that same existing sticky handling.
+                            recovery_blocked_reason = "session_affinity"
+                        elif (
+                            not owner_quota_failover_eligible
+                            and selection.error_code == "preferred_account_unavailable"
+                        ):
+                            # The selector skipped the owner before evaluating
+                            # its availability (API-key assignment scope,
+                            # single-account routing, or an in-request
+                            # exclusion that was not a pre-visible quota
+                            # failover). Policy-caused loss must not become
+                            # replay-eligible just because the owner's
+                            # persisted status happens to be quota-exhausted.
+                            recovery_blocked_reason = "owner_skipped_by_policy"
+                        elif not (
+                            owner_quota_failover_eligible
+                            or (
+                                unavailable_owner_account_id not in excluded_account_ids
+                                and await proxy._compact_owner_selection_loss_is_quota_caused(
+                                    unavailable_owner_account_id
+                                )
+                            )
+                        ):
+                            recovery_blocked_reason = "non_quota_owner_loss"
+                        replay_payload: ResponsesCompactRequest | None = None
+                        if recovery_blocked_reason is None:
+                            replay_payload = _compact_account_neutral_replay_payload(payload)
+                            if replay_payload is None:
+                                recovery_blocked_reason = "history_not_account_neutral"
+                        if replay_payload is None:
+                            logger.info(
+                                "Compact previous-response owner unavailable; staying owner-bound "
+                                "request_id=%s owner_account_id=%s blocked_reason=%s selection_error_code=%s",
+                                request_id,
+                                preferred_account_id,
+                                recovery_blocked_reason,
+                                selection.error_code,
+                            )
+                            _record_continuity_fail_closed(
+                                surface="compact",
+                                reason="owner_account_unavailable",
+                                previous_response_id=previous_response_id
+                                if isinstance(previous_response_id, str)
+                                else None,
+                                session_id=previous_response_lookup_session_id,
+                                upstream_error_code=selection.error_code,
+                            )
+                        else:
+                            logger.warning(
+                                "Compact previous-response owner unavailable; replaying verified "
+                                "account-neutral full resend request_id=%s owner_account_id=%s "
+                                "selection_error_code=%s",
+                                request_id,
+                                preferred_account_id,
+                                selection.error_code,
+                            )
+                            excluded_account_ids.add(unavailable_owner_account_id)
+                            payload = replay_payload
+                            filtered = without_http_bridge_session_affinity_headers(filtered)
+                            preferred_account_id = None
+                            previous_response_preferred_account_id = None
+                            selection = await proxy._select_account_with_budget_compatible(
+                                deadline,
+                                request_id=request_id,
+                                kind="compact",
+                                api_key=api_key,
+                                affinity_policy=affinity,
+                                prefer_earlier_reset_accounts=prefer_earlier_reset,
+                                prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
+                                routing_strategy=routing_strategy,
+                                model=payload.model,
+                                service_tier=payload.service_tier,
+                                exclude_account_ids=excluded_account_ids,
+                                preferred_account_id=None,
+                                require_security_work_authorized=require_security_work_authorized,
+                                lease_kind="response_create",
+                                estimated_lease_tokens=estimated_lease_tokens,
+                                fallback_on_preferred_account_unavailable=True,
+                            )
+                            account = selection.account
                     if account is not None:
                         pass
                     elif last_exc is not None:
@@ -1713,6 +2017,14 @@ class _CompactMixin:
                             action,
                         )
                         if action == "failover_next":
+                            if account.id == preferred_account_id and classified["failure_class"] in (
+                                "rate_limit",
+                                "quota",
+                            ):
+                                # Only a pre-visible quota / rate-limit exclusion
+                                # of the pinned owner makes account-neutral replay
+                                # recovery eligible for the remaining attempts.
+                                owner_quota_failover_eligible = True
                             last_exc = exc
                             excluded_account_ids.add(account.id)
                             await record_or_defer_stream_health(

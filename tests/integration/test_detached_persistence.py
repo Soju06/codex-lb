@@ -144,6 +144,7 @@ async def test_failed_detached_settlement_retries_failed_release_until_persisted
                 output_tokens=6,
             ),
         )
+        assert reservation is not None
 
     original_get_reservation = ApiKeysRepository.get_usage_reservation
     reservation_read_attempts = 0
@@ -210,6 +211,76 @@ async def test_failed_detached_settlement_retries_failed_release_until_persisted
     assert limits[0].current_value == 0
     assert reservation_read_attempts == 3
     assert retry_was_tracked is True
+
+
+@pytest.mark.asyncio
+async def test_settlement_release_and_heartbeat_noop_without_reservation():
+    """A limit-free admission yields no reservation; settlement, release, and
+    heartbeat must no-op without opening a repository session."""
+    from contextlib import asynccontextmanager
+    from typing import cast
+
+    from app.core.utils.time import utcnow
+    from app.modules.api_keys.service import ApiKeyData
+
+    factory_uses = 0
+
+    @asynccontextmanager
+    async def repo_factory():
+        nonlocal factory_uses
+        factory_uses += 1
+        yield object()
+
+    service = proxy_service_module.ProxyService(cast(proxy_service_module.ProxyRepoFactory, repo_factory))
+    api_key = ApiKeyData(
+        id="key_unlimited",
+        name="unlimited",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    settlement = proxy_service_module._StreamSettlement(
+        status="success",
+        model="gpt-5.5",
+        input_tokens=4,
+        output_tokens=6,
+    )
+
+    assert (
+        await service._settle_stream_api_key_usage(
+            api_key,
+            None,
+            settlement,
+            request_id="req_no_reservation",
+        )
+        is True
+    )
+    assert settlement.usage_settlement_transferred is False
+    await service._settle_compact_api_key_usage(
+        api_key=api_key,
+        api_key_reservation=None,
+        response=None,
+        request_service_tier=None,
+    )
+    await service._release_websocket_reservation(None)
+    assert (
+        await service._maybe_touch_api_key_reservation(
+            api_key=api_key,
+            reservation=None,
+            last_touch_at=123.0,
+            request_id="req_no_reservation",
+            surface="stream",
+        )
+        == 123.0
+    )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert factory_uses == 0
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from starlette.types import Message, Receive, Scope, Send
 import app.core.auth.dependencies as auth_dependencies
 import app.core.request_locality as request_locality
 import app.modules.proxy.api as proxy_api_module
+import app.modules.proxy.request_policy as proxy_request_policy
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.exceptions import ProxyAuthError
@@ -393,7 +394,7 @@ async def test_stream_responses_prefers_forwarded_downstream_turn_state(monkeypa
 
     def fake_apply_api_key_enforcement(_payload, _api_key, *, prohibit_fast_mode=False):
         assert prohibit_fast_mode is False
-        return None
+        return proxy_request_policy.ApiKeyEnforcementResult(False, None)
 
     def fake_validate_model_access(_api_key, _model):
         return None
@@ -557,7 +558,7 @@ async def test_stream_responses_does_not_release_forwarded_reservation_on_intern
 
     def fake_apply_api_key_enforcement(_payload, _api_key, *, prohibit_fast_mode=False):
         assert prohibit_fast_mode is False
-        return None
+        return proxy_request_policy.ApiKeyEnforcementResult(False, None)
 
     def fake_validate_model_access(_api_key, _model):
         return None

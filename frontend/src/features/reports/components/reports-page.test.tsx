@@ -876,6 +876,7 @@ describe("ReportsPage", () => {
               cachedInputTokens: 50,
               costUsd: 0.15,
               activeAccounts: 1,
+              cancelledCount: 0,
               errorCount: 0,
               medianTtftMs: 0,
               medianTps: 0,
@@ -903,6 +904,6 @@ describe("ReportsPage", () => {
 
     expect(createObjectURL).toHaveBeenCalledOnce();
     const csvContent = await blobText();
-    expect(csvContent).toContain("2030-01-15,42,2,1000,200,50,0.1500,1,0");
+    expect(csvContent).toContain("2030-01-15,42,2,1000,200,50,0.1500,1,0,0");
   });
 });

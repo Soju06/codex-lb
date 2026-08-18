@@ -641,85 +641,43 @@ class LoadBalancer:
                     account for account in selection_inputs.accounts if bool(account.security_work_authorized)
                 ]
                 if selection_inputs.accounts and not authorized_accounts:
-                    return _SelectionInputs(
+                    return replace(
+                        selection_inputs,
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
-                        latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=authorized_owner_candidates,
                         sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
-                        standard_latest_primary=selection_inputs.standard_latest_primary,
-                        standard_latest_secondary=selection_inputs.standard_latest_secondary,
-                        standard_latest_monthly=selection_inputs.standard_latest_monthly,
-                        quota_planner_settings=selection_inputs.quota_planner_settings,
-                        runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
-                selection_inputs = _SelectionInputs(
+                selection_inputs = replace(
+                    selection_inputs,
                     accounts=authorized_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=authorized_owner_candidates,
                     sticky_mutation_authority_account_ids=authorized_mutation_account_ids,
-                    standard_latest_primary=selection_inputs.standard_latest_primary,
-                    standard_latest_secondary=selection_inputs.standard_latest_secondary,
-                    standard_latest_monthly=selection_inputs.standard_latest_monthly,
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
-                    ),
                 )
             if excluded_ids and selection_inputs.accounts:
                 filtered_accounts = [account for account in selection_inputs.accounts if account.id not in excluded_ids]
                 if require_security_work_authorized and not filtered_accounts:
-                    return _SelectionInputs(
+                    return replace(
+                        selection_inputs,
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
-                        latest_monthly=selection_inputs.latest_monthly,
                         continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
                         sticky_mutation_authority_account_ids=(
                             selection_inputs.effective_sticky_mutation_authority_account_ids
                         ),
-                        standard_latest_primary=selection_inputs.standard_latest_primary,
-                        standard_latest_secondary=selection_inputs.standard_latest_secondary,
-                        standard_latest_monthly=selection_inputs.standard_latest_monthly,
-                        quota_planner_settings=selection_inputs.quota_planner_settings,
-                        runtime_accounts=selection_inputs.runtime_accounts,
                         error_message="No accounts marked as authorized for security work",
                         error_code="no_security_work_authorized_accounts",
                     )
-                selection_inputs = _SelectionInputs(
+                selection_inputs = replace(
+                    selection_inputs,
                     accounts=filtered_accounts,
-                    latest_primary=selection_inputs.latest_primary,
-                    latest_secondary=selection_inputs.latest_secondary,
-                    latest_monthly=selection_inputs.latest_monthly,
                     continuity_owner_candidates=selection_inputs.effective_continuity_owner_candidates,
                     sticky_mutation_authority_account_ids=(
                         selection_inputs.effective_sticky_mutation_authority_account_ids
-                    ),
-                    standard_latest_primary=selection_inputs.standard_latest_primary,
-                    standard_latest_secondary=selection_inputs.standard_latest_secondary,
-                    standard_latest_monthly=selection_inputs.standard_latest_monthly,
-                    quota_planner_settings=selection_inputs.quota_planner_settings,
-                    runtime_accounts=selection_inputs.runtime_accounts,
-                    error_message=selection_inputs.error_message,
-                    error_code=selection_inputs.error_code,
-                    ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
-                    ignore_standard_quota_status=selection_inputs.ignore_standard_quota_status,
-                    persist_standard_quota_status=selection_inputs.persist_standard_quota_status,
-                    routing_policy_override=selection_inputs.routing_policy_override,
-                    quota_admitted_catalog_omission_account_ids=(
-                        selection_inputs.quota_admitted_catalog_omission_account_ids
                     ),
                 )
             if required_continuity_owner:

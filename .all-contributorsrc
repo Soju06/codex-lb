@@ -1291,6 +1291,17 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "zenasharp",
+      "name": "zenasharp",
+      "avatar_url": "https://avatars.githubusercontent.com/u/170236008?v=4",
+      "profile": "https://github.com/zenasharp",
+      "contributions": [
+        "code",
+        "test",
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

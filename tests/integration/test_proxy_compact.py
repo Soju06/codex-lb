@@ -794,7 +794,6 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     assert body["id"] == "resp_compact_summary_1"
     assert body["output"] == [
         {
-            "id": "cmp_msg_compact_summary_1",
             "type": "compaction",
             "status": "completed",
             "encrypted_content": "enc_compact_summary_1",
@@ -1639,9 +1638,7 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
     }
     expected_compact_window = {
         **compact_window,
-        "output": [
-            {**compact_window["output"][0], "id": "cmp_msg_compact_round_trip"},
-        ],
+        "output": [{"type": "compaction", "encrypted_content": "preserve me exactly"}],
     }
     seen_inputs: list[object] = []
 

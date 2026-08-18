@@ -423,7 +423,7 @@ def test_compact_response_output_item_preserves_summary_item_id() -> None:
     }
 
 
-def test_compact_response_output_item_normalizes_invalid_id_prefix() -> None:
+def test_compact_response_output_item_drops_invalid_id_prefix() -> None:
     payload = CompactResponsePayload.model_validate(
         {
             "object": "response.compaction",
@@ -438,7 +438,6 @@ def test_compact_response_output_item_normalizes_invalid_id_prefix() -> None:
     )
 
     assert proxy_api_module._compact_response_output_item(payload) == {
-        "id": "cmp_msg_compact_context",
         "type": "compaction",
         "encrypted_content": "COMPACT_CONTEXT",
     }

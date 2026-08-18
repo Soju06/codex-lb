@@ -445,7 +445,7 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     assert response.id == "resp_compact_1"
     assert response.model_extra is not None
     assert response.model_extra["output"] == [
-        {"id": "cmp_msg_compact_1", "type": "compaction", "status": "completed", "encrypted_content": "enc_compact_1"}
+        {"type": "compaction", "status": "completed", "encrypted_content": "enc_compact_1"}
     ]
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
@@ -476,7 +476,6 @@ async def test_compact_responses_recovers_terminal_item_without_output_index(
     assert response.model_extra is not None
     assert response.model_extra["output"] == [
         {
-            "id": "cmp_msg_compact_without_index",
             "type": "compaction",
             "status": "completed",
             "encrypted_content": "enc_compact_without_index",
@@ -552,7 +551,7 @@ async def test_compact_responses_message_fallback_selects_last_message(
     assert response.id == "resp_compact_messages"
     assert response.model_extra is not None
     assert response.model_extra["output"] == [
-        {"id": "msg_summary", "type": "compaction", "status": "completed", "encrypted_content": "enc_summary"}
+        {"type": "compaction", "status": "completed", "encrypted_content": "enc_summary"}
     ]
 
 

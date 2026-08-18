@@ -875,6 +875,7 @@ describe("ReportsPage", () => {
               conversations: 2,
               inputTokens: 1000,
               outputTokens: 200,
+              reasoningTokens: 0,
               cachedInputTokens: 50,
               costUsd: 0.15,
               activeAccounts: 1,
@@ -906,6 +907,6 @@ describe("ReportsPage", () => {
 
     expect(createObjectURL).toHaveBeenCalledOnce();
     const csvContent = await blobText();
-    expect(csvContent).toContain("2030-01-15,42,2,1000,200,50,0.1500,1,0,0");
+    expect(csvContent).toContain("2030-01-15,42,2,1000,200,0,50,0.1500,1,0,0");
   });
 });

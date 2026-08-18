@@ -29,6 +29,7 @@ async def get_reports(
     end_date: Annotated[date | None, Query()] = None,
     report_timezone: Annotated[str | None, Query(alias="timezone")] = None,
     account_id: Annotated[list[str] | None, Query()] = None,
+    api_key_id: Annotated[list[str] | None, Query()] = None,
     model: Annotated[str | None, Query()] = None,
     useragent_group: Annotated[str | None, Query()] = None,
 ) -> ReportsResponse:
@@ -38,6 +39,7 @@ async def get_reports(
             end_date=end_date,
             report_timezone=report_timezone,
             account_ids=account_id,
+            api_key_ids=api_key_id,
             model=model,
             useragent_group=useragent_group,
         )

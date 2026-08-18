@@ -96,6 +96,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> list[DailyReportAggregateRow]:
         window_days = (end_date - start_date).days + 1
         if window_days > MAX_DAILY_REPORT_DAYS:
@@ -108,14 +109,14 @@ class ReportsRepository:
         # unfiltered per-day conversation counts are served from the
         # conversation satellite (one extra statement per batch, replacing
         # the raw COUNT(DISTINCT ...) column in the main statement).
-        use_rollup = not (account_ids or model or useragent_group)
+        use_rollup = not (account_ids or model or useragent_group or api_key_ids)
         rows: list[DailyReportAggregateRow] = []
         # SQLite caps compound SELECTs at 500 terms, so long report ranges are
         # executed in chunks instead of building a single oversized UNION ALL.
         for day_ranges_batch in batched(day_ranges, _SQLITE_COMPOUND_SELECT_LIMIT):
             day_ranges_list = list(day_ranges_batch)
             speed_result = await self._session.execute(
-                _daily_speed_medians_stmt(day_ranges_list, account_ids, model, useragent_group)
+                _daily_speed_medians_stmt(day_ranges_list, account_ids, model, useragent_group, api_key_ids)
             )
             speed_values = {
                 speed_row.report_date: (
@@ -139,7 +140,12 @@ class ReportsRepository:
 
             result = await self._session.execute(
                 _daily_rows_stmt(
-                    day_ranges_list, account_ids, model, useragent_group, include_conversations=not use_rollup
+                    day_ranges_list,
+                    account_ids,
+                    model,
+                    useragent_group,
+                    api_key_ids,
+                    include_conversations=not use_rollup,
                 )
             )
             rows.extend(
@@ -171,15 +177,16 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> SummaryAggregateRow:
-        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group)
+        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids)
 
         # The conversation satellite carries no model/useragent dimensions
         # and pre-merges accounts, so only the unfiltered read is served from
         # it (rollup + raw tail, split out of the single statement the same
         # way the dashboard activity read splits its conversation metrics);
         # filtered summaries keep the legacy raw single statement.
-        use_rollup = not (account_ids or model or useragent_group)
+        use_rollup = not (account_ids or model or useragent_group or api_key_ids)
         columns = [
             func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
             func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
@@ -231,9 +238,10 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> list[ModelAggregateRow]:
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids),
             RequestLog.model.is_not(None),
         ]
 
@@ -264,8 +272,9 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> list[AccountAggregateRow]:
-        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group)
+        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids)
 
         stmt = (
             select(
@@ -305,10 +314,11 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> list[UserAgentAggregateRow]:
         useragent_group_bucket = _useragent_group_bucket_expr()
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids),
             or_(RequestLog.useragent_group.is_(None), func.trim(RequestLog.useragent_group) != ""),
         ]
 
@@ -339,9 +349,10 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> int:
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
+            *_report_conditions(start_date, end_date, account_ids, model, useragent_group, api_key_ids),
             RequestLog.account_id.is_not(None),
         ]
 
@@ -355,6 +366,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> datetime | None:
         conditions = [_normal_traffic_clause()]
         if account_ids:
@@ -364,6 +376,8 @@ class ReportsRepository:
         useragent_group_clause = _useragent_group_filter_clause(useragent_group)
         if useragent_group_clause is not None:
             conditions.append(useragent_group_clause)
+        if api_key_ids:
+            conditions.append(RequestLog.api_key_id.in_(api_key_ids))
 
         result = await self._session.execute(select(func.min(RequestLog.requested_at)).where(and_(*conditions)))
         value = result.scalar_one_or_none()
@@ -376,6 +390,7 @@ def _report_conditions(
     account_ids: list[str] | None,
     model: str | None,
     useragent_group: str | None,
+    api_key_ids: list[str] | None = None,
 ) -> list:
     conditions = [
         RequestLog.requested_at >= start_date,
@@ -389,6 +404,8 @@ def _report_conditions(
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     if useragent_group_clause is not None:
         conditions.append(useragent_group_clause)
+    if api_key_ids:
+        conditions.append(RequestLog.api_key_id.in_(api_key_ids))
     return conditions
 
 
@@ -435,6 +452,7 @@ def _daily_speed_medians_stmt(
     account_ids: list[str] | None,
     model: str | None,
     useragent_group: str | None,
+    api_key_ids: list[str] | None = None,
 ):
     useragent_group_clause = _useragent_group_filter_clause(useragent_group)
     day_ranges_cte = _day_ranges_cte(day_ranges)
@@ -447,6 +465,7 @@ def _daily_speed_medians_stmt(
             *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
             *([RequestLog.model == model] if model else []),
             *([useragent_group_clause] if useragent_group_clause is not None else []),
+            *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
         ),
     )
     token_count = RequestLog.output_tokens - func.coalesce(RequestLog.reasoning_tokens, 0)
@@ -579,6 +598,7 @@ def _daily_rows_stmt(
     account_ids: list[str] | None,
     model: str | None,
     useragent_group: str | None,
+    api_key_ids: list[str] | None = None,
     *,
     include_conversations: bool = True,
 ):
@@ -615,6 +635,7 @@ def _daily_rows_stmt(
                     *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
                     *([RequestLog.model == model] if model else []),
                     *([useragent_group_clause] if useragent_group_clause is not None else []),
+                    *([RequestLog.api_key_id.in_(api_key_ids)] if api_key_ids else []),
                 ),
             )
         )

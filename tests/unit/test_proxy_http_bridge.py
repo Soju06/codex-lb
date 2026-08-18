@@ -844,6 +844,48 @@ def _make_eventless_http_bridge_owner(
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_sibling", [False, True])
+async def test_http_bridge_eventless_anchored_precreated_retry_stays_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    include_sibling: bool,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    owner = _make_eventless_http_bridge_owner()
+    owner.request_text = '{"type":"response.create","input":"continue"}'
+    owner.previous_response_id = "resp-parent"
+    pending_requests = deque([owner])
+    queued_request_count = 1
+
+    if include_sibling:
+        sibling = proxy_service._WebSocketRequestState(
+            request_id="req-created-sibling",
+            model="gpt-5.6-sol",
+            service_tier=None,
+            reasoning_effort="high",
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            transport="http",
+            response_id="resp-created-sibling",
+        )
+        pending_requests.append(sibling)
+        queued_request_count = 2
+
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "hard-anchor", None),
+        pending_requests=pending_requests,
+        queued_request_count=queued_request_count,
+    )
+    session.last_upstream_close_code = 1011
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()))
+    reconnect = AsyncMock()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is False
+    reconnect.assert_not_awaited()
+
+
 class _SilentEventlessUpstream:
     """Upstream double that never produces a response event, for eventless-timeout tests."""
 

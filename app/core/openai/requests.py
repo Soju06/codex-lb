@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call_item
@@ -612,6 +612,8 @@ class ResponsesTextControls(BaseModel):
 
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
+    _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -739,6 +741,7 @@ class ResponsesRequest(BaseModel):
 
 class ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -1769,6 +1772,7 @@ def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:
 
 def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     reasoning_effort = payload.pop("reasoningEffort", None)
+    snake_case_reasoning_effort = payload.pop("reasoning_effort", None)
     reasoning_summary = payload.pop("reasoningSummary", None)
     provider_thinking = payload.pop("thinking", None)
     provider_enable_thinking = payload.pop("enable_thinking", None)
@@ -1779,8 +1783,20 @@ def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     else:
         reasoning_map = {}
 
-    if isinstance(reasoning_effort, str) and "effort" not in reasoning_map:
-        reasoning_map["effort"] = reasoning_effort
+    existing_effort = reasoning_map.get("effort")
+    if isinstance(existing_effort, str) and not existing_effort.strip():
+        reasoning_map.pop("effort")
+
+    alias_effort = next(
+        (
+            candidate.strip()
+            for candidate in (reasoning_effort, snake_case_reasoning_effort)
+            if isinstance(candidate, str) and candidate.strip()
+        ),
+        None,
+    )
+    if alias_effort is not None and "effort" not in reasoning_map:
+        reasoning_map["effort"] = alias_effort
     if isinstance(reasoning_summary, str) and "summary" not in reasoning_map:
         reasoning_map["summary"] = reasoning_summary
 
@@ -1804,15 +1820,14 @@ def _normalize_thinking_alias(
     enable_thinking: JsonValue,
 ) -> MutableJsonObject | None:
     if isinstance(thinking, bool):
-        return {"effort": "medium"} if thinking else None
+        if thinking:
+            return {"effort": "medium"}
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+        if normalized in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
             return {"effort": normalized}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}
-        if normalized in {"disabled", "false", "off"}:
-            return None
     thinking_mapping = _json_mapping_or_none(thinking)
     if thinking_mapping is not None:
         normalized: MutableJsonObject = {}
@@ -1822,19 +1837,19 @@ def _normalize_thinking_alias(
             normalized["effort"] = effort.strip().lower()
         if isinstance(summary, str) and summary.strip():
             normalized["summary"] = summary.strip()
+        thinking_type = thinking_mapping.get("type")
+        if "effort" not in normalized and isinstance(thinking_type, str) and thinking_type.strip().lower() == "enabled":
+            normalized["effort"] = "medium"
+        enabled = thinking_mapping.get("enabled")
+        if "effort" not in normalized and enabled is True:
+            normalized["effort"] = "medium"
+        if "effort" not in normalized and enable_thinking is True:
+            normalized["effort"] = "medium"
         if normalized:
             return normalized
-        thinking_type = thinking_mapping.get("type")
-        if isinstance(thinking_type, str):
-            normalized_type = thinking_type.strip().lower()
-            if normalized_type == "enabled":
-                return {"effort": "medium"}
-            if normalized_type == "disabled":
-                return None
-        enabled = thinking_mapping.get("enabled")
-        if isinstance(enabled, bool):
-            return {"effort": "medium"} if enabled else None
 
+    # Disabled `thinking` spellings are inactive, not authoritative: a
+    # separate enabled alias must still participate in policy evaluation.
     if isinstance(enable_thinking, bool):
         return {"effort": "medium"} if enable_thinking else None
     return None

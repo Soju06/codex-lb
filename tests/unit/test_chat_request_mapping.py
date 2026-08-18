@@ -359,6 +359,23 @@ def test_chat_reasoning_effort_maps_to_responses_reasoning():
     assert reasoning_map.get("effort") == "high"
 
 
+def test_chat_reasoning_effort_merges_with_reasoning_metadata():
+    request = ChatCompletionsRequest.model_validate(
+        {
+            "model": "gpt-5.2",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "max",
+            "reasoning": {"summary": "auto"},
+        }
+    )
+
+    responses = request.to_responses_request()
+
+    assert responses.reasoning is not None
+    assert responses.reasoning.effort == "max"
+    assert responses.reasoning.summary == "auto"
+
+
 def test_chat_enable_thinking_maps_to_default_reasoning_effort():
     payload = {
         "model": "gpt-5.2",

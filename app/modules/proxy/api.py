@@ -246,9 +246,11 @@ from app.modules.proxy.request_policy import (
     enforce_strict_text_format,
     model_alias_requests_fast_mode,
     normalize_responses_request_payload,
+    normalize_source_reasoning_aliases,
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
+    resolve_wire_reasoning_effort,
     responses_source_route_excluded,
     restore_source_reasoning_effort,
     sanitize_source_chat_payload,
@@ -1127,6 +1129,7 @@ async def responses(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        api_key_policy_already_applied=True,
         prohibit_fast_mode=prohibit_fast_mode,
         # The Codex CLI consumes codex.* vendor events and the upstream's
         # native event ordering, while OpenAI SDK clients pointed at this
@@ -1273,6 +1276,7 @@ async def v1_responses(
             codex_session_affinity=False,
             openai_cache_affinity=True,
             prefer_http_bridge=True,
+            api_key_policy_already_applied=True,
             prohibit_fast_mode=prohibit_fast_mode,
         )
     else:
@@ -1284,6 +1288,7 @@ async def v1_responses(
             codex_session_affinity=False,
             openai_cache_affinity=True,
             prefer_http_bridge=True,
+            api_key_policy_already_applied=True,
             prohibit_fast_mode=prohibit_fast_mode,
         )
     return _mark_subscription_prompt_cache_fallback(response, responses_payload)
@@ -1346,6 +1351,7 @@ async def internal_bridge_responses(
         codex_session_affinity=forwarded_request_context.context.codex_session_affinity,
         openai_cache_affinity=True,
         prefer_http_bridge=True,
+        api_key_policy_already_applied=True,
         skip_limit_enforcement=skip_limit_enforcement,
         api_key_reservation_override=forwarded_request_context.context.reservation,
         include_rate_limit_headers=False,
@@ -4129,6 +4135,11 @@ async def v1_chat_completions(
             source=source,
             model=request_model,
             api_key=api_key,
+            allowed_reasoning_effort=(
+                responses_payload._codex_lb_client_reasoning_effort
+                if api_key is not None and api_key.allowed_reasoning_efforts is not None
+                else None
+            ),
             reservation=reservation,
             rate_limit_headers=rate_limit_headers,
         )
@@ -4462,6 +4473,37 @@ async def _source_responses_response(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
     source_payload = payload.model_dump_for_forwarding()
+    preserve_materialized_provider_alias = payload._codex_lb_provider_reasoning_effort_materialized and (
+        api_key is None or (api_key.enforced_reasoning_effort is None and api_key.allowed_reasoning_efforts is None)
+    )
+    if preserve_materialized_provider_alias:
+        reasoning = source_payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            reasoning = {key: value for key, value in reasoning.items() if key != "effort"}
+            if reasoning:
+                source_payload["reasoning"] = reasoning
+            else:
+                source_payload.pop("reasoning")
+    if api_key is not None and (
+        api_key.enforced_reasoning_effort is not None
+        or (api_key.allowed_reasoning_efforts is not None and payload._codex_lb_client_reasoning_effort is not None)
+    ):
+        normalize_source_reasoning_aliases(source_payload)
+    source_reasoning_effort = (
+        api_key.enforced_reasoning_effort
+        if api_key is not None and api_key.enforced_reasoning_effort is not None
+        else payload._codex_lb_client_reasoning_effort
+    )
+    if source_reasoning_effort is not None and not preserve_materialized_provider_alias:
+        source_reasoning_effort = resolve_wire_reasoning_effort(source_reasoning_effort)
+        reasoning = source_payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            source_payload["reasoning"] = {
+                **reasoning,
+                "effort": source_reasoning_effort,
+            }
+        else:
+            source_payload["reasoning"] = {"effort": source_reasoning_effort}
     strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
@@ -4764,13 +4806,19 @@ async def _source_chat_completion_response(
     source: ModelSource,
     model: str,
     api_key: ApiKeyData | None,
+    allowed_reasoning_effort: str | None = None,
     reservation: ApiKeyUsageReservationData | None,
     rate_limit_headers: Mapping[str, str],
 ) -> Response:
     source_payload = payload.model_dump(mode="json", exclude_none=True)
     source_payload["model"] = model
     source_payload["stream"] = bool(payload.stream)
-    apply_api_key_enforcement_to_chat_payload(source_payload, api_key)
+    apply_api_key_enforcement_to_chat_payload(
+        source_payload,
+        api_key,
+        allowed_reasoning_effort=allowed_reasoning_effort,
+        materialize_allowed_reasoning_effort=allowed_reasoning_effort is not None,
+    )
     sanitize_source_chat_payload(
         source_payload,
         allow_reasoning=source_model_supports_reasoning(source, model),
@@ -5276,6 +5324,7 @@ async def _stream_responses(
     forwarded_client_ip: str | None = None,
     enforce_openai_sdk_contract: bool = True,
     native_codex_heartbeat: bool = False,
+    api_key_policy_already_applied: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
     # Owner-forwarded payloads have already passed API-key enforcement,
@@ -5284,11 +5333,13 @@ async def _stream_responses(
     # signed effective tier: an owner with an older/staler model snapshot must
     # not re-add a tier that the origin authoritatively removed.
     forwarded_effective_service_tier = payload.service_tier if forwarded_request else None
-    service_tier_was_enforced = apply_api_key_enforcement(
-        payload,
-        api_key,
-        prohibit_fast_mode=prohibit_fast_mode,
-    ).service_tier_was_enforced
+    service_tier_was_enforced = False
+    if not api_key_policy_already_applied:
+        service_tier_was_enforced = apply_api_key_enforcement(
+            payload,
+            api_key,
+            prohibit_fast_mode=prohibit_fast_mode,
+        ).service_tier_was_enforced
     if forwarded_request:
         payload.service_tier = forwarded_effective_service_tier
     else:
@@ -5737,15 +5788,16 @@ async def _collect_responses(
     openai_cache_affinity: bool = False,
     suppress_text_done_events: bool = False,
     prefer_http_bridge: bool = False,
+    api_key_policy_already_applied: bool = False,
     prohibit_fast_mode: bool = False,
 ) -> Response:
-    # The replaced effort is discarded: this path is subscription-only, so the
-    # rewrite that works around the backend hang must stick.
-    service_tier_was_enforced = apply_api_key_enforcement(
-        payload,
-        api_key,
-        prohibit_fast_mode=prohibit_fast_mode,
-    ).service_tier_was_enforced
+    service_tier_was_enforced = False
+    if not api_key_policy_already_applied:
+        service_tier_was_enforced = apply_api_key_enforcement(
+            payload,
+            api_key,
+            prohibit_fast_mode=prohibit_fast_mode,
+        ).service_tier_was_enforced
     apply_enforced_service_tier_model_fallback(
         payload,
         service_tier_was_enforced=service_tier_was_enforced,

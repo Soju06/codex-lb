@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
@@ -219,7 +219,13 @@ describe("reports date-range flow integration", () => {
     expect(
       await screen.findByText("Start date must be on or before end date."),
     ).toBeInTheDocument();
-    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    const accountErrorText = await screen.findByText(
+      /Failed to load account options:/i,
+    );
+    const accountErrorContainer = accountErrorText.parentElement!.parentElement!;
+    const retryButton = within(accountErrorContainer).getByRole("button", {
+      name: "Retry",
+    });
     const accountRequestsBeforeRetry = accountRequests;
     const reportsRequestsBeforeRetry = reportsRequests.length;
 

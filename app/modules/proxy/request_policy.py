@@ -6,7 +6,7 @@ from typing import NamedTuple
 from pydantic import ValidationError
 
 from app.core.errors import OpenAIErrorEnvelope, openai_error
-from app.core.exceptions import ProxyModelNotAllowed
+from app.core.exceptions import ProxyModelNotAllowed, ProxyReasoningEffortNotAllowed
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import ModelRegistry, get_model_registry
 from app.core.openai.requests import (
@@ -14,6 +14,7 @@ from app.core.openai.requests import (
     ResponsesReasoning,
     ResponsesRequest,
     extract_input_file_ids,
+    normalize_reasoning_aliases,
     responses_input_uses_lite_tools,
 )
 from app.core.openai.strict_schema import (
@@ -129,6 +130,125 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
 
+def validate_reasoning_effort_access(api_key: ApiKeyData | None, effort: str | None) -> None:
+    if api_key is None:
+        return
+    allowed_reasoning_efforts = getattr(api_key, "allowed_reasoning_efforts", None)
+    if allowed_reasoning_efforts is None or effort is None:
+        return
+    normalized_effort = effort.strip().lower()
+    if normalized_effort in allowed_reasoning_efforts:
+        return
+    logger.info(
+        "api_key_reasoning_effort_not_allowed request_id=%s key_id=%s reasoning_effort=%s",
+        get_request_id(),
+        api_key.id,
+        normalized_effort,
+    )
+    raise ProxyReasoningEffortNotAllowed(
+        f"This API key does not have access to reasoning effort '{normalized_effort}'",
+        param="reasoning.effort",
+    )
+
+
+def _client_reasoning_effort(payload: ResponsesRequest | ResponsesCompactRequest) -> str | None:
+    """Return the effort selected by the client before wire normalization.
+
+    Cursor encodes its effort in an accepted model alias, where ``xhigh`` is
+    later lowered to the upstream's ``high`` value. API-key policies are an
+    operator-facing client-plane control, so they must compare against the
+    original selection rather than that wire representation.
+    """
+    model_effort = _client_reasoning_effort_from_model(payload.model)
+    if model_effort is not None:
+        return model_effort
+
+    reasoning = payload.reasoning.model_dump(mode="json", exclude_none=True) if payload.reasoning is not None else None
+    if is_json_mapping(reasoning):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.strip():
+            return effort.strip().lower()
+    return _client_reasoning_effort_from_provider_aliases(payload)
+
+
+def _client_reasoning_effort_from_provider_aliases(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+) -> str | None:
+    reasoning = payload.reasoning.model_dump(mode="json", exclude_none=True) if payload.reasoning is not None else None
+    extra = payload.model_extra
+    if isinstance(extra, dict):
+        alias_payload = dict(extra)
+        if reasoning is not None:
+            alias_payload["reasoning"] = reasoning
+        normalize_reasoning_aliases(alias_payload)
+        normalized_reasoning = alias_payload.get("reasoning")
+        if is_json_mapping(normalized_reasoning):
+            extra_effort = normalized_reasoning.get("effort")
+            if isinstance(extra_effort, str) and extra_effort.strip():
+                return extra_effort.strip().lower()
+
+    return None
+
+
+def _materialize_provider_reasoning_effort(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    effort: str | None,
+) -> None:
+    existing_effort = payload.reasoning.effort if payload.reasoning is not None else None
+    if effort is None or (isinstance(existing_effort, str) and existing_effort.strip()):
+        return
+    if payload.reasoning is None:
+        payload.reasoning = ResponsesReasoning(effort=effort)
+    else:
+        payload.reasoning.effort = effort
+    if isinstance(payload, ResponsesRequest):
+        payload._codex_lb_provider_reasoning_effort_materialized = True
+
+
+def _client_reasoning_effort_from_model(model: str | None) -> str | None:
+    alias = _resolve_model_alias_parts(model)
+    if alias is not None:
+        normalized_model = model.strip().lower() if isinstance(model, str) else ""
+        suffix = normalized_model[len(alias[0]) + 1 :]
+        tokens = {token for token in suffix.split("-") if token}
+        if "xhigh" in tokens or "extra" in tokens:
+            return "xhigh"
+        if alias[1] is not None:
+            return alias[1]
+    return None
+
+
+def normalize_source_reasoning_aliases(payload: dict[str, JsonValue]) -> None:
+    """Align effort-bearing aliases while preserving unrelated source controls."""
+    provider_thinking = payload.get("thinking")
+    preserve_provider_thinking = False
+    if "thinking" in payload:
+        probe: dict[str, JsonValue] = {"thinking": provider_thinking}
+        normalize_reasoning_aliases(probe)
+        normalized_reasoning = probe.get("reasoning")
+        normalized_effort = normalized_reasoning.get("effort") if is_json_mapping(normalized_reasoning) else None
+        thinking_mapping = provider_thinking if is_json_mapping(provider_thinking) else None
+        thinking_type = thinking_mapping.get("type") if thinking_mapping is not None else None
+        is_inactive = thinking_mapping is not None and (
+            thinking_mapping.get("enabled") is False
+            or (isinstance(thinking_type, str) and thinking_type.strip().lower() == "disabled")
+        )
+        preserve_provider_thinking = (
+            thinking_mapping is not None
+            and not is_inactive
+            and not (isinstance(normalized_effort, str) and bool(normalized_effort.strip()))
+        )
+    if preserve_provider_thinking:
+        payload.pop("thinking", None)
+    normalize_reasoning_aliases(payload)
+    if preserve_provider_thinking and thinking_mapping is not None:
+        preserved_thinking = dict(thinking_mapping.items())
+        preserved_effort = preserved_thinking.get("effort")
+        if isinstance(preserved_effort, str) and not preserved_effort.strip():
+            preserved_thinking.pop("effort")
+        payload["thinking"] = preserved_thinking
+
+
 class ApiKeyEnforcementResult(NamedTuple):
     """What :func:`apply_api_key_enforcement` observed while mutating the payload.
 
@@ -157,13 +277,18 @@ def apply_api_key_enforcement(
     equal the enforced value (including after ``fast`` canonicalizes to
     ``priority``).
     """
+    client_reasoning_effort = payload._codex_lb_client_reasoning_effort or _client_reasoning_effort(payload)
+    payload._codex_lb_client_reasoning_effort = client_reasoning_effort
+    provider_reasoning_effort = _client_reasoning_effort_from_provider_aliases(payload)
     normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
 
     if api_key is None:
+        _materialize_provider_reasoning_effort(payload, provider_reasoning_effort)
         pre_normalization_effort = normalize_unsupported_reasoning_effort(payload, registry=registry)
         return ApiKeyEnforcementResult(False, pre_normalization_effort)
 
     if api_key.enforced_model:
+        enforced_model_reasoning_effort = _client_reasoning_effort_from_model(api_key.enforced_model)
         requested_model = payload.model
         if requested_model != api_key.enforced_model:
             logger.info(
@@ -174,6 +299,9 @@ def apply_api_key_enforcement(
                 api_key.enforced_model,
             )
         payload.model = api_key.enforced_model
+        if enforced_model_reasoning_effort is not None:
+            client_reasoning_effort = enforced_model_reasoning_effort
+            payload._codex_lb_client_reasoning_effort = client_reasoning_effort
         normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
         if (
             responses_input_uses_lite_tools(payload.input)
@@ -203,6 +331,15 @@ def apply_api_key_enforcement(
                 api_key.enforced_reasoning_effort,
             )
 
+    _materialize_provider_reasoning_effort(payload, provider_reasoning_effort)
+    if client_reasoning_effort is not None:
+        validate_reasoning_effort_access(api_key, client_reasoning_effort)
+        if (
+            payload.reasoning is not None
+            and isinstance(payload.reasoning.effort, str)
+            and payload.reasoning.effort.strip().lower() == client_reasoning_effort
+        ):
+            payload.reasoning.effort = client_reasoning_effort
     pre_normalization_effort = normalize_unsupported_reasoning_effort(payload, registry=registry)
 
     service_tier_was_enforced = False
@@ -319,6 +456,9 @@ def sanitize_source_chat_payload(
 def apply_api_key_enforcement_to_chat_payload(
     payload: dict[str, JsonValue],
     api_key: ApiKeyData | None,
+    *,
+    allowed_reasoning_effort: str | None = None,
+    materialize_allowed_reasoning_effort: bool = False,
 ) -> None:
     """Mirror :func:`apply_api_key_enforcement` onto a chat-completions wire payload.
 
@@ -327,6 +467,58 @@ def apply_api_key_enforcement_to_chat_payload(
     applied to the outbound dict as well or the upstream receives the
     caller's values while accounting uses the enforced ones.
     """
+    if allowed_reasoning_effort is not None:
+        wire_effort = resolve_wire_reasoning_effort(allowed_reasoning_effort)
+        # Chat requests can express the same setting through several provider
+        # aliases. Once the Responses conversion has authorized one effective
+        # choice, make every caller-supplied alias agree without adding fields
+        # that the selected source may not accept.
+        if "reasoning_effort" in payload:
+            payload["reasoning_effort"] = wire_effort
+        if "reasoningEffort" in payload:
+            payload["reasoningEffort"] = wire_effort
+        if "thinking" in payload:
+            thinking = payload["thinking"]
+            if isinstance(thinking, dict):
+                thinking_effort = thinking.get("effort")
+                if isinstance(thinking_effort, str) and not thinking_effort.strip():
+                    thinking = {**thinking}
+                    thinking.pop("effort")
+                    payload["thinking"] = thinking
+                if isinstance(thinking_effort, str) and thinking_effort.strip():
+                    aligned_thinking = {**thinking, "effort": wire_effort}
+                    thinking_type = aligned_thinking.get("type")
+                    if isinstance(thinking_type, str) and thinking_type.strip().lower() == "disabled":
+                        aligned_thinking.pop("type")
+                    if aligned_thinking.get("enabled") is False:
+                        aligned_thinking.pop("enabled")
+                    payload["thinking"] = aligned_thinking
+                else:
+                    thinking_type = thinking.get("type")
+                    is_inactive = thinking.get("enabled") is False or (
+                        isinstance(thinking_type, str) and thinking_type.strip().lower() == "disabled"
+                    )
+                    selects_implicit_medium = thinking.get("enabled") is True or (
+                        isinstance(thinking_type, str) and thinking_type.strip().lower() == "enabled"
+                    )
+                    if is_inactive or (selects_implicit_medium and wire_effort != "medium"):
+                        payload.pop("thinking")
+            else:
+                payload["thinking"] = wire_effort
+        if "enable_thinking" in payload:
+            if wire_effort == "medium":
+                payload["enable_thinking"] = True
+            else:
+                payload.pop("enable_thinking", None)
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            payload["reasoning"] = {**reasoning, "effort": wire_effort}
+        if materialize_allowed_reasoning_effort and not any(
+            key in payload
+            for key in ("reasoning_effort", "reasoningEffort", "thinking", "enable_thinking", "reasoning")
+        ):
+            payload["reasoning_effort"] = wire_effort
+
     if api_key is None:
         return
 

@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { renderWithProviders } from "@/test/utils";
 import type { ReportsResponse } from "@/features/reports/schemas";
 import { listAccounts } from "@/features/accounts/api";
+import { getRequestLogOptions } from "@/features/dashboard/api";
 import { getBrowserReportsTimeZone } from "@/features/reports/date";
 import { useReports } from "@/features/reports/hooks/use-reports";
 import { REPORT_CHART_VISIBILITY_STORAGE_KEY } from "@/features/reports/hooks/use-report-chart-visibility";
@@ -13,6 +14,10 @@ import { ReportsPage } from "./reports-page";
 
 vi.mock("@/features/accounts/api", () => ({
   listAccounts: vi.fn().mockResolvedValue({ accounts: [] }),
+}));
+
+vi.mock("@/features/dashboard/api", () => ({
+  getRequestLogOptions: vi.fn().mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] }),
 }));
 
 vi.mock("@/features/reports/hooks/use-reports", () => ({
@@ -69,6 +74,7 @@ const EMPTY_REPORT: ReportsResponse = {
 
 const useReportsMock = vi.mocked(useReports);
 const listAccountsMock = vi.mocked(listAccounts);
+const getRequestLogOptionsMock = vi.mocked(getRequestLogOptions);
 const getBrowserReportsTimeZoneMock = vi.mocked(getBrowserReportsTimeZone);
 type UseReportsMockResult = ReturnType<typeof useReports>;
 const REPORTS_TIMEZONE_STORAGE_KEY = "codex-lb-reports-timezone";
@@ -81,9 +87,11 @@ describe("ReportsPage", () => {
   beforeEach(() => {
     useReportsMock.mockReset();
     listAccountsMock.mockReset();
+    getRequestLogOptionsMock.mockReset();
     getBrowserReportsTimeZoneMock.mockReset();
     window.localStorage.clear();
     listAccountsMock.mockResolvedValue({ accounts: [] });
+    getRequestLogOptionsMock.mockResolvedValue({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
     getBrowserReportsTimeZoneMock.mockReturnValue("America/Los_Angeles");
   });
 
@@ -713,7 +721,8 @@ describe("ReportsPage", () => {
     );
   });
 
-  it("shows account option load failures instead of hiding empty selector silently", async () => {
+  it("shows account option load failures with a retry button and recovers when retried", async () => {
+    const user = userEvent.setup();
     useReportsMock.mockImplementation(() =>
       asUseReportsResult({
         data: EMPTY_REPORT,
@@ -722,21 +731,179 @@ describe("ReportsPage", () => {
         refetch: vi.fn(),
       }),
     );
-    listAccountsMock.mockRejectedValueOnce(
-      new Error("accounts backend timeout"),
-    );
+    listAccountsMock
+      .mockRejectedValueOnce(new Error("accounts backend timeout"))
+      .mockResolvedValueOnce({ accounts: [] });
 
     renderWithProviders(<ReportsPage />);
 
-    expect(
-      await screen.findByText(
-        /Failed to load account options: accounts backend timeout/i,
-      ),
-    ).toBeInTheDocument();
+    const accountErrorText = await screen.findByText(
+      /Failed to load account options: accounts backend timeout/i,
+    );
+    expect(accountErrorText).toBeInTheDocument();
     expect(
       screen
         .getAllByRole("button", { name: /accounts/i })
         .find((button) => button.getAttribute("aria-haspopup") === "menu"),
     ).toBeInTheDocument();
+
+    const accountErrorContainer = accountErrorText.parentElement!.parentElement!;
+    const retryButton = within(accountErrorContainer).getByRole("button", { name: /retry/i });
+    await user.click(retryButton);
+
+    expect(listAccountsMock).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/Failed to load account options:/i),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("forwards initial apiKeyId filter to useReports hook calls", () => {
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(
+      <ReportsPage initialFilters={{ apiKeyId: ["key-123"] }} />,
+    );
+
+    expect(useReportsMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        apiKeyId: ["key-123"],
+      }),
+      "America/Los_Angeles",
+    );
+  });
+
+  it("shows API key option load failures with a retry button and recovers when retried", async () => {
+    const user = userEvent.setup();
+    useReportsMock.mockImplementation(() =>
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+    getRequestLogOptionsMock
+      .mockRejectedValueOnce(new Error("api keys backend timeout"))
+      .mockResolvedValueOnce({ accountIds: [], apiKeys: [], modelOptions: [], statuses: [] });
+
+    renderWithProviders(<ReportsPage />);
+
+    const apiKeyErrorText = await screen.findByText(
+      /Failed to load API key options: api keys backend timeout/i,
+    );
+    expect(apiKeyErrorText).toBeInTheDocument();
+    expect(
+      screen
+        .getAllByRole("button", { name: /api keys/i })
+        .find((button) => button.getAttribute("aria-haspopup") === "menu"),
+    ).toBeInTheDocument();
+
+    const apiKeyErrorContainer = apiKeyErrorText.parentElement!.parentElement!;
+    const retryButton = within(apiKeyErrorContainer).getByRole("button", { name: /retry/i });
+    await user.click(retryButton);
+
+    expect(getRequestLogOptionsMock).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/Failed to load API key options:/i),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("populates API key options from request log options including deleted keys with ID fallback", async () => {
+    const user = userEvent.setup();
+    useReportsMock.mockImplementation(() =>
+      asUseReportsResult({
+        data: EMPTY_REPORT,
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+    getRequestLogOptionsMock.mockResolvedValue({
+      accountIds: [],
+      apiKeys: [
+        { id: "key_active", name: "Active Key", keyPrefix: "sk-active" },
+        { id: "key_deleted", name: "key_deleted", keyPrefix: null },
+      ],
+      modelOptions: [],
+      statuses: [],
+    });
+
+    renderWithProviders(<ReportsPage />);
+
+    const trigger = await screen.findByRole("button", { name: /api keys/i });
+    await user.click(trigger);
+
+    expect(await screen.findByText(/Active Key/i)).toBeInTheDocument();
+    expect(await screen.findByText("key_deleted")).toBeInTheDocument();
+  });
+
+  it("exports CSV based on the filtered report dataset when API key filter is active", async () => {
+    const user = userEvent.setup();
+    const blobText = vi.fn(async () => "");
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      if (!(blob instanceof Blob)) {
+        throw new TypeError("expected Blob export payload");
+      }
+      blobText.mockImplementation(() => blob.text());
+      return "blob:daily-breakdown";
+    });
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: {
+          ...EMPTY_REPORT,
+          daily: [
+            {
+              date: "2030-01-15",
+              requests: 42,
+              conversations: 2,
+              inputTokens: 1000,
+              outputTokens: 200,
+              cachedInputTokens: 50,
+              costUsd: 0.15,
+              activeAccounts: 1,
+              cancelledCount: 0,
+              errorCount: 0,
+              medianTtftMs: 0,
+              medianTps: 0,
+              medianQueueMs: 0,
+            },
+          ],
+        },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(
+      <ReportsPage
+        initialFilters={{
+          startDate: "2030-01-15",
+          endDate: "2030-01-15",
+          apiKeyId: ["key-filtered"],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /csv/i }));
+
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    const csvContent = await blobText();
+    expect(csvContent).toContain("2030-01-15,42,2,1000,200,50,0.1500,1,0,0");
   });
 });

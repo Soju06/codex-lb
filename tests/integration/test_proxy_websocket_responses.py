@@ -610,6 +610,50 @@ def _capability_test_api_key(key_id: str) -> ApiKeyData:
     )
 
 
+def test_responses_websocket_route_rejects_disallowed_reasoning_before_upstream(app_instance, monkeypatch):
+    async def create_key():
+        async with SessionLocal() as session:
+            service = ApiKeysService(ApiKeysRepository(session))
+            created = await service.create_key(
+                ApiKeyCreateData(
+                    name="websocket-reasoning-policy",
+                    allowed_models=None,
+                    allowed_reasoning_efforts=["low"],
+                )
+            )
+            return created.key, await service.get_key_by_id(created.id)
+
+    with TestClient(app_instance) as client:
+        assert client.portal is not None
+        key, api_key = client.portal.call(create_key)
+
+        async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+            del request
+            return api_key
+
+        monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={"Authorization": f"Bearer {key}"},
+        ) as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "model-alpha",
+                        "input": "hi",
+                        "reasoning": {"effort": "max"},
+                    }
+                )
+            )
+            event = json.loads(websocket.receive_text())
+
+    assert event["type"] == "error"
+    assert event["status"] == 403
+    assert event["error"]["code"] == "reasoning_effort_not_allowed"
+
+
 def _websocket_response_batch(
     response_id: str,
     *,

@@ -1864,9 +1864,12 @@ def _is_websocket_response_create(payload: dict[str, JsonValue]) -> bool:
 
 
 def _app_error_to_websocket_event(exc: AppError) -> dict[str, JsonValue]:
+    payload = openai_error(exc.code, exc.message, error_type=getattr(exc, "error_type", "server_error"))
+    if exc.param is not None:
+        payload["error"]["param"] = exc.param
     return _wrapped_websocket_error_event(
         exc.status_code,
-        openai_error(exc.code, exc.message, error_type=getattr(exc, "error_type", "server_error")),
+        payload,
     )
 
 

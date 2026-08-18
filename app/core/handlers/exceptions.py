@@ -30,6 +30,7 @@ from app.core.exceptions import (
     ProxyAuthError,
     ProxyModelNotAllowed,
     ProxyRateLimitError,
+    ProxyReasoningEffortNotAllowed,
     ProxyRequiredCapabilityTransportError,
     ProxyUpstreamError,
 )
@@ -57,6 +58,7 @@ logger = logging.getLogger(__name__)
 _OPENAI_EXCEPTION_TYPES: tuple[type[AppError], ...] = (
     ProxyAuthError,
     ProxyModelNotAllowed,
+    ProxyReasoningEffortNotAllowed,
     ProxyRateLimitError,
     ProxyRequiredCapabilityTransportError,
     ProxyUpstreamError,
@@ -242,10 +244,10 @@ def add_exception_handlers(app: FastAPI) -> None:
                     status=exc.status_code,
                     outcome="invalid_request",
                 )
-            return JSONResponse(
-                status_code=exc.status_code,
-                content=openai_error(exc.code, exc.message, error_type=error_type),
-            )
+            error = openai_error(exc.code, exc.message, error_type=error_type)
+            if exc.param is not None:
+                error["error"]["param"] = exc.param
+            return JSONResponse(status_code=exc.status_code, content=error)
 
     # --- Domain exceptions: Dashboard envelope ---
 

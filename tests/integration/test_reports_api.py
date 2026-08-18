@@ -1613,3 +1613,82 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "medianQueueMs": 0.0,
         },
     ]
+
+
+async def test_reports_api_filters_by_api_key_id(async_client, db_setup):
+    start_at = _naive_utc(datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc))
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_key_filter", "key-filter@example.com"))
+        session.add_all(
+            [
+                RequestLog(
+                    account_id="acc_key_filter",
+                    api_key_id="key-1",
+                    request_id="req-key-1",
+                    requested_at=start_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=10,
+                    output_tokens=5,
+                    cached_input_tokens=0,
+                    cost_usd=0.50,
+                ),
+                RequestLog(
+                    account_id="acc_key_filter",
+                    api_key_id="key-2",
+                    request_id="req-key-2",
+                    requested_at=start_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=20,
+                    output_tokens=10,
+                    cached_input_tokens=0,
+                    cost_usd=1.00,
+                ),
+            ]
+        )
+        await session.commit()
+
+    # Test filtering by single key-1
+    response1 = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["key-1"],
+        },
+    )
+    assert response1.status_code == 200
+    payload1 = response1.json()
+    assert payload1["summary"]["totalRequests"] == 1
+    assert payload1["summary"]["totalCostUsd"] == 0.50
+    assert payload1["daily"][0]["requests"] == 1
+    assert payload1["byAccount"][0]["requests"] == 1
+
+    # Test filtering by multiple keys (key-1 and key-2)
+    response2 = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["key-1", "key-2"],
+        },
+    )
+    assert response2.status_code == 200
+    payload2 = response2.json()
+    assert payload2["summary"]["totalRequests"] == 2
+    assert payload2["summary"]["totalCostUsd"] == 1.50
+
+    # Test filtering by non-matching key returns 0 metrics
+    response3 = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-06-01",
+            "end_date": "2026-06-01",
+            "api_key_id": ["nonexistent-key"],
+        },
+    )
+    assert response3.status_code == 200
+    payload3 = response3.json()
+    assert payload3["summary"]["totalRequests"] == 0
+    assert payload3["summary"]["totalCostUsd"] == 0.0

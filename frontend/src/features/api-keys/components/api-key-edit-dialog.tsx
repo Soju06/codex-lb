@@ -28,6 +28,7 @@ import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
+import { ReasoningEffortsMultiSelect } from "@/features/api-keys/components/reasoning-efforts-multi-select";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
 import { ModelSourceMultiSelect } from "@/features/model-sources/components/model-source-multi-select";
 import type {
@@ -93,6 +94,7 @@ type ApiKeyEditDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
   selectedSourceIds: string[];
+  selectedReasoningEfforts: ReasoningEffortType[];
   clearSourceScope: boolean;
   usageSections: string;
   limitRules: LimitRuleCreate[];
@@ -110,6 +112,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     selectedModels: apiKey.allowedModels || [],
     selectedAccountIds: apiKey.assignedAccountIds,
     selectedSourceIds: apiKey.assignedSourceIds,
+    selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
     clearSourceScope: false,
     usageSections: apiKey.usageSections,
     limitRules: limitsToCreateRules(apiKey),
@@ -146,6 +149,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
   const initialLimitRules = useMemo(() => limitsToCreateRules(apiKey), [apiKey]);
   const [draft, updateDraft] = useReducer(apiKeyEditDraftReducer, apiKey, createApiKeyEditDraft);
+  const hasMalformedReasoningPolicy = apiKey.allowedReasoningEfforts?.length === 0;
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(draft.limitRules);
@@ -167,6 +171,10 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as ReasoningEffortType,
+      ...(draft.selectedReasoningEfforts.length > 0 ||
+        (apiKey.allowedReasoningEfforts !== null && !hasMalformedReasoningPolicy)
+        ? { allowedReasoningEfforts: draft.selectedReasoningEfforts.length > 0 ? draft.selectedReasoningEfforts : null }
+        : {}),
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,
@@ -278,7 +286,11 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.enforcedReasoning")}</div>
-              <Select value={draft.enforcedReasoningEffort} onValueChange={(enforcedReasoningEffort) => updateDraft({ enforcedReasoningEffort })}>
+              <Select
+                value={draft.enforcedReasoningEffort}
+                disabled={draft.selectedReasoningEfforts.length > 0 || hasMalformedReasoningPolicy}
+                onValueChange={(enforcedReasoningEffort) => updateDraft({ enforcedReasoningEffort, selectedReasoningEfforts: [] })}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder={t("common.options.none")} />
                 </SelectTrigger>
@@ -293,6 +305,18 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                   <SelectItem value="ultra">{t("common.reasoning.ultra")}</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">{t("apiKeys.form.allowedReasoningEfforts")}</div>
+              <ReasoningEffortsMultiSelect
+                value={draft.selectedReasoningEfforts}
+                disabled={draft.enforcedReasoningEffort !== "none"}
+                onChange={(selectedReasoningEfforts) => updateDraft({
+                  selectedReasoningEfforts,
+                  enforcedReasoningEffort: selectedReasoningEfforts.length > 0 ? "none" : draft.enforcedReasoningEffort,
+                })}
+              />
             </div>
 
             <div className="space-y-1">

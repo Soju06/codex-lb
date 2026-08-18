@@ -47,6 +47,9 @@ export function ApiKeyInfo({
 	const models = apiKey.allowedModels?.join(", ") || t("apiKeys.modelSelect.all");
 	const enforcedModel = apiKey.enforcedModel || null;
 	const enforcedEffort = apiKey.enforcedReasoningEffort || null;
+	const allowedEfforts = apiKey.allowedReasoningEfforts
+		?.map((effort) => t(`common.reasoning.${effort}`))
+		.join(", ") || null;
 	const trafficClass = apiKey.trafficClass === "opportunistic" ? t("common.traffic.opportunistic") : t("common.traffic.foreground");
 	const usage = allowUsageSummaryFallback
 		? (usageSummary ?? apiKey.usageSummary)
@@ -81,6 +84,12 @@ export function ApiKeyInfo({
 					<div className="flex items-center justify-between gap-2">
 						<dt className="text-muted-foreground">{t("apiKeys.form.enforcedReasoning")}</dt>
 						<dd className="font-medium">{enforcedEffort}</dd>
+					</div>
+				) : null}
+				{allowedEfforts ? (
+					<div className="flex items-start justify-between gap-2">
+						<dt className="text-muted-foreground">{t("apiKeys.form.allowedReasoningEfforts")}</dt>
+						<dd className="text-right font-medium">{allowedEfforts}</dd>
 					</div>
 				) : null}
 				<div className="flex items-center justify-between gap-2">

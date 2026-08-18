@@ -49,6 +49,7 @@ from app.core.clients.proxy_websocket import (
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
+from app.core.exceptions import ProxyReasoningEffortNotAllowed
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
@@ -34217,6 +34218,20 @@ def test_wrapped_websocket_error_event_masks_previous_response_not_found():
     assert error["type"] == "server_error"
     assert "previous_response_not_found" not in json.dumps(event)
     assert "resp_prev_anchor" not in json.dumps(event)
+
+
+def test_app_error_websocket_event_preserves_error_param():
+    event = websocket_helpers_module._app_error_to_websocket_event(
+        ProxyReasoningEffortNotAllowed("Reasoning effort is not allowed", param="reasoning.effort")
+    )
+
+    assert event["status"] == 403
+    assert event["error"] == {
+        "message": "Reasoning effort is not allowed",
+        "type": "permission_error",
+        "code": "reasoning_effort_not_allowed",
+        "param": "reasoning.effort",
+    }
 
 
 def test_sanitize_websocket_connect_failure_rewrites_missing_tool_output():

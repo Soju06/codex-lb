@@ -54,6 +54,16 @@ OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement;
 - **AND** it does not require the legacy `/backend-api/codex/responses/compact`
   upstream route to be available
 
+#### Scenario: Legacy message-shaped compact output gets a valid item ID
+
+- **WHEN** the upstream compact response exposes the encrypted compact payload
+  as a legacy `message` item with a non-empty ID that does not begin with `cmp`
+- **THEN** the proxy converts that item to `type="compaction"` and prefixes
+  the ID with `cmp_` while preserving its suffix
+- **AND** an existing ID that already begins with `cmp` is preserved unchanged
+- **AND** ordinary message items outside the compact-output conversion remain
+  unchanged
+
 #### Scenario: Standalone Codex compact remains a compatibility endpoint
 
 - **WHEN** a client calls `POST /backend-api/codex/responses/compact`

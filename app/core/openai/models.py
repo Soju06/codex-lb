@@ -142,5 +142,17 @@ class CompactResponsePayload(BaseModel):
         return _normalize_model_value(ResponseUsage, value)
 
 
+def normalize_compaction_item_id(item_id: object) -> str | None:
+    """Return an ID compatible with the Responses API compaction item type."""
+    if not isinstance(item_id, str):
+        return None
+    normalized = item_id.strip()
+    if not normalized:
+        return None
+    if normalized.startswith("cmp"):
+        return normalized
+    return f"cmp_{normalized}"
+
+
 OpenAIResponseResult: TypeAlias = OpenAIResponsePayload | OpenAIErrorEnvelope
 CompactResponseResult: TypeAlias = CompactResponsePayload | OpenAIErrorEnvelope

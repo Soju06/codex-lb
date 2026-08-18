@@ -246,12 +246,7 @@ class _SelectionInputs(SelectionInputsProtocol):
     persist_standard_quota_status: bool = True
     routing_policy_override: str | None = None
     quota_admitted_catalog_omission_account_ids: frozenset[str] = frozenset()
-    _runtime_account_by_id: dict[str, Account] | None = field(
-        default=None,
-        init=False,
-        repr=False,
-        compare=False,
-    )
+    _runtime_account_by_id: dict[str, Account] | None = field(default=None, init=False, repr=False, compare=False)
 
     def runtime_account(self, account_id: str) -> Account | None:
         account_by_id = self._runtime_account_by_id
@@ -371,11 +366,9 @@ class LoadBalancer:
             return runtime.inflight_response_creates, runtime.inflight_streams, runtime.leased_tokens
 
     async def check_account_usage_limit(self, account_id: str) -> AccountUsageLimitState | None:
-        """Re-evaluate one continuity owner from the canonical global snapshot.
+        """Re-evaluate one continuity owner without creating runtime state.
 
-        ``None`` means the persisted owner no longer exists. This probe is
-        intentionally read-only: bridge admission must not create runtime
-        state for an owner it is only validating.
+        ``None`` means the persisted owner no longer exists or is not routable.
         """
         selection_inputs = await self._load_selection_inputs(model=None, clone_cached=False)
         account = selection_inputs.runtime_account(account_id)

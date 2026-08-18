@@ -28819,6 +28819,7 @@ async def test_process_upstream_websocket_text_keeps_file_backed_verified_anchor
     assert list(pending_requests) == []
 
 
+@pytest.mark.available_websocket_owner("acc_ws_sticky_1", "acc_ws_sticky_2")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client_turn_state", [None, "client-turn-state-reattach"])
 async def test_proxy_responses_websocket_transparent_replay_strips_socket_turn_state_on_reattach(
@@ -29055,6 +29056,7 @@ async def test_proxy_responses_websocket_transparent_replay_strips_socket_turn_s
     assert first_payload == second_payload
 
 
+@pytest.mark.available_websocket_owner("acc_ws_client_disconnect_live")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("shared_deadline", [False, True])
 async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize_account(
@@ -29234,6 +29236,7 @@ async def test_proxy_responses_websocket_downstream_disconnect_does_not_penalize
     assert request_logs.calls[0]["session_id"] is None
 
 
+@pytest.mark.available_websocket_owner("acc_ws_replay_cancel_owner")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_replay_cancellation_keeps_original_account_id(
     monkeypatch: pytest.MonkeyPatch,
@@ -29464,6 +29467,7 @@ async def test_proxy_responses_websocket_rejects_response_create_observed_after_
     assert downstream.close_calls == [(1012, "Server is draining")]
 
 
+@pytest.mark.available_websocket_owner("acc_ws_active_drain")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_delivers_active_terminal_before_drain_close(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -29622,6 +29626,7 @@ async def test_proxy_responses_websocket_delivers_active_terminal_before_drain_c
     assert request_logs.calls[0]["status"] == "success"
 
 
+@pytest.mark.available_websocket_owner("acc_ws_staged_drain")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_replays_staged_turn_before_drain_close(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -29868,6 +29873,7 @@ async def test_proxy_responses_websocket_replays_staged_turn_before_drain_close(
     assert request_logs.calls[0]["status"] == "success"
 
 
+@pytest.mark.available_websocket_owner("acc_ws_sequenced_send_failure")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_send_failure(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -30011,6 +30017,7 @@ async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_sen
     handle_stream_error.assert_not_awaited()
 
 
+@pytest.mark.available_websocket_owner("acc_ws_liveness_race")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_liveness_race_awaits_reader_settlement(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -31447,6 +31454,7 @@ async def test_relay_upstream_websocket_ordinary_receive_failure_is_stream_incom
     assert handle_stream_error_args.args[2] == "stream_incomplete"
 
 
+@pytest.mark.available_websocket_owner("acc_ws_race_1", "acc_ws_race_2")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_replays_precreated_request_after_upstream_close_race(
     monkeypatch,
@@ -32103,6 +32111,7 @@ async def _run_websocket_clean_close_during_send_failure(
     )
 
 
+@pytest.mark.available_websocket_owner("acc_ws_clean_close_send_1", "acc_ws_clean_close_send_2")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_replays_reader_claim_after_generic_send_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -32144,6 +32153,7 @@ async def test_proxy_responses_websocket_replays_reader_claim_after_generic_send
     assert request_state.account_response_create_lease is None
 
 
+@pytest.mark.available_websocket_owner("acc_ws_clean_close_send_1")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_finalizes_reader_claim_after_typed_send_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -32180,6 +32190,7 @@ async def test_proxy_responses_websocket_finalizes_reader_claim_after_typed_send
     assert request_state.account_response_create_lease is None
 
 
+@pytest.mark.available_websocket_owner("acc_selected_any")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_prefers_previous_response_owner_from_request_logs(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -32828,6 +32839,7 @@ async def test_direct_websocket_preserves_client_turn_state_when_switching_to_re
     assert first_upstream.close_seen.is_set()
 
 
+@pytest.mark.available_websocket_owner("acc-ws-existing-socket")
 @pytest.mark.asyncio
 async def test_reused_direct_websocket_revalidates_conversation_ownership(
     monkeypatch: pytest.MonkeyPatch,
@@ -33007,6 +33019,7 @@ async def test_websocket_owner_switch_blocked_cleanup_releases_response_create_g
     assert await service._load_balancer.account_pressure_snapshot(account.id) == (0, 0, 0.0)
 
 
+@pytest.mark.available_websocket_owner("acc_selected_any")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_uses_turn_state_as_owner_lookup_session_scope(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -33159,6 +33172,7 @@ async def test_proxy_responses_websocket_uses_turn_state_as_owner_lookup_session
     assert [event["type"] for event in emitted_events] == ["response.created", "response.completed"]
 
 
+@pytest.mark.available_websocket_owner("acc_selected_any")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_prefers_turn_state_over_session_for_owner_lookup_scope(monkeypatch):
     request_logs = _RequestLogsRecorder()
@@ -33552,6 +33566,7 @@ async def test_proxy_responses_websocket_masks_prepare_previous_response_not_fou
     assert payload["error"]["message"] == "Upstream websocket closed before response.completed"
 
 
+@pytest.mark.available_websocket_owner("acc_ws_account_cap")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_releases_reservation_on_local_account_create_cap(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -33686,6 +33701,7 @@ async def test_proxy_responses_websocket_releases_reservation_on_local_account_c
     assert payload["response"]["error"]["code"] == "account_response_create_cap"
 
 
+@pytest.mark.available_websocket_owner("acc_ws_stream_budget")
 @pytest.mark.asyncio
 async def test_proxy_responses_websocket_relay_uses_stream_specific_request_budget(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

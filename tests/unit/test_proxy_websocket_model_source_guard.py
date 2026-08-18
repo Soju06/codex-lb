@@ -319,6 +319,7 @@ async def test_first_turn_reaches_connect_guard_not_the_reuse_guard(
     )
 
 
+@pytest.mark.available_websocket_owner("acc_ws_source_guard_reuse")
 @pytest.mark.asyncio
 async def test_reuse_guard_rejects_a_later_source_owned_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     """A second turn that switches to a source-owned model must not be forwarded.
@@ -479,6 +480,7 @@ class _TurnDrivenUpstream:
         self.close_seen.set()
 
 
+@pytest.mark.available_websocket_owner("acc_ws_source_guard_alias")
 @pytest.mark.asyncio
 async def test_reuse_guard_sees_the_raw_model_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     """A later turn asking for an alias-only source model must be rejected.
@@ -698,6 +700,7 @@ class _TurnSerializedDownstream:
         self.done.set()
 
 
+@pytest.mark.available_websocket_owner("acc_ws_source_guard_file_pin")
 @pytest.mark.asyncio
 async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypatch: pytest.MonkeyPatch) -> None:
     """A later source-owned turn that references an uploaded file must be forwarded.
@@ -751,6 +754,7 @@ async def test_reuse_guard_forwards_a_pinned_input_file_turn(db_setup, monkeypat
     assert any("resp_turn_two" in text for text in downstream.sent_text), "the file-pinned turn must complete"
 
 
+@pytest.mark.available_websocket_owner("acc_ws_source_guard_compact")
 @pytest.mark.asyncio
 async def test_reuse_guard_forwards_a_terminal_compaction_trigger_turn(
     monkeypatch: pytest.MonkeyPatch,

@@ -4,7 +4,7 @@ Point any OpenAI-compatible client at codex-lb. If [API key auth](api-keys.md) i
 
 Model availability is discovered from the upstream Codex model catalog and can vary by account plan, workspace, rollout, and upstream deprecation state. Prefer the live `GET /v1/models` or `GET /backend-api/codex/models` response over a copied static table when configuring clients or API-key model allowlists.
 
-The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest), **`gpt-5.6-terra`** (balanced), and **`gpt-5.6-luna`** (fast) — all 272k context. `gpt-5.5` and `gpt-5.4` are still served for older pinned clients; retired slugs such as `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `gpt-5.1-codex-mini` were dropped from the upstream bundled catalog and should no longer be used in new configs.
+The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest), **`gpt-5.6-terra`** (balanced), and **`gpt-5.6-luna`** (fast) — all with a 272k default input budget and an 872k upstream maximum ([opt-in, Codex CLI only](#opting-into-the-872k-context-window)). `gpt-5.5` and `gpt-5.4` are still served for older pinned clients; retired slugs such as `gpt-5.3-codex`, `gpt-5.3-codex-spark`, and `gpt-5.1-codex-mini` were dropped from the upstream bundled catalog and should no longer be used in new configs.
 
 | Client | Endpoint | Config |
 |--------|----------|--------|
@@ -30,6 +30,31 @@ wire_api = "responses"
 supports_websockets = true
 requires_openai_auth = true # required for codex app
 ```
+
+### Opting into the 872k context window
+
+GPT-5.6 ships a 272,000-token default input budget with an 872,000-token
+maximum. codex-lb advertises both — `context_window` and `max_context_window`
+on `GET /backend-api/codex/models` — and the Codex CLI stays on the default
+until you raise it in `~/.codex/config.toml` (top level, before any
+`[section]` header):
+
+```toml
+model_context_window = 872000
+```
+
+- Values above `max_context_window` are clamped to it: `model_context_window =
+  1000000` resolves to 872,000 and does not unlock a 1M window.
+- Leave `model_auto_compact_token_limit` unset. Codex auto-compacts at 90% of
+  the resolved window — 784,800 tokens here — and clamps any larger configured
+  value down to that, so setting `900000` is a no-op. Set it only to compact
+  *earlier*.
+- Cost: input beyond the 272,000-token threshold is metered at the upstream
+  long-context rate. That threshold is why 272,000 stays the default.
+
+These keys are Codex-CLI-only. The OpenCode / OpenClaw / SDK examples below
+stay at 272000 because `/v1/models` reports the default input budget, not the
+ceiling.
 
 ### Daybreak Blue profile (Trusted Access)
 

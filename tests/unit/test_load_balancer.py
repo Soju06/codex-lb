@@ -2501,6 +2501,7 @@ async def test_sticky_selection_falls_back_from_usage_limited_account() -> None:
             account_id=limited.id,
             continuity_abandoned=False,
             abandoned_account_id=None,
+            refresh_skip_deadline=None,
         )
     )
     balancer = LoadBalancer(repo_factory=lambda: repos)

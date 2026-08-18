@@ -78,7 +78,7 @@ OpenAI-style `/v1/responses/compact` is otherwise unchanged by this requirement;
 
 - **WHEN** a Codex-affinity `POST /backend-api/codex/responses/compact` request receives upstream output that contains historical message items and one compaction summary item
 - **THEN** the JSON response body contains exactly one `output` item for that compaction summary
-- **AND** the normalized item preserves the compaction summary's non-empty upstream ID and status
+- **AND** the normalized item preserves the compaction summary's valid `cmp_`-prefixed upstream ID and status
 - **AND** it does not expose historical message items as standalone compact output
 
 #### Scenario: OpenAI-compatible compact normalizes duplicate triggers

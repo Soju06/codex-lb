@@ -4147,7 +4147,7 @@ def test_enforced_service_tier_provenance_treats_default_aliases_as_omitted(
     service_tier_was_enforced = apply_api_key_enforcement(
         payload,
         _service_tier_enforcement_key("priority"),
-    )
+    ).service_tier_was_enforced
 
     assert service_tier_was_enforced is True
     assert payload.service_tier == "priority"
@@ -4186,7 +4186,7 @@ async def test_select_account_ignores_enforced_service_tier_the_model_never_adve
     service_tier_was_enforced = apply_api_key_enforcement(
         payload,
         _service_tier_enforcement_key("priority"),
-    )
+    ).service_tier_was_enforced
     assert service_tier_was_enforced is True
     assert apply_enforced_service_tier_model_fallback(
         payload,
@@ -4215,7 +4215,7 @@ async def test_select_account_ignores_enforced_service_tier_the_model_never_adve
         explicitly_requested = apply_api_key_enforcement(
             explicit_payload,
             _service_tier_enforcement_key("priority"),
-        )
+        ).service_tier_was_enforced
         assert explicitly_requested is False
         assert not apply_enforced_service_tier_model_fallback(
             explicit_payload,
@@ -4314,7 +4314,7 @@ async def test_api_key_enforced_priority_tier_still_routes_a_model_without_prior
         last_used_at=None,
     )
     payload = ResponsesRequest(model=model, instructions="ping", input=[])
-    service_tier_was_enforced = apply_api_key_enforcement(payload, api_key)
+    service_tier_was_enforced = apply_api_key_enforcement(payload, api_key).service_tier_was_enforced
     assert payload.service_tier == "priority"
     assert service_tier_was_enforced is True
     assert apply_enforced_service_tier_model_fallback(

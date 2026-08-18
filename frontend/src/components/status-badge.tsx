@@ -16,15 +16,16 @@ const statusClassMap: Record<StatusValue, string> = {
 
 export type StatusBadgeProps = {
   status: StatusValue;
+  title?: string;
 };
 
-export function StatusBadge({ status }: StatusBadgeProps) {
+export function StatusBadge({ status, title }: StatusBadgeProps) {
   const { t } = useTranslation();
   const className = statusClassMap[status] ?? statusClassMap.deactivated;
   const label = t(`common.status.${status}`, { defaultValue: status });
 
   return (
-    <Badge className={cn("gap-1.5", className)} variant="outline">
+    <Badge className={cn("gap-1.5", className)} variant="outline" title={title}>
       <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
       {label}
     </Badge>

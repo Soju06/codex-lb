@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
 
@@ -2926,3 +2926,198 @@ async def test_seed_hard_sticky_outage_grace_on_startup_refreshes_only_unavailab
             entry = await repo.get_entry(f"turn_{account_id}", kind=StickySessionKind.CODEX_SESSION)
             assert entry is not None
             assert entry.updated_at == long_ago
+
+
+async def _create_account(account_id: str) -> None:
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(
+            Account(
+                id=account_id,
+                email=f"{account_id}@example.com",
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("access"),
+                refresh_token_encrypted=encryptor.encrypt("refresh"),
+                id_token_encrypted=encryptor.encrypt("id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                deactivation_reason=None,
+            )
+        )
+
+
+async def _backdate_sticky_row(key: str, kind: StickySessionKind, *, age_seconds: float) -> None:
+    from app.db.models import StickySession
+
+    async with SessionLocal() as session:
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == kind)
+            .values(updated_at=utcnow() - timedelta(seconds=age_seconds))
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_sticky_lookup_refresh_skippable_only_for_fresh_unmarked_rows(db_setup):
+    """refresh_skip_deadline is set only when a same-owner upsert would be a
+    pure updated_at rewrite: fresh within min(15s, 1% of TTL), not stamped in
+    the future, and free of any abandonment marker."""
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _create_account("acc_refresh_skip")
+    key = "key_refresh_skip"
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        await repo.upsert(key, "acc_refresh_skip", kind=StickySessionKind.PROMPT_CACHE)
+
+        fresh = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert fresh.account_id == "acc_refresh_skip"
+        assert isinstance(fresh.refresh_skip_deadline, datetime)
+        # The deadline is observed_updated_at + window: never further out
+        # than the full window from now.
+        assert fresh.refresh_skip_deadline <= utcnow() + timedelta(seconds=15.0)
+
+        # Without a TTL there is no refresh write to skip.
+        durable = await repo.get_account_id_and_abandonment(key, kind=StickySessionKind.PROMPT_CACHE)
+        assert durable.account_id == "acc_refresh_skip"
+        assert durable.refresh_skip_deadline is None
+
+    # 10s old: inside the 15s cap for an 1800s TTL, but outside 1% of a 600s
+    # TTL (6s) — the window scales with the TTL it protects.
+    await _backdate_sticky_row(key, StickySessionKind.PROMPT_CACHE, age_seconds=10.0)
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        within_cap = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert within_cap.account_id == "acc_refresh_skip"
+        assert isinstance(within_cap.refresh_skip_deadline, datetime)
+        beyond_fraction = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=600,
+        )
+        assert beyond_fraction.account_id == "acc_refresh_skip"
+        assert beyond_fraction.refresh_skip_deadline is None
+
+    # A future updated_at (database clock ahead of the application, or a
+    # restored row) is never skippable: an upper-bound-only age check would
+    # otherwise satisfy the window for longer than the documented bound.
+    await _backdate_sticky_row(key, StickySessionKind.PROMPT_CACHE, age_seconds=-30.0)
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        future_stamped = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert future_stamped.account_id == "acc_refresh_skip"
+        assert future_stamped.refresh_skip_deadline is None
+
+    # An abandonment marker disqualifies the skip even on a fresh row: the
+    # upsert that would be skipped also clears the marker columns.
+    async with SessionLocal() as session:
+        await session.execute(
+            update(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.PROMPT_CACHE)
+            .values(updated_at=utcnow(), continuity_abandonment_scope="session_header")
+        )
+        await session.commit()
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        marked = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+            continuity_source="turn_state",
+        )
+        # Non-matching source keeps the owner, but the marker still makes a
+        # same-owner upsert semantic (it would clear the scope).
+        assert marked.account_id == "acc_refresh_skip"
+        assert marked.refresh_skip_deadline is None
+
+
+@pytest.mark.asyncio
+async def test_sticky_upsert_concurrent_same_key_semantics(db_setup):
+    """Concurrent upserts on one (key, kind) must each observe their own
+    write in RETURNING, keep exactly one row, and settle on one of the
+    written owners."""
+    from sqlalchemy import func as sa_func
+    from sqlalchemy import select
+
+    from app.db.models import StickySession
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _create_account("acc_conc_a")
+    await _create_account("acc_conc_b")
+    key = "key_concurrent_upsert"
+    started_at = utcnow()
+
+    async def _one_upsert(index: int) -> str:
+        account_id = "acc_conc_a" if index % 2 == 0 else "acc_conc_b"
+        async with SessionLocal() as session:
+            repo = StickySessionsRepository(session)
+            row = await repo.upsert(key, account_id, kind=StickySessionKind.PROMPT_CACHE)
+            assert row.key == key
+            # RETURNING must reflect this statement's own write, not a
+            # concurrent winner's row.
+            assert row.account_id == account_id
+            assert row.continuity_abandoned_at is None
+            return row.account_id
+
+    results = await asyncio.gather(*(_one_upsert(index) for index in range(12)))
+    assert set(results) == {"acc_conc_a", "acc_conc_b"}
+
+    async with SessionLocal() as session:
+        row_count = await session.scalar(
+            select(sa_func.count())
+            .select_from(StickySession)
+            .where(StickySession.key == key, StickySession.kind == StickySessionKind.PROMPT_CACHE)
+        )
+        assert row_count == 1
+        final = await StickySessionsRepository(session).get_entry(key, kind=StickySessionKind.PROMPT_CACHE)
+        assert final is not None
+        assert final.account_id in {"acc_conc_a", "acc_conc_b"}
+        # Backend timestamps may carry second precision only.
+        assert final.updated_at >= started_at.replace(microsecond=0)
+
+
+@pytest.mark.asyncio
+async def test_sticky_refresh_skip_never_clobbers_concurrent_rebind(db_setup):
+    """A request that observed a fresh same-owner row and skipped its refresh
+    write must leave a concurrent rebind to another account intact."""
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
+    await _create_account("acc_skip_old")
+    await _create_account("acc_skip_new")
+    key = "key_skip_vs_rebind"
+
+    async with SessionLocal() as session:
+        repo = StickySessionsRepository(session)
+        await repo.upsert(key, "acc_skip_old", kind=StickySessionKind.PROMPT_CACHE)
+        lookup = await repo.get_account_id_and_abandonment(
+            key,
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=1800,
+        )
+        assert lookup.account_id == "acc_skip_old"
+        # The selection layer would skip its same-owner refresh here.
+        assert isinstance(lookup.refresh_skip_deadline, datetime)
+
+    # Concurrent request rebinds the mapping while the first request is still
+    # in flight; the first request performs no compensating write.
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(key, "acc_skip_new", kind=StickySessionKind.PROMPT_CACHE)
+
+    async with SessionLocal() as session:
+        final = await StickySessionsRepository(session).get_account_id(key, kind=StickySessionKind.PROMPT_CACHE)
+        assert final == "acc_skip_new"

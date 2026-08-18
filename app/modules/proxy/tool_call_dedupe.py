@@ -7,7 +7,7 @@ from typing import cast
 
 from app.core.openai import tool_call_safety
 from app.core.openai.models import OpenAIEvent
-from app.core.openai.parsing import parse_sse_event_payload
+from app.core.openai.parsing import classify_event_type, parse_sse_event_payload
 from app.core.types import JsonValue
 from app.core.utils.sse import format_sse_event
 
@@ -36,14 +36,7 @@ def is_downstream_side_effect_tool_call(item: Mapping[str, JsonValue]) -> bool:
 def event_type_from_payload(event: OpenAIEvent | None, payload: dict[str, JsonValue] | None) -> str | None:
     if event is not None:
         return event.type
-    if payload is None:
-        return None
-    payload_type = payload.get("type")
-    if isinstance(payload_type, str):
-        return payload_type
-    if isinstance(payload.get("error"), dict):
-        return "error"
-    return None
+    return classify_event_type(payload)
 
 
 def response_id_from_payload(payload: dict[str, JsonValue] | None) -> str | None:
@@ -785,10 +778,10 @@ def rewrite_parallel_tool_call_text(
 ) -> tuple[str, dict[str, JsonValue] | None, OpenAIEvent | None, str | None, str]:
     rewritten_payload, changed, _removed_count = rewrite_parallel_tool_call_payload(payload)
     if not changed:
-        # Reuse the caller's parsed event; validating the payload directly
-        # avoids re-parsing the raw block when a caller has neither.
-        if event is None:
-            event = parse_sse_event_payload(payload)
+        # Reuse the caller's parsed event as-is. Hot streaming paths validate
+        # only lifecycle frames, so ``event`` is intentionally None for the
+        # delta bulk; the event type is classified from the payload dict
+        # instead of re-validating per frame.
         return text, payload, event, event_type_from_payload(event, payload), event_block
     assert rewritten_payload is not None
     rewritten_text = json.dumps(rewritten_payload, ensure_ascii=True, separators=(",", ":"))
@@ -811,8 +804,8 @@ def rewrite_parallel_tool_call_sse_line(
 ) -> tuple[str, dict[str, JsonValue] | None, OpenAIEvent | None, str | None]:
     rewritten_payload, changed, _removed_count = rewrite_parallel_tool_call_payload(payload)
     if not changed:
-        if event is None:
-            event = parse_sse_event_payload(payload)
+        # See rewrite_parallel_tool_call_text: no per-frame re-validation on
+        # the unchanged path; callers own lifecycle-gated validation.
         return line, payload, event, event_type_from_payload(event, payload)
     assert rewritten_payload is not None
     rewritten_line = format_sse_event(rewritten_payload)

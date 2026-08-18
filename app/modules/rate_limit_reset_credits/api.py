@@ -132,7 +132,8 @@ async def get_rate_limit_reset_credits(
 ) -> RateLimitResetCreditsSnapshotResponse | None:
     store = get_rate_limit_reset_credits_store()
     account = await context.repository.get_by_id(account_id)
-    if account is None:
+    # A pending-deletion account is gone from the operator's point of view.
+    if account is None or account.delete_requested_at is not None:
         await store.invalidate(account_id)
         return None
     if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
@@ -158,7 +159,9 @@ async def consume_rate_limit_reset_credit(
     context: AccountsContext = Depends(get_accounts_context),
 ) -> ConsumeResetCreditResponseSchema:
     account = await context.repository.get_by_id(account_id)
-    if account is None:
+    # A pending-deletion account is gone from the operator's point of view:
+    # the synchronous delete 404'd here once the row was removed.
+    if account is None or account.delete_requested_at is not None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
 
     store = get_rate_limit_reset_credits_store()

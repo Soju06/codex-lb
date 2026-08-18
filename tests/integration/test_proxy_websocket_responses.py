@@ -37,7 +37,13 @@ from app.core.utils.request_id import get_request_id
 from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.api_keys.service import ApiKeyCreateData, ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
+from app.modules.api_keys.service import (
+    ApiKeyCreateData,
+    ApiKeyData,
+    ApiKeysService,
+    ApiKeyUsageReservationData,
+    LimitRuleInput,
+)
 from app.modules.proxy._service.websocket import mixin as websocket_mixin_module
 from app.modules.proxy.affinity import _codex_session_selection_key
 from app.modules.proxy.capability_routing import (
@@ -419,12 +425,19 @@ def test_responses_websocket_route_drain_preserves_terminal_ownership_and_reject
                 ApiKeyCreateData(
                     name="route drain",
                     allowed_models=None,
+                    # Limit-free keys skip the reservation ledger entirely, and
+                    # this test asserts drain-time settlement ownership of a
+                    # real reservation, so give the key an applicable limit.
+                    limits=[
+                        LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000_000),
+                    ],
                 )
             )
             usage_reservation = await service.enforce_limits_for_request(
                 created_key.id,
                 request_model="gpt-5.6-sol",
             )
+            assert usage_reservation is not None
         return created_key, usage_reservation
 
     async def read_persisted_results(

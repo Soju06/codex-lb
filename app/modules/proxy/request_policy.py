@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import NamedTuple
 
 from pydantic import ValidationError
 
@@ -23,7 +24,9 @@ from app.core.openai.v1_requests import V1ResponsesRequest
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 from app.core.utils.request_id import get_request_id
+from app.db.models import ModelSource
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.model_sources.catalog import source_model_reasoning_levels
 
 logger = logging.getLogger(__name__)
 
@@ -126,13 +129,27 @@ def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 
 
+class ApiKeyEnforcementResult(NamedTuple):
+    """What :func:`apply_api_key_enforcement` observed while mutating the payload.
+
+    ``pre_normalization_reasoning_effort`` carries the effort that
+    :func:`normalize_unsupported_reasoning_effort` replaced, so a caller that
+    later routes the request to an OpenAI-compatible model source can restore
+    it. It is the post-enforcement value: restoring it cannot resurrect an
+    effort an API key overrode.
+    """
+
+    service_tier_was_enforced: bool
+    pre_normalization_reasoning_effort: str | None
+
+
 def apply_api_key_enforcement(
     payload: ResponsesRequest | ResponsesCompactRequest,
     api_key: ApiKeyData | None,
     *,
     registry: ModelRegistry | None = None,
     prohibit_fast_mode: bool = False,
-) -> bool:
+) -> ApiKeyEnforcementResult:
     """Apply API-key policy and report whether it supplied the service tier.
 
     The returned provenance is captured before mutating ``payload``. Callers
@@ -143,8 +160,8 @@ def apply_api_key_enforcement(
     normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
 
     if api_key is None:
-        normalize_unsupported_reasoning_effort(payload)
-        return False
+        pre_normalization_effort = normalize_unsupported_reasoning_effort(payload, registry=registry)
+        return ApiKeyEnforcementResult(False, pre_normalization_effort)
 
     if api_key.enforced_model:
         requested_model = payload.model
@@ -186,7 +203,7 @@ def apply_api_key_enforcement(
                 api_key.enforced_reasoning_effort,
             )
 
-    normalize_unsupported_reasoning_effort(payload)
+    pre_normalization_effort = normalize_unsupported_reasoning_effort(payload, registry=registry)
 
     service_tier_was_enforced = False
     if api_key.enforced_service_tier is not None:
@@ -216,7 +233,7 @@ def apply_api_key_enforcement(
                 api_key.enforced_service_tier,
                 effective_service_tier,
             )
-    return service_tier_was_enforced
+    return ApiKeyEnforcementResult(service_tier_was_enforced, pre_normalization_effort)
 
 
 def apply_enforced_service_tier_model_fallback(
@@ -449,7 +466,7 @@ def normalize_unsupported_reasoning_effort(
     payload: ResponsesRequest | ResponsesCompactRequest,
     *,
     registry: ModelRegistry | None = None,
-) -> None:
+) -> str | None:
     """Rewrite ``reasoning.effort`` values the upstream backend rejects.
 
     Some efforts that codex-lb accepts at the API surface (notably
@@ -462,10 +479,25 @@ def normalize_unsupported_reasoning_effort(
 
     Client-plane efforts the reference Codex client aliases before sending
     (``ultra`` -> ``max``) are rewritten the same way here.
+
+    Returns the effort that the unsupported-effort fallback replaced, in
+    normalized (trimmed, lowercased) form, or ``None`` when nothing restorable
+    was rewritten. Model sources do not have the backend quirk that fallback
+    works around, but whether a request is served by one is only known after
+    source selection, which happens later; callers that can reach a source
+    carry this value forward and restore it there (see
+    ``restore_source_reasoning_effort``).
+
+    The ``ultra`` -> ``max`` wire alias is never reported. That aliasing mirrors
+    the reference client and is required on every upstream surface, so it must
+    survive source routing too.
+
+    The reported value is the post-enforcement effort rather than the client's
+    original, so restoring it cannot resurrect an effort an API key overrode.
     """
 
     if payload.reasoning is None or payload.reasoning.effort is None:
-        return
+        return None
 
     requested_effort = payload.reasoning.effort
     normalized_effort = requested_effort.strip().lower()
@@ -480,10 +512,12 @@ def normalize_unsupported_reasoning_effort(
             requested_effort,
             wire_alias,
         )
-        return
+        # Deliberately not reported as restorable: the ultra -> max alias must
+        # hold on every surface, source-routed payloads included.
+        return None
 
     if normalized_effort not in _UNSUPPORTED_UPSTREAM_REASONING_EFFORTS:
-        return
+        return None
 
     fallback = _resolve_reasoning_effort_fallback(
         payload.model,
@@ -496,6 +530,50 @@ def normalize_unsupported_reasoning_effort(
         payload.model,
         requested_effort,
         fallback,
+    )
+    return normalized_effort
+
+
+def restore_source_reasoning_effort(
+    payload: ResponsesRequest | ResponsesCompactRequest,
+    source: ModelSource,
+    *,
+    pre_normalization_effort: str | None,
+) -> None:
+    """Undo :func:`normalize_unsupported_reasoning_effort` for a source-routed request.
+
+    The rewrite exists solely to work around a ChatGPT/Codex backend quirk, so
+    it must not reach an OpenAI-compatible model source. This runs at the point
+    where the source has actually been selected, which is the only place the
+    routing outcome is known -- inferring it earlier from registry membership
+    misfires in both directions (a subscription model missing from a populated
+    snapshot, and a source model whose slug shadows a subscription one).
+
+    The restore is gated on the operator having declared the effort for this
+    model: sources without reasoning metadata keep the pre-existing behaviour,
+    and an effort the backend never advertised is not sent to it.
+    """
+    if pre_normalization_effort is None or payload.reasoning is None:
+        return
+    if payload.model is None:
+        return
+    restored_effort = pre_normalization_effort.strip().lower()
+    declared = {level.effort for level in source_model_reasoning_levels(source, payload.model)}
+    if restored_effort not in declared:
+        return
+    current_effort = payload.reasoning.effort
+    # Normalized on assignment rather than trusting the caller: the sole
+    # producer already reports the normalized form, but that invariant is
+    # non-local and a casing variant must never reach the wire.
+    payload.reasoning.effort = restored_effort
+    logger.info(
+        "reasoning_effort_restored_for_source request_id=%s model=%s source_id=%s "
+        "normalized_effort=%s restored_effort=%s",
+        get_request_id(),
+        payload.model,
+        source.id,
+        current_effort,
+        restored_effort,
     )
 
 

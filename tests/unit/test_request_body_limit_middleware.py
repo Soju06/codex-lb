@@ -8,14 +8,16 @@ from typing import cast
 import pytest
 from fastapi import Body, Depends, FastAPI, HTTPException
 from httpx import ASGITransport, AsyncByteStream, AsyncClient
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import Message, Receive, Scope, Send
 
 from app.core.config.settings import get_settings
 from app.core.handlers import add_exception_handlers
 from app.core.middleware.path_rewrite import BackendApiCodexV1AliasMiddleware
 from app.core.middleware.request_body_limit import RequestBodyLimitMiddleware, add_request_body_limit_middleware
-from app.core.middleware.request_decompression import add_request_decompression_middleware
+from app.core.middleware.request_decompression import (
+    RequestDecompressionMiddleware,
+    add_request_decompression_middleware,
+)
 from app.main import create_app
 
 pytestmark = pytest.mark.unit
@@ -495,9 +497,7 @@ def test_production_middleware_order_keeps_alias_and_admission_outside_body_read
     alias_index = next(index for index, item in enumerate(middleware) if item.cls is BackendApiCodexV1AliasMiddleware)
     limit_index = next(index for index, item in enumerate(middleware) if item.cls is RequestBodyLimitMiddleware)
     decompression_index = next(
-        index
-        for index, item in enumerate(middleware)
-        if item.cls is BaseHTTPMiddleware and item.kwargs.get("dispatch").__name__ == "request_decompression_middleware"
+        index for index, item in enumerate(middleware) if item.cls is RequestDecompressionMiddleware
     )
 
     assert alias_index < limit_index < decompression_index

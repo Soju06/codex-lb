@@ -39,6 +39,22 @@ from app.modules.usage.depletion_service import (
 )
 from app.modules.usage.mappers import usage_history_to_window_row
 
+# Newest-first per-account row bound for the projections history fetch
+# (PostgreSQL; the SQLite snapshot cache keeps the shared floor). Live
+# snapshot ingestion appends usage rows per proxied request, so one busy
+# account's 7-day secondary window can hold tens of thousands of rows while
+# the consumers only read the recent tail. The cap alone covers the
+# tail-weighted consumers: the EWMA depletion/burn rates (alpha 0.4 — a
+# sample's contribution decays by 0.6^n within a few dozen newer samples)
+# are insensitive to samples this deep regardless of write cadence. The one
+# equal-weight consumer — the weekly-pace smoothing mean over the configured
+# window (<= 240 minutes) — is protected by ``uncapped_recent_floor``
+# instead, because ingestion writes on every fingerprint change and a burst
+# could out-write any fixed cap inside the smoothing window. 4320 rows cover
+# the 6-hour recent-burn window at the ingestor's 5-second per-account write
+# throttle floor; sparse accounts stay under the cap entirely.
+_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP = 4320
+
 
 def _parse_weekly_pace_working_days(value: str) -> set[int]:
     try:
@@ -181,15 +197,16 @@ class DashboardService:
             encryptor=self._encryptor,
             include_auth=False,
         )
+        dashboard_settings = await self._repo.get_settings()
         primary_history, secondary_history = await _load_projection_histories(
             self._repo,
             primary_usage,
             secondary_usage,
             now,
+            smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
         )
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
         settings = get_settings()
-        dashboard_settings = await self._repo.get_settings()
         weekly_credit_pace = build_weekly_credit_pace(
             accounts=accounts,
             account_summaries=account_summaries,
@@ -211,6 +228,8 @@ async def _load_projection_histories(
     primary_usage: dict[str, UsageHistory],
     secondary_usage: dict[str, UsageHistory],
     now: datetime,
+    *,
+    smoothing_window_minutes: int,
 ) -> tuple[dict[str, list[UsageHistory]], dict[str, list[UsageHistory]]]:
     # Compute depletion separately for primary-window and secondary-window
     # accounts so the aggregate is not skewed by mixing different window durations.
@@ -279,13 +298,32 @@ async def _load_projection_histories(
             if acct_since < sec_since:
                 sec_since = acct_since
 
+    # The weekly-pace smoothing mean weighs every sample in its window
+    # equally, so rows inside the configured smoothing window are exempt from
+    # the row cap (ingestion writes per fingerprint change; a burst could
+    # otherwise out-write the cap and silently shift the smoothed values).
+    smoothing_floor = now - timedelta(minutes=smoothing_window_minutes)
     all_pri_rows = (
-        await repo.bulk_usage_history_since(pri_fetch_ids, "primary", pri_since, cutoffs=pri_cutoffs)
+        await repo.bulk_usage_history_since(
+            pri_fetch_ids,
+            "primary",
+            pri_since,
+            cutoffs=pri_cutoffs,
+            per_account_row_cap=_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP,
+            uncapped_recent_floor=smoothing_floor,
+        )
         if pri_fetch_ids
         else {}
     )
     all_sec_rows = (
-        await repo.bulk_usage_history_since(sec_fetch_ids, "secondary", sec_since, cutoffs=sec_cutoffs)
+        await repo.bulk_usage_history_since(
+            sec_fetch_ids,
+            "secondary",
+            sec_since,
+            cutoffs=sec_cutoffs,
+            per_account_row_cap=_PROJECTION_HISTORY_PER_ACCOUNT_ROW_CAP,
+            uncapped_recent_floor=smoothing_floor,
+        )
         if sec_fetch_ids
         else {}
     )

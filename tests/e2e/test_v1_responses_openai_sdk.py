@@ -327,12 +327,15 @@ async def sdk_client(
     result = registry.update(snapshot)
     if hasattr(result, "__await__"):
         await result
-    # Reuse the same ASGITransport that e2e_client built.
+    # Reuse the same ASGI app that e2e_client built, wrapped for httpx2.
+    httpx = __import__("httpx")
+    httpx2 = __import__("httpx2")
     transport = e2e_client._transport  # noqa: SLF001
+    assert isinstance(transport, httpx.ASGITransport)
     client = openai.AsyncOpenAI(
         api_key=created["key"],
         base_url="http://testserver/v1",
-        http_client=__import__("httpx").AsyncClient(transport=transport, base_url="http://testserver"),
+        http_client=httpx2.AsyncClient(transport=httpx2.ASGITransport(app=transport.app), base_url="http://testserver"),
     )
     yield client
     await client.close()

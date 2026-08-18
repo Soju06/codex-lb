@@ -137,6 +137,20 @@ class Account(Base):
         server_default=false(),
         nullable=False,
     )
+    # Pending-deletion marker: set by the fast DELETE path, consumed by the
+    # background deletion worker, cleared only by a credential replacement
+    # (re-import/reauth) that supersedes the deletion. Non-NULL rows are
+    # hidden from account listings and are already unroutable (the fast path
+    # also sets status=DEACTIVATED).
+    delete_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Frozen at the first delete request (repeat requests do not escalate):
+    # True selects the history-deleting variant in the background worker.
+    delete_history_requested: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
 
     api_key_assignments: Mapped[list["ApiKeyAccountAssignment"]] = relationship(
         "ApiKeyAccountAssignment",
@@ -2121,6 +2135,17 @@ Index(
     postgresql_include=["used_percent", "reset_at", "window_minutes", "id"],
 )
 Index("idx_accounts_email", Account.email)
+# Pending-deletion queue: every replica probes ``delete_requested_at IS NOT
+# NULL LIMIT 1`` each worker interval and the leader orders the queue by
+# (delete_requested_at, id); the partial index keeps both reads off the full
+# accounts table and is empty in the steady state (no pending deletions).
+Index(
+    "idx_accounts_delete_requested_at",
+    Account.delete_requested_at,
+    Account.id,
+    postgresql_where=text("delete_requested_at IS NOT NULL"),
+    sqlite_where=text("delete_requested_at IS NOT NULL"),
+)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)

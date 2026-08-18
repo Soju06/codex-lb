@@ -2178,3 +2178,59 @@ def test_rewrite_parallel_tool_call_payload_removes_duplicate_goal_side_effects(
         "functions.update_plan",
         "functions.request_user_input",
     ]
+
+
+def test_rewrite_parallel_tool_call_text_does_not_revalidate_unchanged_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Hot streaming paths validate only lifecycle frames; the unchanged path
+    # must not re-run pydantic validation when the caller passed event=None.
+    calls: list[JsonValue | None] = []
+
+    def counting_validate(payload: JsonValue | None) -> None:
+        calls.append(payload)
+        return None
+
+    monkeypatch.setattr(tool_call_dedupe, "parse_sse_event_payload", counting_validate)
+    payload: dict[str, JsonValue] = {"type": "response.output_text.delta", "delta": "hello"}
+    text = json.dumps(payload, separators=(",", ":"))
+
+    rewritten_text, rewritten_payload, event, event_type, event_block = (
+        tool_call_dedupe.rewrite_parallel_tool_call_text(
+            text,
+            payload,
+            event_block=f"data: {text}\n\n",
+        )
+    )
+
+    assert calls == []
+    assert event is None
+    assert event_type == "response.output_text.delta"
+    assert rewritten_text == text
+    assert rewritten_payload is payload
+    assert event_block == f"data: {text}\n\n"
+
+
+def test_rewrite_parallel_tool_call_sse_line_does_not_revalidate_unchanged_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[JsonValue | None] = []
+
+    def counting_validate(payload: JsonValue | None) -> None:
+        calls.append(payload)
+        return None
+
+    monkeypatch.setattr(tool_call_dedupe, "parse_sse_event_payload", counting_validate)
+    payload: dict[str, JsonValue] = {"type": "response.reasoning_text.delta", "delta": "r"}
+    line = format_sse_event(payload)
+
+    rewritten_line, rewritten_payload, event, event_type = tool_call_dedupe.rewrite_parallel_tool_call_sse_line(
+        line,
+        payload,
+    )
+
+    assert calls == []
+    assert event is None
+    assert event_type == "response.reasoning_text.delta"
+    assert rewritten_line == line
+    assert rewritten_payload is payload

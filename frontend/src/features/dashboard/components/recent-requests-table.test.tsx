@@ -3,6 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
+import {
+  ALL_REQUEST_LOG_COLUMNS,
+  MAX_REQUEST_LOG_COLUMN_WIDTH,
+  MIN_REQUEST_LOG_COLUMN_WIDTH,
+  REQUEST_LOG_COLUMN_WIDTH_STEP,
+} from "@/features/dashboard/request-log-columns";
+import type { RequestLog } from "@/features/dashboard/schemas";
 
 const ISO = "2026-01-01T12:00:00+00:00";
 const NULL_FAILURE_METADATA = {
@@ -48,6 +55,41 @@ const PAGINATION_PROPS = {
   onOffsetChange: vi.fn(),
 };
 
+const LAYOUT_REQUEST = {
+  requestedAt: ISO,
+  accountId: "acc-layout",
+  planType: "plus",
+  apiKeyName: "Layout Key",
+  apiKeyId: "key-layout",
+  requestId: "req-layout",
+  conversationId: null,
+  requestKind: "normal",
+  model: "gpt-5.1",
+  source: null,
+  serviceTier: null,
+  requestedServiceTier: null,
+  actualServiceTier: null,
+  transport: "http",
+  upstreamTransport: "http",
+  status: "ok",
+  errorCode: null,
+  errorMessage: null,
+  ...NULL_FAILURE_METADATA,
+  ...NULL_USERAGENT_METADATA,
+  tokens: 1200,
+  inputTokens: 1000,
+  outputTokens: 200,
+  outputTokensRaw: 200,
+  reasoningTokens: 0,
+  latencyFirstTokenMs: 200,
+  latencyQueueMs: null,
+  cachedInputTokens: 0,
+  reasoningEffort: null,
+  costUsd: 0.01,
+  costBreakdown: null,
+  latencyMs: 1000,
+} satisfies RequestLog;
+
 function openRequestDetails() {
   fireEvent.click(screen.getByRole("button", { name: "View Details" }));
   return screen.getByRole("dialog");
@@ -72,6 +114,127 @@ describe("RecentRequestsTable", () => {
     if (originalIsSecureContext) {
       Object.defineProperty(window, "isSecureContext", originalIsSecureContext);
     }
+  });
+
+  it("renders every existing column when layout props are omitted", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+      />,
+    );
+
+    expect(screen.getAllByRole("columnheader")).toHaveLength(ALL_REQUEST_LOG_COLUMNS.length);
+    expect(screen.getByText("Layout Key")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View Details" })).toBeInTheDocument();
+  });
+
+  it("renders only selected headers and matching row cells", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "model"]}
+      />,
+    );
+
+    expect(screen.getAllByRole("columnheader")).toHaveLength(2);
+    expect(screen.getByRole("columnheader", { name: "Time" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Model" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "API Key" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Layout Key")).not.toBeInTheDocument();
+    expect(screen.getByText("gpt-5.1")).toBeInTheDocument();
+  });
+
+  it("resizes only the selected column by pointer and clamps it to bounds", () => {
+    const onColumnWidthChange = vi.fn();
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: 112, account: 160 }}
+        onColumnWidthChange={onColumnWidthChange}
+      />,
+    );
+
+    const accountSeparator = screen.getByRole("separator", {
+      name: "Resize Account column",
+    });
+    fireEvent.pointerDown(accountSeparator, { pointerId: 7, clientX: 100 });
+    fireEvent.pointerMove(accountSeparator, { pointerId: 7, clientX: 164 });
+    fireEvent.pointerUp(accountSeparator, { pointerId: 7, clientX: 164 });
+
+    expect(onColumnWidthChange).toHaveBeenCalledWith("account", 224);
+    expect(onColumnWidthChange).not.toHaveBeenCalledWith("time", expect.any(Number));
+
+    onColumnWidthChange.mockClear();
+    fireEvent.pointerDown(accountSeparator, { pointerId: 8, clientX: 100 });
+    fireEvent.pointerMove(accountSeparator, { pointerId: 8, clientX: 10_000 });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "account",
+      MAX_REQUEST_LOG_COLUMN_WIDTH,
+    );
+  });
+
+  it("resizes with arrow keys within bounds and sums visible widths", () => {
+    const onColumnWidthChange = vi.fn();
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: MIN_REQUEST_LOG_COLUMN_WIDTH, account: 200 }}
+        onColumnWidthChange={onColumnWidthChange}
+      />,
+    );
+
+    expect(screen.getByRole("table")).toHaveStyle({
+      width: `${MIN_REQUEST_LOG_COLUMN_WIDTH + 200}px`,
+      minWidth: `${MIN_REQUEST_LOG_COLUMN_WIDTH + 200}px`,
+    });
+
+    const timeSeparator = screen.getByRole("separator", {
+      name: "Resize Time column",
+    });
+    fireEvent.keyDown(timeSeparator, { key: "ArrowLeft" });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "time",
+      MIN_REQUEST_LOG_COLUMN_WIDTH,
+    );
+
+    const accountSeparator = screen.getByRole("separator", {
+      name: "Resize Account column",
+    });
+    fireEvent.keyDown(accountSeparator, { key: "ArrowRight" });
+    expect(onColumnWidthChange).toHaveBeenLastCalledWith(
+      "account",
+      200 + REQUEST_LOG_COLUMN_WIDTH_STEP,
+    );
+  });
+
+  it("pins the table to the configured width sum so surplus space is not redistributed", () => {
+    render(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[LAYOUT_REQUEST]}
+        visibleColumns={["time", "account"]}
+        columnWidths={{ time: 112, account: 160 }}
+        onColumnWidthChange={vi.fn()}
+      />,
+    );
+
+    // An explicit width (not merely a minimum) keeps configured column widths
+    // independent when their sum is smaller than the container.
+    expect(screen.getByRole("table")).toHaveStyle({
+      width: "272px",
+      minWidth: "272px",
+    });
   });
 
   it("renders rows with status badges and supports request details and copy actions", async () => {

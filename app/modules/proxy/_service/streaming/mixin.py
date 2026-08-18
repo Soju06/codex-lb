@@ -41,7 +41,11 @@ from app.core.errors import (
 from app.core.errors import (
     response_failed_event,
 )
-from app.core.openai.parsing import parse_sse_event_payload
+from app.core.openai.parsing import (
+    _LIFECYCLE_EVENT_TYPES,
+    classify_event_type,
+    parse_sse_event_payload,
+)
 from app.core.openai.requests import (
     ResponsesRequest,
 )
@@ -274,6 +278,7 @@ from app.modules.proxy._service.streaming.helpers import (
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
     _raw_stream_error_code_or_upstream,
+    _rewrite_malformed_stream_error_event,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _raw_stream_error_fields as _raw_error_fields,
@@ -292,13 +297,13 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _ApiKeyReservationTouchState,
-    _event_type_from_payload,
     _finalize_ttft_latency_ms,
     _RequestLogFailureMetadata,
     _RetryableStreamError,
     _StreamSettlement,
     _TerminalStreamError,
     _ttft_event_latency_ms,
+    _verbatim_relay_event_type,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import (
@@ -521,6 +526,16 @@ class _StreamingMixin(_StreamingRetryMixin):
         response_create_lease = AdmissionLease(None, stage="response_create", request_id=request_id)
         account_response_create_lease: AccountLease | None = None
         api_key_reservation_touch_state = _ApiKeyReservationTouchState(last_touch_at=start)
+
+        async def _touch_api_key_reservation() -> None:
+            api_key_reservation_touch_state.last_touch_at = await proxy._maybe_touch_api_key_reservation(
+                api_key=api_key,
+                reservation=api_key_reservation,
+                last_touch_at=api_key_reservation_touch_state.last_touch_at,
+                request_id=request_id,
+                surface="stream",
+            )
+
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
         if api_key_reservation is not None:
@@ -575,7 +590,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 error_code = "stream_incomplete"
                 error_message = "Upstream websocket closed before response.completed"
                 settlement.record_success = False
-                settlement.account_health_error = True
+                terminal_event_seen = settlement.account_health_error = True
                 settlement.error = {"message": error_message}
                 yield format_sse_event(
                     response_failed_event(
@@ -593,7 +608,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 error_code = "upstream_unavailable"
                 error_message = str(exc) or "Request to upstream timed out"
                 settlement.record_success = False
-                settlement.account_health_error = True
+                terminal_event_seen = settlement.account_health_error = True
                 settlement.error = {"message": error_message}
                 yield format_sse_event(
                     response_failed_event(
@@ -607,23 +622,21 @@ class _StreamingMixin(_StreamingRetryMixin):
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
             first_payload = parse_sse_data_json(first)
-            event = parse_sse_event_payload(first_payload)
-            event_type = _event_type_from_payload(event, first_payload)
-            terminal_event_seen = event_type in {
-                "response.completed",
-                "response.failed",
-                "response.incomplete",
-                "error",
-            }
+            event_type = classify_event_type(first_payload)
+            event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+            terminal_event_seen = False
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
+            malformed_error_rewrite = _rewrite_malformed_stream_error_event(
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                event=event,
+                event_type=event_type,
+                event_payload=first_payload,
+                response_id=response_id,
+            )
+            if malformed_error_rewrite is not None:
+                first, event, first_payload, event_type = malformed_error_rewrite
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                api_key_reservation_touch_state.last_touch_at = await proxy._maybe_touch_api_key_reservation(
-                    api_key=api_key,
-                    reservation=api_key_reservation,
-                    last_touch_at=api_key_reservation_touch_state.last_touch_at,
-                    request_id=request_id,
-                    surface="stream",
-                )
+                await _touch_api_key_reservation()
             event_service_tier = _facade()._service_tier_from_event_payload(first_payload)
             if event_service_tier is not None:
                 actual_service_tier = event_service_tier
@@ -754,6 +767,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
+                    if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                        terminal_event_seen = True
                     if latency_first_token_ms is None:
                         latency_first_token_ms = _ttft_event_latency_ms(
                             event_type, first_payload, ttft_reasoning_deltas, attempt_started_at
@@ -765,37 +780,28 @@ class _StreamingMixin(_StreamingRetryMixin):
             if terminal_stream_error is not None:
                 raise terminal_stream_error
             async for line in iterator:
+                if verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas):
+                    await _touch_api_key_reservation()
+                    if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                        saw_text_delta = settlement.downstream_text_visible = True
+                    settlement.downstream_visible = True
+                    yield line
+                    continue
                 event_payload = parse_sse_data_json(line)
-                event = parse_sse_event_payload(event_payload)
-                event_type = _event_type_from_payload(event, event_payload)
-                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    terminal_event_seen = True
+                event_type = classify_event_type(event_payload)
+                event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
-                if (
-                    enforce_openai_sdk_contract
-                    and event_type == "error"
-                    and (event is None or event.error is None)
-                    and isinstance(event_payload, dict)
-                ):
-                    message_value = event_payload.get("message")
-                    message = (
-                        message_value.strip()
-                        if isinstance(message_value, str) and message_value.strip()
-                        else "Upstream error"
-                    )
-                    line, event, event_payload, event_type = _facade()._build_rewritten_stream_response_failed_event(
-                        response_id=response_id,
-                        error_code="upstream_error",
-                        error_message=message,
-                    )
+                malformed_error_rewrite = _rewrite_malformed_stream_error_event(
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    event=event,
+                    event_type=event_type,
+                    event_payload=event_payload,
+                    response_id=response_id,
+                )
+                if malformed_error_rewrite is not None:
+                    line, event, event_payload, event_type = malformed_error_rewrite
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    api_key_reservation_touch_state.last_touch_at = await proxy._maybe_touch_api_key_reservation(
-                        api_key=api_key,
-                        reservation=api_key_reservation,
-                        last_touch_at=api_key_reservation_touch_state.last_touch_at,
-                        request_id=request_id,
-                        surface="stream",
-                    )
+                    await _touch_api_key_reservation()
                 event_service_tier = _facade()._service_tier_from_event_payload(event_payload)
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
@@ -940,6 +946,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.downstream_visible = True
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
+                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    terminal_event_seen = True
                 yield line
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
@@ -1005,7 +1013,8 @@ class _StreamingMixin(_StreamingRetryMixin):
         except _TerminalStreamError:
             raise
         except (asyncio.CancelledError, GeneratorExit):
-            status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
+            if not terminal_event_seen:
+                status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
             raise
         except Exception:
             if settlement.downstream_visible:

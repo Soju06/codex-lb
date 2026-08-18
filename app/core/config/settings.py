@@ -242,9 +242,12 @@ class Settings(BaseSettings):
     database_url: str = DEFAULT_DATABASE_URL
     # Pool timeout and recycle are fixed constants in ``app/db/session.py``;
     # the background-task engine always derives its pool sizing from the two
-    # settings below.
-    database_pool_size: int = Field(default=15, gt=0)
-    database_max_overflow: int = Field(default=10, ge=0)
+    # settings below. Defaults are sized so one replica's two pooled engines
+    # cap at (25 + 15) * 2 = 80 PostgreSQL connections, preserving >= 20 raw
+    # server slots on PostgreSQL's default max_connections=100 for reserved
+    # connections, the migration path's two-connection peak, and operations.
+    database_pool_size: int = Field(default=25, gt=0)
+    database_max_overflow: int = Field(default=15, ge=0)
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)

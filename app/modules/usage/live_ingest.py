@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from dataclasses import dataclass
 
 from app.core import usage as usage_core
@@ -22,6 +23,50 @@ logger = logging.getLogger(__name__)
 _QUEUE_SIZE = 512
 _WRITE_MIN_INTERVAL_SECONDS = 5.0
 _CACHE_INVALIDATION_MIN_INTERVAL_SECONDS = 5.0
+
+# Ownership accounting for every task any ingestor instance creates (consumer
+# and trailing cache invalidation), so a task an owner lost track of (a stop
+# cancelled mid-await) can never end in a silently dropped exception:
+#
+# - `_owned_tasks` holds weak references (they never extend task lifetime) so
+#   the test suite's leak fence can cancel pending tasks and settle completed
+#   ones that some reference chain kept alive across a test boundary.
+# - `_record_owned_task_result` runs as each task's done callback: it
+#   retrieves the exception (so the loop's unobserved-task warning can never
+#   fire at garbage-collection time), logs it, and records it in the bounded
+#   `_owned_task_failures` strong handoff for the fence to drain (#1755).
+#
+# `_settled_owned_tasks` (also weak) marks tasks whose result was already
+# recorded, so the done callback and the fence's sweep of completed tasks
+# settle each task exactly once even when both observe it.
+_owned_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()
+_settled_owned_tasks: weakref.WeakSet[asyncio.Task[None]] = weakref.WeakSet()
+# (task name, exception repr) pairs. Reprs, not exception objects: a stored
+# exception's traceback would keep the failed ingestor's whole object graph
+# (task, queue, cached state) alive for the process lifetime, since production
+# never drains this record.
+_owned_task_failures: list[tuple[str, str]] = []
+_MAX_OWNED_TASK_FAILURES = 16
+
+
+def _record_owned_task_result(task: asyncio.Task[None]) -> None:
+    if task in _settled_owned_tasks:
+        return
+    _settled_owned_tasks.add(task)
+    _owned_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    logger.error("Live usage ingestor task %r died unexpectedly", task.get_name(), exc_info=exc)
+    if len(_owned_task_failures) < _MAX_OWNED_TASK_FAILURES:
+        _owned_task_failures.append((task.get_name(), repr(exc)))
+
+
+def _enroll_owned_task(task: asyncio.Task[None]) -> None:
+    _owned_tasks.add(task)
+    task.add_done_callback(_record_owned_task_result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +141,11 @@ class LiveUsageIngestor:
     def start(self) -> None:
         if self._consumer is None or self._consumer.done():
             self._consumer = asyncio.create_task(self._run(), name="live-usage-ingestor")
+            _enroll_owned_task(self._consumer)
+
+    def is_running(self) -> bool:
+        consumer = self._consumer
+        return consumer is not None and not consumer.done()
 
     async def stop(self) -> None:
         consumer = self._consumer
@@ -213,7 +263,11 @@ class LiveUsageIngestor:
             await self._invalidate_caches_now()
             return
         if self._trailing_invalidation is None or self._trailing_invalidation.done():
-            self._trailing_invalidation = asyncio.create_task(self._trailing_invalidate(remaining))
+            self._trailing_invalidation = asyncio.create_task(
+                self._trailing_invalidate(remaining),
+                name="live-usage-trailing-invalidation",
+            )
+            _enroll_owned_task(self._trailing_invalidation)
 
     async def _trailing_invalidate(self, delay_seconds: float) -> None:
         await asyncio.sleep(delay_seconds)
@@ -229,9 +283,28 @@ class LiveUsageIngestor:
 
 
 _ingestor: LiveUsageIngestor | None = None
+# Registrations a nested startup displaced, innermost-last. A stack rather
+# than a single prior slot: lifespans can nest more than one level deep (each
+# portal-loop ``TestClient`` adds one), and a stack restores each displaced
+# outer lifespan in LIFO order while an out-of-order stop simply removes its
+# instance from wherever it sits — a single slot would forget everything below
+# the most recent displacement.
+_displaced_ingestors: list[LiveUsageIngestor] = []
 
 
 def start_live_usage_ingestor() -> LiveUsageIngestor | None:
+    """Create, start, and register a fresh ingestor as the current singleton.
+
+    The caller (the app lifespan) MUST hold the returned instance and pass it
+    back to ``stop_live_usage_ingestor`` at shutdown. Two lifespans can be
+    live in one process (the test suite nests a portal-loop ``TestClient``
+    inside an app already running on the session loop); each owns its own
+    instance, and the module global only tracks whichever registered last. A
+    started ingestor whose only strong root is the module global would become
+    an unreferenced reference cycle (task -> coroutine frame -> ingestor ->
+    queue -> getter future -> task) the moment a nested startup overwrites the
+    global, and the cyclic GC would then destroy its consumer task mid-await.
+    """
     global _ingestor
     settings = get_settings()
     if not getattr(settings, "live_usage_ingestion_enabled", True):
@@ -242,15 +315,47 @@ def start_live_usage_ingestor() -> LiveUsageIngestor | None:
         write_min_interval_seconds=_WRITE_MIN_INTERVAL_SECONDS,
     )
     ingestor.start()
+    if _ingestor is not None and _ingestor.is_running():
+        # A nested startup displaces a still-running outer registration;
+        # remember it so the nested shutdown can restore it (a dead instance
+        # is never worth remembering).
+        _displaced_ingestors.append(_ingestor)
     register_live_usage_publisher(ingestor.publish)
     _ingestor = ingestor
     return ingestor
 
 
-async def stop_live_usage_ingestor() -> None:
+async def stop_live_usage_ingestor(ingestor: LiveUsageIngestor | None = None) -> None:
+    """Stop ``ingestor``, or the current singleton when omitted.
+
+    The module global and the publisher registration are touched only when
+    the stopped instance still owns them, so a lifespan shutting down cannot
+    orphan or unregister a nested lifespan's newer instance — and a nested
+    lifespan's shutdown cannot leave the outer instance dangling with no
+    stop path (the leak behind issue #1755's cross-test poisoning). When the
+    stopped instance is the current registration, the most recent displaced
+    ingestor that is still running is restored (registration and publisher
+    wiring), so a still-live outer lifespan resumes receiving publications
+    instead of going silently deaf after a nested shutdown.
+    """
     global _ingestor
-    ingestor = _ingestor
-    _ingestor = None
-    register_live_usage_publisher(None)
+    if ingestor is None:
+        ingestor = _ingestor
+    if ingestor is not None:
+        # Whatever happens next, a stopped instance must never be restorable.
+        try:
+            _displaced_ingestors.remove(ingestor)
+        except ValueError:
+            pass
+    if ingestor is None or _ingestor is ingestor:
+        restored: LiveUsageIngestor | None = None
+        while _displaced_ingestors:
+            candidate = _displaced_ingestors.pop()
+            if candidate.is_running():
+                restored = candidate
+                break
+            # Stopped or dead in the meantime — never restore a dead instance.
+        _ingestor = restored
+        register_live_usage_publisher(restored.publish if restored is not None else None)
     if ingestor is not None:
         await ingestor.stop()

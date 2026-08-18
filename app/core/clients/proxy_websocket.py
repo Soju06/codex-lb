@@ -934,6 +934,13 @@ async def _connect_upstream_websocket(
             ping_timeout=ping_timeout,
             max_size=settings.max_sse_event_bytes,
             proxy=proxy_url,
+            # Do not offer permessage-deflate upstream: the websockets library
+            # enables it by default, but the sibling upstream transports (the
+            # routed aiohttp path and the raw-handshake transport) already run
+            # uncompressed, and per-frame zlib decode on high-rate event
+            # streams burns CPU on the proxy host. The client-facing socket
+            # keeps negotiating permessage-deflate per responses-api-compat.
+            compression=None,
             **subprotocol_kwargs,
         )
     except asyncio.TimeoutError as exc:

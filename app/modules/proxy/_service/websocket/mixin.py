@@ -7,7 +7,7 @@ import sys
 import time
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Iterator, Mapping, NoReturn, cast
 
@@ -71,7 +71,11 @@ from app.core.errors import (
 from app.core.exceptions import AppError, ProxyAuthError
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import OpenAIEvent
-from app.core.openai.parsing import parse_sse_event
+from app.core.openai.parsing import (
+    _LIFECYCLE_EVENT_TYPES,
+    classify_event_type,
+    parse_sse_event_payload,
+)
 from app.core.openai.requests import (
     ResponsesRequest,
 )
@@ -84,7 +88,7 @@ from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event
 from app.core.utils.time import utcnow as utcnow
 from app.db.models import (
     Account,
@@ -323,7 +327,6 @@ from app.modules.proxy._service.support import (
     _clear_websocket_precreated_replay_fallback,
     _clear_websocket_request_error_overrides,
     _DownstreamWebSocketActivity,
-    _event_type_from_payload,
     _finalize_ttft_reasoning_deltas,
     _PreparedWebSocketRequest,
     _record_response_event,
@@ -693,35 +696,52 @@ def _websocket_archive_request_state_for_payload(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _ParsedUpstreamWebSocketFrame:
+    payload: dict[str, JsonValue] | None
+    event_type: str | None
+    event: OpenAIEvent | None
+
+
+def _parse_upstream_websocket_text_frame(text: str) -> _ParsedUpstreamWebSocketFrame:
+    """Decode an upstream websocket text frame exactly once.
+
+    The payload is json-decoded a single time, the event type is classified
+    from the parsed dict, and pydantic validation runs only for lifecycle
+    frames (the only events whose validated model fields the proxy consumes).
+    """
+    try:
+        raw_payload = json.loads(text)
+    except json.JSONDecodeError:
+        raw_payload = None
+    payload = cast(dict[str, JsonValue], raw_payload) if isinstance(raw_payload, dict) else None
+    event_type = classify_event_type(payload)
+    event = parse_sse_event_payload(payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
+    return _ParsedUpstreamWebSocketFrame(payload=payload, event_type=event_type, event=event)
+
+
 async def _websocket_archive_request_id_for_message(
     message: Any,
     *,
     pending_requests: deque[_WebSocketRequestState],
     pending_lock: anyio.Lock,
+    parsed_frame: _ParsedUpstreamWebSocketFrame | None = None,
 ) -> str | None:
     if message.kind != "text" or message.text is None:
         async with pending_lock:
             if len(pending_requests) == 1:
                 return pending_requests[0].archive_request_id
             return None
-    event_block = f"data: {message.text}\n\n"
-    payload = parse_sse_data_json(event_block)
-    if payload is None:
-        try:
-            raw_payload = json.loads(message.text)
-        except json.JSONDecodeError:
-            raw_payload = None
-        if isinstance(raw_payload, dict):
-            payload = cast(dict[str, JsonValue], raw_payload)
-            event_block = format_sse_event(payload)
-    event = parse_sse_event(event_block)
-    event_type = _event_type_from_payload(event, payload)
+    # Archive attribution only needs the payload dict (response ids and error
+    # fields are read from it directly), so reuse the caller's parsed frame
+    # when provided and never re-validate non-lifecycle deltas.
+    frame = parsed_frame if parsed_frame is not None else _parse_upstream_websocket_text_frame(message.text)
     async with pending_lock:
         request_state = _websocket_archive_request_state_for_payload(
             pending_requests,
-            event=event,
-            payload=payload,
-            event_type=event_type,
+            event=frame.event,
+            payload=frame.payload,
+            event_type=frame.event_type,
         )
         return None if request_state is None else request_state.archive_request_id
 
@@ -939,10 +959,12 @@ async def _process_and_forward_upstream_websocket_text(
     continuity_state: _WebSocketContinuityState | None,
     codex_session_affinity: bool,
 ) -> bool:
+    parsed_frame = _parse_upstream_websocket_text_frame(text)
     archive_request_id = await _websocket_archive_request_id_for_message(
         message,
         pending_requests=pending_requests,
         pending_lock=pending_lock,
+        parsed_frame=parsed_frame,
     )
     _archive_received_websocket_message(
         upstream,
@@ -951,6 +973,7 @@ async def _process_and_forward_upstream_websocket_text(
     )
     downstream_text = await proxy._process_upstream_websocket_text(
         text,
+        parsed_frame=parsed_frame,
         account=account,
         account_id_value=account_id_value,
         pending_requests=pending_requests,
@@ -2924,11 +2947,14 @@ class _WebSocketMixin:
         # exactly, including the enforced-model substitution here and the
         # fast-mode correction after enforcement below.
         raw_source_model = effective_model_for_api_key(refreshed_api_key, responses_payload.model)
+        # The effort the normalizer replaced is discarded here on purpose: the
+        # WebSocket transport never reaches a model source, so the rewrite that
+        # works around the backend hang must stick.
         service_tier_was_enforced = apply_api_key_enforcement(
             responses_payload,
             refreshed_api_key,
             prohibit_fast_mode=prohibit_fast_mode,
-        )
+        ).service_tier_was_enforced
         if prohibit_fast_mode and model_alias_requests_fast_mode(raw_source_model):
             raw_source_model = responses_payload.model
         apply_enforced_service_tier_model_fallback(
@@ -5037,21 +5063,15 @@ class _WebSocketMixin:
         response_create_gate: asyncio.Semaphore,
         continuity_state: "_WebSocketContinuityState | None" = None,
         codex_session_affinity: bool = False,
+        parsed_frame: _ParsedUpstreamWebSocketFrame | None = None,
     ) -> str:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        event_block = f"data: {text}\n\n"
-        payload = parse_sse_data_json(event_block)
-        if payload is None:
-            try:
-                raw_payload = json.loads(text)
-            except json.JSONDecodeError:
-                raw_payload = None
-            if isinstance(raw_payload, dict):
-                payload = cast(dict[str, JsonValue], raw_payload)
-                event_block = format_sse_event(payload)
-        event = parse_sse_event(event_block)
-        event_type = _event_type_from_payload(event, payload)
+        if parsed_frame is None:
+            parsed_frame = _parse_upstream_websocket_text_frame(text)
+        payload = parsed_frame.payload
+        event_type = parsed_frame.event_type
+        event = parsed_frame.event
         response_id = _websocket_response_id(event, payload)
         error_message = _websocket_event_error_message(event_type, payload)
         is_typeless_error_event = (
@@ -5076,10 +5096,14 @@ class _WebSocketMixin:
             message=error_message,
         )
         previous_response_id_hint = _facade()._previous_response_id_from_not_found_message(error_message)
+        # The returned event block is unused here; the rewrite helper rebuilds
+        # its own canonical block on the (rare) changed path, so avoid the
+        # per-frame ``format_sse_event`` re-encode and pass the raw framing.
         text, payload, event, event_type, _event_block = rewrite_parallel_tool_call_text(
             text,
             payload,
-            event_block=format_sse_event(payload) if payload is not None else f"data: {text}\n\n",
+            event_block=f"data: {text}\n\n",
+            event=event,
         )
 
         async with pending_lock:
@@ -5163,8 +5187,10 @@ class _WebSocketMixin:
                     request_state.suppress_next_created_downstream = False
                     upstream_control.suppress_downstream_event = True
                 if payload is not None:
-                    payload = _rewrite_websocket_downstream_response_id(payload, request_state)
-                    text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+                    rewritten_payload = _rewrite_websocket_downstream_response_id(payload, request_state)
+                    if rewritten_payload is not payload:
+                        payload = rewritten_payload
+                        text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
                     sequence_number = payload.get("sequence_number")
                     if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
                         upstream_control.downstream_sequence_request_state = request_state

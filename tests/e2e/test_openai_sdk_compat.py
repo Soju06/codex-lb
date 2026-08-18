@@ -311,14 +311,17 @@ async def sdk_client(
     if hasattr(result, "__await__"):
         await result
 
-    transport = e2e_client._transport  # noqa: SLF001
     import httpx
+    import httpx2
+
+    transport = e2e_client._transport  # noqa: SLF001
+    assert isinstance(transport, httpx.ASGITransport)
 
     client = openai.AsyncOpenAI(
         api_key=created["key"],
         base_url="http://testserver/v1",
-        http_client=httpx.AsyncClient(
-            transport=transport,
+        http_client=httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=transport.app),
             base_url="http://testserver",
         ),
     )

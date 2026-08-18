@@ -40,6 +40,7 @@ from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
+from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.schemas import (
@@ -233,7 +234,7 @@ class AccountsService:
         )
 
     async def get_account_trends(self, account_id: str) -> AccountTrendsResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if not account or not self._usage_repo:
             return None
         now = utcnow()
@@ -255,7 +256,7 @@ class AccountsService:
         )
 
     async def get_usage_reset_credits(self, account_id: str) -> AccountUsageResetCreditsResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
         if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -318,7 +319,7 @@ class AccountsService:
         *,
         redeem_request_id: str | None = None,
     ) -> AccountUsageResetConsumeResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
         if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -423,8 +424,19 @@ class AccountsService:
                 encryptor=self._encryptor,
             )
 
-    async def export_opencode_auth(self, account_id: str) -> AccountOpenCodeAuthExportResponse | None:
+    async def _get_visible_account(self, account_id: str) -> Account | None:
+        """Account fetch for ID-based operator routes; marked-for-deletion
+        rows are gone from the operator's perspective (the synchronous delete
+        returned 404 on every one of these routes once the row was removed)
+        and MUST NOT keep serving reads, mutations, or decrypted tokens
+        during the background drain window."""
         account = await self._repo.get_by_id(account_id)
+        if account is None or account.delete_requested_at is not None:
+            return None
+        return account
+
+    async def export_opencode_auth(self, account_id: str) -> AccountOpenCodeAuthExportResponse | None:
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
 
@@ -449,7 +461,7 @@ class AccountsService:
         )
 
     async def export_auth(self, account_id: str) -> AccountAuthExportResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
 
@@ -592,6 +604,11 @@ class AccountsService:
         account = await self._repo.get_by_id(account_id)
         if account is None:
             return False
+        if account.delete_requested_at is not None:
+            # Marked for background deletion: already invisible in listings
+            # and about to be removed — report it as gone rather than racing
+            # the deletion worker back to ACTIVE.
+            return False
         if account.status == AccountStatus.REAUTH_REQUIRED:
             raise AccountStateTransitionError("Account requires re-authentication and cannot be reactivated directly")
         result = await self._repo.update_status_if_current(
@@ -614,7 +631,7 @@ class AccountsService:
         return result
 
     async def pause_account(self, account_id: str) -> bool:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return False
         if account.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
@@ -659,19 +676,25 @@ class AccountsService:
         return result
 
     async def delete_account(self, account_id: str, *, delete_history: bool = False) -> bool:
-        result = await self._repo.delete(account_id, delete_history=delete_history)
+        # Fast path: stamp the pending-deletion marker (terminal status, hidden
+        # from listings, sticky/bridge cleanup) and return in milliseconds; the
+        # background deletion worker drains the bulk rows and removes the
+        # account row afterwards (see app.modules.accounts.deletion).
+        result = await self._repo.begin_delete(account_id, delete_history=delete_history)
         if result:
             mark_account_routing_unavailable(account_id)
             get_account_selection_cache().invalidate()
             get_api_key_cache().clear()
-            # Deletion cascades the account_proxy_bindings row away, and account
-            # ids are deterministic (delete-then-re-import regenerates the same
-            # id), so the cached route outcome must not survive the deletion.
+            # Finalization cascades the account_proxy_bindings row away, and
+            # account ids are deterministic (delete-then-re-import regenerates
+            # the same id), so the cached route outcome must not survive the
+            # delete request; the worker invalidates again after finalizing.
             await get_upstream_route_cache().invalidate()
             await propagate_account_routing_change()
             poller = get_cache_invalidation_poller()
             if poller is not None:
                 await poller.bump(NAMESPACE_API_KEY)
+            request_account_deletion_run()
         return result
 
     async def set_account_alias(self, account_id: str, alias: str | None) -> bool:
@@ -681,7 +704,7 @@ class AccountsService:
         return await self._repo.update_alias(account_id, normalized)
 
     async def export_account(self, account_id: str) -> AccountExportResponse | None:
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if not account:
             return None
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
@@ -722,7 +745,7 @@ class AccountsService:
         before/after snapshot so the operator can see whether the upstream
         state changed.
         """
-        account = await self._repo.get_by_id(account_id)
+        account = await self._get_visible_account(account_id)
         if account is None:
             return None
         if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):

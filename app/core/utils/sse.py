@@ -20,6 +20,29 @@ _SSE_LINE_BOUNDARY = re.compile(r"\r\n|\r|\n")
 SSE_KEEPALIVE_FRAME = ": keepalive\n\n"
 CODEX_KEEPALIVE_FRAME = 'event: codex.keepalive\ndata: {"type":"codex.keepalive"}\n\n'
 
+# The exact single-event shape ``format_sse_event`` emits (and the upstream
+# Codex backend sends): a leading ``event: <type>`` line, one JSON-object
+# ``data:`` line, LF-only framing, and a blank-line terminator. Blocks that
+# match can expose their event type without a JSON parse and are safe to
+# relay downstream byte-for-byte.
+_CANONICAL_SSE_BLOCK = re.compile(r"\Aevent: ([^\r\n]+)\ndata: \{[^\r\n]*\n\n\Z")
+
+
+def sse_event_type_from_block(event_block: str) -> str | None:
+    """Cheaply extract the event type from a canonically framed SSE block.
+
+    Returns the ``event:`` line's value only when the block matches the exact
+    shape ``format_sse_event`` produces (see ``_CANONICAL_SSE_BLOCK``).
+    Anything else — data-only blocks, multi-line data, CR/CRLF framing,
+    comment or ``id:`` lines, non-object data payloads, or an ``event:`` field
+    that appears after ``data:`` (legal SSE, but not canonical here) — returns
+    ``None`` so callers fall back to a full parse.
+    """
+    match = _CANONICAL_SSE_BLOCK.match(event_block)
+    if match is None:
+        return None
+    return match.group(1)
+
 
 async def inject_sse_keepalives(
     source: AsyncIterator[str],

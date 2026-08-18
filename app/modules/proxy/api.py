@@ -3921,7 +3921,23 @@ def _v1_full_context_window(model: UpstreamModel) -> int:
 
 
 def _v1_input_context_window(model: UpstreamModel) -> int:
-    return model.context_window
+    # An explicit operator context-window override is an assertion about the usable
+    # input budget, so it must also reach the generic OpenAI-compatible fields
+    # (`context_length`, `contextLength`, `capabilities.context_length`, and
+    # `metadata.input_context_window`). Generic clients read those rather than
+    # `metadata.context_window` and would otherwise cap themselves at the
+    # un-overridden upstream budget while Codex-native clients use the wider window.
+    # The override is clamped to the upstream-declared `max_context_window` so it can
+    # never advertise more input than the backend sanctions — the same clamp the Codex
+    # client applies to `model_context_window` in config.toml.
+    overrides = get_settings().model_context_window_overrides
+    override = overrides.get(model.slug)
+    if override is None:
+        return model.context_window
+    max_context_window = model.raw.get("max_context_window")
+    if isinstance(max_context_window, int) and not isinstance(max_context_window, bool) and max_context_window > 0:
+        return min(override, max_context_window)
+    return override
 
 
 def _v1_max_output_tokens(model: UpstreamModel) -> int | None:

@@ -1395,10 +1395,36 @@ async def test_model_context_window_override(async_client, monkeypatch):
     v1_entry = next(m for m in resp_v1.json()["data"] if m["id"] == "gpt-5.4")
     metadata = v1_entry["metadata"]
     assert metadata["context_window"] == 515000
-    assert metadata["input_context_window"] == 272000
-    assert v1_entry["capabilities"]["context_length"] == 272000
-    assert v1_entry["contextLength"] == 272000
-    assert v1_entry["context_length"] == 272000
+    # An explicit operator override is the reported input budget too: generic
+    # OpenAI-compatible clients read `context_length`/`contextLength` and would
+    # otherwise cap themselves at the un-overridden upstream window.
+    assert metadata["input_context_window"] == 515000
+    assert v1_entry["capabilities"]["context_length"] == 515000
+    assert v1_entry["contextLength"] == 515000
+    assert v1_entry["context_length"] == 515000
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_clamped_to_max_context_window(async_client, monkeypatch):
+    registry = get_model_registry()
+    models = [_make_upstream_model("gpt-5.4", raw=_raw_with_max_context_window(872_000))]
+    await registry.update({"pro": models})
+
+    from app.core.config.settings import get_settings
+    from app.modules.proxy import api as proxy_api_module
+
+    patched = get_settings().model_copy(update={"model_context_window_overrides": {"gpt-5.4": 1_000_000}})
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+
+    resp_v1 = await async_client.get("/v1/models")
+    assert resp_v1.status_code == 200
+    v1_entry = next(m for m in resp_v1.json()["data"] if m["id"] == "gpt-5.4")
+
+    # The reported input budget never exceeds the upstream-declared ceiling.
+    assert v1_entry["metadata"]["input_context_window"] == 872_000
+    assert v1_entry["capabilities"]["context_length"] == 872_000
+    assert v1_entry["contextLength"] == 872_000
+    assert v1_entry["context_length"] == 872_000
 
 
 @pytest.mark.asyncio

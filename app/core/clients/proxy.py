@@ -1469,10 +1469,13 @@ def _compact_sse_terminal_error_payload(
         error_code = payload.get("code")
         error_message = payload.get("message")
         if isinstance(error_code, str) and error_code and isinstance(error_message, str) and error_message:
+            error_type = payload.get("error_type")
+            if not isinstance(error_type, str) or not error_type.strip():
+                error_type = "server_error"
             detail: OpenAIErrorDetail = {
                 "code": error_code,
                 "message": error_message,
-                "type": "server_error",
+                "type": error_type,
             }
             param = payload.get("param")
             if isinstance(param, str) and param:

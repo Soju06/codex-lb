@@ -164,10 +164,15 @@ class _CompactTerminalErrorStreamResponse:
     status = 200
     status_code = 200
     headers = {"content-type": "text/event-stream"}
-    content = (
-        b'data: {"type":"error","code":"rate_limit_exceeded","message":"quota closed",'
-        b'"param":"previous_response_id"}\n\n'
-    )
+
+    def __init__(self, error_type: str, error_code: str) -> None:
+        self.content = (
+            b'data: {"type":"error","error_type":"'
+            + error_type.encode("utf-8")
+            + b'","code":"'
+            + error_code.encode("utf-8")
+            + b'","message":"compact rejected","param":"previous_response_id"}\n\n'
+        )
 
 
 class _CompactTerminalFailedStreamResponse:
@@ -621,10 +626,20 @@ async def test_compact_responses_terminal_sse_error_infers_status_from_error_det
 
 
 @pytest.mark.asyncio
-async def test_compact_responses_routed_top_level_sse_error_preserves_fields(
+@pytest.mark.parametrize(
+    ("error_type", "error_code", "expected_status"),
+    [
+        ("invalid_request_error", "invalid_request_error", 400),
+        ("rate_limit_error", "rate_limit_exceeded", 429),
+    ],
+)
+async def test_compact_responses_routed_top_level_sse_error_preserves_type(
     route: ResolvedUpstreamRoute,
+    error_type: str,
+    error_code: str,
+    expected_status: int,
 ) -> None:
-    client = _RouteMetadataCodexClient(_CompactTerminalErrorStreamResponse())
+    client = _RouteMetadataCodexClient(_CompactTerminalErrorStreamResponse(error_type, error_code))
     payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
 
     with pytest.raises(ProxyResponseError) as exc_info:
@@ -638,11 +653,29 @@ async def test_compact_responses_routed_top_level_sse_error_preserves_fields(
             codex_client=cast(Any, client),
         )
 
-    assert exc_info.value.status_code == 429
+    assert exc_info.value.status_code == expected_status
     error = exc_info.value.payload["error"]
-    assert error["code"] == "rate_limit_exceeded"
-    assert error["message"] == "quota closed"
+    assert error["type"] == error_type
+    assert error["code"] == error_code
+    assert error["message"] == "compact rejected"
     assert error["param"] == "previous_response_id"
+
+
+@pytest.mark.parametrize("error_type", [None, "", "   ", 123])
+def test_compact_top_level_sse_error_type_uses_server_error_fallback(
+    error_type: object,
+) -> None:
+    payload: dict[str, Any] = {
+        "type": "error",
+        "code": "upstream_error",
+        "message": "compact failed",
+    }
+    if error_type is not None:
+        payload["error_type"] = error_type
+
+    detail = proxy_module._compact_sse_terminal_error_payload(payload, "error")
+
+    assert detail["error"]["type"] == "server_error"
 
 
 @pytest.mark.parametrize(

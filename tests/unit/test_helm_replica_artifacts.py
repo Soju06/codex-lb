@@ -164,6 +164,33 @@ def test_grafana_dashboard_titles_can_be_overridden() -> None:
     assert dashboard_config["data"]["ttft-breakdown.json"] == raw_dashboard_values["ttft-breakdown.json"]
 
 
+def test_rendered_ttft_dashboard_keeps_runtime_postgres_datasource_binding() -> None:
+    rendered = _helm_template(
+        "--set",
+        "metrics.grafanaDashboard.enabled=true",
+        "--show-only",
+        "templates/grafana-dashboard.yaml",
+    )
+    (dashboard_config,) = _helm_documents(rendered)
+    dashboard = json.loads(dashboard_config["data"]["ttft-breakdown.json"])
+    (datasource,) = dashboard["templating"]["list"]
+
+    assert datasource["name"] == "DS_SQL"
+    assert datasource["type"] == "datasource"
+    assert datasource["query"] == "grafana-postgresql-datasource"
+    assert datasource["hide"] == 0
+    assert datasource["multi"] is False
+    assert datasource["includeAll"] is False
+    assert all(
+        panel["datasource"]
+        == {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_SQL}",
+        }
+        for panel in dashboard["panels"]
+    )
+
+
 def _prod_overlay_args(*args: str) -> tuple[str, ...]:
     return (
         "-f",

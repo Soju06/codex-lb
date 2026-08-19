@@ -5,7 +5,10 @@
   "editable": true,
   "panels": [
     {
-      "datasource": "${DS_SQL}",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_SQL}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -29,7 +32,10 @@
       "type": "table"
     },
     {
-      "datasource": "${DS_SQL}",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_SQL}"
+      },
       "fieldConfig": {
         "defaults": {},
         "overrides": []
@@ -51,7 +57,10 @@
       "type": "table"
     },
     {
-      "datasource": "${DS_SQL}",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_SQL}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -75,7 +84,10 @@
       "type": "table"
     },
     {
-      "datasource": "${DS_SQL}",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_SQL}"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -106,7 +118,20 @@
     "ttft"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "hide": 0,
+        "includeAll": false,
+        "label": "PostgreSQL",
+        "multi": false,
+        "name": "DS_SQL",
+        "options": [],
+        "query": "grafana-postgresql-datasource",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      }
+    ]
   },
   "time": {
     "from": "now-24h",

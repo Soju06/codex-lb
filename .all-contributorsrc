@@ -1302,6 +1302,16 @@
         "test",
         "doc"
       ]
+    },
+    {
+      "login": "hanseo0507",
+      "name": "HanSu Lee",
+      "avatar_url": "https://avatars.githubusercontent.com/u/56479293?v=4",
+      "profile": "https://github.com/hanseo0507",
+      "contributions": [
+        "code",
+        "test"
+      ]
     }
   ],
   "contributorsPerLine": 7,

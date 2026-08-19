@@ -383,8 +383,10 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.websocket.helpers import (
     _app_error_to_websocket_event,
     _assign_websocket_response_id,
+    _bind_websocket_request_dispatch_owner,
     _find_websocket_request_state_by_response_id,
     _forget_websocket_stale_previous_response,
+    _install_verified_fresh_replay,
     _is_websocket_response_create,
     _is_websocket_stale_previous_response,
     _match_websocket_request_state_for_anonymous_event,
@@ -2575,6 +2577,19 @@ class _WebSocketMixin:
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):
+                            if account is None or not _bind_websocket_request_dispatch_owner(
+                                request_state,
+                                account_id=account.id,
+                                exact_request_text=text_data,
+                            ):
+                                raise ProxyResponseError(
+                                    502,
+                                    openai_error(
+                                        "previous_response_owner_unavailable",
+                                        "Request payload owner account is unavailable; retry later.",
+                                        error_type="server_error",
+                                    ),
+                                )
                             request_state.response_create_sent_at = time.monotonic()
                         with _websocket_archive_request_context(archive_request_id):
                             await upstream.send_text(text_data)
@@ -3441,13 +3456,18 @@ class _WebSocketMixin:
         for attempt in range(max_attempts):
             is_retry = attempt > 0
             forced_refresh_account_id = request_state.force_refresh_account_id
-            preferred_account_id = forced_refresh_account_id or request_state.preferred_account_id
+            preferred_account_id = (
+                request_state.replay_required_account_id
+                or forced_refresh_account_id
+                or request_state.preferred_account_id
+            )
             turn_state_owner_required = (
                 request_state.affinity_policy.codex_session_source == "turn_state"
                 and request_state.preferred_account_id is not None
             )
             require_preferred_account = (
                 (request_state.previous_response_id is not None and request_state.preferred_account_id is not None)
+                or request_state.replay_required_account_id is not None
                 or request_state.file_required_preferred_account
                 or turn_state_owner_required
             )
@@ -3761,6 +3781,14 @@ class _WebSocketMixin:
                 break
 
         account = selection.account
+        if (
+            account is not None
+            and request_state.replay_required_account_id is None
+            and request_state.request_text is not None
+            and not _facade()._websocket_request_text_is_account_neutral_fresh_replay(request_state.request_text)
+        ):
+            request_state.preferred_account_id = account.id
+            request_state.replay_required_account_id = account.id
         if (
             account is not None
             and require_preferred_account
@@ -5544,18 +5572,21 @@ class _WebSocketMixin:
                     # transparently retried.
                     retry_error_code = None
                 else:
-                    upstream_control.reconnect_requested = True
-                    request_state.request_text = request_state.fresh_upstream_request_text
-                    request_state.previous_response_id = None
-                    request_state.proxy_injected_previous_response_id = False
-                    request_state.fresh_upstream_request_is_retry_safe = False
-                    request_state.responses_lite_model = request_state.fresh_upstream_request_responses_lite_model
-                    request_state.replay_count += 1
-                    request_state.awaiting_response_created = True
-                    request_state.response_id = None
-                    _clear_websocket_request_error_overrides(request_state)
-                    upstream_control.suppress_downstream_event = True
-                    upstream_control.replay_request_state = request_state
+                    replay_text = _install_verified_fresh_replay(
+                        request_state,
+                        require_proxy_injected_previous_response_id=False,
+                        require_account_neutral=False,
+                    )
+                    if replay_text is None:
+                        retry_error_code = None
+                    else:
+                        upstream_control.reconnect_requested = True
+                        request_state.replay_count += 1
+                        request_state.awaiting_response_created = True
+                        request_state.response_id = None
+                        _clear_websocket_request_error_overrides(request_state)
+                        upstream_control.suppress_downstream_event = True
+                        upstream_control.replay_request_state = request_state
             else:
                 upstream_control.reconnect_requested = True
                 request_state.replay_count += 1
@@ -5678,10 +5709,31 @@ class _WebSocketMixin:
     ) -> bool:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
-        if _prepare_websocket_request_state_for_auth_replay(request_state) is None:
+        bound_to_current_account = request_state.replay_required_account_id == account.id
+        requires_reauth = _websocket_auth_failure_requires_reauth(error_message)
+        if bound_to_current_account and (
+            requires_reauth or request_state.auth_replay_counts_by_account.get(account.id, 0) > 0
+        ):
+            failure_code = (
+                _facade()._WEBSOCKET_SESSION_EXPIRED_FAILURE_CODE
+                if requires_reauth
+                else _facade()._WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE
+            )
+            await proxy._load_balancer.mark_permanent_failure(account, failure_code)
+            request_state.force_refresh_account_id = None
+            request_state.preferred_account_id = None
+            request_state.excluded_account_ids.add(account.id)
+            return False
+        if (
+            _prepare_websocket_request_state_for_auth_replay(
+                request_state,
+                current_account_id=account.id,
+            )
+            is None
+        ):
             return False
 
-        if _websocket_auth_failure_requires_reauth(error_message):
+        if requires_reauth:
             failure_code = _facade()._WEBSOCKET_SESSION_EXPIRED_FAILURE_CODE
         elif request_state.auth_replay_counts_by_account.get(account.id, 0) == 0:
             request_state.auth_replay_counts_by_account[account.id] = 1

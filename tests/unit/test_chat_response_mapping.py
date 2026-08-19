@@ -75,6 +75,22 @@ def test_error_event_emits_done_chunk():
 
 
 @pytest.mark.asyncio
+async def test_stream_chat_chunks_emits_error_and_done_when_upstream_ends_without_terminal_event():
+    # #given
+    async def _stream():
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    # #when
+    chunks = [chunk async for chunk in stream_chat_chunks(_stream(), model="gpt-5.2")]
+
+    # #then
+    assert chunks[-1].strip() == "data: [DONE]"
+    error_chunk = json.loads(chunks[-2][5:].strip())
+    assert error_chunk["error"]["code"] == "upstream_stream_truncated"
+    assert error_chunk["error"]["type"] == "server_error"
+
+
+@pytest.mark.asyncio
 async def test_collect_completion_parses_event_prefixed_sse_block():
     lines = [
         (
@@ -92,6 +108,22 @@ async def test_collect_completion_parses_event_prefixed_sse_block():
     assert isinstance(result, OpenAIErrorEnvelope)
     assert result.error is not None
     assert result.error.code == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_collect_chat_completion_returns_error_when_upstream_ends_without_terminal_event():
+    # #given
+    async def _stream():
+        yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+
+    # #when
+    result = await collect_chat_completion(_stream(), model="gpt-5.2")
+
+    # #then
+    assert isinstance(result, OpenAIErrorEnvelope)
+    assert result.error is not None
+    assert result.error.code == "upstream_stream_truncated"
+    assert result.error.type == "server_error"
 
 
 def test_tool_call_delta_is_emitted():

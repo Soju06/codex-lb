@@ -30020,7 +30020,12 @@ async def test_stream_api_key_cancelled_settlement_transfers_to_release(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_image_api_key_settlement_maps_captured_usage_once(monkeypatch):
+@pytest.mark.parametrize(("input_tokens", "output_tokens"), [(3, 4), (0, 0)])
+async def test_image_api_key_settlement_maps_captured_usage_once(
+    monkeypatch,
+    input_tokens,
+    output_tokens,
+):
     repo = SimpleNamespace(api_keys=object())
 
     @asynccontextmanager
@@ -30082,8 +30087,8 @@ async def test_image_api_key_settlement_maps_captured_usage_once(monkeypatch):
         api_key,
         reservation,
         model="gpt-image-2",
-        input_tokens=3,
-        output_tokens=4,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
         cached_input_tokens=None,
         request_id="req_image_handoff",
     )
@@ -30100,8 +30105,8 @@ async def test_image_api_key_settlement_maps_captured_usage_once(monkeypatch):
     assert captured_reservation is reservation
     assert settlement.status == "success"
     assert settlement.model == "gpt-image-2"
-    assert settlement.input_tokens == 3
-    assert settlement.output_tokens == 4
+    assert settlement.input_tokens == input_tokens
+    assert settlement.output_tokens == output_tokens
     assert settlement.cached_input_tokens == 0
     assert settlement.service_tier is None
     assert settlement.usage_settlement_transferred

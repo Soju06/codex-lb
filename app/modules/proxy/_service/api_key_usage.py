@@ -371,7 +371,7 @@ class _ApiKeyUsageMixin:
         request_id: str,
     ) -> bool:
         """Transfer captured image usage to tracked reservation settlement."""
-        has_usage = bool(input_tokens) or bool(output_tokens)
+        has_usage = input_tokens is not None or output_tokens is not None
         settlement = _StreamSettlement(
             status="success" if has_usage else "failed",
             model=model,

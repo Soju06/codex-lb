@@ -1,6 +1,6 @@
 ## Context
 
-See [proposal.md](proposal.md) for the production incident. The shared classifier currently accepts canonical `code = "previous_response_not_found"`, or `code = "invalid_request_error"` only when `param = "previous_response_id"` and the message says the response was not found. The observed upstream frame has neither `code` nor `param`; normalization yields `code = "invalid_request_error"`, and its new `Invalid \`previous_response_id\`.` wording fails the message test.
+See [proposal.md](proposal.md) for the production incident. The shared classifier currently accepts canonical `code = "previous_response_not_found"`, or `code = "invalid_request_error"` only when `param = "previous_response_id"` and the message says the response was not found. The observed upstream frame has neither `code` nor `param`; normalization yields `code = "invalid_request_error"`, and its new ``Invalid `previous_response_id`.`` wording fails the message test.
 
 Every downstream recovery mechanism already depends on this classifier. Direct WebSocket full resends retain a safe request body without the anchor and can replay transparently. Delta-only Codex-native requests receive a sanitized canonical code that the client uses to resend full local history; public `/v1` traffic receives generic `stream_incomplete` masking. The classifier miss bypasses all of those paths.
 
@@ -24,7 +24,7 @@ The incident data also contained upstream WebSocket interruptions, downstream di
 
 ### Extend the shared semantic classifier
 
-Add a normalized-message predicate for `Invalid \`previous_response_id\`` with zero or one trailing period, and accept it only when the normalized error code is `invalid_request_error` and `param` is absent or already names `previous_response_id`. Reject other trailing punctuation and every different named parameter. Normalize `error.type` at the WebSocket rewrite helper just as its detection and retry-decision callers already do; without that consistency, the first classifier can recognize a code-less frame while the later rewrite still relays it raw. This keeps nested and top-level WebSocket consumers, the HTTP bridge, and compact/error sanitizers on one source of truth.
+Add a normalized-message predicate for ``Invalid `previous_response_id``` with zero or one trailing period, and accept it only when the normalized error code is `invalid_request_error` and `param` is absent or already names `previous_response_id`. Reject other trailing punctuation and every different named parameter. Normalize `error.type` at the WebSocket rewrite helper just as its detection and retry-decision callers already do; without that consistency, the first classifier can recognize a code-less frame while the later rewrite still relays it raw. This keeps nested and top-level WebSocket consumers, the HTTP bridge, and compact/error sanitizers on one source of truth.
 
 Alternative: special-case the raw frame inside the WebSocket relay. Rejected because it would duplicate semantics, miss other existing classifier consumers, and make nested versus top-level envelopes diverge.
 

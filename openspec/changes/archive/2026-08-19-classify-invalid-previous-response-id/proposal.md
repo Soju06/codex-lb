@@ -1,6 +1,6 @@
 ## Why
 
-The ChatGPT-backed Codex WebSocket now emits stale-anchor failures as `invalid_request_error` with no `code` or `param` and the message `Invalid \`previous_response_id\`.`. codex-lb does not recognize that observed shape, so it relays the raw 400 instead of entering its existing safe replay or sanitized client-recovery path.
+The ChatGPT-backed Codex WebSocket now emits stale-anchor failures as `invalid_request_error` with no `code` or `param` and the message ``Invalid `previous_response_id`.``. codex-lb does not recognize that observed shape, so it relays the raw 400 instead of entering its existing safe replay or sanitized client-recovery path.
 
 Production evidence on current upstream `main` recorded three affected Codex sessions in one overnight window. In every case the rejected anchor was a successful response from the same session and account only 9–17 seconds earlier, making this an active compatibility gap rather than an old retained response or account-routing mismatch.
 

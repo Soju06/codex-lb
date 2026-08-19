@@ -1,6 +1,6 @@
 ## 1. Regression Coverage
 
-- [x] 1.1 Add a Codex-native route regression using the exact production frame (`invalid_request_error`, no `code`/`param`, `Invalid \`previous_response_id\`.`) and verify it fails by exposing the raw 400 before implementation.
+- [x] 1.1 Add a Codex-native route regression using the exact production frame (`invalid_request_error`, no `code`/`param`, ``Invalid `previous_response_id`.``) and verify it fails by exposing the raw 400 before implementation.
 
 ## 2. Classification Fix
 

@@ -29951,6 +29951,165 @@ async def test_stream_api_key_background_settlement_failure_falls_back_to_releas
 
 
 @pytest.mark.asyncio
+async def test_stream_api_key_cancelled_settlement_transfers_to_release(monkeypatch):
+    finalize_started = asyncio.Event()
+    release_completed = asyncio.Event()
+    repo = SimpleNamespace(api_keys=object())
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        yield repo
+
+    class FakeApiKeysService:
+        def __init__(self, api_keys_repository: object) -> None:
+            assert api_keys_repository is repo.api_keys
+
+        async def finalize_usage_reservation(self, reservation_id: str, **kwargs: object) -> None:
+            del reservation_id, kwargs
+            finalize_started.set()
+            await asyncio.Event().wait()
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            assert reservation_id == "resv_image_cancel"
+            release_completed.set()
+
+    monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    api_key = ApiKeyData(
+        id="key_image_cancel",
+        name="image cancel",
+        key_prefix="sk-image-cancel",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_image_cancel",
+        key_id=api_key.id,
+        model="gpt-image-2",
+    )
+    settlement = proxy_service._StreamSettlement(
+        status="success",
+        model="gpt-image-2",
+        input_tokens=3,
+        output_tokens=4,
+    )
+
+    assert await service._settle_stream_api_key_usage(
+        api_key,
+        reservation,
+        settlement,
+        request_id="req_image_cancel",
+    )
+    await asyncio.wait_for(finalize_started.wait(), timeout=1.0)
+
+    settlement_task = next(iter(service._background_cleanup_tasks))
+    settlement_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await settlement_task
+
+    await asyncio.wait_for(release_completed.wait(), timeout=1.0)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_image_api_key_settlement_maps_captured_usage_once(monkeypatch):
+    repo = SimpleNamespace(api_keys=object())
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[SimpleNamespace]:
+        yield repo
+
+    service = proxy_service.ProxyService(cast(proxy_service.ProxyRepoFactory, repo_factory))
+    api_key = ApiKeyData(
+        id="key_image_handoff",
+        name="image handoff",
+        key_prefix="sk-image-handoff",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_image_handoff",
+        key_id=api_key.id,
+        model="gpt-image-2",
+    )
+    captured: list[
+        tuple[
+            ApiKeyData | None,
+            proxy_service.ApiKeyUsageReservationData | None,
+            proxy_service._StreamSettlement,
+            str,
+            bool,
+        ]
+    ] = []
+
+    async def settle_spy(
+        api_key_arg: ApiKeyData | None,
+        reservation_arg: proxy_service.ApiKeyUsageReservationData | None,
+        settlement: proxy_service._StreamSettlement,
+        request_id: str,
+        *,
+        wait_for_settlement: bool = False,
+    ) -> bool:
+        settlement.usage_settlement_transferred = True
+        captured.append(
+            (
+                api_key_arg,
+                reservation_arg,
+                settlement,
+                request_id,
+                wait_for_settlement,
+            )
+        )
+        return True
+
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_spy)
+
+    assert await service.settle_image_api_key_usage(
+        api_key,
+        reservation,
+        model="gpt-image-2",
+        input_tokens=3,
+        output_tokens=4,
+        cached_input_tokens=None,
+        request_id="req_image_handoff",
+    )
+
+    assert len(captured) == 1
+    (
+        captured_api_key,
+        captured_reservation,
+        settlement,
+        request_id,
+        wait_for_settlement,
+    ) = captured[0]
+    assert captured_api_key is api_key
+    assert captured_reservation is reservation
+    assert settlement.status == "success"
+    assert settlement.model == "gpt-image-2"
+    assert settlement.input_tokens == 3
+    assert settlement.output_tokens == 4
+    assert settlement.cached_input_tokens == 0
+    assert settlement.service_tier is None
+    assert settlement.usage_settlement_transferred
+    assert request_id == "req_image_handoff"
+    assert wait_for_settlement is False
+
+
+@pytest.mark.asyncio
 async def test_stream_api_key_release_retries_bound_concurrent_repository_attempts(monkeypatch):
     retry_concurrency = proxy_service._STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY
     task_count = retry_concurrency + 1

@@ -3179,6 +3179,8 @@ async def _proxy_images_generation_request(
                 _output = captured.get("image_output_tokens")
                 _cached = captured.get("image_cached_input_tokens")
                 await _finalize_image_reservation(
+                    context.service,
+                    api_key,
                     reservation,
                     model=public_model,
                     input_tokens=_input if isinstance(_input, int) else None,
@@ -3232,6 +3234,8 @@ async def _proxy_images_generation_request(
     _output = captured.get("image_output_tokens")
     _cached = captured.get("image_cached_input_tokens")
     await _finalize_image_reservation(
+        context.service,
+        api_key,
         reservation,
         model=public_model,
         input_tokens=_input if isinstance(_input, int) else None,
@@ -3474,6 +3478,8 @@ async def _proxy_images_edit_request(
                 _output = captured.get("image_output_tokens")
                 _cached = captured.get("image_cached_input_tokens")
                 await _finalize_image_reservation(
+                    context.service,
+                    api_key,
                     reservation,
                     model=public_model,
                     input_tokens=_input if isinstance(_input, int) else None,
@@ -3527,6 +3533,8 @@ async def _proxy_images_edit_request(
     _output = captured.get("image_output_tokens")
     _cached = captured.get("image_cached_input_tokens")
     await _finalize_image_reservation(
+        context.service,
+        api_key,
         reservation,
         model=public_model,
         input_tokens=_input if isinstance(_input, int) else None,
@@ -7651,6 +7659,8 @@ async def _release_reservation_best_effort(
 
 
 async def _finalize_image_reservation(
+    service: proxy_service_module.ProxyService,
+    api_key: ApiKeyData | None,
     reservation: ApiKeyUsageReservationData | None,
     *,
     model: str,
@@ -7658,47 +7668,18 @@ async def _finalize_image_reservation(
     output_tokens: int | None,
     cached_input_tokens: int | None = None,
 ) -> None:
-    """Finalize the API-key usage reservation for a ``/v1/images/*`` call.
-
-    The image adapter bypasses the standard stream settlement (``stream_responses``
-    is invoked with ``api_key_reservation=None``) because the ``image_generation``
-    tool path typically leaves ``response.usage`` empty; charging from
-    ``tool_usage.image_gen`` is the only source of truth. This helper
-    finalizes the reservation with the captured image tokens when present,
-    otherwise releases it. Calling this exactly once per request prevents
-    the double-billing scenario where both the standard settlement and
-    the post-hoc image record_usage path increment limits.
-
-    Persistence errors are caught and logged so a transient DB/session
-    failure during the tail accounting cannot turn a successfully
-    generated image into a user-facing 500 (non-streaming) or an
-    abrupt stream termination (streaming). This mirrors the
-    best-effort accounting policy used by
-    ``ProxyService._settle_stream_api_key_usage``.
-    """
+    """Transfer image-token settlement to tracked persistence ownership."""
     if reservation is None:
         return
-    try:
-        if not input_tokens and not output_tokens:
-            await _release_reservation(reservation)
-            return
-        async with get_background_session() as session:
-            service = ApiKeysService(ApiKeysRepository(session))
-            await service.finalize_usage_reservation(
-                reservation.reservation_id,
-                model=model,
-                input_tokens=int(input_tokens or 0),
-                output_tokens=int(output_tokens or 0),
-                cached_input_tokens=int(cached_input_tokens or 0),
-                service_tier=None,
-            )
-    except Exception:
-        logger.warning(
-            "failed to finalize image reservation reservation_id=%s model=%s",
-            reservation.reservation_id,
-            model,
-            exc_info=True,
-        )
+    await service.settle_image_api_key_usage(
+        api_key,
+        reservation,
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        request_id=get_request_id() or reservation.reservation_id,
+    )
 
 
 async def _settle_source_reservation(

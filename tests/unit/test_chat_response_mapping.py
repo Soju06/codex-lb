@@ -74,6 +74,29 @@ def test_error_event_emits_done_chunk():
     assert chunks[-1].strip() == "data: [DONE]"
 
 
+@pytest.mark.parametrize(
+    "event_line",
+    [
+        'data: {"type":"response.failed","response":{"id":"r1","status":"failed"}}\n\n',
+        'data: {"type":"error"}\n\n',
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_chat_chunks_preserves_terminal_error_without_payload(event_line: str):
+    async def _stream():
+        yield event_line
+
+    chunks = [chunk async for chunk in stream_chat_chunks(_stream(), model="gpt-5.2")]
+
+    error_payload = json.loads(chunks[-2][5:].strip())
+    assert error_payload["error"] == {
+        "message": "Upstream error",
+        "type": "server_error",
+        "code": "upstream_error",
+    }
+    assert chunks[-1].strip() == "data: [DONE]"
+
+
 @pytest.mark.asyncio
 async def test_stream_chat_chunks_emits_error_and_done_when_upstream_ends_without_terminal_event():
     # #given

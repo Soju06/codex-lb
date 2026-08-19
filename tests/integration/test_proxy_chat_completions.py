@@ -88,6 +88,34 @@ async def test_v1_chat_completions_stream_truncated_eof_emits_error_and_done(asy
 
 
 @pytest.mark.asyncio
+async def test_v1_chat_completions_stream_terminal_error_without_payload_uses_default_error(
+    async_client,
+    monkeypatch,
+):
+    email = "chat-stream-terminal-error@example.com"
+    raw_account_id = "acc_chat_stream_terminal_error"
+    auth_json = _make_auth_json(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    imported = await async_client.post("/api/accounts/import", files=files)
+    assert imported.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield 'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
+        yield 'data: {"type":"response.failed","response":{"id":"r1","status":"failed"}}\n\n'
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.2", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+    async with async_client.stream("POST", "/v1/chat/completions", json=payload) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert json.loads(lines[-2][len("data: ") :])["error"]["code"] == "upstream_error"
+    assert lines[-1] == "data: [DONE]"
+
+
+@pytest.mark.asyncio
 async def test_v1_chat_completions_omits_synthesized_tools(async_client, monkeypatch):
     email = "chatnotools@example.com"
     raw_account_id = "acc_chatnotools"

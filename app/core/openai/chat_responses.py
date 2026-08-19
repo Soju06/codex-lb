@@ -361,9 +361,11 @@ def iter_chat_chunks(
                     error = maybe_error
             if error is not None:
                 error_payload: dict[str, JsonValue] = {"error": error}
-                yield _dump_sse(error_payload)
-                yield "data: [DONE]\n\n"
-                return
+            else:
+                error_payload = _default_error_envelope().model_dump(mode="json", exclude_none=True)
+            yield _dump_sse(error_payload)
+            yield "data: [DONE]\n\n"
+            return
         if event_type in ("response.completed", "response.incomplete"):
             for tool_state in state.tool_calls:
                 stream_delta = tool_state.build_stream_delta()

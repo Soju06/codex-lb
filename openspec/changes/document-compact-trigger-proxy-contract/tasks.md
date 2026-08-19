@@ -7,6 +7,7 @@
 - [x] 1.3 Record the streamed `/backend-api/codex/responses` compact transport,
   the standalone Codex compatibility endpoint, and the `/v1` normalization
   asymmetry.
+- [x] 1.4 Record the legacy message-shaped compact ID filtering contract.
 
 ## 2. Validate the change
 

@@ -79,6 +79,15 @@ def is_previous_response_not_found_message(message: str | None) -> bool:
     return "previous response" in normalized and "not found" in normalized
 
 
+def _is_invalid_previous_response_id_message(message: str | None) -> bool:
+    if message is None:
+        return False
+    normalized = " ".join(message.lower().split())
+    if normalized.endswith("."):
+        normalized = normalized[:-1]
+    return normalized == "invalid `previous_response_id`"
+
+
 def previous_response_id_from_not_found_message(message: str | None) -> str | None:
     if message is None:
         return None
@@ -102,9 +111,13 @@ def is_previous_response_not_found_error(
 ) -> bool:
     if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
         return True
-    if code != "invalid_request_error" or param != "previous_response_id":
+    if code != "invalid_request_error":
         return False
-    return is_previous_response_not_found_message(message)
+    if param is None:
+        return _is_invalid_previous_response_id_message(message)
+    if param != "previous_response_id":
+        return False
+    return is_previous_response_not_found_message(message) or _is_invalid_previous_response_id_message(message)
 
 
 def response_failed_event(

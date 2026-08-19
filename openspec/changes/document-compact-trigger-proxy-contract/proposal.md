@@ -18,6 +18,9 @@ implementation detail that contradicts the existing context notes.
 - Document that Codex compact transport uses streamed `POST
   /backend-api/codex/responses` with `stream=true` and `store=false`, and
   reconstructs the compact response from the terminal SSE lifecycle.
+- Document that legacy message-shaped compact output is converted to a
+  `compaction` item while only valid opaque `cmp_` IDs are preserved; malformed
+  IDs are omitted rather than rewritten.
 - Document that the standalone Codex `/backend-api/codex/responses/compact`
   route remains a compatibility endpoint, while `/v1/responses/compact`
   preserves duplicate-trigger normalization for existing OpenAI-compatible

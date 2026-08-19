@@ -58,7 +58,7 @@ from app.core.errors import (
 )
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import get_model_registry
-from app.core.openai.models import CompactResponsePayload, OpenAIError
+from app.core.openai.models import CompactResponsePayload, OpenAIError, normalize_compaction_item_id
 from app.core.openai.parsing import (
     classify_event_type,
     parse_compact_response_payload,
@@ -1245,6 +1245,7 @@ async def _compact_response_payload_from_sse(
 ) -> JsonValue:
     last_payload: dict[str, JsonValue] | None = None
     output_items: dict[int, dict[str, JsonValue]] = {}
+    unindexed_output_items: list[dict[str, JsonValue]] = []
     async for event_block in _iter_sse_events(resp, idle_timeout_seconds, max_event_bytes):
         payload = parse_sse_data_json(event_block)
         if payload is None:
@@ -1254,15 +1255,26 @@ async def _compact_response_payload_from_sse(
         if event_type in {"response.output_item.added", "response.output_item.done"}:
             output_index = payload.get("output_index")
             item = payload.get("item")
-            if isinstance(output_index, int) and isinstance(item, dict):
+            if not isinstance(item, dict):
+                continue
+            if isinstance(output_index, int):
                 output_items[output_index] = dict(item)
+            elif event_type == "response.output_item.done":
+                # Some compatible upstream responses omit output_index on the
+                # terminal item even though response.completed has no output.
+                unindexed_output_items.append(dict(item))
         if event_type == "response.completed":
             response = payload.get("response")
             if isinstance(response, dict):
                 existing_output = response.get("output")
-                if output_items and not (isinstance(existing_output, list) and existing_output):
+                if (output_items or unindexed_output_items) and not (
+                    isinstance(existing_output, list) and existing_output
+                ):
                     merged_response = dict(response)
-                    merged_response["output"] = [item for _, item in sorted(output_items.items())]
+                    merged_response["output"] = [
+                        *[item for _, item in sorted(output_items.items())],
+                        *unindexed_output_items,
+                    ]
                     return merged_response
                 return response
             raise ValueError("response.completed event missing response object")
@@ -1355,10 +1367,12 @@ def _compact_output_item_from_message(item: Mapping[str, JsonValue]) -> dict[str
         "type": "compaction",
         "encrypted_content": text,
     }
-    for key in ("id", "status"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            normalized[key] = value
+    item_id = normalize_compaction_item_id(item.get("id"))
+    if item_id is not None:
+        normalized["id"] = item_id
+    status = item.get("status")
+    if isinstance(status, str) and status.strip():
+        normalized["status"] = status
     return normalized
 
 
@@ -1392,10 +1406,12 @@ def _normalize_compact_output_item(item: Mapping[str, JsonValue]) -> dict[str, J
         "type": "compaction",
         "encrypted_content": encrypted_content,
     }
-    for key in ("id", "status"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            normalized[key] = value
+    item_id = normalize_compaction_item_id(item.get("id"))
+    if item_id is not None:
+        normalized["id"] = item_id
+    status = item.get("status")
+    if isinstance(status, str) and status.strip():
+        normalized["status"] = status
     return normalized
 
 

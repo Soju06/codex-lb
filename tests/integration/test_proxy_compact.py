@@ -794,7 +794,6 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     assert body["id"] == "resp_compact_summary_1"
     assert body["output"] == [
         {
-            "id": "msg_compact_summary_1",
             "type": "compaction",
             "status": "completed",
             "encrypted_content": "enc_compact_summary_1",
@@ -1629,14 +1628,17 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
         "object": "response.compaction",
         "output": [
             {
-                "type": "message",
+                "type": "compaction",
                 "id": "msg_compact_round_trip",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "preserve me exactly"}],
+                "encrypted_content": "preserve me exactly",
             },
             {"type": "reasoning", "encrypted_content": "enc_round_trip_state"},
         ],
         "retained_items": [{"type": "item_reference", "id": "msg_original_round_trip"}],
+    }
+    expected_compact_window = {
+        **compact_window,
+        "output": [{"type": "compaction", "encrypted_content": "preserve me exactly"}],
     }
     seen_inputs: list[object] = []
 
@@ -1653,7 +1655,7 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
     compact_payload = {"model": "gpt-5.1", "instructions": "compact", "input": []}
     compact_response = await async_client.post("/backend-api/codex/responses/compact", json=compact_payload)
     assert compact_response.status_code == 200
-    assert compact_response.json() == compact_window
+    assert compact_response.json() == expected_compact_window
 
     stream_payload = {
         "model": "gpt-5.1",
@@ -1664,7 +1666,7 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
 
     assert response.status_code == 200
-    assert seen_inputs == [compact_window["output"]]
+    assert seen_inputs == [expected_compact_window["output"]]
 
 
 _NEUTRAL_FULL_RESEND_INPUT: list[dict[str, object]] = [

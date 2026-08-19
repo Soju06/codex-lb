@@ -96,10 +96,30 @@ class _CompactStreamContent:
         )
 
 
+class _CompactStreamWithoutOutputIndexContent:
+    async def iter_chunked(self, size: int):
+        del size
+        yield (
+            b'data: {"type":"response.output_item.done",'
+            b'"item":{"id":"msg_compact_without_index","type":"message",'
+            b'"status":"completed","content":[{"type":"output_text",'
+            b'"text":"enc_compact_without_index"}]}}\n\n'
+            b'data: {"type":"response.completed","response":'
+            b'{"object":"response","id":"resp_compact_without_index",'
+            b'"status":"completed","output":[]}}\n\n'
+        )
+
+
 class _CompactStreamResponse:
     status_code = 200
     headers: dict[str, str] = {}
     content = _CompactStreamContent()
+
+
+class _CompactStreamWithoutOutputIndexResponse:
+    status_code = 200
+    headers: dict[str, str] = {}
+    content = _CompactStreamWithoutOutputIndexContent()
 
 
 class _BufferedCompactStreamResponse:
@@ -425,7 +445,7 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     assert response.id == "resp_compact_1"
     assert response.model_extra is not None
     assert response.model_extra["output"] == [
-        {"id": "msg_compact_1", "type": "compaction", "status": "completed", "encrypted_content": "enc_compact_1"}
+        {"type": "compaction", "status": "completed", "encrypted_content": "enc_compact_1"}
     ]
     assert client.calls[0]["url"].endswith("/backend-api/codex/responses")
     assert client.calls[0]["route"] is route
@@ -434,6 +454,33 @@ async def test_compact_responses_uses_codex_client_when_route_is_resolved(route:
     assert client.calls[0]["json"]["stream"] is True
     assert client.calls[0]["headers"]["Accept"] == "text/event-stream"
     assert trace.endpoint_id == "ep_1"
+
+
+@pytest.mark.asyncio
+async def test_compact_responses_recovers_terminal_item_without_output_index(
+    route: ResolvedUpstreamRoute,
+) -> None:
+    client = _RouteMetadataCodexClient(_CompactStreamWithoutOutputIndexResponse())
+    payload = ResponsesCompactRequest(model="gpt-5.2", instructions="Summarize.", input="hello")
+
+    response = await compact_responses(
+        payload,
+        {"user-agent": "codex"},
+        "access",
+        "chatgpt_account",
+        session=cast(Any, object()),
+        route=route,
+        codex_client=cast(Any, client),
+    )
+
+    assert response.model_extra is not None
+    assert response.model_extra["output"] == [
+        {
+            "type": "compaction",
+            "status": "completed",
+            "encrypted_content": "enc_compact_without_index",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -504,7 +551,7 @@ async def test_compact_responses_message_fallback_selects_last_message(
     assert response.id == "resp_compact_messages"
     assert response.model_extra is not None
     assert response.model_extra["output"] == [
-        {"id": "msg_summary", "type": "compaction", "status": "completed", "encrypted_content": "enc_summary"}
+        {"type": "compaction", "status": "completed", "encrypted_content": "enc_summary"}
     ]
 
 

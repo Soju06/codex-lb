@@ -31,7 +31,7 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 - Compact transport may use bounded same-contract retries only for safe pre-body transport failures and `401 -> refresh -> retry`.
 - `/v1/responses/compact` is supported only when the upstream implements it.
 - `prompt_cache_key` affinity on OpenAI-style routes is intentionally bounded by a dashboard-managed freshness window, unlike durable backend `session_id` or dashboard sticky-thread routing.
-- Codex-native direct websocket `/backend-api/codex/responses` treats upstream `previous_response_id` as an ephemeral anchor. If that anchor goes stale, the proxy must mask raw `previous_response_not_found` details and emit a sanitized `codex_previous_response_stale` classifier so compatible Codex clients can soft-reset and retry without `previous_response_id`.
+- Codex-native direct websocket `/backend-api/codex/responses` treats upstream `previous_response_id` as an ephemeral anchor. If that anchor goes stale, the proxy masks raw upstream details and emits the sanitized canonical `previous_response_not_found` classifier so compatible Codex clients can retry with full local history and no `previous_response_id`. The upstream Codex socket has emitted this condition both with the canonical code and as a parameterless `invalid_request_error` carrying ``Invalid `previous_response_id`.``; both shapes use the same recovery policy.
 - Upstream Responses WebSockets use transport ping/pong control frames to detect a black-holed connection without confusing valid application-event silence with an idle turn. Direct and routed connections reuse `proxy_downstream_websocket_idle_timeout_seconds` for this zero-config liveness budget.
 - A post-send liveness timeout is delivery-ambiguous. It remains account-neutral, is never transparently replayed, and retires the affected upstream socket so a client retry opens a fresh route without risking duplicated model work or tool side effects.
 - An HTTP SSE first-event `stream_idle_timeout` is also account-neutral for health writes. The request may still exclude that account and fail over, but idle silence must not increment `error_count` or move the account into probe/drain.
@@ -145,7 +145,7 @@ when upstream reports a different actual tier.
 - **HTTP bridge session closes or expires:** The next compatible HTTP `/v1/responses` or `/backend-api/codex/responses` request recreates a fresh upstream websocket bridge session; continuity is guaranteed only within the lifetime of one active bridged session.
 - **Multi-instance routing without bridge owner policy:** if operators do not configure a bridge ring or front-door affinity, continuity can still fragment across replicas. With a configured bridge ring, hard continuity keys landing on a non-owner replica are proxy-forwarded to the owner replica; the proxy fails closed only when the owner endpoint or ring membership cannot be resolved or the forward signature fails authentication. Gateway-safe prompt-cache requests may accept locality misses and continue locally instead of forwarding.
 - **Codex websocket reconnects:** Reconnect continuity now depends on the client replaying the accepted `x-codex-turn-state`; generated turn-state is emitted on accept for backend Codex routes and echoed back when the client already supplies one.
-- **Codex websocket stale previous-response anchors:** Direct backend Codex websocket stale-anchor failures are surfaced as `response.failed` / `codex_previous_response_stale` without the raw upstream code or missing `resp_...` id; OpenAI-compatible `/v1/responses` websocket clients continue to receive generic `stream_incomplete` masking.
+- **Codex websocket stale previous-response anchors:** Direct backend Codex websocket stale-anchor failures are either replayed transparently from a self-contained full resend or surfaced as a sanitized `response.failed` whose `response.error.code` is `previous_response_not_found`; the error omits `param`, the raw upstream envelope, and the missing `resp_...` id. A connect-time failure uses the same code directly at `error.code`. This includes the parameterless upstream message ``Invalid `previous_response_id`.``. OpenAI-compatible `/v1/responses` websocket clients continue to receive generic `stream_incomplete` masking.
 - **Websocket handshake forbidden/not-found:** Auto transport now fails loud on `403` / `404` instead of silently hiding the websocket regression behind HTTP fallback.
 - **Upstream websocket stops answering pings:** Pending direct-WebSocket and HTTP-bridge work fails with `upstream_websocket_liveness_timeout`; the account remains healthy and the request is not replayed because upstream acceptance is unknown.
 - **Repeated eventless bridge failures:** Two consecutive request-affecting pre-response failures can open the hard-key cooldown. A successful terminal response clears the state; an idle close followed by one real timeout remains only one strike.
@@ -186,6 +186,15 @@ the next request times out before `response.created`. The idle close is logged
 but contributes no failure; the timeout is the first strike. Only another
 consecutive eventless pending failure may open the repeated-failure cooldown.
 
+Stale-anchor recovery example: a reconnect sends a tool-output delta with a
+recent `previous_response_id`, and upstream answers
+``{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"Invalid `previous_response_id`."}}``.
+Because the delta cannot stand alone, codex-lb returns a sanitized
+`previous_response_not_found` signal on the Codex-native route so the client can
+retry once with full local history. If the original request already contained a
+self-contained full resend, codex-lb instead reconnects and replays that body
+without the rejected anchor.
+
 ## Known Client Integrations (Reference)
 
 Third-party agents that consume the `/v1` Responses surface documented by this
@@ -216,5 +225,5 @@ OpenSpec change first.
 - Post-deploy: monitor `no_accounts`, `stream_incomplete`, and `upstream_unavailable`.
 - Post-deploy: monitor `upstream_websocket_liveness_timeout`; recurring failures indicate a host route, VPN, proxy, or intermediary that black-holes established WebSockets.
 - Post-deploy: correlate retry-circuit `opened`, `half_open`, and `reset` events with bridge `pending` and `response_events_seen` diagnostics. An idle `pending=0` retirement must not precede an immediate two-failure cooldown.
-- Post-deploy: monitor `codex_previous_response_stale` on `/backend-api/codex/responses`; recurring spikes mean clients are still relying on stale upstream anchors and should perform the documented full-context retry without `previous_response_id`.
+- Post-deploy: monitor `previous_response_not_found` on `/backend-api/codex/responses`; recurring spikes show repeated continuity failures, which may come from malformed client identifiers, server-side invalidation, or connection lifecycle. Clients should perform the documented full-context retry without `previous_response_id`. Investigate socket-lifecycle remediation only when a separate close-reason, reconnect, or transport diagnostic correlates with the failures.
 - Websocket/Codex CLI tier verification runbook: `openspec/specs/responses-api-compat/ops.md`

@@ -78,7 +78,9 @@ def test_error_event_emits_done_chunk():
     "event_line",
     [
         'data: {"type":"response.failed","response":{"id":"r1","status":"failed"}}\n\n',
+        'data: {"type":"response.failed","response":{"error":{}}}\n\n',
         'data: {"type":"error"}\n\n',
+        'data: {"type":"error","error":{}}\n\n',
     ],
 )
 @pytest.mark.asyncio

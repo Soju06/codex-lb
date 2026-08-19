@@ -353,11 +353,11 @@ def iter_chat_chunks(
                 response = payload.get("response")
                 if isinstance(response, dict):
                     maybe_error = response.get("error")
-                    if isinstance(maybe_error, dict):
+                    if isinstance(maybe_error, dict) and maybe_error:
                         error = maybe_error
             else:
                 maybe_error = payload.get("error")
-                if isinstance(maybe_error, dict):
+                if isinstance(maybe_error, dict) and maybe_error:
                     error = maybe_error
             if error is not None:
                 error_payload: dict[str, JsonValue] = {"error": error}

@@ -5390,6 +5390,14 @@ transition.
 - **WHEN** normal retry selection chooses account B
 - **THEN** the proxy may dispatch the replacement body to account B
 
+#### Scenario: Confirmed pre-dispatch failure does not create an owner
+
+- **GIVEN** account A is selected for a nonportable Responses body
+- **WHEN** transport evidence confirms the request failed before any upstream
+  bytes were dispatched
+- **THEN** the proxy does not record account A as the dispatch owner
+- **AND** normal retry selection may dispatch the body first on account B
+
 #### Scenario: HTTP bridge preserves payload ownership
 
 - **GIVEN** an HTTP bridge request has already dispatched a nonportable body to

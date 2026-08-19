@@ -6,6 +6,8 @@
       account-bound request bodies.
 - [x] 1.3 Add HTTP bridge coverage for owner exclusion and account-neutral
       replacement controls.
+- [x] 1.4 Add a confirmed pre-dispatch regression proving owner registration
+      waits for actual upstream dispatch.
 
 ## 2. Owner-fencing implementation
 

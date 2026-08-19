@@ -31,6 +31,10 @@ account A. Account B must never receive it.
 An ordinary fresh request containing only portable user input can pass the
 canonical predicate and may use normal account selection.
 
+A selected account is not recorded as owner when transport evidence proves the
+request failed before dispatch. The body may then make its first real dispatch
+on another eligible account. Ambiguous failures remain pinned.
+
 HTTP bridge operation IDs are proxy-owned but still identify an in-flight
 operation. A bridge retry carrying an existing operation ID remains on its
 current account unless the operation is explicitly rebound before selection.

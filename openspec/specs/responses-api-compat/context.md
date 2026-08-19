@@ -219,6 +219,12 @@ HTTP bridge tracing archive IDs do not pin neutral requests. A real durable
 replaces that identity. Existing file pins and API-key settlement-before-health
 ordering remain independent invariants.
 
+Streaming selection authorizes owner compatibility before opening upstream, but
+persists a new owner only after dispatch is observed. A transport failure that
+is positively classified as pre-dispatch therefore leaves the body unowned and
+eligible for its first real dispatch on another account. Ambiguous failures
+remain owner-bound.
+
 ## Known Client Integrations (Reference)
 
 Third-party agents that consume the `/v1` Responses surface documented by this

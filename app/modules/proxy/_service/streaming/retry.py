@@ -582,8 +582,7 @@ class _StreamingRetryMixin:
             )
             settled = await _settle_stream_usage_before_pending_penalty(settlement)
 
-        def _authorize_payload_dispatch(account: Account) -> None:
-            nonlocal payload_replay_required_account_id
+        def _authorize_payload_dispatch(account: Account) -> bool:
             required_account_id = payload_replay_required_account_id
             if required_account_id is not None and required_account_id != account.id:
                 raise ProxyResponseError(
@@ -594,10 +593,9 @@ class _StreamingRetryMixin:
                         error_type="server_error",
                     ),
                 )
-            if required_account_id is None and not responses_payload_is_account_neutral_fresh_replay(
+            return required_account_id is None and not responses_payload_is_account_neutral_fresh_replay(
                 payload.to_replay_safety_payload()
-            ):
-                payload_replay_required_account_id = account.id
+            )
 
         def _move_verified_fresh_replay_from_owner(*, account_id: str, outcome: str) -> bool:
             # Only a proxy-injected owner anchor with locally verified full
@@ -1881,7 +1879,7 @@ class _StreamingRetryMixin:
                         )
                         try:
                             settlement = _StreamSettlement()
-                            _authorize_payload_dispatch(account)
+                            register_payload_owner = _authorize_payload_dispatch(account)
                             inner_stream = proxy._stream_once(
                                 account,
                                 payload,
@@ -1923,8 +1921,21 @@ class _StreamingRetryMixin:
                                 enforce_openai_sdk_contract=enforce_openai_sdk_contract,
                             )
                             try:
-                                async for line in inner_stream:
-                                    yield line
+                                try:
+                                    async for line in inner_stream:
+                                        if register_payload_owner:
+                                            payload_replay_required_account_id = account.id
+                                            register_payload_owner = False
+                                        yield line
+                                    if register_payload_owner:
+                                        payload_replay_required_account_id = account.id
+                                except BaseException as exc:
+                                    if register_payload_owner and not (
+                                        isinstance(exc, ProxyResponseError)
+                                        and is_confirmed_pre_dispatch_transport_error(exc)
+                                    ):
+                                        payload_replay_required_account_id = account.id
+                                    raise
                             finally:
                                 close_task = asyncio.create_task(
                                     inner_stream.aclose(),

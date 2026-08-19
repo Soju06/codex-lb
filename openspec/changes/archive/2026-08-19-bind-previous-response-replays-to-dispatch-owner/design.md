@@ -44,9 +44,12 @@ reasoning.
 
 ### Bind on first nonportable dispatch
 
-A request-local dispatch-owner ID is set immediately before the first
-nonportable payload is sent. Every later selection treats that owner like any
-other strict continuity requirement.
+A request-local dispatch-owner ID is authorized before the first nonportable
+payload is sent and persisted after the first upstream event or normal stream
+completion. Ambiguous/post-dispatch failures also preserve that owner, while a
+positively confirmed pre-dispatch transport failure does not create one. Every
+later selection treats a persisted owner like any other strict continuity
+requirement.
 
 Alternative: infer ownership from the current preferred account. Rejected
 because retry branches intentionally clear or replace preference state.

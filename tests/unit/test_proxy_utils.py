@@ -17393,6 +17393,60 @@ async def test_stream_responses_retries_security_work_warning_on_authorized_acco
 
 
 @pytest.mark.asyncio
+async def test_stream_responses_account_bound_pre_dispatch_failure_retries_other_account(monkeypatch):
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    first_account = _make_account("acc_pre_dispatch_bound_first")
+    second_account = _make_account("acc_pre_dispatch_bound_second")
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=first_account, error_message=None),
+            AccountSelection(account=second_account, error_message=None),
+        ]
+    )
+    attempted_account_ids: list[str] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        attempted_account_ids.append(account_id)
+        if account_id == first_account.chatgpt_account_id:
+            raise _pre_dispatch_proxy_connect_error("first bound account proxy route unavailable")
+        yield 'data: {"type":"response.completed","response":{"id":"resp_bound_fallback"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+    monkeypatch.setattr(service._load_balancer, "record_error", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=lambda account, **kwargs: account))
+    monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_pre_dispatch_owner",
+                    "encrypted_content": "owner-bound",
+                }
+            ],
+            "stream": True,
+        }
+    )
+
+    chunks = [chunk async for chunk in service.stream_responses(payload, {"session_id": "sid-pre-dispatch"})]
+
+    assert select_account.await_count == 2
+    assert attempted_account_ids == [
+        first_account.chatgpt_account_id,
+        second_account.chatgpt_account_id,
+    ]
+    assert any("resp_bound_fallback" in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_refuses_account_bound_security_work_retry(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))

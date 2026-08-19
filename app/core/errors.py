@@ -76,7 +76,14 @@ def is_previous_response_not_found_message(message: str | None) -> bool:
     if message is None:
         return False
     normalized = " ".join(message.lower().split())
-    return "previous response" in normalized and "not found" in normalized
+    if "previous response" in normalized and "not found" in normalized:
+        return True
+    # The Codex backend also rejects an unresolvable anchor with a terse
+    # ``Invalid `previous_response_id`.`` that carries neither "not found" nor an
+    # error ``param``. Recognize that shape too: the recovery (retry with full
+    # input and no anchor) is the correct response to any upstream rejection of
+    # the anchor itself, including a malformed one.
+    return "previous_response_id" in normalized and ("invalid" in normalized or "not found" in normalized)
 
 
 def previous_response_id_from_not_found_message(message: str | None) -> str | None:
@@ -102,7 +109,11 @@ def is_previous_response_not_found_error(
 ) -> bool:
     if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
         return True
-    if code != "invalid_request_error" or param != "previous_response_id":
+    if code != "invalid_request_error":
+        return False
+    # ``param`` is absent on the terse rejection shape; only a *different* param
+    # rules the anchor out as the cause.
+    if param is not None and param != "previous_response_id":
         return False
     return is_previous_response_not_found_message(message)
 

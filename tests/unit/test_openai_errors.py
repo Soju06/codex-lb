@@ -59,6 +59,40 @@ def test_previous_response_not_found_classifier_covers_openai_shapes():
     )
 
 
+def test_is_previous_response_not_found_error_terse_upstream_shape():
+    # The Codex backend rejects an unresolvable anchor with a terse message that
+    # carries neither "not found" nor an error ``param``; the recovery must still
+    # engage, otherwise the raw 400 reaches the client.
+    assert is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param=None,
+        message="Invalid `previous_response_id`.",
+    )
+    assert is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param="previous_response_id",
+        message="Invalid previous_response_id",
+    )
+    # A different param still rules the anchor out as the cause.
+    assert not is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param="model",
+        message="Invalid `previous_response_id`.",
+    )
+    # An unrelated 400 that never mentions the anchor is untouched.
+    assert not is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param=None,
+        message="Invalid value for 'temperature'.",
+    )
+    # A non-400 code that happens to mention the anchor is untouched.
+    assert not is_previous_response_not_found_error(
+        code="rate_limit_exceeded",
+        param=None,
+        message="Invalid `previous_response_id`.",
+    )
+
+
 def test_previous_response_id_from_not_found_message_extracts_anchor():
     assert (
         previous_response_id_from_not_found_message(

@@ -273,7 +273,10 @@ def test_bootstrap_models_include_representative_upstream_metadata():
     assert [level.effort for level in luna.supported_reasoning_levels] == ["low", "medium", "high", "xhigh", "max"]
 
     # Reproducible upstream catalog evidence:
-    # codex-rs/models-manager/models.json at rust-v0.145.0.
+    # codex-rs/models-manager/models.json at rust-v0.145.0, except
+    # ``max_context_window``: raised to 872000 in openai/codex commit
+    # 2eee483e49f88b868f67364134a658b3298e6c14 (openai/codex#39102), which no
+    # rust-v* release tag carries yet.
     for gpt56 in (sol, terra, luna):
         assert gpt56.minimal_client_version == "0.144.0"
         assert gpt56.context_window == 272_000
@@ -289,7 +292,13 @@ def test_bootstrap_models_include_representative_upstream_metadata():
         assert gpt56.raw["include_skills_usage_instructions"] is False
         assert gpt56.raw["experimental_supported_tools"] == []
         assert gpt56.raw["supports_search_tool"] is True
-        assert gpt56.raw["max_context_window"] == 272_000
+        # The upstream ceiling is decoupled from the default input budget, so
+        # the ``_bootstrap_model`` synthesis (max == context_window) must not
+        # win for these entries.
+        max_context_window = gpt56.raw["max_context_window"]
+        assert isinstance(max_context_window, int)
+        assert max_context_window == 872_000
+        assert max_context_window > gpt56.context_window
         assert gpt56.raw["service_tiers"] == [
             {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
         ]

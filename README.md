@@ -293,6 +293,9 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/e
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/evan-choi"><img src="https://avatars.githubusercontent.com/u/9690415?v=4?s=100" width="100px;" alt="Evan"/><br /><sub><b>Evan</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=evan-choi" title="Code">💻</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://chaoxu.prof/"><img src="https://avatars.githubusercontent.com/u/18860?v=4?s=100" width="100px;" alt="Chao Xu"/><br /><sub><b>Chao Xu</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=chaoxu" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=chaoxu" title="Tests">⚠️</a></td>
     </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/zenasharp"><img src="https://avatars.githubusercontent.com/u/170236008?v=4?s=100" width="100px;" alt="zenasharp"/><br /><sub><b>zenasharp</b></sub></a><br /><a href="https://github.com/Soju06/codex-lb/commits?author=zenasharp" title="Code">💻</a> <a href="https://github.com/Soju06/codex-lb/commits?author=zenasharp" title="Tests">⚠️</a> <a href="https://github.com/Soju06/codex-lb/commits?author=zenasharp" title="Documentation">📖</a></td>
+    </tr>
   </tbody>
 </table>
 

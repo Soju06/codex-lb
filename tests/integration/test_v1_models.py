@@ -261,6 +261,18 @@ async def test_v1_models_uses_bootstrap_models_when_registry_not_populated(async
     assert ids == BOOTSTRAP_MODEL_SLUGS
     assert "gpt-5.5-pro" not in ids
 
+    # The raised GPT-5.6 ceiling is a Codex-native field. /v1 input budgets
+    # stay on ``context_window`` so OpenAI-compatible clients keep packing to
+    # the 272k default instead of the 872k ``max_context_window`` ceiling.
+    entries = {item["id"]: item for item in payload["data"]}
+    for slug in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        entry = entries[slug]
+        assert entry["metadata"]["context_window"] == 272_000
+        assert entry["metadata"]["input_context_window"] == 272_000
+        assert entry["capabilities"]["context_length"] == 272_000
+        assert entry["context_length"] == 272_000
+        assert entry["contextLength"] == 272_000
+
 
 @pytest.mark.asyncio
 async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_client):
@@ -315,7 +327,10 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
     }
 
     # Reproducible upstream catalog evidence:
-    # codex-rs/models-manager/models.json at rust-v0.145.0.
+    # codex-rs/models-manager/models.json at rust-v0.145.0, except
+    # ``max_context_window``: raised to 872000 in openai/codex commit
+    # 2eee483e49f88b868f67364134a658b3298e6c14 (openai/codex#39102), which no
+    # rust-v* release tag carries yet.
     for gpt56 in (sol, terra, luna):
         assert gpt56["minimal_client_version"] == "0.144.0"
         assert gpt56["context_window"] == 272_000
@@ -328,7 +343,8 @@ async def test_backend_codex_models_uses_bootstrap_upstream_metadata(async_clien
         assert gpt56["reasoning_summary_format"] == "experimental"
         assert gpt56["comp_hash"] == "3000"
         assert gpt56["experimental_supported_tools"] == []
-        assert gpt56["max_context_window"] == 272_000
+        assert gpt56["max_context_window"] == 872_000
+        assert gpt56["max_context_window"] > gpt56["context_window"]
         assert gpt56["service_tiers"] == [
             {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
         ]

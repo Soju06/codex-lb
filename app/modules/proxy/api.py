@@ -123,6 +123,7 @@ from app.core.openai.models import (
     OpenAIError,
     OpenAIResponsePayload,
     OpenAIResponseResult,
+    normalize_compaction_item_id,
 )
 from app.core.openai.models import (
     OpenAIErrorEnvelope as OpenAIErrorEnvelopeModel,
@@ -6201,8 +6202,8 @@ def _normalize_compaction_output_item(item: Mapping[str, JsonValue]) -> dict[str
         "type": "compaction",
         "encrypted_content": encrypted_content,
     }
-    item_id = item.get("id")
-    if isinstance(item_id, str) and item_id.strip():
+    item_id = normalize_compaction_item_id(item.get("id"))
+    if item_id is not None:
         normalized["id"] = item_id
     status = item.get("status")
     if isinstance(status, str) and status.strip():

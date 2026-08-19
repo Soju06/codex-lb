@@ -1151,8 +1151,15 @@ async def test_confirmed_paid_to_free_transition_warms_fresh_monthly_window() ->
         ("plus", "plus", 0, 0.0, 100.0),
         ("plus", "free", -1, 0.0, 100.0),
         ("plus", "free", 0, 2.0, 99.0),
+        ("plus", "free", 0, 100.0, 100.0),
     ],
-    ids=["already-free", "unconfirmed", "stale-monthly", "below-availability-gate"],
+    ids=[
+        "already-free",
+        "unconfirmed",
+        "stale-monthly",
+        "below-availability-gate",
+        "exhausted-monthly-at-default-gate",
+    ],
 )
 async def test_paid_to_free_transition_candidate_rejects_unsafe_evidence(
     previous_plan_type: str,

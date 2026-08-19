@@ -774,6 +774,8 @@ def _build_paid_to_free_transition_candidate(
         return None
     if after.recorded_at < refresh_started_at:
         return None
+    if after.used_percent >= 100.0:
+        return None
     available_percent = 100.0 - after.used_percent
     if min_available_percent < 100.0 and available_percent < min_available_percent:
         return None

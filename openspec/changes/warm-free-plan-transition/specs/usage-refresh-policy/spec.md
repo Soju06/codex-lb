@@ -14,7 +14,9 @@ confirmed by the refresh that wrote the monthly sample. It MUST NOT apply to a
 single unconfirmed Free observation, an account that was already Free, or a
 monthly sample left over from an earlier refresh. Ordinary same-window reset
 detection MUST remain unchanged. The durable warm-up identity SHALL remain the
-account, canonical `monthly` window, and monthly reset deadline.
+account, canonical `monthly` window, and monthly reset deadline. The confirming
+monthly sample MUST report `used_percent < 100`; the configured minimum-
+available threshold MAY impose a stricter lower usage limit.
 
 #### Scenario: Confirmed paid-to-Free transition warms fresh monthly quota
 

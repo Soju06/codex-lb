@@ -6008,9 +6008,7 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
                             "status": 400,
                             "error": {
                                 "type": "invalid_request_error",
-                                "code": "previous_response_not_found",
-                                "message": "Previous response with id 'resp_ws_prev_anchor' not found.",
-                                "param": "previous_response_id",
+                                "message": "Invalid `previous_response_id`.",
                             },
                         },
                         separators=(",", ":"),
@@ -6192,9 +6190,7 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
                             "status": 400,
                             "error": {
                                 "type": "invalid_request_error",
-                                "code": "invalid_request_error",
-                                "message": ("Previous response with id 'resp_ws_prev_anchor' not found."),
-                                "param": "previous_response_id",
+                                "message": "Invalid `previous_response_id`.",
                             },
                         },
                         separators=(",", ":"),
@@ -6445,9 +6441,26 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
     _assert_previous_response_not_found_error(event["error"])
 
 
+@pytest.mark.parametrize(
+    "upstream_error",
+    [
+        {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_ws_prev_anchor' not found.",
+            "param": "previous_response_id",
+        },
+        {
+            "type": "invalid_request_error",
+            "message": "Invalid `previous_response_id`.",
+        },
+    ],
+    ids=["canonical-not-found", "parameterless-invalid-id"],
+)
 def test_backend_responses_websocket_masks_short_previous_response_not_found_without_retry(
     app_instance,
     monkeypatch,
+    upstream_error,
 ):
     first_upstream = _SequencedUpstreamWebSocket(
         [],
@@ -6481,12 +6494,7 @@ def test_backend_responses_websocket_masks_short_previous_response_not_found_wit
                         {
                             "type": "error",
                             "status": 400,
-                            "error": {
-                                "type": "invalid_request_error",
-                                "code": "previous_response_not_found",
-                                "message": "Previous response with id 'resp_ws_prev_anchor' not found.",
-                                "param": "previous_response_id",
-                            },
+                            "error": upstream_error,
                         },
                         separators=(",", ":"),
                     ),

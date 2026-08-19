@@ -52,10 +52,45 @@ def test_previous_response_not_found_classifier_covers_openai_shapes():
         param="previous_response_id",
         message='Previous response with id "resp_abc" not found.',
     )
+    assert is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param=None,
+        message="Invalid `previous_response_id`.",
+    )
+    assert is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param=None,
+        message="Invalid `previous_response_id`",
+    )
+    assert is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param="previous_response_id",
+        message="Invalid `previous_response_id`.",
+    )
     assert not is_previous_response_not_found_error(
         code="invalid_request_error",
         param="input",
         message='Previous response with id "resp_abc" not found.',
+    )
+    assert not is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param="input",
+        message="Invalid `previous_response_id`.",
+    )
+    assert not is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param=None,
+        message="Invalid request payload.",
+    )
+    assert not is_previous_response_not_found_error(
+        code="invalid_request_error",
+        param=None,
+        message="Invalid `previous_response_id`...",
+    )
+    assert not is_previous_response_not_found_error(
+        code=None,
+        param=None,
+        message="Invalid `previous_response_id`.",
     )
 
 

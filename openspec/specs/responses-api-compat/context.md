@@ -195,6 +195,36 @@ retry once with full local history. If the original request already contained a
 self-contained full resend, codex-lb instead reconnects and replays that body
 without the rejected anchor.
 
+## Previous-response replay owner fencing
+
+Removing a stale continuation anchor does not make every retained body
+portable. Encrypted reasoning, account-scoped items, file references, and
+durable bridge operation identities remain owned by the account that first
+received them. The proxy records that dispatch owner and requires it on later
+HTTP streaming, HTTP bridge, and direct WebSocket selections.
+
+For example, if account A first receives encrypted reasoning and then returns a
+pre-visible Trusted Access or authentication failure, account B must never
+receive the retained ciphertext. One forced token refresh may replay the body
+on account A; permanent failure or owner unavailability fails closed.
+
+Verified recovery installs a replacement body and updates owner state
+atomically. A canonical account-neutral replacement clears the owner and may
+use normal failover. A verified nonneutral replacement, including a
+Responses-Lite full resend, may replay only on the same owner and preserves the
+fence.
+
+HTTP bridge tracing archive IDs do not pin neutral requests. A real durable
+`operation_id` does pin the request until an explicit operation-rebind path
+replaces that identity. Existing file pins and API-key settlement-before-health
+ordering remain independent invariants.
+
+Streaming selection authorizes owner compatibility before opening upstream, but
+persists a new owner only after dispatch is observed. A transport failure that
+is positively classified as pre-dispatch therefore leaves the body unowned and
+eligible for its first real dispatch on another account. Ambiguous failures
+remain owner-bound.
+
 ## Known Client Integrations (Reference)
 
 Third-party agents that consume the `/v1` Responses surface documented by this

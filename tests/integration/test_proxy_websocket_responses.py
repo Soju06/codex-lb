@@ -4409,6 +4409,8 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
         ],
     )
     connect_calls: list[dict[str, object]] = []
+    dispatch_owner_snapshots: list[tuple[str | None, str | None]] = []
+    original_bind_dispatch_owner = websocket_mixin_module._bind_websocket_request_dispatch_owner
 
     class _FakeSettingsCache:
         async def get(self):
@@ -4449,7 +4451,18 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": model,
             }
         )
-        return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_calls)}"), first_upstream
+        return SimpleNamespace(id="acct_ws_proxy_owner"), first_upstream
+
+    def capture_dispatch_owner(*args, **kwargs):
+        bound = original_bind_dispatch_owner(*args, **kwargs)
+        request_state = args[0] if args else kwargs["request_state"]
+        dispatch_owner_snapshots.append(
+            (
+                request_state.preferred_account_id,
+                request_state.replay_required_account_id,
+            )
+        )
+        return bound
 
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
@@ -4459,6 +4472,11 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_bind_websocket_request_dispatch_owner",
+        capture_dispatch_owner,
+    )
 
     first_request = {
         "type": "response.create",
@@ -4471,6 +4489,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
         "type": "response.create",
         "model": "gpt-5.5",
         "input": "second",
+        "account_bound_probe": "owner-bound",
         "promptCacheKey": "thread_b",
         "stream": True,
     }
@@ -4489,6 +4508,10 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     assert connect_calls[0]["sticky_key"] == "thread_a"
     assert connect_calls[0]["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
     assert connect_calls[0]["model"] == "gpt-5.4"
+    assert dispatch_owner_snapshots == [
+        (None, None),
+        ("acct_ws_proxy_owner", "acct_ws_proxy_owner"),
+    ]
     _assert_upstream_payloads(
         first_upstream.sent_text,
         [
@@ -4505,6 +4528,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": "gpt-5.5",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
+                "account_bound_probe": "owner-bound",
                 "store": False,
                 "include": [],
                 "prompt_cache_key": "thread_b",

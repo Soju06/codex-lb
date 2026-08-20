@@ -2863,8 +2863,76 @@ async def test_source_responses_stream_starts_sse_keepalive_before_first_upstrea
             break
     joined = "".join(remaining)
     assert "resp_source_delayed" in joined
-    # Public contract synthesizes response.created before the delayed terminal.
-    assert "response.created" in joined
+    created_at = joined.find("response.created")
+    completed_at = joined.find("response.completed")
+    assert created_at != -1
+    assert completed_at != -1
+    assert created_at < completed_at
+
+
+@pytest.mark.asyncio
+async def test_source_responses_stream_reassembles_crlf_event_blocks(monkeypatch):
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
+
+    async def crlf_split_body():
+        event = (
+            'data: {"type":"response.completed","response":{"id":"resp_crlf"}}\r\n\r\n'
+        )
+        mid = max(1, len(event) // 2)
+        yield event[:mid].encode("utf-8")
+        yield event[mid:].encode("utf-8")
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=crlf_split_body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.11", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_crlf",
+        name="crlf-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+    assert isinstance(response, StreamingResponse)
+    joined = "".join([cast(str, chunk) async for chunk in response.body_iterator])
+    assert "resp_crlf" in joined
+    assert joined.find("response.created") < joined.find("response.completed")
 
 
 @pytest.mark.asyncio
@@ -2941,7 +3009,9 @@ async def test_source_responses_normalize_error_still_settles_reservation(monkey
     assert isinstance(response, StreamingResponse)
     chunks = [cast(str, chunk) async for chunk in response.body_iterator]
     joined = "".join(chunks)
-    assert "response.failed" in joined or '"type":"error"' in joined or "boom" in joined
+    assert "response.created" in joined
+    assert "response.failed" in joined
+    assert "resp_should_not_matter" not in joined
     assert settle_calls, "normalize early-return must still settle the outer reservation"
     assert "cancelled" not in log_statuses
 

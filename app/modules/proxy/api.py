@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import math
@@ -5442,29 +5443,47 @@ async def _buffered_limited_source_chat_stream_response(
     )
 
 
-async def _iter_source_sse_event_blocks(stream: AsyncIterator[bytes]) -> AsyncIterator[str]:
+async def _iter_source_sse_event_blocks(stream: AsyncIterator[bytes | str]) -> AsyncIterator[str]:
     """Reassemble chunked source bytes into SSE event blocks for public shaping.
 
-    SSE permits CR, LF, and CRLF line endings. Normalize to LF so event-block
-    detection only needs ``\\n\\n``, matching ``SourceStreamUsageParser``.
+    SSE permits CR, LF, and CRLF line endings. Decode incrementally so multi-byte
+    UTF-8 characters spanning chunks survive, and hold a trailing ``\\r`` until the
+    next chunk so a split CRLF cannot become a false ``\\n\\n`` boundary.
     """
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     buffer = ""
+    pending_cr = False
     try:
         async for chunk in stream:
             if not chunk:
                 continue
-            buffer += chunk.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+            text = decoder.decode(chunk if isinstance(chunk, bytes) else chunk.encode("utf-8"))
+            if pending_cr:
+                if text.startswith("\n"):
+                    text = text[1:]
+                buffer += "\n"
+                pending_cr = False
+            if text.endswith("\r"):
+                pending_cr = True
+                text = text[:-1]
+            buffer += text.replace("\r\n", "\n").replace("\r", "\n")
             while "\n\n" in buffer:
                 raw_block, buffer = buffer.split("\n\n", 1)
                 if raw_block:
                     yield f"{raw_block}\n\n"
+        trailing = decoder.decode(b"", final=True)
+        if pending_cr:
+            buffer += "\n"
+            pending_cr = False
+        if trailing:
+            buffer += trailing.replace("\r\n", "\n").replace("\r", "\n")
         if buffer.strip():
             yield buffer
     finally:
         await _aclose_stream(stream)
 
 
-def _wrap_source_responses_public_stream(stream: AsyncIterator[bytes]) -> AsyncIterator[str]:
+def _wrap_source_responses_public_stream(stream: AsyncIterator[bytes | str]) -> AsyncIterator[str]:
     """Normalize and keep source-routed Responses SSE proxy-timeout friendly.
 
     Account-backed ``_stream_responses`` already reassembles, normalizes, and

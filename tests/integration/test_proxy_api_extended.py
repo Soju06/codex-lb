@@ -2876,9 +2876,7 @@ async def test_source_responses_stream_reassembles_crlf_event_blocks(monkeypatch
     from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
 
     async def crlf_split_body():
-        event = (
-            'data: {"type":"response.completed","response":{"id":"resp_crlf"}}\r\n\r\n'
-        )
+        event = 'data: {"type":"response.completed","response":{"id":"resp_crlf"}}\r\n\r\n'
         mid = max(1, len(event) // 2)
         yield event[:mid].encode("utf-8")
         yield event[mid:].encode("utf-8")
@@ -2932,6 +2930,72 @@ async def test_source_responses_stream_reassembles_crlf_event_blocks(monkeypatch
     assert isinstance(response, StreamingResponse)
     joined = "".join([cast(str, chunk) async for chunk in response.body_iterator])
     assert "resp_crlf" in joined
+    assert joined.find("response.created") < joined.find("response.completed")
+
+
+@pytest.mark.asyncio
+async def test_source_responses_stream_preserves_split_utf8_and_crlf(monkeypatch):
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
+
+    async def split_boundary_body():
+        # "é" is UTF-8 C3 A9; split after C3. Also split CRLF after CR.
+        prefix = b'data: {"type":"response.completed","response":{"id":"resp_'
+        mid = "caf\u00e9".encode("utf-8")
+        yield prefix + mid[:4]  # ends mid UTF-8 sequence for é
+        yield mid[4:] + b'"}}\r'
+        yield b"\n\r\n"
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=split_boundary_body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.12", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_utf8_crlf",
+        name="utf8-crlf-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+    assert isinstance(response, StreamingResponse)
+    joined = "".join([cast(str, chunk) async for chunk in response.body_iterator])
+    assert "resp_caf" in joined
+    assert "\\u00e9" in joined or "caf\u00e9" in joined
     assert joined.find("response.created") < joined.find("response.completed")
 
 

@@ -6,7 +6,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -5505,7 +5505,9 @@ async def _buffered_limited_source_chat_stream_response(
     )
 
 
-async def _iter_source_sse_event_blocks(stream: AsyncIterator[bytes | str]) -> AsyncIterator[str]:
+async def _iter_source_sse_event_blocks(
+    stream: AsyncIterable[bytes | str | memoryview[int]],
+) -> AsyncIterator[str]:
     """Reassemble chunked source bytes into SSE event blocks for public shaping.
 
     SSE permits CR, LF, and CRLF line endings. Decode incrementally so multi-byte
@@ -5519,7 +5521,13 @@ async def _iter_source_sse_event_blocks(stream: AsyncIterator[bytes | str]) -> A
         async for chunk in stream:
             if not chunk:
                 continue
-            text = decoder.decode(chunk if isinstance(chunk, bytes) else chunk.encode("utf-8"))
+            if isinstance(chunk, memoryview):
+                raw = chunk.tobytes()
+            elif isinstance(chunk, str):
+                raw = chunk.encode("utf-8")
+            else:
+                raw = chunk
+            text = decoder.decode(raw)
             if pending_cr:
                 if text.startswith("\n"):
                     text = text[1:]
@@ -5545,7 +5553,9 @@ async def _iter_source_sse_event_blocks(stream: AsyncIterator[bytes | str]) -> A
         await _aclose_stream(stream)
 
 
-def _wrap_source_responses_public_stream(stream: AsyncIterator[bytes | str]) -> AsyncIterator[str]:
+def _wrap_source_responses_public_stream(
+    stream: AsyncIterable[bytes | str | memoryview[int]],
+) -> AsyncIterator[str]:
     """Normalize and keep source-routed Responses SSE proxy-timeout friendly.
 
     Account-backed ``_stream_responses`` already reassembles, normalizes, and
@@ -8098,7 +8108,7 @@ async def _log_source_chat_completion(
         )
 
 
-async def _aclose_stream(stream: AsyncIterator[object]) -> None:
+async def _aclose_stream(stream: object) -> None:
     aclose = getattr(stream, "aclose", None)
     if aclose is not None:
         await aclose()

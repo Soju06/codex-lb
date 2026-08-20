@@ -618,6 +618,8 @@ async def _persist_http_bridge_operation_event(
                 )
         await release_terminal_delivery_barrier()
         return terminal_enqueued
+
+
 async def _wait_for_http_bridge_recovery_settlement_retry(
     service: Any,
     *,

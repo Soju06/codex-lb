@@ -209,7 +209,7 @@ class AccountRoutingPolicyUpdateResponse(DashboardModel):
 
 class AccountUsageLimitUpdateRequest(DashboardModel):
     enabled: bool
-    percent: float | None = Field(default=None, gt=0, le=100)
+    percent: float | None = Field(gt=0, le=100)
 
     @model_validator(mode="after")
     def validate_enabled_limit_has_percent(self) -> AccountUsageLimitUpdateRequest:

@@ -149,6 +149,7 @@ async def test_account_usage_limit_can_be_set_disabled_retained_and_removed(asyn
 @pytest.mark.parametrize(
     "payload",
     [
+        {"enabled": False},
         {"enabled": True, "percent": None},
         {"enabled": True, "percent": 0},
         {"enabled": True, "percent": 100.01},

@@ -15194,7 +15194,12 @@ async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_accou
     )
     release_unsettled = AsyncMock()
     record_success = AsyncMock()
-    record_errors = AsyncMock()
+
+    async def record_retry_errors(account: Account, count: int) -> None:
+        assert account is account_a
+        settlement_order.append(f"extra:{count}")
+
+    record_errors = AsyncMock(side_effect=record_retry_errors)
 
     async def settle_usage(
         settled_api_key: ApiKeyData | None,
@@ -15244,7 +15249,7 @@ async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_accou
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
-    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 1)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
     monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
     monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
@@ -15278,14 +15283,15 @@ async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_accou
 
     terminal = json.loads(chunks[-1].split("data: ", 1)[1])
     assert terminal["response"]["id"] == "resp_keyed_transient_settle_ok"
-    assert stream_account_ids == [account_a.id, account_b.id]
+    assert stream_account_ids == [account_a.id, account_a.id, account_a.id, account_b.id]
     assert settlement_wait_flags == [True]
     assert settlement_order == [
         "settle",
         f"health:{account_a.id}:invalid_request_error",
+        "extra:2",
     ]
     release_unsettled.assert_not_awaited()
-    record_errors.assert_not_awaited()
+    record_errors.assert_awaited_once_with(account_a, 2)
 
 
 @pytest.mark.asyncio

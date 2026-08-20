@@ -24,4 +24,4 @@
 
 - [x] 3.3 Run an actual-path async surface driver and record bounded-pressure plus resumed-delivery output
 
-- [ ] 3.4 Review the committed diff for disconnect/cancellation, task ownership, terminal settlement, durable spool/replay, and async task leaks
+- [x] 3.4 Review the committed diff for disconnect/cancellation, task ownership, terminal settlement, durable spool/replay, and async task leaks

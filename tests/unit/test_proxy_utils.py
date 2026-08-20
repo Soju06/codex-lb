@@ -15278,6 +15278,103 @@ async def test_stream_with_retry_keyed_refresh_connect_settles_before_account_he
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_keyed_queued_penalty_flushes_on_cancel(monkeypatch):
+    """Cancel after a queued keyed mid-loop penalty must still flush health.
+
+    Regression for CodeRabbit on CLB-20260820-06: queuing into
+    ``pending_post_refresh_transient_penalties`` then cancelling before the
+    replacement settles must still settle/flush the deferred health write in
+    cleanup, not drop the penalty when releasing the reservation.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_cancel_penalty_a")
+    account_b = _make_account("acc_keyed_cancel_penalty_b")
+    settlement_order: list[str] = []
+    api_key = _make_api_key_data("key_keyed_cancel_penalty")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_cancel_penalty",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock(return_value=True)
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_stream_once",
+        AsyncMock(side_effect=AssertionError("stream must not start after cancel")),
+    )
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-cancel-penalty"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            pass
+
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:upstream_unavailable",
+    ]
+    release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_account_health(
     monkeypatch,
 ):

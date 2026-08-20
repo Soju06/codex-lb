@@ -63,6 +63,7 @@ from app.core.clients.proxy_websocket import (
     filter_inbound_websocket_headers,
     is_account_neutral_websocket_error_code,
 )
+from app.core.clock import scheduler_for
 from app.core.errors import (
     OpenAIErrorEnvelope,
     openai_error,
@@ -1404,7 +1405,7 @@ class _WebSocketMixin:
                 account_lease = None
                 if lease_to_release is None:
                     return
-                account_lease_release_task = asyncio.create_task(
+                account_lease_release_task = scheduler_for(proxy).create_task(
                     proxy._load_balancer.release_account_lease(lease_to_release),
                     name="proxy-websocket-finalization-connection-lease",
                 )
@@ -1595,7 +1596,7 @@ class _WebSocketMixin:
                                 break
                     message: Any | None = None
                     try:
-                        message = await asyncio.wait_for(
+                        message = await scheduler_for(proxy).wait_for(
                             websocket.receive(),
                             timeout=min(
                                 downstream_idle_timeout_seconds, _facade()._DOWNSTREAM_WEBSOCKET_RECEIVE_POLL_SECONDS
@@ -2430,7 +2431,7 @@ class _WebSocketMixin:
                     upstream_requires_security_work_authorized = request_state.require_security_work_authorized
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
-                    upstream_reader = asyncio.create_task(
+                    upstream_reader = scheduler_for(proxy).create_task(
                         proxy._relay_upstream_websocket_messages(
                             websocket,
                             upstream,
@@ -2530,7 +2531,7 @@ class _WebSocketMixin:
                         # transport owner. A fresh connection re-acquires it
                         # for its selected account; the global turn admission
                         # remains attached to a claimed request state.
-                        retired_create_lease_release_task = asyncio.create_task(
+                        retired_create_lease_release_task = scheduler_for(proxy).create_task(
                             proxy._release_request_state_account_response_create_lease(request_state),
                             name="proxy-websocket-finalization-retired-create-lease",
                         )
@@ -2539,7 +2540,7 @@ class _WebSocketMixin:
                         retired_create_lease_release_task = None
                         if request_state_to_fail is not None:
                             owned_request_state = request_state_to_fail
-                            request_state_failure_task = asyncio.create_task(
+                            request_state_failure_task = scheduler_for(proxy).create_task(
                                 proxy._fail_pending_websocket_requests(
                                     account=None,
                                     account_id_value=account.id if account is not None else upstream_account_id,
@@ -2629,7 +2630,7 @@ class _WebSocketMixin:
                         # find either this slot or the registered child task.
                         request_state_to_fail = reader_replay
                         owned_request_state = request_state_to_fail
-                        request_state_failure_task = asyncio.create_task(
+                        request_state_failure_task = scheduler_for(proxy).create_task(
                             proxy._fail_pending_websocket_requests(
                                 account=account,
                                 account_id_value=account.id if account else None,
@@ -2697,7 +2698,7 @@ class _WebSocketMixin:
                             "Transparent websocket replay after upstream send failure request_id=%s",
                             replay_candidate.request_log_id or replay_candidate.request_id,
                         )
-                        retired_create_lease_release_task = asyncio.create_task(
+                        retired_create_lease_release_task = scheduler_for(proxy).create_task(
                             proxy._release_request_state_account_response_create_lease(replay_candidate),
                             name="proxy-websocket-finalization-retired-create-lease",
                         )
@@ -2891,7 +2892,7 @@ class _WebSocketMixin:
                     )
                 cleanup_phase = "complete"
 
-            cleanup_task = asyncio.create_task(
+            cleanup_task = scheduler_for(proxy).create_task(
                 finalize_websocket_scope(),
                 name="proxy-websocket-finalization-scope-cleanup",
             )
@@ -4878,7 +4879,7 @@ class _WebSocketMixin:
                     continue
                 if message.kind == "text" and message.text is not None:
                     downstream_activity.mark()
-                    terminal_task = asyncio.create_task(
+                    terminal_task = scheduler_for(proxy).create_task(
                         _process_and_forward_upstream_websocket_text(
                             proxy,
                             websocket,
@@ -4955,7 +4956,7 @@ class _WebSocketMixin:
                             )
                         break
                     continue
-                terminal_task = asyncio.create_task(
+                terminal_task = scheduler_for(proxy).create_task(
                     _process_upstream_websocket_transport_end(
                         proxy,
                         websocket,
@@ -6345,7 +6346,7 @@ class _WebSocketMixin:
             remaining = list(pending_requests)
             pending_requests.clear()
             if remaining:
-                finalization_task = asyncio.create_task(
+                finalization_task = scheduler_for(proxy).create_task(
                     self._finalize_claimed_websocket_requests(
                         account=account,
                         account_id_value=account_id_value,

@@ -60,6 +60,7 @@ from app.core.clients.proxy_websocket import (
 from app.core.clients.proxy_websocket import (
     connect_responses_websocket as connect_responses_websocket,
 )
+from app.core.clock import REAL_CLOCK, REAL_SCHEDULER, Clock, Scheduler
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
@@ -936,11 +937,14 @@ class ProxyService(
         self,
         repo_factory: ProxyRepoFactory,
         *,
+        clock: Clock = REAL_CLOCK,
+        scheduler: Scheduler = REAL_SCHEDULER,
         live_websocket_connector: LiveWebSocketConnector = connect_live_websocket,
     ) -> None:
         self._repo_factory = repo_factory
+        self._clock, self._scheduler = clock, scheduler
         self._encryptor = TokenEncryptor()
-        self._load_balancer = LoadBalancer(repo_factory)
+        self._load_balancer = LoadBalancer(repo_factory, clock=clock)
         self._capability_router = CapabilityRouter(repo_factory)
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)
@@ -948,7 +952,7 @@ class ProxyService(
         self._http_bridge_operation_event_batcher = HttpBridgeOperationEventBatcher.from_settings(self._durable_bridge)
         self._http_bridge_owner_client = HTTPBridgeOwnerClient()
         self._initialize_http_bridge_session_registry()
-        _initialize_http_bridge_retry_circuit(self, _clear_websocket_stale_previous_response_cache)
+        _initialize_http_bridge_retry_circuit(self, _clear_websocket_stale_previous_response_cache, clock=clock)
         self._http_bridge_account_timeout_failures, self._http_bridge_account_timeout_lock = {}, asyncio.Lock()
         self._http_bridge_inflight_sessions: dict[_HTTPBridgeSessionKey, asyncio.Future[_HTTPBridgeSession]] = {}
         self._http_bridge_turn_state_index: dict[tuple[str, str | None], _HTTPBridgeSessionKey] = {}
@@ -970,11 +974,8 @@ class ProxyService(
                 websocket_connect_limit=settings.proxy_upstream_websocket_connect_limit,
                 response_create_limit=settings.proxy_response_create_limit,
                 compact_response_create_limit=settings.proxy_compact_response_create_limit,
-                admission_wait_timeout_seconds=getattr(
-                    settings,
-                    "proxy_admission_wait_timeout_seconds",
-                    10.0,
-                ),
+                admission_wait_timeout_seconds=getattr(settings, "proxy_admission_wait_timeout_seconds", 10.0),
+                scheduler=self._scheduler,
             )
         return self._work_admission
 
@@ -991,7 +992,7 @@ class ProxyService(
         filtered = filter_inbound_headers(headers)
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
         request_id = get_request_id() or ensure_request_id(None)
-        start = time.monotonic()
+        start = self._clock.monotonic()
         base_settings = get_settings()
         deadline = start + base_settings.proxy_request_budget_seconds
         settings = await get_settings_cache().get()
@@ -1253,7 +1254,7 @@ class ProxyService(
                 api_key=api_key,
                 request_id=request_id,
                 model=None,
-                latency_ms=int((time.monotonic() - start) * 1000),
+                latency_ms=int((self._clock.monotonic() - start) * 1000),
                 status=log_status,
                 error_code=log_error_code,
                 error_message=log_error_message,
@@ -1288,7 +1289,7 @@ class ProxyService(
         if bridge_session is not None:
             timeout_seconds = _http_bridge_admission_timeout_seconds(request_state, timeout_seconds, get_settings())
         request_state.response_create_gate = response_create_gate
-        request_state.response_create_gate_wait_started_at = time.monotonic()
+        request_state.response_create_gate_wait_started_at = self._clock.monotonic()
         if account_id is not None:
             settings = await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
@@ -1299,7 +1300,7 @@ class ProxyService(
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
-            await asyncio.wait_for(response_create_gate.acquire(), timeout=timeout_seconds)
+            await self._scheduler.wait_for(response_create_gate.acquire(), timeout=timeout_seconds)
         except TimeoutError as exc:
             await self._release_request_state_account_response_create_lease(request_state)
             request_state.response_create_gate = None
@@ -1313,7 +1314,7 @@ class ProxyService(
             stale_pending_requests_to_fail: list[_WebSocketRequestState] = []
             retry_circuit_attempt_selection = None
             if bridge_session is not None:
-                now = time.monotonic()
+                now = self._clock.monotonic()
                 stale_gate_snapshot = await self._snapshot_http_bridge_stale_gate_state(bridge_session, now=now)
                 pending_states = stale_gate_snapshot.pending_states
                 pending_count = len(pending_states)
@@ -1397,7 +1398,7 @@ class ProxyService(
         request_state.awaiting_response_created = True
         if request_state.response_create_gate_wait_started_at is not None:
             request_state.latency_response_create_gate_wait_ms = int(
-                max(0.0, time.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
+                max(0.0, self._clock.monotonic() - request_state.response_create_gate_wait_started_at) * 1000
             )
         try:
             request_state.response_create_admission = await self._get_work_admission().acquire_response_create(
@@ -1461,7 +1462,7 @@ class ProxyService(
                 refresh = auth_manager.ensure_fresh(account, force=force)
                 if timeout_seconds is None:
                     return await refresh
-                return await asyncio.wait_for(refresh, timeout=max(0.001, timeout_seconds))
+                return await self._scheduler.wait_for(refresh, timeout=max(0.001, timeout_seconds))
         finally:
             pop_token_refresh_timeout_override(token)
 
@@ -1473,7 +1474,7 @@ class ProxyService(
         timeout_seconds: float | None = None,
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account:
-        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+        deadline = None if timeout_seconds is None else self._clock.monotonic() + timeout_seconds
         return await _recover_fresh_account(
             self,
             account,

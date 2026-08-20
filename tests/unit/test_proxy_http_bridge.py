@@ -26394,6 +26394,7 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_expi
             *,
             label: str,
             cleanup_tasks: set[asyncio.Task[None]] | None = None,
+            scheduler_owner: Any | None = None,
         ) -> bool:
             if label == "HTTP bridge upstream receive after missing response.created":
                 return False
@@ -26401,6 +26402,7 @@ async def test_http_bridge_eventless_timeout_clears_durable_anchor_only_for_expi
                 task,
                 label=label,
                 cleanup_tasks=cleanup_tasks,
+                scheduler_owner=scheduler_owner,
             )
 
         monkeypatch.setattr(
@@ -26525,6 +26527,7 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
         *,
         label: str,
         cleanup_tasks: set[asyncio.Task[None]] | None = None,
+        scheduler_owner: Any | None = None,
     ) -> bool:
         if label == "HTTP bridge upstream receive after missing response.created":
             upstream.release_receive.set()
@@ -26532,7 +26535,12 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
             await asyncio.sleep(0)
             assert task is not None and task.done() and not task.cancelled()
             return True
-        return await original_cancel_reader_child(task, label=label, cleanup_tasks=cleanup_tasks)
+        return await original_cancel_reader_child(
+            task,
+            label=label,
+            cleanup_tasks=cleanup_tasks,
+            scheduler_owner=scheduler_owner,
+        )
 
     monkeypatch.setattr(
         http_bridge_upstream_events_module,

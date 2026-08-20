@@ -46,6 +46,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     is_account_neutral_websocket_error_code,
 )
+from app.core.clock import scheduler_for
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import (
@@ -1579,7 +1580,7 @@ class _HTTPBridgeRequestSubmitMixin:
         except BaseException:
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
-            cleanup_task = asyncio.create_task(
+            cleanup_task = scheduler_for(self).create_task(
                 self._cleanup_http_bridge_submit_interruption(
                     session,
                     request_state=request_state,
@@ -1618,7 +1619,7 @@ class _HTTPBridgeRequestSubmitMixin:
         except BaseException:
             if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
                 session.unanchored_reservation_id = None
-            cleanup_task = asyncio.create_task(
+            cleanup_task = scheduler_for(self).create_task(
                 self._cleanup_http_bridge_submit_interruption(
                     session,
                     request_state=request_state,
@@ -1713,7 +1714,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         registration_cancellation: asyncio.CancelledError | None = None
                         try:
                             async with session.recovery_alias_lock:
-                                registration_task = asyncio.create_task(
+                                registration_task = scheduler_for(self).create_task(
                                     self._register_http_bridge_recovery_turn_state_locked(
                                         session,
                                         recovery_turn_state,
@@ -1975,7 +1976,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 await self._retire_http_bridge_after_drain_if_ready(session)
             raise
         except asyncio.CancelledError as cancellation:
-            cleanup_task = asyncio.create_task(
+            cleanup_task = scheduler_for(self).create_task(
                 self._cleanup_http_bridge_submit_interruption(
                     session,
                     request_state=request_state,
@@ -1990,7 +1991,7 @@ class _HTTPBridgeRequestSubmitMixin:
             except Exception:
                 logger.warning("Failed to clean up cancelled HTTP bridge submit", exc_info=True)
             if session.upstream_control.retire_after_drain and not session.upstream_close_attempted:
-                retire_task = asyncio.create_task(self._retire_http_bridge_after_drain_if_ready(session))
+                retire_task = scheduler_for(self).create_task(self._retire_http_bridge_after_drain_if_ready(session))
                 try:
                     await _await_task_deferring_cancellation(retire_task)
                 except Exception:
@@ -2219,7 +2220,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     await _send_http_bridge_request_text_with_archive_id(session, warmup_state, warmup_text)
                 while True:
                     try:
-                        event_block = await asyncio.wait_for(
+                        event_block = await scheduler_for(self).wait_for(
                             event_queue.get(),
                             timeout=_prewarm_response_timeout_seconds(),
                         )
@@ -2315,7 +2316,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
                 request_state.prewarm_status = "error"
                 _record_http_bridge_prewarm_outcome(outcome="error")
-                cleanup_task = asyncio.create_task(
+                cleanup_task = scheduler_for(self).create_task(
                     self._cleanup_http_bridge_submit_interruption(
                         session,
                         request_state=warmup_state,
@@ -2330,7 +2331,9 @@ class _HTTPBridgeRequestSubmitMixin:
                     and session.upstream_control.retire_after_drain
                     and not session.upstream_close_attempted
                 ):
-                    retire_task = asyncio.create_task(self._retire_http_bridge_after_drain_if_ready(session))
+                    retire_task = scheduler_for(self).create_task(
+                        self._retire_http_bridge_after_drain_if_ready(session)
+                    )
                     await _await_task_deferring_cancellation(retire_task)
                 raise
 
@@ -2553,7 +2556,7 @@ class _HTTPBridgeRequestSubmitMixin:
                         exc_info=True,
                     )
 
-            release_task = asyncio.create_task(release_detached_lease())
+            release_task = scheduler_for(self).create_task(release_detached_lease())
             _, cancellation = await _await_task_deferring_cancellation(release_task)
             if cancellation is not None:
                 raise cancellation
@@ -2598,7 +2601,7 @@ class _HTTPBridgeRequestSubmitMixin:
             except Exception:
                 logger.warning("Failed to release idle HTTP bridge account lease", exc_info=True)
 
-        release_task = asyncio.create_task(release_idle_lease())
+        release_task = scheduler_for(self).create_task(release_idle_lease())
         _, cancellation = await _await_task_deferring_cancellation(release_task)
         if cancellation is not None:
             raise cancellation
@@ -3213,7 +3216,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_state.request_id,
                     retry_jitter_seconds,
                 )
-                await asyncio.sleep(retry_jitter_seconds)
+                await scheduler_for(self).sleep(retry_jitter_seconds)
                 request_deadline = request_state.bridge_request_deadline
                 if request_deadline is None:
                     request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(
@@ -3295,7 +3298,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     await self._release_request_state_account_response_create_lease(request_state)
                     return False
                 try:
-                    request_state.response_create_admission = await asyncio.wait_for(
+                    request_state.response_create_admission = await scheduler_for(self).wait_for(
                         self._get_work_admission().acquire_response_create(),
                         timeout=remaining_retry_budget_seconds,
                     )

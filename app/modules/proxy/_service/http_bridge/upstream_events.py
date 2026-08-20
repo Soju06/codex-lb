@@ -37,6 +37,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     is_account_neutral_websocket_error_code,
 )
+from app.core.clock import scheduler_for
 from app.core.errors import response_failed_event
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import (
@@ -971,6 +972,7 @@ async def _cancel_http_bridge_reader_child(
     *,
     label: str,
     cleanup_tasks: set[asyncio.Task[None]] | None = None,
+    scheduler_owner: Any | None = None,
 ) -> bool:
     if task is None:
         return True
@@ -988,6 +990,7 @@ async def _cancel_http_bridge_reader_child(
                 task,
                 label=label,
                 cleanup_tasks=cleanup_tasks,
+                scheduler=scheduler_for(scheduler_owner) if scheduler_owner is not None else scheduler_for(task),
             )
         )
     except Exception:
@@ -1358,7 +1361,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     stuck_gate_retire_after_seconds=stuck_gate_retire_after_seconds,
                 )
                 if receive_task is None:
-                    receive_task = asyncio.create_task(session.upstream.receive())
+                    receive_task = scheduler_for(self).create_task(session.upstream.receive())
 
                 message: UpstreamWebSocketMessage | None = None
                 timed_out = False
@@ -1368,7 +1371,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 elif receive_timeout is not None and receive_timeout.timeout_seconds <= 0:
                     timed_out = True
                 else:
-                    wakeup_task = asyncio.create_task(session.upstream_reader_wakeup.wait())
+                    wakeup_task = scheduler_for(self).create_task(session.upstream_reader_wakeup.wait())
                     done, _pending = await asyncio.wait(
                         (receive_task, wakeup_task),
                         timeout=receive_timeout.timeout_seconds if receive_timeout is not None else None,
@@ -1388,6 +1391,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                             wakeup_task,
                             label="HTTP bridge reader wakeup wait",
                             cleanup_tasks=self._background_cleanup_tasks,
+                            scheduler_owner=self,
                         )
                         wakeup_task = None
 

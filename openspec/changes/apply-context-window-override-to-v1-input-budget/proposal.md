@@ -20,4 +20,4 @@ None.
 
 ### Modified Capabilities
 
-- `model-catalog-compat`: an operator context-window override applies to the OpenAI-compatible input-budget fields, clamped to the upstream `max_context_window` when upstream declares one above the backend `context_window`.
+- `model-catalog-compat`: an operator context-window override applies to the OpenAI-compatible input-budget fields, clamped to the upstream `max_context_window` when upstream declares one above the backend `context_window`. The Codex-native catalog requirement now specifies the same single resolved value for the native `context_window`/`max_context_window` rewrite and the endpoint's OpenAI-compatible `data` alias.

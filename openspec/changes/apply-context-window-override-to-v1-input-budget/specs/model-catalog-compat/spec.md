@@ -52,3 +52,38 @@ When serving `GET /v1/models`, the system SHALL expose the upstream backend inpu
 
 - **WHEN** `GET /v1/models` returns `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, or `gpt-5.3-codex`
 - **THEN** the entry's metadata includes `max_output_tokens=128000`
+
+### Requirement: Codex-native model catalog keeps backend catalog fields
+
+When serving `GET /backend-api/codex/models`, the system MUST keep Codex-native model catalog semantics unchanged: the top-level `context_window` field remains the backend compact/input budget unless an explicit operator override applies, and upstream raw fields such as `max_context_window` remain available when upstream provides them. The `/v1/models` compatibility metadata MUST NOT mutate the native Codex endpoint.
+
+When an explicit operator context-window override applies to a model, the native entry SHALL report the single resolved value — the override clamped to the upstream-declared `max_context_window` when upstream declares one above the backend `context_window`; a `max_context_window` equal to the backend `context_window` (the synthesized parseability default) MUST NOT clamp — on `context_window`, and SHALL rewrite `max_context_window` to that same resolved value when upstream provides the field. The endpoint's OpenAI-compatible `data` alias SHALL report the same resolved value on its `context_length`, `contextLength`, `capabilities.context_length`, `metadata.context_window`, and `metadata.input_context_window` fields, so the native and alias views of one model never advertise different budgets.
+
+#### Scenario: Native Codex route preserves compact budget
+
+- **WHEN** the upstream model catalog contains `gpt-5.5` with `context_window=272000`
+- **THEN** `GET /backend-api/codex/models` returns `gpt-5.5.context_window=272000`
+- **AND** it does not replace that field with `400000`
+
+#### Scenario: Codex model catalog also exposes OpenAI data alias
+
+- **WHEN** a client requests `GET /backend-api/codex/models`
+- **THEN** the response keeps the Codex-native `models` list
+- **AND** the response includes `object: "list"` and an OpenAI-compatible `data` list
+- **AND** `data` contains model entries whose Codex visibility is `list`
+- **AND** `data` excludes entries whose Codex visibility is `hide`
+
+#### Scenario: Native Codex catalog reports one resolved budget for a clamped override
+
+- **WHEN** an operator override sets a model's reported context window to `1000000`
+- **AND** the upstream model catalog contains that model with `context_window=272000` and `max_context_window=872000`
+- **THEN** `GET /backend-api/codex/models` returns that model with `context_window=872000`
+- **AND** `max_context_window=872000`
+
+#### Scenario: Codex data alias reports the resolved input budget for an override
+
+- **WHEN** an operator override sets a model's reported context window to `515000`
+- **AND** the upstream model catalog contains that model with `context_window=272000` and no explicit `max_context_window`
+- **THEN** the `GET /backend-api/codex/models` `data` alias entry for that model reports `context_length`, `contextLength`, and `capabilities.context_length` of `515000`
+- **AND** `metadata.context_window=515000` and `metadata.input_context_window=515000`
+- **AND** the native `models` entry reports `context_window=515000`

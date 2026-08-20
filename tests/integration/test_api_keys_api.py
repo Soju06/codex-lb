@@ -2165,9 +2165,7 @@ async def test_v1_responses_source_owned_previous_response_id_keeps_model_source
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_responses_source_owned_previous_response_id_keeps_model_source(
-    async_client, monkeypatch
-):
+async def test_backend_codex_responses_source_owned_previous_response_id_keeps_model_source(async_client, monkeypatch):
     model = "external-codex-responses-source-prev"
     source_id = await _create_model_source(
         async_client,

@@ -17,6 +17,8 @@ import { useTelemetryConsent } from "@/features/settings/hooks/use-settings";
 // Same published page the backend startup notice points operators to
 // (TELEMETRY_FIELDS_DOCUMENTATION in app/modules/telemetry/scheduler.py).
 const TELEMETRY_DOCS_URL = "https://soju06.github.io/codex-lb/telemetry/";
+const OPT_OUT_NOTICE =
+  "Disabling from the dashboard sends one anonymous opt-out notice to keep aggregate counts accurate.";
 
 export function TelemetryConsentDialog() {
   const { t } = useTranslation();
@@ -60,6 +62,7 @@ export function TelemetryConsentDialog() {
           <p className="text-sm text-muted-foreground">
             {t("settings.telemetry.consentDialog.categories")}
           </p>
+          <p className="text-sm text-muted-foreground">{OPT_OUT_NOTICE}</p>
           <p className="text-sm font-medium">{t("settings.telemetry.consentDialog.payloadLabel")}</p>
           <TelemetryPayloadPreview preview={preview} />
           <p className="text-sm">

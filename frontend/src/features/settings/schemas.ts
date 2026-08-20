@@ -436,6 +436,7 @@ const TelemetryFeaturesSnapshotSchema = z.strictObject({
 
 export const TelemetrySnapshotSchema = z.strictObject({
   schema_version: z.literal(1),
+  consent: z.enum(["undecided", "enabled"]),
   instance_id: z.string(),
   version: z.string(),
   python: z.string(),

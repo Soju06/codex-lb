@@ -550,6 +550,7 @@ export function createTelemetrySnapshotEnvelope(): TelemetrySnapshotEnvelope {
 		timestamp: "2026-08-06T00:00:00Z",
 		metrics: {
 			schema_version: 1,
+			consent: "undecided",
 			instance_id: "00000000-0000-4000-8000-000000000000",
 			version: "1.23.0",
 			python: "3.13",

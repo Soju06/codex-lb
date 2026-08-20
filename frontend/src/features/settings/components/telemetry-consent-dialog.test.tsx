@@ -32,6 +32,12 @@ describe("TelemetryConsentDialog", () => {
     expect(within(dialog).getByText(/"timestamp": "2026-08-06T00:00:00Z"/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"metrics": \{/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"consent": "undecided"/)).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(
+        "Disabling from the dashboard sends one anonymous opt-out notice to keep aggregate counts accurate.",
+      ),
+    ).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Keep enabled" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Disable telemetry" })).toBeInTheDocument();
     expect(

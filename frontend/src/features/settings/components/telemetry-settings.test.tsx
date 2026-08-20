@@ -27,6 +27,11 @@ describe("TelemetrySettings", () => {
     const toggle = await screen.findByRole("switch", { name: "Enable anonymous telemetry" });
     await waitFor(() => expect(toggle).toBeChecked());
     expect(toggle).toBeEnabled();
+    expect(
+      screen.getByText(
+        "Disabling from the dashboard sends one anonymous opt-out notice to keep aggregate counts accurate.",
+      ),
+    ).toBeInTheDocument();
 
     await user.click(toggle);
 
@@ -86,6 +91,7 @@ describe("TelemetrySettings", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "Collected telemetry data" });
     expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/"consent": "undecided"/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"timestamp": "2026-08-06T00:00:00Z"/)).toBeInTheDocument();
     expect(
       telemetryRequests.filter((url) => url.searchParams.get("include_preview") === "true"),

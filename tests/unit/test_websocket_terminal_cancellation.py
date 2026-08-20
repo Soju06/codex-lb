@@ -984,6 +984,7 @@ async def test_pending_failure_cancellation_after_claim_remains_drain_owned(
 
     assert pending_requests == deque()
     shutdown_state.commit_shutdown(timeout_seconds=0.01)
+    shutdown_state.set_post_drain_cleanup_timeout_seconds(0.05)
     failure.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(failure, timeout=0.2)

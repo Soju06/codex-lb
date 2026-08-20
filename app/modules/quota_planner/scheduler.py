@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Protocol, TypeVar, cast
 
 from app.core.config.settings import get_settings
+from app.core.utils.time import to_utc_naive
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.load_balancer import _build_states
@@ -81,6 +82,8 @@ class QuotaPlannerScheduler:
             settings = await planner_repo.get_settings()
             if settings.mode == "off":
                 return
+            warmup_service = QuotaWarmupService(session)
+            await self._reconcile_expired_warmup_claims(planner_repo=planner_repo, warmup_service=warmup_service)
             accounts_repo = AccountsRepository(session)
             usage_repo = UsageRepository(session)
             accounts = await accounts_repo.list_accounts()
@@ -133,7 +136,6 @@ class QuotaPlannerScheduler:
                 now=now,
             )
             expected_gain = max(0.0, base_simulation.loss - scenario.loss)
-            warmup_service = QuotaWarmupService(session)
             for action in actions:
                 cycle_key = action.warmup_cycle_key or f"{now:%Y%m%d%H%M}"
                 key = f"{cycle_key}:{settings.mode}:{action.account_id}:{action.action}"
@@ -163,9 +165,29 @@ class QuotaPlannerScheduler:
                         separators=(",", ":"),
                     ),
                 )
-                due = action.scheduled_at is None or action.scheduled_at <= now
-                if settings.mode == "auto" and action.action == "warmup" and due and decision.status == "planned":
+                # Decision timestamps come back from the timezone-naive DB
+                # columns while planner output is timezone-aware. Compare
+                # normalized UTC-naive instants at this boundary.
+                due = action.scheduled_at is None or to_utc_naive(action.scheduled_at) <= to_utc_naive(now)
+                if (
+                    settings.mode == "auto"
+                    and action.action == "warmup"
+                    and due
+                    and decision.status in {"planned", "executing"}
+                ):
+                    # An expired executing row is reclaimed inside warm_now;
+                    # a still-live executing row is read back and left alone.
                     await warmup_service.warm_now(account_id=action.account_id, decision_id=decision.id)
+
+    async def _reconcile_expired_warmup_claims(
+        self,
+        *,
+        planner_repo: QuotaPlannerRepository,
+        warmup_service: QuotaWarmupService,
+    ) -> None:
+        expired_claims = await planner_repo.list_expired_warmup_claims()
+        for decision in expired_claims:
+            await warmup_service.warm_now(account_id=decision.account_id or "", decision_id=decision.id)
 
 
 def build_quota_planner_scheduler() -> QuotaPlannerScheduler:

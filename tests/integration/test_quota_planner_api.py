@@ -23,8 +23,9 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyNotFoundError, ApiKeyRateLimitExceededError
-from app.modules.quota_planner.logic import PlannerSettings
+from app.modules.quota_planner.logic import PlannerAction, PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
+from app.modules.quota_planner.scheduler import QuotaPlannerScheduler
 from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupUsage
 
 pytestmark = pytest.mark.integration
@@ -626,6 +627,107 @@ async def test_quota_planner_warm_now_claims_planned_decision_before_probe(monke
 
     assert seen_statuses == ["executing"]
     assert result.status == "executed"
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_scheduler_reclaims_expired_executing_warmup_claim(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    cycle_key = "reclaim-expired-executing-claim"
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-expired-claim",
+            email="warm-expired-claim@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmups_per_day=3,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        decision = await repo.log_decision(
+            mode="auto",
+            action="warmup",
+            idempotency_key=f"{cycle_key}:auto:{account.id}:warmup",
+            account_id=account.id,
+            scheduled_at=utcnow() - timedelta(minutes=5),
+            score=3.0,
+            reason="expired_claim_reclaim",
+            status="planned",
+        )
+        claimed = await repo.claim_warmup_decision(
+            decision.id,
+            since=utcnow().replace(hour=0, minute=0, second=0, microsecond=0),
+            max_warmups=3,
+            max_credits=1.0,
+            claim_ttl_seconds=60.0,
+        )
+        assert claimed is not None
+        stale_claim_time = utcnow() - timedelta(minutes=10)
+        claimed.executed_at = stale_claim_time
+        claimed.lease_expires_at = stale_claim_time
+        await session.commit()
+
+    forecast = SimpleNamespace(peak_slot_start=None, peak_demand_units=0.0)
+    simulation = SimpleNamespace(loss=0.0, unmet_demand=0.0)
+
+    monkeypatch.setattr("app.modules.quota_planner.scheduler._build_states", lambda **kwargs: ([], {}))
+    monkeypatch.setattr("app.modules.quota_planner.scheduler.build_demand_forecast", lambda **kwargs: forecast)
+    monkeypatch.setattr("app.modules.quota_planner.scheduler.simulate_pool", lambda **kwargs: simulation)
+    monkeypatch.setattr(
+        "app.modules.quota_planner.scheduler.plan_shadow_actions",
+        lambda **kwargs: [
+            PlannerAction(
+                account_id="acc-warm-expired-claim",
+                action="warmup",
+                scheduled_at=utcnow() - timedelta(minutes=1),
+                score=3.0,
+                reason="expired_claim_reclaim",
+                warmup_cycle_key=cycle_key,
+            )
+        ],
+    )
+
+    async def fake_send(self, *, account, model, request_id):
+        del self, account, model, request_id
+        return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+    async def noop_record_effect(self, account, model, *, source, confidence):
+        del self, account, model, source, confidence
+
+    monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+    await QuotaPlannerScheduler()._run_once_as_leader()
+
+    async with SessionLocal() as session:
+        refreshed = await session.get(QuotaPlannerDecision, decision.id)
+        assert refreshed is not None
+        assert refreshed.status == "executed"
+        assert refreshed.reason == "warmup_executed"
+        assert refreshed.lease_expires_at is None
+        assert refreshed.executed_at is not None
+        assert refreshed.executed_at > stale_claim_time
+        logs = await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))
+        assert len(logs.scalars().all()) == 1
 
 
 @pytest.mark.asyncio

@@ -1112,9 +1112,9 @@ async def responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        # Hard continuity, terminal compaction, and file pins must stay on
-        # subscription accounts; the shared predicate keeps this gate and the
-        # WebSocket /v1 source-ownership guards in agreement.
+        # ChatGPT-shaped previous_response continuity, terminal compaction, and
+        # file pins must stay on subscription accounts; the shared predicate
+        # keeps this gate and the WebSocket source-ownership guards in agreement.
         source_route_excluded = responses_source_route_excluded(responses_payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
@@ -1268,10 +1268,14 @@ async def v1_responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        # Same source-route exclusion gate as /backend-api/codex/responses and
-        # the WebSocket guards: hard continuity (previous_response_id), terminal
-        # compaction, and file pins must stay on subscription accounts.
-        source_route_excluded = responses_source_route_excluded(responses_payload)
+        # Share ChatGPT-shaped previous_response and file-pin exclusions with
+        # Codex/WebSocket, but do not treat terminal compaction_trigger as a
+        # source-route exclusion: /v1 has no Codex compact path and would
+        # otherwise dispatch external-only models to subscription accounts.
+        source_route_excluded = responses_source_route_excluded(
+            responses_payload,
+            exclude_compaction=False,
+        )
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)

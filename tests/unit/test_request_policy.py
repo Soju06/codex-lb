@@ -15,6 +15,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_api_key_enforcement_to_chat_payload,
     normalize_source_reasoning_aliases,
+    previous_response_forces_subscription_route,
     responses_source_route_excluded,
     validate_model_access,
 )
@@ -869,17 +870,32 @@ def test_source_route_excluded_is_false_for_plain_turns() -> None:
     assert responses_source_route_excluded(request) is False
 
 
-def test_source_route_excluded_for_previous_response_id() -> None:
+def test_source_route_excluded_for_chatgpt_previous_response_id() -> None:
     request = ResponsesRequest.model_validate(
         {
             "model": "gpt-5",
             "instructions": "",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
-            "previous_response_id": "resp_hard_continuity",
+            "previous_response_id": "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e",
         }
     )
 
+    assert previous_response_forces_subscription_route(request.previous_response_id) is True
     assert responses_source_route_excluded(request) is True
+
+
+def test_source_route_excluded_is_false_for_source_owned_previous_response_id() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "previous_response_id": "resp_source_owned_continuation",
+        }
+    )
+
+    assert previous_response_forces_subscription_route(request.previous_response_id) is False
+    assert responses_source_route_excluded(request) is False
 
 
 def test_source_route_excluded_is_false_for_blank_previous_response_id() -> None:
@@ -913,6 +929,7 @@ def test_source_route_excluded_for_terminal_compaction_trigger() -> None:
     )
 
     assert responses_source_route_excluded(request) is True
+    assert responses_source_route_excluded(request, exclude_compaction=False) is False
 
 
 def test_source_route_excluded_raises_for_malformed_compaction_trigger() -> None:

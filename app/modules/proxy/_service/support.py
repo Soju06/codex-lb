@@ -956,9 +956,9 @@ class _WebSocketRequestState:
     # ``_prepare_websocket_response_create_request`` (replays, archives),
     # which keeps those on the normalized-model check.
     raw_source_model: str | None = None
-    # True when the HTTP route would exclude this request from model-source
-    # routing (``responses_source_route_excluded``: hard continuity via
-    # ``previous_response_id``, a terminal compaction trigger, or
+    # True when the Codex HTTP route would exclude this request from
+    # model-source routing (``responses_source_route_excluded``: ChatGPT-shaped
+    # ``previous_response_id`` continuity, a terminal compaction trigger, or
     # ``input_file`` references pinned to the uploading subscription account).
     # The WebSocket source-ownership guards skip such requests so the
     # owner-routing logic can dispatch them to a subscription account, exactly

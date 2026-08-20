@@ -2016,7 +2016,7 @@ async def test_backend_codex_responses_previous_response_id_skips_model_source(a
             "model": model,
             "instructions": "continue",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}],
-            "previous_response_id": "resp_codex_hard_continuity",
+            "previous_response_id": "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e",
             "stream": True,
         },
     )
@@ -2025,7 +2025,7 @@ async def test_backend_codex_responses_previous_response_id_skips_model_source(a
     assert response.json() == {"ok": True}
     assert observed == {
         "model": model,
-        "previous_response_id": "resp_codex_hard_continuity",
+        "previous_response_id": "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e",
         "codex_session_affinity": True,
     }
 
@@ -2101,7 +2101,7 @@ async def test_v1_responses_previous_response_id_skips_model_source(async_client
         json={
             "model": model,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
-            "previous_response_id": "resp_v1_hard_continuity",
+            "previous_response_id": "resp_03ac4d75eac7c5d1016a0a619e8a688191b5267ba7ffac3111",
             "stream": True,
         },
     )
@@ -2109,7 +2109,171 @@ async def test_v1_responses_previous_response_id_skips_model_source(async_client
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert observed["model"] == model
-    assert observed["previous_response_id"] == "resp_v1_hard_continuity"
+    assert observed["previous_response_id"] == "resp_03ac4d75eac7c5d1016a0a619e8a688191b5267ba7ffac3111"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_source_owned_previous_response_id_keeps_model_source(async_client, monkeypatch):
+    model = "external-v1-responses-source-prev"
+    source_id = await _create_model_source(
+        async_client,
+        name="v1-responses-source-prev",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream_source(source, payload):
+        observed["source_id"] = source.id
+        observed["previous_response_id"] = payload.get("previous_response_id")
+        observed["model"] = payload.get("model")
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_v1_source_prev",'
+                b'"usage":{"input_tokens":1,"output_tokens":1}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    async def fail_subscription(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("source-owned previous_response_id must keep model-source routing")
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fail_subscription)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            "previous_response_id": "resp_source_owned_continuation",
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    assert observed["previous_response_id"] == "resp_source_owned_continuation"
+    assert observed["model"] == model
+    assert any("resp_v1_source_prev" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_source_owned_previous_response_id_keeps_model_source(
+    async_client, monkeypatch
+):
+    model = "external-codex-responses-source-prev"
+    source_id = await _create_model_source(
+        async_client,
+        name="codex-responses-source-prev",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream_source(source, payload):
+        observed["source_id"] = source.id
+        observed["previous_response_id"] = payload.get("previous_response_id")
+        observed["model"] = payload.get("model")
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_codex_source_prev",'
+                b'"usage":{"input_tokens":1,"output_tokens":1}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    async def fail_subscription(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("source-owned previous_response_id must keep model-source routing")
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fail_subscription)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "continue",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}],
+            "previous_response_id": "resp_source_owned_continuation",
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    assert observed["previous_response_id"] == "resp_source_owned_continuation"
+    assert observed["model"] == model
+    assert any("resp_codex_source_prev" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_compaction_trigger_keeps_model_source(async_client, monkeypatch):
+    model = "external-v1-responses-compact"
+    source_id = await _create_model_source(
+        async_client,
+        name="v1-responses-compact",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream_source(source, payload):
+        observed["source_id"] = source.id
+        observed["model"] = payload.get("model")
+        observed["input"] = payload.get("input")
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_v1_compact_source",'
+                b'"usage":{"input_tokens":1,"output_tokens":1}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    async def fail_subscription(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("v1 compaction_trigger must remain eligible for model sources")
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fail_subscription)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    assert observed["model"] == model
+    assert observed["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+        {"type": "compaction_trigger"},
+    ]
+    assert any("resp_v1_compact_source" in line for line in lines)
 
 
 @pytest.mark.asyncio

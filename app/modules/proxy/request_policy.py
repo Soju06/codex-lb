@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import NamedTuple
 
@@ -893,27 +894,50 @@ def _validate_terminal_compaction_trigger_input_items(input_value: list[JsonValu
     return trigger_seen
 
 
-def responses_source_route_excluded(payload: ResponsesRequest) -> bool:
+# ChatGPT / Codex-backend response ids are ``resp_`` plus a long hex body
+# (observed production anchors are 50 hex chars). External Responses-capable
+# sources often mint shorter or non-hex ids; those remain eligible for
+# source→source continuation routing.
+_CHATGPT_BACKEND_PREVIOUS_RESPONSE_ID_RE = re.compile(r"^resp_[0-9a-f]{48,}$", re.IGNORECASE)
+
+
+def previous_response_forces_subscription_route(previous_response_id: str | None) -> bool:
+    """True when ``previous_response_id`` is ChatGPT/subscription continuity.
+
+    Source-owned continuations keep model-source routing: only ChatGPT-shaped
+    anchors force the subscription path. Blank values are already normalized
+    to ``None`` by ``ResponsesRequest``.
+    """
+    if previous_response_id is None:
+        return False
+    return _CHATGPT_BACKEND_PREVIOUS_RESPONSE_ID_RE.fullmatch(previous_response_id) is not None
+
+
+def responses_source_route_excluded(
+    payload: ResponsesRequest,
+    *,
+    exclude_compaction: bool = True,
+) -> bool:
     """True when a Responses request must stay on subscription accounts.
 
-    Hard continuity via a nonblank ``previous_response_id`` is owner-bound on
-    the subscription account that produced the prior response.
-    ``ResponsesRequest`` already normalizes blank/whitespace values to
-    ``None``, so a non-``None`` field here is always nonblank. A terminal
-    compaction trigger is served by the upstream compact flow on the turn's
-    owner account, and an ``input_file``/``input_image`` file reference is
-    pinned to the subscription account that received the upload — none of
-    these can be dispatched to an OpenAI-compatible model source. The HTTP
-    ``/responses`` and ``/v1/responses`` routes and the WebSocket
-    source-ownership guards share this predicate so their notion of
-    source-route eligibility cannot drift.
+    ChatGPT-shaped ``previous_response_id`` anchors are owner-bound on the
+    subscription/bridge account that produced the prior response; source-minted
+    continuation ids are not excluded so Responses-capable model sources can
+    serve multi-turn follow-ups. A terminal compaction trigger is served by
+    the upstream compact flow on the turn's owner account (Codex path only —
+    callers set ``exclude_compaction=False`` on ``/v1/responses``, which has
+    no Codex compaction path). An ``input_file``/``input_image`` file
+    reference is pinned to the subscription account that received the upload.
+    The HTTP ``/backend-api/codex/responses`` route and the WebSocket
+    source-ownership guards share this predicate (with compaction excluded);
+    ``/v1/responses`` shares the previous-response and file gates only.
 
     Raises ``ClientPayloadError`` for a malformed compaction trigger, exactly
     like ``strip_terminal_compaction_trigger_input``.
     """
-    if payload.previous_response_id is not None:
+    if previous_response_forces_subscription_route(payload.previous_response_id):
         return True
-    if strip_terminal_compaction_trigger_input(payload) is not None:
+    if exclude_compaction and strip_terminal_compaction_trigger_input(payload) is not None:
         return True
     return bool(extract_input_file_ids(payload.input))
 

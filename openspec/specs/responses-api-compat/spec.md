@@ -3600,6 +3600,33 @@ those paths.
 - **THEN** the request is not forwarded to the external source
 - **AND** it follows the subscription-backed Codex compaction path instead
 
+#### Scenario: ChatGPT-shaped previous_response_id is not source-routed
+
+- **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
+- **AND** a client calls `/backend-api/codex/responses` or `/v1/responses` for that
+  model with a ChatGPT/Codex-backend-shaped `previous_response_id`
+- **THEN** the request is not forwarded to the external source
+- **AND** it follows the subscription path so hard continuity stays owner-bound
+
+#### Scenario: Source-owned previous_response_id keeps model-source routing
+
+- **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
+- **AND** a client calls `/backend-api/codex/responses` or `/v1/responses` for that
+  model with a non-ChatGPT-shaped `previous_response_id` minted by a prior
+  source-routed turn
+- **THEN** the request remains eligible for that Responses-compatible source
+- **AND** it is not forced onto subscription account selection solely because
+  `previous_response_id` is present
+
+#### Scenario: V1 compaction_trigger remains eligible for model sources
+
+- **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
+- **AND** a client calls `POST /v1/responses` for that model whose input ends with
+  a terminal `compaction_trigger` item
+- **THEN** the request remains eligible for that Responses-compatible source
+- **AND** it is not forced onto subscription account selection by the Codex-only
+  compaction source-route exclusion
+
 #### Scenario: File-referencing request is not source-routed
 
 - **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`

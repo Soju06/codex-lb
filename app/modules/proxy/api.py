@@ -4806,7 +4806,7 @@ async def _source_responses_response(
             )
             return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
         if _reservation_requires_usage(reservation):
-            return await _buffered_limited_source_chat_stream_response(
+            response = await _buffered_limited_source_chat_stream_response(
                 request,
                 source=source,
                 api_key=api_key,
@@ -4816,6 +4816,18 @@ async def _source_responses_response(
                 usage_holder=stream.usage_holder,
                 rate_limit_headers=rate_limit_headers,
             )
+            # Limited keys stay fail-closed: usage must be present before any
+            # body bytes reach the client. Public normalize still applies to the
+            # replayed body; keepalives cannot precede upstream completion while
+            # that buffer gate remains.
+            if isinstance(response, StreamingResponse):
+                return StreamingResponse(
+                    _wrap_source_responses_public_stream(response.body_iterator),
+                    media_type=response.media_type,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                )
+            return response
         body = _source_chat_stream_with_settlement(
             _wrap_source_responses_public_stream(stream.body),
             usage_holder=stream.usage_holder,
@@ -5493,20 +5505,23 @@ async def _buffered_limited_source_chat_stream_response(
 
 
 async def _iter_source_sse_event_blocks(stream: AsyncIterator[bytes]) -> AsyncIterator[str]:
-    """Reassemble chunked source bytes into SSE event blocks for public shaping."""
-    buffer = b""
+    """Reassemble chunked source bytes into SSE event blocks for public shaping.
+
+    SSE permits CR, LF, and CRLF line endings. Normalize to LF so event-block
+    detection only needs ``\\n\\n``, matching ``SourceStreamUsageParser``.
+    """
+    buffer = ""
     try:
         async for chunk in stream:
             if not chunk:
                 continue
-            buffer += chunk
-            while b"\n\n" in buffer:
-                raw_block, buffer = buffer.split(b"\n\n", 1)
-                text = raw_block.decode("utf-8")
-                if text:
-                    yield f"{text}\n\n"
+            buffer += chunk.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
+            while "\n\n" in buffer:
+                raw_block, buffer = buffer.split("\n\n", 1)
+                if raw_block:
+                    yield f"{raw_block}\n\n"
         if buffer.strip():
-            yield buffer.decode("utf-8")
+            yield buffer
     finally:
         await _aclose_stream(stream)
 

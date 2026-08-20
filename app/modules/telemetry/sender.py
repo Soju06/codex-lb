@@ -115,6 +115,19 @@ class TelemetrySender:
         )
 
         envelope = build_snapshot_envelope(snapshot)
+        try:
+            active, current_identity = await self._context_provider()
+            identity_matches = (
+                current_identity is not None
+                and current_identity.instance_id == identity.instance_id
+                and current_identity.public_key_hex == identity.public_key_hex
+            )
+        except Exception as exc:
+            logger.debug("Anonymous telemetry consent re-check failed", exc_info=exc)
+            return
+        if not active or not identity_matches:
+            return
+
         await self._post_signed(session, "/v1/snapshot", _json_bytes(envelope), identity, accepted={200, 202})
 
     async def _transmit_opt_out_once(

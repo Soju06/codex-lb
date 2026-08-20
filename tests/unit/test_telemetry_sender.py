@@ -139,11 +139,97 @@ async def test_sender_disabled_guard_does_not_construct_http_client(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_opt_out_registers_activates_and_posts_exact_signed_canonical_body(monkeypatch) -> None:
+async def test_sender_aborts_snapshot_when_consent_becomes_inactive_before_post(monkeypatch) -> None:
+    snapshot = _snapshot()
+    identity = TelemetryIdentity(snapshot.instance_id, Ed25519PrivateKey.generate())
+    context_provider = AsyncMock(side_effect=[(True, identity), (False, None)])
+    session = _FakeClientSession()
+    monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", Mock(return_value=session))
+
+    await TelemetrySender(
+        "https://telemetry.example",
+        context_provider=context_provider,
+    ).send_snapshot(snapshot)
+
+    assert [request[0] for request in session.requests] == [
+        "https://telemetry.example/v1/register",
+        "https://telemetry.example/v1/activate",
+    ]
+    assert context_provider.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sender_posts_snapshot_once_when_consent_stays_active(monkeypatch) -> None:
+    snapshot = _snapshot()
+    identity = TelemetryIdentity(snapshot.instance_id, Ed25519PrivateKey.generate())
+    context_provider = AsyncMock(return_value=(True, identity))
+    session = _FakeClientSession()
+    monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", Mock(return_value=session))
+
+    await TelemetrySender(
+        "https://telemetry.example",
+        context_provider=context_provider,
+    ).send_snapshot(snapshot)
+
+    assert [request[0] for request in session.requests] == [
+        "https://telemetry.example/v1/register",
+        "https://telemetry.example/v1/activate",
+        "https://telemetry.example/v1/snapshot",
+    ]
+    assert context_provider.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sender_aborts_snapshot_when_identity_changes_before_post(monkeypatch) -> None:
+    snapshot = _snapshot()
+    identity = TelemetryIdentity(snapshot.instance_id, Ed25519PrivateKey.generate())
+    replacement_identity = TelemetryIdentity(snapshot.instance_id, Ed25519PrivateKey.generate())
+    context_provider = AsyncMock(side_effect=[(True, identity), (True, replacement_identity)])
+    session = _FakeClientSession()
+    monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", Mock(return_value=session))
+
+    await TelemetrySender(
+        "https://telemetry.example",
+        context_provider=context_provider,
+    ).send_snapshot(snapshot)
+
+    assert [request[0] for request in session.requests] == [
+        "https://telemetry.example/v1/register",
+        "https://telemetry.example/v1/activate",
+    ]
+    assert context_provider.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sender_aborts_snapshot_when_consent_recheck_fails(monkeypatch, caplog) -> None:
+    snapshot = _snapshot()
+    identity = TelemetryIdentity(snapshot.instance_id, Ed25519PrivateKey.generate())
+    context_provider = AsyncMock(side_effect=[(True, identity), OSError("database unavailable")])
+    session = _FakeClientSession()
+    monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", Mock(return_value=session))
+
+    with caplog.at_level(logging.DEBUG, logger="app.modules.telemetry.sender"):
+        await TelemetrySender(
+            "https://telemetry.example",
+            context_provider=context_provider,
+        ).send_snapshot(snapshot)
+
+    assert [request[0] for request in session.requests] == [
+        "https://telemetry.example/v1/register",
+        "https://telemetry.example/v1/activate",
+    ]
+    assert context_provider.await_count == 2
+    assert [record.message for record in caplog.records] == ["Anonymous telemetry consent re-check failed"]
+
+
+@pytest.mark.asyncio
+async def test_opt_out_with_inactive_consent_registers_activates_and_posts_exact_signed_canonical_body(
+    monkeypatch,
+) -> None:
     identity = TelemetryIdentity("00000000-0000-4000-8000-000000000004", Ed25519PrivateKey.generate())
     session = _FakeClientSession()
     client_session = Mock(return_value=session)
-    context_provider = AsyncMock(side_effect=AssertionError("opt-out must not resolve inactive consent"))
+    context_provider = AsyncMock(return_value=(False, None))
     monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", client_session)
     monkeypatch.setattr("app.modules.telemetry.sender.utcnow", lambda: datetime(2026, 8, 20, 12, 0, 0))
 
@@ -220,7 +306,7 @@ async def test_opt_out_failure_is_swallowed_and_logged_at_debug(monkeypatch, cap
 async def test_sender_uses_canonical_shm_paths_and_valid_ed25519_signature() -> None:
     snapshot = _snapshot()
     identity = TelemetryIdentity(snapshot.instance_id, Ed25519PrivateKey.generate())
-    sender = TelemetrySender()
+    sender = TelemetrySender(context_provider=AsyncMock(return_value=(True, identity)))
     sender._post = AsyncMock()
     sender._post_signed = AsyncMock()
     session = Mock()
@@ -272,7 +358,7 @@ async def test_preview_and_sender_snapshot_envelopes_have_identical_key_structur
     snapshot = _snapshot()
     identity = TelemetryIdentity(snapshot.instance_id, Ed25519PrivateKey.generate())
     preview = build_snapshot_envelope(snapshot)
-    sender = TelemetrySender()
+    sender = TelemetrySender(context_provider=AsyncMock(return_value=(True, identity)))
     sender._post = AsyncMock()
     sender._post_signed = AsyncMock()
 

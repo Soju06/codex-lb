@@ -896,16 +896,21 @@ def _validate_terminal_compaction_trigger_input_items(input_value: list[JsonValu
 def responses_source_route_excluded(payload: ResponsesRequest) -> bool:
     """True when a Responses request must stay on subscription accounts.
 
-    A terminal compaction trigger is served by the upstream compact flow on the
-    turn's owner account, and an ``input_file``/``input_image`` file reference
-    is pinned to the subscription account that received the upload — neither
-    can be dispatched to an OpenAI-compatible model source. The HTTP
-    ``/responses`` route and the WebSocket source-ownership guards share this
-    predicate so their notion of source-route eligibility cannot drift.
+    Hard continuity via a nonblank ``previous_response_id`` is owner-bound on
+    the subscription account that produced the prior response. A terminal
+    compaction trigger is served by the upstream compact flow on the turn's
+    owner account, and an ``input_file``/``input_image`` file reference is
+    pinned to the subscription account that received the upload — none of
+    these can be dispatched to an OpenAI-compatible model source. The HTTP
+    ``/responses`` and ``/v1/responses`` routes and the WebSocket
+    source-ownership guards share this predicate so their notion of
+    source-route eligibility cannot drift.
 
     Raises ``ClientPayloadError`` for a malformed compaction trigger, exactly
     like ``strip_terminal_compaction_trigger_input``.
     """
+    if payload.previous_response_id is not None:
+        return True
     if strip_terminal_compaction_trigger_input(payload) is not None:
         return True
     return bool(extract_input_file_ids(payload.input))

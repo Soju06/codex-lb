@@ -1986,6 +1986,51 @@ async def test_backend_codex_responses_file_pinned_payload_skips_model_source(as
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_responses_previous_response_id_skips_model_source(async_client, monkeypatch):
+    model = "external-codex-responses-prev-id"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-prev-id",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("previous_response_id responses must use subscription routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key
+        observed["model"] = payload.model
+        observed["previous_response_id"] = payload.previous_response_id
+        observed["codex_session_affinity"] = kwargs.get("codex_session_affinity")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "continue",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}],
+            "previous_response_id": "resp_codex_hard_continuity",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed == {
+        "model": model,
+        "previous_response_id": "resp_codex_hard_continuity",
+        "codex_session_affinity": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_file_pinned_payload_skips_model_source(async_client, monkeypatch):
     model = "external-v1-responses-file-pin"
     await _create_model_source(
@@ -2025,6 +2070,46 @@ async def test_v1_responses_file_pinned_payload_skips_model_source(async_client,
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert observed["model"] == model
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_previous_response_id_skips_model_source(async_client, monkeypatch):
+    model = "external-v1-responses-prev-id"
+    await _create_model_source(
+        async_client,
+        name="v1-responses-prev-id",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("previous_response_id /v1/responses must use subscription routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key, kwargs
+        observed["model"] = payload.model
+        observed["previous_response_id"] = payload.previous_response_id
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            "previous_response_id": "resp_v1_hard_continuity",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed["model"] == model
+    assert observed["previous_response_id"] == "resp_v1_hard_continuity"
 
 
 @pytest.mark.asyncio

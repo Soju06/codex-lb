@@ -869,6 +869,19 @@ def test_source_route_excluded_is_false_for_plain_turns() -> None:
     assert responses_source_route_excluded(request) is False
 
 
+def test_source_route_excluded_for_previous_response_id() -> None:
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5",
+            "instructions": "",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+            "previous_response_id": "resp_hard_continuity",
+        }
+    )
+
+    assert responses_source_route_excluded(request) is True
+
+
 def test_source_route_excluded_for_input_file_references() -> None:
     request = _responses_request_with_input(
         [{"role": "user", "content": [{"type": "input_file", "file_id": "file_123"}]}]

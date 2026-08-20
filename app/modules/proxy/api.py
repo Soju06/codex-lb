@@ -132,7 +132,6 @@ from app.core.openai.parsing import parse_response_payload
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
-    extract_input_file_ids,
     normalize_tool_type,
     responses_request_has_explicit_prompt_cache_controls,
     strip_replayed_tool_call_namespaces_from_payload,
@@ -1113,10 +1112,9 @@ async def responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        # Terminal compaction triggers run the upstream compact flow on the
-        # turn's owner account, and file-referencing requests are pinned to
-        # the account that received the upload; the shared predicate keeps
-        # this gate and the WebSocket source-ownership guards in agreement.
+        # Hard continuity, terminal compaction, and file pins must stay on
+        # subscription accounts; the shared predicate keeps this gate and the
+        # WebSocket /v1 source-ownership guards in agreement.
         source_route_excluded = responses_source_route_excluded(responses_payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
@@ -1269,12 +1267,17 @@ async def v1_responses(
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
-    # File-referencing Responses requests pin to the subscription account that
-    # registered the upload; that account-scoped invariant applies to /v1
-    # streams too, so such requests must not be source-routed.
+    try:
+        # Same source-route exclusion gate as /backend-api/codex/responses and
+        # the WebSocket guards: hard continuity (previous_response_id), terminal
+        # compaction, and file pins must stay on subscription accounts.
+        source_route_excluded = responses_source_route_excluded(responses_payload)
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
     source_selection = (
         None
-        if extract_input_file_ids(responses_payload.input)
+        if source_route_excluded
         else await _select_responses_model_source(
             responses_payload.model,
             api_key,

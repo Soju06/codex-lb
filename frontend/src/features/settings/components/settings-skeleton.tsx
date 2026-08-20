@@ -135,6 +135,7 @@ export function SettingsSkeleton() {
             </div>
             <Skeleton className="h-5 w-9 rounded-full" />
           </div>
+          <Skeleton className="h-3 w-96 max-w-full" />
           <div className="flex items-center justify-between rounded-lg border p-3">
             <div className="space-y-1">
               <Skeleton className="h-3.5 w-24" />

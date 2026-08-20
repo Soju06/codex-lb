@@ -14,7 +14,7 @@ import anyio
 
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer import failover_decision
-from app.core.balancer.types import UpstreamError
+from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.proxy import (
     ProxyResponseError,
     _resolve_stream_transport,
@@ -495,6 +495,50 @@ class _StreamingRetryMixin:
                 deferred_account_error_backoffs.setdefault(account.id, account)
                 return
             await proxy._load_balancer.record_error_backoff(account)
+
+        async def _handle_or_defer_keyed_stream_health(
+            failed_account: Account,
+            failed_error: UpstreamError,
+            failed_code: str,
+            *,
+            http_status: int | None = None,
+            transient_retry_count: int = 1,
+        ) -> ClassifiedFailure:
+            """Classify and either write health now or defer until after settle.
+
+            Keyed streams keep a shared ``api_key_reservation`` open across
+            mid-loop failover ``continue``/``break`` paths. Immediate
+            ``_handle_stream_error`` / ``record_errors`` on those paths would
+            run while the reservation is still open; queue into
+            ``pending_post_refresh_transient_penalties`` instead so
+            ``_settle_stream_usage_before_pending_penalty`` flushes health
+            after settlement (same ordering as compact keyed mid-loop health).
+            """
+            if api_key is not None and api_key_reservation is not None:
+                pending_post_refresh_transient_penalties.append(
+                    (
+                        failed_account,
+                        failed_error,
+                        failed_code,
+                        http_status if http_status is not None else 502,
+                        transient_retry_count,
+                    )
+                )
+                return classify_upstream_failure(
+                    error_code=failed_code,
+                    error=failed_error,
+                    http_status=http_status,
+                    phase="first_event",
+                )
+            classified = await proxy._handle_stream_error(
+                failed_account,
+                failed_error,
+                failed_code,
+                http_status=http_status,
+            )
+            if transient_retry_count > 1:
+                await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
+            return classified
 
         async def _drain_pending_post_refresh_penalty_on_terminal(
             current_settlement: _StreamSettlement,
@@ -1774,7 +1818,7 @@ class _StreamingRetryMixin:
                                 outcome="owner_refresh_connect_failure",
                             )
                         ):
-                            await proxy._handle_stream_error(
+                            await _handle_or_defer_keyed_stream_health(
                                 account,
                                 {"message": message},
                                 "upstream_unavailable",
@@ -1794,7 +1838,7 @@ class _StreamingRetryMixin:
                             and _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
                             and attempt + 1 < max_attempts
                         ):
-                            await proxy._handle_stream_error(
+                            await _handle_or_defer_keyed_stream_health(
                                 account,
                                 {"message": message},
                                 "upstream_unavailable",
@@ -2200,11 +2244,11 @@ class _StreamingRetryMixin:
                                         attempt + 1,
                                     )
                                     break
-                                classified = await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    code,
+                                classified = classify_upstream_failure(
+                                    error_code=code,
+                                    error=_upstream_error_from_openai(error),
                                     http_status=tex.status_code,
+                                    phase="first_event",
                                 )
                                 if getattr(base_settings, "deterministic_failover_enabled", True):
                                     action = failover_decision(
@@ -2224,6 +2268,12 @@ class _StreamingRetryMixin:
                                     action,
                                 )
                                 if action == "failover_next":
+                                    await _handle_or_defer_keyed_stream_health(
+                                        account,
+                                        _upstream_error_from_openai(error),
+                                        code,
+                                        http_status=tex.status_code,
+                                    )
                                     last_transient_exc = tex
                                     transient_failed_account_id = account.id
                                     await _release_tracked_stream_lease(current_account_lease)
@@ -2234,6 +2284,12 @@ class _StreamingRetryMixin:
                                         outcome="owner_previsible_failure",
                                     )
                                     break
+                                await proxy._handle_stream_error(
+                                    account,
+                                    _upstream_error_from_openai(error),
+                                    code,
+                                    http_status=tex.status_code,
+                                )
                                 raise
                             error_code = tex.code if isinstance(tex, _TransientStreamError) else "server_error"
                             error_payload: UpstreamError = (
@@ -2284,10 +2340,13 @@ class _StreamingRetryMixin:
                                 transient_retries,
                                 error_code,
                             )
-                            await proxy._handle_stream_error(account, error_payload, error_code)
-                            # Record remaining errors so total equals transient_retries,
-                            # meeting the load balancer backoff threshold (error_count >= 3).
-                            await proxy._load_balancer.record_errors(account, transient_retries - 1)
+                            await _handle_or_defer_keyed_stream_health(
+                                account,
+                                error_payload,
+                                error_code,
+                                http_status=(tex.status_code if isinstance(tex, ProxyResponseError) else None),
+                                transient_retry_count=transient_retries,
+                            )
                             # Preserve last ProxyResponseError for propagate_http_errors path.
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex
@@ -2354,7 +2413,7 @@ class _StreamingRetryMixin:
                         require_security_work_authorized = True
                         last_security_work_retry_error = exc
                         continue
-                    await proxy._handle_stream_error(account, exc.error, exc.code)
+                    await _handle_or_defer_keyed_stream_health(account, exc.error, exc.code)
                     last_retryable_stream_error = exc
                     if exc.exclude_account:
                         await _release_tracked_stream_lease(current_account_lease)
@@ -2544,7 +2603,7 @@ class _StreamingRetryMixin:
                                 and _facade()._should_retry_transient_stream_error("upstream_unavailable", message)
                                 and attempt + 1 < max_attempts
                             ):
-                                await proxy._handle_stream_error(
+                                await _handle_or_defer_keyed_stream_health(
                                     account,
                                     {"message": message},
                                     "upstream_unavailable",
@@ -2815,7 +2874,7 @@ class _StreamingRetryMixin:
                                 action,
                             )
                             if action == "failover_next":
-                                await proxy._handle_stream_error(
+                                await _handle_or_defer_keyed_stream_health(
                                     account,
                                     current_error_payload,
                                     current_error_code,

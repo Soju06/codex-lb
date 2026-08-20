@@ -5455,8 +5455,9 @@ async def _iter_source_sse_event_blocks(
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     buffer = ""
     pending_cr = False
+    iterator = stream.__aiter__()
     try:
-        async for chunk in stream:
+        async for chunk in iterator:
             if not chunk:
                 continue
             if isinstance(chunk, memoryview):
@@ -5488,7 +5489,9 @@ async def _iter_source_sse_event_blocks(
         if buffer.strip():
             yield buffer
     finally:
-        await _aclose_stream(stream)
+        await _aclose_stream(iterator)
+        if iterator is not stream:
+            await _aclose_stream(stream)
 
 
 def _wrap_source_responses_public_stream(

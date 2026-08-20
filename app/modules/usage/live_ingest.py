@@ -6,16 +6,21 @@ import time
 import weakref
 from dataclasses import dataclass
 
+from sqlalchemy import select
+
 from app.core import usage as usage_core
 from app.core.config.settings import get_settings
 from app.core.usage.live_hub import register_live_usage_publisher
 from app.core.usage.live_snapshots import LiveRateLimitSnapshot, LiveUsageWindow
+from app.db.models import Account
 from app.db.session import get_background_session
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import UsageRepository, UsageWindowWrite
 
 logger = logging.getLogger(__name__)
+
+_RESOLUTION_TTL_SECONDS = 300.0
 
 # Write-coalescing tuning (fixed; issue #1340 / PRINCIPLES.md P2). The
 # ingestor keeps both as constructor fields so tests can exercise queue
@@ -108,6 +113,8 @@ class LiveUsageIngestor:
         self._queue: asyncio.Queue[_QueuedSnapshot] = asyncio.Queue(maxsize=max(1, queue_size))
         self._write_min_interval_seconds = write_min_interval_seconds
         self._last_write: dict[str, tuple[tuple[object, ...], float]] = {}
+        self._resolution_cache: dict[str, tuple[str | None, float]] = {}
+        self._resolution_aliases: dict[str, tuple[str, str | None]] = {}
         self._consumer: asyncio.Task[None] | None = None
         self._dropped = 0
         self._last_cache_invalidation = 0.0
@@ -121,7 +128,13 @@ class LiveUsageIngestor:
         chatgpt_account_id: str | None = None,
     ) -> None:
         item = _QueuedSnapshot(account_id=account_id, chatgpt_account_id=chatgpt_account_id, snapshot=snapshot)
-        if account_id is not None and self._should_skip(account_id, snapshot):
+        coalesce_account_id = account_id
+        if account_id is not None:
+            alias = self._resolution_aliases.get(account_id)
+            if alias is not None and chatgpt_account_id is None:
+                alias_account_id, _alias_chatgpt_account_id = alias
+                coalesce_account_id = alias_account_id
+        if coalesce_account_id is not None and self._should_skip(coalesce_account_id, snapshot):
             return
         try:
             self._queue.put_nowait(item)
@@ -185,6 +198,15 @@ class LiveUsageIngestor:
                 )
 
     async def _ingest(self, item: _QueuedSnapshot) -> None:
+        raw_account_id = item.account_id
+        account_id = await self._resolve_persisted_account_id(raw_account_id, item.chatgpt_account_id)
+        if account_id is None:
+            return
+        if raw_account_id and raw_account_id != account_id:
+            self._resolution_aliases[raw_account_id] = (account_id, item.chatgpt_account_id)
+        if self._should_skip(account_id, item.snapshot):
+            return
+
         snapshot = item.snapshot
         primary = snapshot.primary
         secondary = snapshot.secondary
@@ -280,6 +302,73 @@ class LiveUsageIngestor:
         # the poller invalidates otherwise; drop it so clients see the live
         # values before the TTL expires.
         await get_rate_limit_headers_cache().invalidate()
+
+    async def _resolve_persisted_account_id(
+        self,
+        account_id: str | None,
+        chatgpt_account_id: str | None,
+    ) -> str | None:
+        if account_id is not None:
+            exact = await self._resolve_account_id_by_id(account_id)
+            if exact is not None:
+                if chatgpt_account_id:
+                    resolved = await self._resolve_account_id(chatgpt_account_id)
+                    if resolved is not None and exact != resolved:
+                        return None
+                return exact
+            resolved = await self._resolve_account_id(account_id)
+            if resolved is not None:
+                if chatgpt_account_id and chatgpt_account_id != account_id:
+                    chatgpt_resolved = await self._resolve_account_id(chatgpt_account_id)
+                    if chatgpt_resolved is not None and chatgpt_resolved != resolved:
+                        return None
+                return resolved
+        return await self._resolve_account_id(chatgpt_account_id)
+
+    async def _resolve_account_id_by_id(self, account_id: str | None) -> str | None:
+        if not account_id:
+            return None
+        cache_key = f"id:{account_id}"
+        cached = self._resolution_cache.get(cache_key)
+        now = time.monotonic()
+        if cached is not None and now - cached[1] < _RESOLUTION_TTL_SECONDS:
+            cached_account_id = cached[0]
+            if cached_account_id is None:
+                return None
+            if await self._account_id_exists(cached_account_id):
+                return cached_account_id
+            self._resolution_cache.pop(cache_key, None)
+        async with get_background_session() as session:
+            resolved = await session.scalar(select(Account.id).where(Account.id == account_id))
+        if not isinstance(resolved, str):
+            resolved = None
+        self._resolution_cache[cache_key] = (resolved, now)
+        return resolved
+
+    async def _resolve_account_id_by_account_id(self, account_id: str) -> str | None:
+        return await self._resolve_account_id_by_id(account_id)
+
+    async def _resolve_account_id(self, chatgpt_account_id: str | None) -> str | None:
+        if not chatgpt_account_id:
+            return None
+        cache_key = f"chatgpt:{chatgpt_account_id}"
+        now = time.monotonic()
+        async with get_background_session() as session:
+            rows = (
+                (await session.execute(select(Account.id).where(Account.chatgpt_account_id == chatgpt_account_id)))
+                .scalars()
+                .all()
+            )
+        # Ambiguous identities (multiple workspace slots) are dropped rather
+        # than guessed; the poller stays authoritative for them.
+        resolved = rows[0] if len(rows) == 1 else None
+        self._resolution_cache[cache_key] = (resolved, now)
+        return resolved
+
+    async def _account_id_exists(self, account_id: str) -> bool:
+        async with get_background_session() as session:
+            resolved = await session.scalar(select(Account.id).where(Account.id == account_id))
+        return isinstance(resolved, str)
 
 
 _ingestor: LiveUsageIngestor | None = None

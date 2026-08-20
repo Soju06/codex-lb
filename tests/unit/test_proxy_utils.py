@@ -4513,10 +4513,10 @@ async def test_compact_turn_state_owner_lookup_is_api_key_scoped_and_fails_close
 
 
 @pytest.mark.asyncio
-async def test_compact_turn_state_owner_fails_closed_when_same_account_sessions_conflict() -> None:
+async def test_compact_turn_state_owner_rejects_same_account_session_identity_drift() -> None:
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     owner = SimpleNamespace(id="account-owner")
-    turn_state = "turn-owner-session-conflict"
+    turn_state = "turn-owner-session-drift"
     owner_key = proxy_service._http_bridge_turn_state_alias_key(turn_state, None)
     service._http_bridge_turn_state_index[owner_key] = "bridge-live"  # type: ignore[assignment]
     service._http_bridge_sessions["bridge-live"] = SimpleNamespace(  # type: ignore[index]
@@ -4584,6 +4584,10 @@ async def test_compact_turn_state_owner_is_a_strict_selection_constraint(monkeyp
 
     assert seen_selection["preferred_account_id"] == owner.id
     assert seen_selection["fallback_on_preferred_account_unavailable"] is False
+    affinity = cast(proxy_service._AffinityPolicy, seen_selection["affinity_policy"])
+    assert affinity.key == turn_state
+    assert affinity.kind == StickySessionKind.CODEX_SESSION
+    assert affinity.codex_session_source == "turn_state"
 
 
 @pytest.mark.asyncio
@@ -4623,7 +4627,7 @@ async def test_compact_previous_response_owner_ignores_legacy_session_header_aff
     assert select_account.await_args is not None
     assert select_account.await_args.kwargs["required_account_id"] == owner.id
     assert select_account.await_args.kwargs["sticky_key"] is None
-    assert select_account.await_args.kwargs["sticky_kind"] == proxy_service.StickySessionKind.CODEX_SESSION
+    assert select_account.await_args.kwargs["sticky_kind"] == StickySessionKind.CODEX_SESSION
     assert select_account.await_args.kwargs["sticky_source"] == "session_header"
     assert select_account.await_args.kwargs["legacy_sticky_key"] == "sid-root"
 
@@ -4663,6 +4667,10 @@ async def test_compact_registered_synthesized_turn_state_is_a_strict_selection_c
 
     assert seen_selection["preferred_account_id"] == owner.id
     assert seen_selection["fallback_on_preferred_account_unavailable"] is False
+    affinity = cast(proxy_service._AffinityPolicy, seen_selection["affinity_policy"])
+    assert affinity.key == turn_state
+    assert affinity.kind == StickySessionKind.CODEX_SESSION
+    assert affinity.codex_session_source == "turn_state"
 
 
 @pytest.mark.asyncio
@@ -4764,6 +4772,8 @@ async def test_compact_file_pin_overrides_session_and_prompt_cache_locality(
     assert seen_selection["preferred_account_id"] == account.id
     assert seen_selection["fallback_on_preferred_account_unavailable"] is False
     affinity = cast(proxy_service._AffinityPolicy, seen_selection["affinity_policy"])
+    assert affinity.key == "soft-process-session"
+    assert affinity.kind == StickySessionKind.CODEX_SESSION
     assert affinity.codex_session_source == "session_header"
     assert await service.drain_persistence_tasks(timeout_seconds=1)
 
@@ -13571,6 +13581,14 @@ async def test_plain_stream_resolves_http_bridge_turn_state_owner(monkeypatch: p
 
     async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
         selections.append(kwargs)
+        affinity = kwargs["affinity_policy"]
+        assert isinstance(affinity, proxy_service._AffinityPolicy)
+        # The stale session_id header must not reach selection: the hard
+        # turn-state owner supplies the key, exactly as on the compact path.
+        assert affinity.key == turn_state
+        assert affinity.kind == StickySessionKind.CODEX_SESSION
+        assert affinity.codex_session_source == "turn_state"
+        assert affinity.legacy_codex_session_key is None
         return AccountSelection(account=owner, error_message=None)
 
     async def fake_core_stream_responses(*_args: object, **_kwargs: object):
@@ -13590,7 +13608,7 @@ async def test_plain_stream_resolves_http_bridge_turn_state_owner(monkeypatch: p
         chunk
         async for chunk in service._stream_with_retry(
             payload,
-            {"x-codex-turn-state": turn_state},
+            {"session_id": "stale-session-owner", "x-codex-turn-state": turn_state},
             codex_session_affinity=True,
             propagate_http_errors=False,
             openai_cache_affinity=False,

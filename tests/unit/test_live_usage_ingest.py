@@ -193,6 +193,33 @@ async def test_ingestor_queue_overflow_drops_oldest() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ingestor_resolves_upstream_account_id_before_history_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingestor = live_ingest.LiveUsageIngestor(queue_size=8, write_min_interval_seconds=60.0)
+    by_id_calls: list[str | None] = []
+    by_chatgpt_calls: list[str | None] = []
+
+    async def fake_by_id(account_id: str | None) -> str | None:
+        by_id_calls.append(account_id)
+        return "acc-internal" if account_id == "acc-internal" else None
+
+    async def fake_by_chatgpt(chatgpt_account_id: str | None) -> str | None:
+        by_chatgpt_calls.append(chatgpt_account_id)
+        return "acc-internal" if chatgpt_account_id == "chatgpt-raw" else None
+
+    monkeypatch.setattr(ingestor, "_resolve_account_id_by_id", fake_by_id)
+    monkeypatch.setattr(ingestor, "_resolve_account_id", fake_by_chatgpt)
+
+    assert await ingestor._resolve_persisted_account_id("acc-internal", "unused") == "acc-internal"
+    assert await ingestor._resolve_persisted_account_id("chatgpt-raw", None) == "acc-internal"
+    assert await ingestor._resolve_persisted_account_id(None, "chatgpt-raw") == "acc-internal"
+    assert await ingestor._resolve_persisted_account_id("missing", "missing-too") is None
+    assert by_id_calls == ["acc-internal", "chatgpt-raw", "missing"]
+    assert by_chatgpt_calls == ["unused", "chatgpt-raw", "chatgpt-raw", "missing", "missing-too"]
+
+
+@pytest.mark.asyncio
 async def test_stream_responses_tap_publishes_rate_limit_events(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.core.clients.proxy as proxy_client_module
 

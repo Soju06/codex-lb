@@ -2160,6 +2160,7 @@ Index(
     postgresql_where=text("delete_requested_at IS NOT NULL"),
     sqlite_where=text("delete_requested_at IS NOT NULL"),
 )
+Index("idx_accounts_chatgpt_account_id", Account.chatgpt_account_id)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)

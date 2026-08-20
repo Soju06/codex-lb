@@ -66,7 +66,7 @@ spec:
           protocol: TCP
     {{- else }}
     - ports:
-        - port: 5432
+        - port: {{ .Values.externalDatabase.port | default 5432 }}
           protocol: TCP
     {{- end }}
     # HTTPS for OpenAI API

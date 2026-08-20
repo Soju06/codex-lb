@@ -60,6 +60,7 @@ _FAIL_CLOSED_HTTP_ROUTES: frozenset[_RouteKey] = frozenset(
         ("HTTP", "POST", "/v1/images/generations"),
         ("HTTP", "POST", "/v1/images/edits"),
         ("HTTP", "POST", "/v1/chat/completions"),
+        ("HTTP", "POST", "/v1/embeddings"),
         ("HTTP", "POST", "/v1/responses/compact"),
         ("HTTP", "POST", "/backend-api/transcribe"),
         ("HTTP", "POST", "/backend-api/files"),
@@ -173,6 +174,12 @@ _PROVIDER_ROUTING_CASES = [
         {"json": {"model": "gpt-5.6-sol", "messages": [{"role": "user", "content": "inert"}]}},
         id="chat-completions",
     ),
+    pytest.param(
+        "POST",
+        "/v1/embeddings",
+        {"json": {"model": "text-embedding-3-small", "input": "inert"}},
+        id="embeddings",
+    ),
 ]
 
 _PROVIDER_BINARY_ROUTE_CASES = [
@@ -222,6 +229,7 @@ async def test_daybreak_capability_fails_closed_on_unsupported_routing_http_surf
     monkeypatch.setattr(ProxyService, "codex_control_request", fail_before_routing)
     monkeypatch.setattr(proxy_api_module, "_opportunistic_admission_denial", fail_before_routing)
     monkeypatch.setattr(proxy_api_module, "_select_chat_model_source", fail_before_routing)
+    monkeypatch.setattr(proxy_api_module, "_select_embeddings_model_source", fail_before_routing)
     key = await _create_api_key(f"Daybreak route guard {path}")
 
     response = await _request(
@@ -267,6 +275,7 @@ async def test_daybreak_capability_unsupported_http_authenticates_before_denial(
         "/v1/responses",
         "/backend-api/codex/responses",
         "/v1/chat/completions",
+        "/v1/embeddings",
         "/v1/images/generations",
         "/v1/warmup",
         "/v1/warmup/default",

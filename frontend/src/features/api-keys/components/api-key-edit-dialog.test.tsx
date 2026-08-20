@@ -30,6 +30,22 @@ describe("ApiKeyEditDialog", () => {
     );
   }
 
+  it("labels the reasoning effort trigger with its field and state", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ allowedReasoningEfforts: ["low"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Allowed efforts: 1 effort selected" }),
+    ).toBeInTheDocument();
+  });
+
   it("omits limits from payload when only name changes", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -183,6 +199,33 @@ describe("ApiKeyEditDialog", () => {
     expect(onOpenChange).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog", { name: "Edit API key" })).toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toHaveValue("Renamed key");
+  });
+
+  it("preserves a malformed fail-closed reasoning policy on unrelated edits", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ allowedReasoningEfforts: [] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const nameInput = screen.getByLabelText("Name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed malformed-policy key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    expect(onSubmit.mock.calls[0][0].name).toBe("Renamed malformed-policy key");
+    expect("allowedReasoningEfforts" in onSubmit.mock.calls[0][0]).toBe(false);
   });
 
   it("submits selected assigned accounts", async () => {
@@ -483,6 +526,20 @@ describe("ApiKeyEditDialog", () => {
 
     const trafficClassSelect = screen.getByRole("combobox", { name: /traffic class/i });
     expect(trafficClassSelect).toHaveTextContent("Opportunistic");
+  });
+
+  it("shows the stored Ultrafast service tier", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ enforcedServiceTier: "ultrafast" })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: /enforced service tier/i })).toHaveTextContent("Ultrafast");
   });
 });
 

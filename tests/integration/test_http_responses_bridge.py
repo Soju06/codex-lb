@@ -9396,6 +9396,109 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_retries_unanchored_request_when_upstream_never_acknowledges_response_create(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+    )
+    proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_missing_created_retry",
+        "http-bridge-missing-created-retry@example.com",
+    )
+    account = await _get_account(account_id)
+    silent_upstream = _SilentUpstreamWebSocket()
+    recovered_upstream = _FakeBridgeUpstreamWebSocket()
+    upstreams = [silent_upstream, recovered_upstream]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    response = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "retry missing response.created",
+                "prompt_cache_key": "missing-created-retry-key",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert response.status_code == 200
+    assert connect_count == 2
+    assert silent_upstream.closed is True
+    assert len(silent_upstream.sent_text) == 1
+    assert len(recovered_upstream.sent_text) == 1
+    assert silent_upstream.sent_text == recovered_upstream.sent_text
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_retries_precreated_server_overload(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(

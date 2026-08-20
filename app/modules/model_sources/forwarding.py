@@ -84,6 +84,13 @@ class SourceAudioTranscription:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceEmbeddings:
+    payload: dict[str, JsonValue]
+    usage: SourceUsage | None
+    upstream_status_code: int
+
+
+@dataclass(frozen=True, slots=True)
 class SourceChatStream:
     body: AsyncIterator[bytes]
     usage_holder: "SourceUsageHolder"
@@ -292,6 +299,43 @@ async def forward_audio_transcription(
                     usage=_usage_from_audio_body(body, response_content_type),
                     audio_seconds=_audio_seconds_from_body(body, response_content_type),
                     timings=_timings_from_audio_body(body, response_content_type),
+                    upstream_status_code=response.status,
+                )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise _unreachable_error(exc) from exc
+
+
+async def forward_embeddings(
+    source: ModelSource,
+    payload: dict[str, JsonValue],
+    *,
+    encryptor: TokenEncryptor | None = None,
+) -> SourceEmbeddings:
+    try:
+        async with lease_http_session() as session:
+            timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
+            async with session.post(
+                _source_url(source, "/embeddings"),
+                headers=_source_headers(source, encryptor=encryptor),
+                json=payload,
+                timeout=timeout,
+            ) as response:
+                data = await _response_json(response)
+                if response.status >= 400:
+                    raise ModelSourceForwardingError(
+                        status_code=response.status,
+                        payload=_redact_source_error_payload(
+                            _error_payload(data),
+                            source,
+                            encryptor=encryptor,
+                        ),
+                        upstream_status_code=response.status,
+                    )
+                if data is None:
+                    raise _invalid_upstream_response_error(response.status)
+                return SourceEmbeddings(
+                    payload=data,
+                    usage=_usage_from_embeddings_payload(data),
                     upstream_status_code=response.status,
                 )
     except (aiohttp.ClientError, TimeoutError) as exc:
@@ -535,6 +579,14 @@ def _usage_from_responses_payload(payload: Mapping[str, JsonValue]) -> SourceUsa
     if not is_json_mapping(usage):
         return None
     return _usage_from_responses_mapping(usage)
+
+
+def _usage_from_embeddings_payload(payload: Mapping[str, JsonValue]) -> SourceUsage | None:
+    """Embeddings responses report prompt/total tokens and no completion tokens."""
+    usage = payload.get("usage")
+    if not is_json_mapping(usage):
+        return None
+    return _usage_from_mapping(usage) or _usage_from_total_tokens_mapping(usage)
 
 
 def _usage_from_audio_body(body: bytes, content_type: str | None) -> SourceUsage | None:

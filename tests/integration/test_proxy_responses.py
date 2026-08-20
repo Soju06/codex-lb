@@ -660,6 +660,8 @@ async def test_proxy_responses_compaction_trigger_elides_required_tool_image_and
     assert "Image Size: 1512x982." in compact_input_json
     assert "Omitted inline image bytes that were already observed before compaction" in compact_input_json
     assert "data:image/png;base64" not in compact_input_json
+    assert compact_input[-1] == {"type": "compaction_trigger"}
+    assert sum(1 for item in compact_input if item.get("type") == "compaction_trigger") == 1
     assert seen_payload["previous_response_id"] == "resp_compact_anchor"
     assert seen_payload["account_id"] == raw_account_id
     compact_payload = cast(Mapping[str, object], seen_payload["payload"])
@@ -806,6 +808,11 @@ async def test_proxy_responses_compaction_trigger_rejects_untrimmable_input_befo
     [
         [{"type": "compaction_trigger"}, {"role": "user", "content": "hello"}],
         [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}, {"type": "compaction_trigger"}],
+        [
+            {"role": "user", "content": "hello"},
+            {"type": "compaction_trigger"},
+            {"role": "developer", "content": "still trailing"},
+        ],
     ],
 )
 async def test_proxy_responses_rejects_malformed_compaction_trigger(async_client, monkeypatch, input_items):
@@ -2942,6 +2949,34 @@ async def test_v1_responses_compact_invalid_messages_returns_openai_400(async_cl
     assert body["error"]["type"] == "invalid_request_error"
     assert body["error"]["code"] == "invalid_request_error"
     assert body["error"]["param"] == "messages"
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_rejects_duplicate_top_level_compaction_trigger(async_client, monkeypatch):
+    async def fail_stream(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("malformed top-level compaction_trigger must fail before upstream streaming")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+
+    resp = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.2",
+            "input": [
+                {"role": "user", "content": "hello"},
+                {"type": "compaction_trigger"},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] == "invalid_request_error"
+    assert body["error"]["param"] == "input"
 
 
 @pytest.mark.asyncio

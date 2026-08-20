@@ -170,6 +170,7 @@ async def test_scheduler_repository_path_scopes_selected_account_history_and_fol
         selected.id,
         unrelated.id,
     }
+    assert warmup_calls[0]["previous_plan_types"] == {selected.id: "plus"}
     for snapshot_name in ("before_primary", "before_secondary", "after_primary", "after_secondary"):
         assert set(cast("dict[str, UsageHistory]", warmup_calls[0][snapshot_name])) <= {selected.id}
 
@@ -296,6 +297,91 @@ async def test_scheduler_recovers_rate_limited_free_before_monthly_reset_warmup(
         None,
     )
     assert (attempt.window, attempt.reset_at, attempt.status) == ("monthly", after_reset_at, "succeeded")
+
+
+@pytest.mark.asyncio
+async def test_scheduler_warms_confirmed_paid_to_free_plan_transition(
+    db_setup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del db_setup
+    account = _account("acc_paid_to_free", status=AccountStatus.ACTIVE)
+    prior_reset_at = int(time.time()) + 7 * 24 * 60 * 60
+    monthly_reset_at = int(time.time()) + 30 * 24 * 60 * 60
+
+    async with SessionLocal() as session:
+        await AccountsRepository(session).upsert(account)
+        await UsageRepository(session).add_entry(
+            account.id,
+            100.0,
+            window="secondary",
+            recorded_at=utcnow(),
+            reset_at=prior_reset_at,
+            window_minutes=10_080,
+        )
+        await SettingsRepository(session).update(
+            limit_warmup_enabled=True,
+            limit_warmup_windows="secondary",
+            limit_warmup_model="gpt-5.1-codex-mini",
+        )
+
+    class _Leader:
+        async def run_if_leader(self, fn: Callable[[], Awaitable[object]]) -> object:
+            return await fn()
+
+    class _Updater:
+        async def refresh_accounts(
+            self,
+            accounts: list[Account],
+            latest_usage: dict[str, UsageHistory],
+        ) -> bool:
+            assert [candidate.id for candidate in accounts] == [account.id]
+            assert accounts[0].plan_type == "plus"
+            accounts[0].plan_type = "free"
+            async with SessionLocal() as session:
+                persisted = await AccountsRepository(session).get_by_id(account.id)
+                assert persisted is not None
+                persisted.plan_type = "free"
+                await session.commit()
+                await UsageRepository(session).add_entry(
+                    account.id,
+                    0.0,
+                    window="monthly",
+                    recorded_at=utcnow(),
+                    reset_at=monthly_reset_at,
+                    window_minutes=43_200,
+                )
+            return True
+
+    class _Sender:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        async def send(
+            self,
+            target: Account,
+            *,
+            model: str,
+            prompt: str,
+        ) -> LimitWarmupSendResult:
+            self.calls.append((target.id, model))
+            return LimitWarmupSendResult(request_id="warmup-plan-transition", success=True, latency_ms=12)
+
+    sender = _Sender()
+    monkeypatch.setattr(refresh_scheduler_module, "_get_leader_election", lambda: _Leader())
+    monkeypatch.setattr(refresh_scheduler_module, "build_background_usage_updater", lambda: _Updater())
+    monkeypatch.setattr(refresh_scheduler_module, "StreamingLimitWarmupSender", lambda *_args, **_kwargs: sender)
+
+    scheduler = refresh_scheduler_module.UsageRefreshScheduler(interval_seconds=60, enabled=True)
+
+    assert await scheduler._refresh_once() == 60.0
+    assert sender.calls == [(account.id, "gpt-5.1-codex-mini")]
+    async with SessionLocal() as session:
+        persisted_account = await AccountsRepository(session).get_by_id(account.id)
+        attempt = (await LimitWarmupRepository(session).latest_by_account([account.id]))[account.id]
+    assert persisted_account is not None
+    assert persisted_account.plan_type == "free"
+    assert (attempt.window, attempt.reset_at, attempt.status) == ("monthly", monthly_reset_at, "succeeded")
 
 
 @pytest.mark.asyncio

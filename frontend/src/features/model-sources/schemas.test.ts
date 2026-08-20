@@ -9,10 +9,8 @@ import {
 
 const ISO = "2026-01-01T00:00:00+00:00";
 
-describe("ModelSourceSchema", () => {
-  it("parses model source payload", () => {
-    const parsed = ModelSourceSchema.parse({
-      id: "src_vllm",
+const BASE_SOURCE = {
+  id: "src_vllm",
       name: "vLLM",
       kind: "openai_compatible",
       baseUrl: "http://localhost:8000/v1",
@@ -21,6 +19,7 @@ describe("ModelSourceSchema", () => {
       supportsChatCompletions: true,
       supportsResponses: false,
       supportsAudioTranscriptions: true,
+      supportsEmbeddings: true,
       timeoutSeconds: null,
       maxConcurrency: null,
       createdAt: ISO,
@@ -44,12 +43,26 @@ describe("ModelSourceSchema", () => {
           createdAt: ISO,
           updatedAt: ISO,
         },
-      ],
-    });
+  ],
+};
+
+describe("ModelSourceSchema", () => {
+  it("parses model source payload", () => {
+    const parsed = ModelSourceSchema.parse(BASE_SOURCE);
 
     expect(parsed.id).toBe("src_vllm");
     expect(parsed.supportsAudioTranscriptions).toBe(true);
+    expect(parsed.supportsEmbeddings).toBe(true);
     expect(parsed.models[0].model).toBe("local-coder");
+  });
+
+  it("defaults supportsEmbeddings to false when the field is absent", () => {
+    const withoutEmbeddings: Record<string, unknown> = { ...BASE_SOURCE };
+    delete withoutEmbeddings.supportsEmbeddings;
+
+    const parsed = ModelSourceSchema.parse(withoutEmbeddings);
+
+    expect(parsed.supportsEmbeddings).toBe(false);
   });
 });
 
@@ -70,10 +83,12 @@ describe("ModelSourceCreateRequestSchema", () => {
       supportsChatCompletions: true,
       supportsResponses: true,
       supportsAudioTranscriptions: true,
+      supportsEmbeddings: true,
       models: [{ model: "deepseek-v4-flash" }],
     });
 
     expect(parsed.supportsAudioTranscriptions).toBe(true);
+    expect(parsed.supportsEmbeddings).toBe(true);
     expect(parsed.models[0].model).toBe("deepseek-v4-flash");
   });
 });

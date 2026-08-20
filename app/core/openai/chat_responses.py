@@ -353,17 +353,19 @@ def iter_chat_chunks(
                 response = payload.get("response")
                 if isinstance(response, dict):
                     maybe_error = response.get("error")
-                    if isinstance(maybe_error, dict):
+                    if isinstance(maybe_error, dict) and maybe_error:
                         error = maybe_error
             else:
                 maybe_error = payload.get("error")
-                if isinstance(maybe_error, dict):
+                if isinstance(maybe_error, dict) and maybe_error:
                     error = maybe_error
             if error is not None:
                 error_payload: dict[str, JsonValue] = {"error": error}
-                yield _dump_sse(error_payload)
-                yield "data: [DONE]\n\n"
-                return
+            else:
+                error_payload = _default_error_envelope().model_dump(mode="json", exclude_none=True)
+            yield _dump_sse(error_payload)
+            yield "data: [DONE]\n\n"
+            return
         if event_type in ("response.completed", "response.incomplete"):
             for tool_state in state.tool_calls:
                 stream_delta = tool_state.build_stream_delta()
@@ -448,6 +450,9 @@ async def stream_chat_chunks(
             if chunk.strip() == "data: [DONE]":
                 terminal_chunk_sent = True
                 break
+    if not terminal_chunk_sent:
+        yield _dump_sse(_upstream_stream_truncated_error_payload())
+        yield "data: [DONE]\n\n"
 
 
 async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> ChatCompletionResult:
@@ -460,6 +465,7 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
     tool_index = ToolCallIndex()
     tool_calls: list[ToolCallState] = []
     terminal_error: ChatCompletionResult | None = None
+    terminal_event_seen = False
 
     async for line in stream:
         payload = _parse_data(line)
@@ -496,6 +502,7 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
         if terminal_error is not None:
             continue
         if event_type in ("response.completed", "response.incomplete"):
+            terminal_event_seen = True
             response = payload.get("response")
             if isinstance(response, dict):
                 response_id_value = response.get("id")
@@ -507,6 +514,8 @@ async def collect_chat_completion(stream: AsyncIterator[str], model: str) -> Cha
 
     if terminal_error is not None:
         return terminal_error
+    if not terminal_event_seen:
+        return _upstream_stream_truncated_error()
 
     message_content: str | None = "".join(content_parts)
     message_refusal = "".join(refusal_parts) or None
@@ -580,6 +589,20 @@ def _dump_chunk(chunk: ChatCompletionChunk, *, include_usage: bool = False) -> s
 
 def _dump_sse(payload: dict[str, JsonValue]) -> str:
     return format_sse_data(payload)
+
+
+def _upstream_stream_truncated_error_payload() -> dict[str, JsonValue]:
+    return {
+        "error": {
+            "message": "Responses stream ended before a terminal event",
+            "type": "server_error",
+            "code": "upstream_stream_truncated",
+        }
+    }
+
+
+def _upstream_stream_truncated_error() -> OpenAIErrorEnvelope:
+    return OpenAIErrorEnvelope.model_validate(_upstream_stream_truncated_error_payload())
 
 
 def _finish_reason_from_incomplete(response: JsonValue | None) -> str:

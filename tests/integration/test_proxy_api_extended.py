@@ -227,6 +227,13 @@ async def test_openapi_operation_ids_are_unique_and_thread_goal_methods_stable(a
     assert thread_goal["get"]["operationId"] == "thread_goal_get_backend_api_codex_thread_goal_get_get"
     assert thread_goal["post"]["operationId"] == "thread_goal_get_backend_api_codex_thread_goal_get_post"
 
+    assert schema["paths"]["/v1/responses"]["post"]["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/V1ResponsesRequest"
+    }
+    assert schema["paths"]["/backend-api/codex/responses/compact"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"] == {"$ref": "#/components/schemas/ResponsesCompactRequest"}
+
 
 @pytest.mark.asyncio
 async def test_proxy_compact_not_implemented(async_client, monkeypatch):

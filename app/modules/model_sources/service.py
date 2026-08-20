@@ -57,6 +57,7 @@ class ModelSourcesService:
             supports_chat_completions=payload.supports_chat_completions,
             supports_responses=payload.supports_responses,
             supports_audio_transcriptions=payload.supports_audio_transcriptions,
+            supports_embeddings=payload.supports_embeddings,
             timeout_seconds=payload.timeout_seconds,
             max_concurrency=payload.max_concurrency,
             models=model_rows,
@@ -88,6 +89,8 @@ class ModelSourcesService:
             row.supports_responses = payload.supports_responses
         if "supports_audio_transcriptions" in fields and payload.supports_audio_transcriptions is not None:
             row.supports_audio_transcriptions = payload.supports_audio_transcriptions
+        if "supports_embeddings" in fields and payload.supports_embeddings is not None:
+            row.supports_embeddings = payload.supports_embeddings
         if "timeout_seconds" in fields:
             row.timeout_seconds = payload.timeout_seconds
         if "max_concurrency" in fields:
@@ -224,6 +227,7 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         supports_chat_completions=row.supports_chat_completions,
         supports_responses=row.supports_responses,
         supports_audio_transcriptions=row.supports_audio_transcriptions,
+        supports_embeddings=row.supports_embeddings,
         timeout_seconds=row.timeout_seconds,
         max_concurrency=row.max_concurrency,
         created_at=row.created_at,

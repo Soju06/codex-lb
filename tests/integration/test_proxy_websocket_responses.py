@@ -610,6 +610,50 @@ def _capability_test_api_key(key_id: str) -> ApiKeyData:
     )
 
 
+def test_responses_websocket_route_rejects_disallowed_reasoning_before_upstream(app_instance, monkeypatch):
+    async def create_key():
+        async with SessionLocal() as session:
+            service = ApiKeysService(ApiKeysRepository(session))
+            created = await service.create_key(
+                ApiKeyCreateData(
+                    name="websocket-reasoning-policy",
+                    allowed_models=None,
+                    allowed_reasoning_efforts=["low"],
+                )
+            )
+            return created.key, await service.get_key_by_id(created.id)
+
+    with TestClient(app_instance) as client:
+        assert client.portal is not None
+        key, api_key = client.portal.call(create_key)
+
+        async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+            del request
+            return api_key
+
+        monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+
+        with client.websocket_connect(
+            "/backend-api/codex/responses",
+            headers={"Authorization": f"Bearer {key}"},
+        ) as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "model-alpha",
+                        "input": "hi",
+                        "reasoning": {"effort": "max"},
+                    }
+                )
+            )
+            event = json.loads(websocket.receive_text())
+
+    assert event["type"] == "error"
+    assert event["status"] == 403
+    assert event["error"]["code"] == "reasoning_effort_not_allowed"
+
+
 def _websocket_response_batch(
     response_id: str,
     *,
@@ -4365,6 +4409,8 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
         ],
     )
     connect_calls: list[dict[str, object]] = []
+    dispatch_owner_snapshots: list[tuple[str | None, str | None]] = []
+    original_bind_dispatch_owner = websocket_mixin_module._bind_websocket_request_dispatch_owner
 
     class _FakeSettingsCache:
         async def get(self):
@@ -4405,7 +4451,18 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": model,
             }
         )
-        return SimpleNamespace(id=f"acct_ws_proxy_{len(connect_calls)}"), first_upstream
+        return SimpleNamespace(id="acct_ws_proxy_owner"), first_upstream
+
+    def capture_dispatch_owner(*args, **kwargs):
+        bound = original_bind_dispatch_owner(*args, **kwargs)
+        request_state = args[0] if args else kwargs["request_state"]
+        dispatch_owner_snapshots.append(
+            (
+                request_state.preferred_account_id,
+                request_state.replay_required_account_id,
+            )
+        )
+        return bound
 
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
@@ -4415,6 +4472,11 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(
+        websocket_mixin_module,
+        "_bind_websocket_request_dispatch_owner",
+        capture_dispatch_owner,
+    )
 
     first_request = {
         "type": "response.create",
@@ -4427,6 +4489,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
         "type": "response.create",
         "model": "gpt-5.5",
         "input": "second",
+        "account_bound_probe": "owner-bound",
         "promptCacheKey": "thread_b",
         "stream": True,
     }
@@ -4445,6 +4508,10 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
     assert connect_calls[0]["sticky_key"] == "thread_a"
     assert connect_calls[0]["sticky_kind"] == proxy_module.StickySessionKind.PROMPT_CACHE
     assert connect_calls[0]["model"] == "gpt-5.4"
+    assert dispatch_owner_snapshots == [
+        (None, None),
+        ("acct_ws_proxy_owner", "acct_ws_proxy_owner"),
+    ]
     _assert_upstream_payloads(
         first_upstream.sent_text,
         [
@@ -4461,6 +4528,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                 "model": "gpt-5.5",
                 "instructions": "",
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "second"}]}],
+                "account_bound_probe": "owner-bound",
                 "store": False,
                 "include": [],
                 "prompt_cache_key": "thread_b",
@@ -5964,9 +6032,7 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
                             "status": 400,
                             "error": {
                                 "type": "invalid_request_error",
-                                "code": "previous_response_not_found",
-                                "message": "Previous response with id 'resp_ws_prev_anchor' not found.",
-                                "param": "previous_response_id",
+                                "message": "Invalid `previous_response_id`.",
                             },
                         },
                         separators=(",", ":"),
@@ -6148,9 +6214,7 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
                             "status": 400,
                             "error": {
                                 "type": "invalid_request_error",
-                                "code": "invalid_request_error",
-                                "message": ("Previous response with id 'resp_ws_prev_anchor' not found."),
-                                "param": "previous_response_id",
+                                "message": "Invalid `previous_response_id`.",
                             },
                         },
                         separators=(",", ":"),
@@ -6401,9 +6465,26 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
     _assert_previous_response_not_found_error(event["error"])
 
 
+@pytest.mark.parametrize(
+    "upstream_error",
+    [
+        {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_ws_prev_anchor' not found.",
+            "param": "previous_response_id",
+        },
+        {
+            "type": "invalid_request_error",
+            "message": "Invalid `previous_response_id`.",
+        },
+    ],
+    ids=["canonical-not-found", "parameterless-invalid-id"],
+)
 def test_backend_responses_websocket_masks_short_previous_response_not_found_without_retry(
     app_instance,
     monkeypatch,
+    upstream_error,
 ):
     first_upstream = _SequencedUpstreamWebSocket(
         [],
@@ -6437,12 +6518,7 @@ def test_backend_responses_websocket_masks_short_previous_response_not_found_wit
                         {
                             "type": "error",
                             "status": 400,
-                            "error": {
-                                "type": "invalid_request_error",
-                                "code": "previous_response_not_found",
-                                "message": "Previous response with id 'resp_ws_prev_anchor' not found.",
-                                "param": "previous_response_id",
-                            },
+                            "error": upstream_error,
                         },
                         separators=(",", ":"),
                     ),
@@ -8831,7 +8907,6 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
     assert duplicate_event["status"] == 400
     assert len(list(tmp_path.glob("*.response-create.json.gz"))) == 1
     assert len(list(tmp_path.glob("*.meta.json"))) == 1
-
     meta_files[0].unlink()
     with TestClient(app_instance) as client:
         orphan_retry_event = send_oversized_request()
@@ -8842,6 +8917,88 @@ def test_backend_responses_websocket_rejects_oversized_response_create_before_up
         if (tmp_path / f"{dump_path.name[: -len('.response-create.json.gz')]}.meta.json").exists()
     ]
     assert complete_pairs
+
+
+def test_backend_responses_websocket_rejects_non_terminal_compaction_trigger_before_upstream(
+    app_instance,
+    monkeypatch,
+):
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
+        return None
+
+    async def fail_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        prefer_earlier_reset_window,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del (
+            self,
+            headers,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset,
+            prefer_earlier_reset_window,
+            routing_strategy,
+            model,
+            request_state,
+            api_key,
+            client_send_lock,
+            websocket,
+        )
+        raise AssertionError("malformed compaction trigger must fail before upstream websocket connect")
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fail_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.4",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            {"type": "compaction_trigger"},
+            {"role": "developer", "content": [{"type": "input_text", "text": "still trailing"}]},
+        ],
+        "stream": True,
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            error_event = json.loads(websocket.receive_text())
+
+    assert error_event["type"] == "error"
+    assert error_event["status"] == 400
+    assert error_event["error"]["code"] == "invalid_request_error"
+    assert error_event["error"]["type"] == "invalid_request_error"
+    assert error_event["error"]["param"] == "input"
+    assert (
+        "compaction_trigger must appear exactly once as the final top-level input item"
+        in error_event["error"]["message"]
+    )
 
 
 def test_backend_responses_websocket_slims_historical_inline_artifacts_and_succeeds(

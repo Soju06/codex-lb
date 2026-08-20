@@ -1066,6 +1066,9 @@ class _WebSocketRequestState:
     fresh_upstream_request_responses_lite_model: str | None = None
     request_stage: str = "first_turn"
     preferred_account_id: str | None = None
+    # Once an account-bound body has been dispatched, retries remain pinned to
+    # that owner even when stale-anchor recovery removes previous_response_id.
+    replay_required_account_id: str | None = None
     require_security_work_authorized: bool = False
     durable_capability_lineage_required: bool = False
     file_required_preferred_account: bool = False

@@ -27,6 +27,7 @@ import { AccountMultiSelect } from "@/features/api-keys/components/account-multi
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
+import { ReasoningEffortsMultiSelect } from "@/features/api-keys/components/reasoning-efforts-multi-select";
 import { UsageSectionsMultiSelect } from "@/features/api-keys/components/usage-sections-multi-select";
 import { ModelSourceMultiSelect } from "@/features/model-sources/components/model-source-multi-select";
 import type {
@@ -66,6 +67,7 @@ type ApiKeyCreateDraft = {
   selectedModels: string[];
   selectedAccountIds: string[];
   selectedSourceIds: string[];
+  selectedReasoningEfforts: ReasoningEffortType[];
   usageSections: string;
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
@@ -81,6 +83,7 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   selectedModels: [],
   selectedAccountIds: [],
   selectedSourceIds: [],
+  selectedReasoningEfforts: [],
   usageSections: "upstream_limits,account_pool_usage",
   limitRules: [],
   expiresAt: null,
@@ -125,6 +128,9 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
         draft.enforcedReasoningEffort === "none"
           ? null
           : draft.enforcedReasoningEffort as ReasoningEffortType,
+      ...(draft.selectedReasoningEfforts.length > 0
+        ? { allowedReasoningEfforts: draft.selectedReasoningEfforts }
+        : {}),
       enforcedServiceTier: draft.enforcedServiceTier === "none" ? null : draft.enforcedServiceTier as ServiceTierType,
       trafficClass: draft.trafficClass,
       transportPolicyOverride: draft.transportPolicyOverride,
@@ -209,7 +215,11 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
 
             <div className="space-y-1">
               <label htmlFor="create-api-key-enforced-reasoning" className="text-sm font-medium">{t("apiKeys.form.enforcedReasoning")}</label>
-              <Select value={draft.enforcedReasoningEffort} onValueChange={(enforcedReasoningEffort) => updateDraft({ enforcedReasoningEffort })}>
+              <Select
+                value={draft.enforcedReasoningEffort}
+                disabled={draft.selectedReasoningEfforts.length > 0}
+                onValueChange={(enforcedReasoningEffort) => updateDraft({ enforcedReasoningEffort, selectedReasoningEfforts: [] })}
+              >
                 <SelectTrigger id="create-api-key-enforced-reasoning">
                   <SelectValue placeholder={t("common.options.none")} />
                 </SelectTrigger>
@@ -227,6 +237,18 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             </div>
 
             <div className="space-y-1">
+              <p className="text-sm font-medium">{t("apiKeys.form.allowedReasoningEfforts")}</p>
+              <ReasoningEffortsMultiSelect
+                value={draft.selectedReasoningEfforts}
+                disabled={draft.enforcedReasoningEffort !== "none"}
+                onChange={(selectedReasoningEfforts) => updateDraft({
+                  selectedReasoningEfforts,
+                  enforcedReasoningEffort: selectedReasoningEfforts.length > 0 ? "none" : draft.enforcedReasoningEffort,
+                })}
+              />
+            </div>
+
+            <div className="space-y-1">
               <label htmlFor="create-api-key-enforced-service-tier" className="text-sm font-medium">{t("apiKeys.form.enforcedServiceTier")}</label>
               <Select value={draft.enforcedServiceTier} onValueChange={(enforcedServiceTier) => updateDraft({ enforcedServiceTier })}>
                 <SelectTrigger id="create-api-key-enforced-service-tier">
@@ -238,6 +260,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                   <SelectItem value="default">{t("common.serviceTier.default")}</SelectItem>
                   <SelectItem value="priority">{t("common.serviceTier.priority")}</SelectItem>
                   <SelectItem value="flex">{t("common.serviceTier.flex")}</SelectItem>
+                  <SelectItem value="ultrafast">{t("common.serviceTier.ultrafast")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>

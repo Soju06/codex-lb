@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import contextlib
 import json
 import logging
@@ -26,6 +25,7 @@ from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
+from tests.integration.compact_test_helpers import _make_auth_json
 
 pytestmark = pytest.mark.integration
 
@@ -173,28 +173,6 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
         assert row.status == "released"
 
 
-def _encode_jwt(payload: dict) -> str:
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-    return f"header.{body}.sig"
-
-
-def _make_auth_json(account_id: str, email: str, *, plan_type: str = "plus") -> dict:
-    payload = {
-        "email": email,
-        "chatgpt_account_id": account_id,
-        "https://api.openai.com/auth": {"chatgpt_plan_type": plan_type},
-    }
-    return {
-        "tokens": {
-            "idToken": _encode_jwt(payload),
-            "accessToken": "access-token",
-            "refreshToken": "refresh-token",
-            "accountId": account_id,
-        },
-    }
-
-
 class _JsonResponse:
     def __init__(self, payload: dict[str, object]) -> None:
         self.status = 200
@@ -217,8 +195,39 @@ class _JsonResponse:
         return _return_self().__await__()
 
 
+class _SseContent:
+    async def iter_chunked(self, size: int):
+        del size
+        yield (
+            b'data: {"type":"response.output_item.done","output_index":0,'
+            b'"item":{"id":"msg_compact_summary_1","type":"message","role":"assistant",'
+            b'"status":"completed","content":[{"type":"output_text","text":"enc_compact_summary_1"}]}}\n\n'
+            b'data: {"type":"response.completed","response":'
+            b'{"object":"response","id":"resp_compact_summary_1","status":"completed","output":[]}}\n\n'
+        )
+
+
+class _SseResponse:
+    status = 200
+    reason = "OK"
+    headers: dict[str, str] = {"content-type": "text/event-stream"}
+    content = _SseContent()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def __await__(self):
+        async def _return_self():
+            return self
+
+        return _return_self().__await__()
+
+
 class _JsonSession:
-    def __init__(self, response: _JsonResponse) -> None:
+    def __init__(self, response: object) -> None:
         self._response = response
         self.calls: list[dict[str, object]] = []
 
@@ -767,17 +776,7 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
 
-    session = _JsonSession(
-        _JsonResponse(
-            {
-                "object": "response.compaction",
-                "compaction_summary": {
-                    "encrypted_content": "enc_compact_summary_1",
-                    "summary_text": "condensed thread state",
-                },
-            }
-        )
-    )
+    session = _JsonSession(_SseResponse())
 
     @contextlib.asynccontextmanager
     async def lease_session(session_override=None):
@@ -792,14 +791,20 @@ async def test_proxy_compact_success_preserves_compaction_payload(async_client, 
     assert response.status_code == 200
     body = response.json()
     assert body["object"] == "response.compaction"
-    assert body["compaction_summary"] == {
-        "encrypted_content": "enc_compact_summary_1",
-        "summary_text": "condensed thread state",
-    }
-    assert _session_call_url(session).endswith("/codex/responses/compact")
+    assert body["id"] == "resp_compact_summary_1"
+    assert body["output"] == [
+        {
+            "type": "compaction",
+            "status": "completed",
+            "encrypted_content": "enc_compact_summary_1",
+        }
+    ]
+    assert _session_call_url(session).endswith("/codex/responses")
     call_json = _session_call_json(session)
-    assert "stream" not in call_json
-    assert "store" not in call_json
+    assert call_json["stream"] is True
+    assert call_json["store"] is False
+    call_headers = cast(dict[str, str], session.calls[0]["headers"])
+    assert call_headers["Accept"] == "text/event-stream"
 
 
 @pytest.mark.asyncio
@@ -1623,14 +1628,17 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
         "object": "response.compaction",
         "output": [
             {
-                "type": "message",
+                "type": "compaction",
                 "id": "msg_compact_round_trip",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "preserve me exactly"}],
+                "encrypted_content": "preserve me exactly",
             },
             {"type": "reasoning", "encrypted_content": "enc_round_trip_state"},
         ],
         "retained_items": [{"type": "item_reference", "id": "msg_original_round_trip"}],
+    }
+    expected_compact_window = {
+        **compact_window,
+        "output": [{"type": "compaction", "encrypted_content": "preserve me exactly"}],
     }
     seen_inputs: list[object] = []
 
@@ -1647,7 +1655,7 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
     compact_payload = {"model": "gpt-5.1", "instructions": "compact", "input": []}
     compact_response = await async_client.post("/backend-api/codex/responses/compact", json=compact_payload)
     assert compact_response.status_code == 200
-    assert compact_response.json() == compact_window
+    assert compact_response.json() == expected_compact_window
 
     stream_payload = {
         "model": "gpt-5.1",
@@ -1658,7 +1666,7 @@ async def test_proxy_compact_output_round_trips_into_followup_responses_without_
     response = await async_client.post("/backend-api/codex/responses", json=stream_payload)
 
     assert response.status_code == 200
-    assert seen_inputs == [compact_window["output"]]
+    assert seen_inputs == [expected_compact_window["output"]]
 
 
 _NEUTRAL_FULL_RESEND_INPUT: list[dict[str, object]] = [

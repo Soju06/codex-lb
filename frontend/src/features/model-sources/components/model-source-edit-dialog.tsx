@@ -203,6 +203,7 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
+      supportsEmbeddings: draft.supportsEmbeddings,
     };
 
     if (modelIdsChanged || hasAnyModelDraftChange(draftChangeFlags)) {

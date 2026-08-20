@@ -29,6 +29,7 @@ const BASE_ROW = {
   conversations: 0,
   inputTokens: 1_000,
   outputTokens: 100,
+  reasoningTokens: 0,
   cachedInputTokens: 0,
   costUsd: 0.5,
   activeAccounts: 1,

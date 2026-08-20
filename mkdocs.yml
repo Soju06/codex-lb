@@ -59,6 +59,7 @@ nav:
   - Client Setup: client-setup.md
   - Live Voice: live-voice.md
   - Conversations: conversations.md
+  - Usage Reporting: usage-reporting.md
   - Configuration: configuration.md
   - Anonymous Telemetry: telemetry.md
   - Authentication: authentication.md

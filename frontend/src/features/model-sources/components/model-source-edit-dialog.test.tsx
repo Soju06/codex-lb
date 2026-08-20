@@ -18,6 +18,7 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
     supportsChatCompletions: true,
     supportsResponses: false,
     supportsAudioTranscriptions: false,
+    supportsEmbeddings: false,
     timeoutSeconds: null,
     maxConcurrency: null,
     createdAt: "2026-07-03T00:00:00Z",
@@ -99,6 +100,31 @@ describe("ModelSourceEditDialog", () => {
       outputPer1M: 2.25,
     });
     expect(payload.supportsAudioTranscriptions).toBe(false);
+    expect(payload.supportsEmbeddings).toBe(false);
+  });
+
+  it("carries an enabled embeddings capability through submit", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={createModelSource({ supportsEmbeddings: true })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const [, payload] = onSubmit.mock.calls[0];
+    expect(payload.supportsEmbeddings).toBe(true);
   });
 
   it("preserves disabled model rows during edits", async () => {

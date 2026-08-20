@@ -56,6 +56,7 @@ export function ModelSourceCreateDialog({
       supportsChatCompletions: draft.supportsChatCompletions,
       supportsResponses: draft.supportsResponses,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
+      supportsEmbeddings: draft.supportsEmbeddings,
       models: modelInputsFromForm(values, draft),
     };
     await onSubmit(payload);

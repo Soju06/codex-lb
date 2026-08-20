@@ -220,7 +220,9 @@ def _gpt56_raw(
 ) -> dict[str, JsonValue]:
     """Raw catalog fields for the GPT-5.6 family, mirroring the upstream
     bundled catalog (codex-rs/models-manager/models.json at rust-v0.145.0)
-    field-for-field. The ~16.5 KB ``base_instructions`` string and the
+    field-for-field, with one tracked exception: ``max_context_window``, which
+    upstream later raised from 272,000 to 872,000 (see the field comment
+    below). The ~16.5 KB ``base_instructions`` string and the
     personality-templated ``model_messages`` object are deliberately not
     bundled; the live upstream registry supplies them on the first refresh.
     """
@@ -237,6 +239,16 @@ def _gpt56_raw(
         "use_responses_lite": True,
         "include_skills_usage_instructions": False,
         "auto_review_model_override": None,
+        # Upstream raised only the ceiling: ``max_context_window`` 272000 ->
+        # 872000 with ``context_window`` unchanged at 272000. ``_bootstrap_model``
+        # synthesizes ``max_context_window == context_window``, so the family
+        # ceiling has to override it here, the same decoupling ``gpt-5.4`` uses.
+        # Pinned evidence: openai/codex commit
+        # 2eee483e49f88b868f67364134a658b3298e6c14 -- "Raise the GPT-5.6 maximum
+        # context window" (openai/codex#39102). Not yet in a ``rust-v*`` release
+        # tag; ``rust-v0.148.0-alpha.21`` still ships 272000. Re-pin to the tag
+        # once one carries it.
+        "max_context_window": 872_000,
         "auto_compact_token_limit": None,
         "comp_hash": "3000",
         "reasoning_summary_format": "experimental",

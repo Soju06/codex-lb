@@ -58,7 +58,7 @@ from app.core.errors import (
 )
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.model_registry import get_model_registry
-from app.core.openai.models import CompactResponsePayload, OpenAIError
+from app.core.openai.models import CompactResponsePayload, OpenAIError, normalize_compaction_item_id
 from app.core.openai.parsing import (
     classify_event_type,
     parse_compact_response_payload,
@@ -442,11 +442,41 @@ SSEResponse: TypeAlias = aiohttp.ClientResponse | SSEResponseProtocol
 
 class _CodexSSEContent:
     def __init__(self, response: Any) -> None:
-        self._response = response
+        content = getattr(response, "content", None)
+        if isinstance(content, bytes | bytearray):
+            self._body: bytes | None = bytes(content)
+        elif isinstance(content, str):
+            # Duck-typed upstream responses may expose a decoded string body
+            # (mirrors _codex_response_body); str has no iter_chunked.
+            self._body = content.encode()
+        else:
+            self._body = None
+        self._content = content
 
     def iter_chunked(self, size: int) -> "SSEChunkIteratorProtocol":
-        del size
-        return cast(SSEChunkIteratorProtocol, self._response.content.iter_chunked(1024))
+        if self._body is not None:
+            return cast(SSEChunkIteratorProtocol, _BytesSSEChunkIterator(bytes(self._body), size))
+        if self._content is None:
+            raise TypeError("SSE response content is missing")
+        return cast(SSEChunkIteratorProtocol, self._content.iter_chunked(size))
+
+
+class _BytesSSEChunkIterator:
+    def __init__(self, body: bytes, size: int) -> None:
+        self._body = body
+        self._size = max(1, size)
+        self._offset = 0
+
+    def __aiter__(self) -> "_BytesSSEChunkIterator":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._offset >= len(self._body):
+            raise StopAsyncIteration
+        end = min(len(self._body), self._offset + self._size)
+        chunk = self._body[self._offset : end]
+        self._offset = end
+        return chunk
 
 
 class _CodexSSEResponse:
@@ -455,6 +485,7 @@ class _CodexSSEResponse:
     def __init__(self, response: Any) -> None:
         self._response = response
         self.status = _codex_response_status(response)
+        self.headers = _codex_response_headers(response)
         self.content = _CodexSSEContent(response)
 
     async def json(self, *, content_type: str | None = None) -> JsonValue:
@@ -1207,6 +1238,321 @@ async def _iter_sse_events(
         if len(buffer) > max_event_bytes:
             raise StreamEventTooLargeError(len(buffer), max_event_bytes)
         yield bytes(buffer).decode("utf-8", errors="replace")
+
+
+async def _compact_response_payload_from_sse(
+    resp: SSEResponse, idle_timeout_seconds: float, max_event_bytes: int
+) -> JsonValue:
+    last_payload: dict[str, JsonValue] | None = None
+    output_items: dict[int, dict[str, JsonValue]] = {}
+    unindexed_output_items: list[dict[str, JsonValue]] = []
+    async for event_block in _iter_sse_events(resp, idle_timeout_seconds, max_event_bytes):
+        payload = parse_sse_data_json(event_block)
+        if payload is None:
+            continue
+        last_payload = payload
+        event_type = payload.get("type")
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            output_index = payload.get("output_index")
+            item = payload.get("item")
+            if not isinstance(item, dict):
+                continue
+            if isinstance(output_index, int):
+                output_items[output_index] = dict(item)
+            elif event_type == "response.output_item.done":
+                # Some compatible upstream responses omit output_index on the
+                # terminal item even though response.completed has no output.
+                unindexed_output_items.append(dict(item))
+        if event_type == "response.completed":
+            response = payload.get("response")
+            if isinstance(response, dict):
+                existing_output = response.get("output")
+                if (output_items or unindexed_output_items) and not (
+                    isinstance(existing_output, list) and existing_output
+                ):
+                    merged_response = dict(response)
+                    merged_response["output"] = [
+                        *[item for _, item in sorted(output_items.items())],
+                        *unindexed_output_items,
+                    ]
+                    return merged_response
+                return response
+            raise ValueError("response.completed event missing response object")
+        if event_type in {"response.failed", "response.incomplete", "error"}:
+            raise _proxy_response_error_from_compact_sse_terminal(payload, event_type)
+    if last_payload is not None:
+        raise ValueError("upstream SSE ended before response.completed")
+    raise ValueError("empty upstream SSE response")
+
+
+async def _compact_response_payload_from_success_response(
+    resp: Any,
+    *,
+    idle_timeout_seconds: float,
+    max_event_bytes: int,
+) -> JsonValue:
+    headers = _codex_response_headers(resp)
+    content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
+    content = getattr(resp, "content", None)
+    if "text/event-stream" in content_type.lower() or (
+        not content_type and callable(getattr(content, "iter_chunked", None))
+    ):
+        return await _compact_response_payload_from_sse(cast(SSEResponse, resp), idle_timeout_seconds, max_event_bytes)
+    return await _codex_response_json(resp)
+
+
+def _normalize_compact_response_payload_shape(payload: JsonValue) -> JsonValue:
+    if not is_json_mapping(payload):
+        return payload
+    object_value = payload.get("object")
+    if isinstance(object_value, str) and object_value.startswith("response.compact"):
+        return payload
+    compaction_item = _compact_output_item_from_payload(payload)
+    if compaction_item is None:
+        return payload
+    normalized: dict[str, JsonValue] = {
+        "object": "response.compaction",
+        "output": [compaction_item],
+    }
+    for key in ("id", "status", "usage", "service_tier"):
+        value = payload.get(key)
+        if value is not None:
+            normalized[key] = value
+    return normalized
+
+
+def _responses_compact_payload_for_responses_endpoint(payload: ResponsesCompactRequest) -> dict[str, JsonValue]:
+    payload_dict = dict(payload.to_payload())
+    input_value = payload_dict.get("input")
+    input_items = list(input_value) if isinstance(input_value, list) else [input_value]
+    if not (input_items and is_json_mapping(input_items[-1]) and input_items[-1].get("type") == "compaction_trigger"):
+        input_items.append({"type": "compaction_trigger"})
+    payload_dict["input"] = input_items
+    return payload_dict
+
+
+def _compact_output_item_from_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    output = payload.get("output")
+    if isinstance(output, list):
+        for raw_item in output:
+            if not is_json_mapping(raw_item):
+                continue
+            item_type = raw_item.get("type")
+            if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary"}:
+                normalized = _normalize_compact_output_item(raw_item)
+                if normalized is not None:
+                    return normalized
+        # Remote compaction output places the compaction summary after any
+        # historical message items, so the message-shaped fallback must pick
+        # the last usable message instead of leaking earlier history.
+        for raw_item in reversed(output):
+            if not is_json_mapping(raw_item):
+                continue
+            item_type = raw_item.get("type")
+            if item_type == "message":
+                normalized = _compact_output_item_from_message(raw_item)
+                if normalized is not None:
+                    return normalized
+    summary = payload.get("compaction_summary")
+    if is_json_mapping(summary):
+        return _normalize_compact_output_item(summary)
+    return None
+
+
+def _compact_output_item_from_message(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    text = _compact_message_text(item)
+    if not text:
+        return None
+    normalized: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": text,
+    }
+    item_id = normalize_compaction_item_id(item.get("id"))
+    if item_id is not None:
+        normalized["id"] = item_id
+    status = item.get("status")
+    if isinstance(status, str) and status.strip():
+        normalized["status"] = status
+    return normalized
+
+
+def _compact_message_text(item: Mapping[str, JsonValue]) -> str | None:
+    direct_text = item.get("text")
+    if isinstance(direct_text, str) and direct_text:
+        return direct_text
+    content = item.get("content")
+    content_parts: list[Mapping[str, JsonValue]]
+    if is_json_mapping(content):
+        content_parts = [content]
+    elif isinstance(content, list):
+        content_parts = [part for part in content if is_json_mapping(part)]
+    else:
+        content_parts = []
+    text_parts: list[str] = []
+    for part in content_parts:
+        text = part.get("text")
+        if isinstance(text, str) and text:
+            text_parts.append(text)
+    if text_parts:
+        return "".join(text_parts)
+    return None
+
+
+def _normalize_compact_output_item(item: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    encrypted_content = item.get("encrypted_content")
+    if not isinstance(encrypted_content, str):
+        return None
+    normalized: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": encrypted_content,
+    }
+    item_id = normalize_compaction_item_id(item.get("id"))
+    if item_id is not None:
+        normalized["id"] = item_id
+    status = item.get("status")
+    if isinstance(status, str) and status.strip():
+        normalized["status"] = status
+    return normalized
+
+
+def _proxy_response_error_from_compact_sse_terminal(
+    payload: Mapping[str, JsonValue],
+    event_type: object,
+) -> ProxyResponseError:
+    error_payload = _compact_sse_terminal_error_payload(payload, event_type)
+    error_code, error_message = _error_details_from_envelope(error_payload)
+    status_code = _compact_sse_terminal_status_code(payload, error_payload=error_payload)
+    return ProxyResponseError(
+        status_code,
+        error_payload,
+        failure_phase="upstream",
+        failure_detail=error_message,
+        upstream_status_code=status_code,
+        upstream_error_code=error_code,
+    )
+
+
+def _proxy_response_error_from_compact_sse_stream_exception(
+    exc: StreamIdleTimeoutError | StreamEventTooLargeError,
+    *,
+    upstream_status_code: int | None,
+) -> ProxyResponseError:
+    if isinstance(exc, StreamIdleTimeoutError):
+        return ProxyResponseError(
+            502,
+            openai_error("stream_idle_timeout", "Upstream stream idle timeout"),
+            failure_phase="upstream",
+            failure_detail="stream_idle_timeout",
+            failure_exception_type=type(exc).__name__,
+            upstream_status_code=upstream_status_code,
+            upstream_error_code="stream_idle_timeout",
+        )
+    return ProxyResponseError(
+        502,
+        openai_error("stream_event_too_large", str(exc)),
+        failure_phase="upstream",
+        failure_detail=str(exc),
+        failure_exception_type=type(exc).__name__,
+        upstream_status_code=upstream_status_code,
+        upstream_error_code="stream_event_too_large",
+    )
+
+
+def _compact_sse_terminal_error_payload(
+    payload: Mapping[str, JsonValue],
+    event_type: object,
+) -> OpenAIErrorEnvelope:
+    error = parse_error_payload(dict(payload))
+    if error:
+        return {"error": _openai_error_detail(error)}
+    if event_type == "error":
+        error_code = payload.get("code")
+        error_message = payload.get("message")
+        if isinstance(error_code, str) and error_code and isinstance(error_message, str) and error_message:
+            detail: OpenAIErrorDetail = {
+                "code": error_code,
+                "message": error_message,
+                "type": "server_error",
+            }
+            param = payload.get("param")
+            if isinstance(param, str) and param:
+                detail["param"] = param
+            return {"error": detail}
+    response = payload.get("response")
+    if is_json_mapping(response):
+        response_error = parse_error_payload(dict(response))
+        if response_error:
+            return {"error": _openai_error_detail(response_error)}
+    message = _extract_upstream_message(cast(Mapping[str, Any], payload))
+    if not message and is_json_mapping(response):
+        message = _extract_upstream_message(cast(Mapping[str, Any], response))
+    code = "incomplete" if event_type == "response.incomplete" else "upstream_error"
+    return openai_error(code, message or f"Upstream SSE terminal event: {event_type}")
+
+
+def _compact_sse_terminal_status_code(
+    payload: Mapping[str, JsonValue],
+    *,
+    error_payload: OpenAIErrorEnvelope | None = None,
+) -> int:
+    response = payload.get("response")
+    candidates: list[JsonValue] = []
+    if is_json_mapping(response):
+        candidates.extend(
+            [
+                response.get("status_code"),
+                response.get("statusCode"),
+                response.get("status"),
+            ]
+        )
+    candidates.extend([payload.get("status_code"), payload.get("statusCode"), payload.get("status")])
+    for value in candidates:
+        if isinstance(value, int) and not isinstance(value, bool) and 400 <= value <= 599:
+            return value
+    candidates_for_error: tuple[Mapping[str, JsonValue], ...] = tuple(
+        candidate for candidate in (error_payload, response, payload) if is_json_mapping(candidate)
+    )
+    for candidate in candidates_for_error:
+        error = parse_error_payload(dict(candidate))
+        if error is None:
+            if candidate is payload and payload.get("type") == "error":
+                root_error = {key: payload[key] for key in ("code", "message", "param", "error_type") if key in payload}
+                error = OpenAIError.model_validate(
+                    {
+                        **root_error,
+                        "type": root_error.get("error_type"),
+                    }
+                )
+            else:
+                continue
+        inferred_status = _status_code_from_openai_error(error)
+        if inferred_status is not None:
+            return inferred_status
+    return 502
+
+
+def _status_code_from_openai_error(error: OpenAIError) -> int | None:
+    error_type = error.type
+    error_code = error.code
+    if error_type == "authentication_error" or error_code in {
+        "invalid_api_key",
+        "invalid_authentication",
+        "token_invalidated",
+    }:
+        return 401
+    if error_type == "permission_error" or error_code == "insufficient_permissions":
+        return 403
+    if error_code == "not_found":
+        return 404
+    if error_type == "rate_limit_error" or error_code in {
+        "rate_limit_exceeded",
+        "usage_limit_reached",
+        "insufficient_quota",
+    }:
+        return 429
+    if error_type == "invalid_request_error":
+        return 400
+    return None
 
 
 async def _error_response_body(resp: ErrorResponse) -> tuple[object | None, str | None]:
@@ -3688,7 +4034,7 @@ class _CompactCommandTransport:
     async def execute(self) -> CompactResponsePayload:
         settings = get_settings()
         upstream_base = settings.upstream_base_url.rstrip("/")
-        url = f"{upstream_base}/codex/responses/compact"
+        url = f"{upstream_base}/codex/responses"
         require_route_or_direct_egress_opt_in(
             route=self.route,
             allow_direct_egress=self.allow_direct_egress,
@@ -3701,12 +4047,14 @@ class _CompactCommandTransport:
             self.headers,
             self.access_token,
             upstream_account_id,
-            accept="application/json",
+            accept="text/event-stream",
         )
         pre_request_started_at = time.monotonic()
         compact_timeout_seconds = _effective_compact_total_timeout(settings.upstream_compact_timeout_seconds)
         effective_connect_timeout = _effective_compact_connect_timeout(settings.upstream_connect_timeout_seconds)
-        payload_dict = dict(self.payload.to_payload())
+        payload_dict = _responses_compact_payload_for_responses_endpoint(self.payload)
+        payload_dict["store"] = False
+        payload_dict["stream"] = True
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,
@@ -3826,7 +4174,18 @@ class _CompactCommandTransport:
                         upstream_status_code=status_code,
                     )
                 try:
-                    data = await _codex_response_json(resp)
+                    data = await _compact_response_payload_from_success_response(
+                        _CodexSSEResponse(resp),
+                        idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
+                        max_event_bytes=settings.max_sse_event_bytes,
+                    )
+                except (StreamIdleTimeoutError, StreamEventTooLargeError) as exc:
+                    raise _proxy_response_error_from_compact_sse_stream_exception(
+                        exc,
+                        upstream_status_code=status_code,
+                    ) from exc
+                except ProxyResponseError:
+                    raise
                 except Exception as exc:
                     error_code = "upstream_error"
                     error_message = "Invalid JSON from upstream"
@@ -3841,12 +4200,14 @@ class _CompactCommandTransport:
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=status_code,
                     ) from exc
+                raw_data = data
+                data = _normalize_compact_response_payload_shape(data)
                 parsed = parse_compact_response_payload(data)
                 archive_json(
                     direction="server_to_codex",
                     kind="compact",
                     transport="http",
-                    payload=data,
+                    payload=raw_data,
                     account_id=self.account_id,
                     method="POST",
                     url=url,
@@ -3904,7 +4265,11 @@ class _CompactCommandTransport:
                         upstream_status_code=resp.status,
                     )
                 try:
-                    data = await resp.json(content_type=None)
+                    data = await _compact_response_payload_from_success_response(
+                        resp,
+                        idle_timeout_seconds=compact_timeout_seconds or settings.stream_idle_timeout_seconds,
+                        max_event_bytes=settings.max_sse_event_bytes,
+                    )
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                     message = str(exc) or "Request to upstream timed out"
                     error_code = process_network_error_code(
@@ -3927,6 +4292,13 @@ class _CompactCommandTransport:
                         upstream_status_code=resp.status,
                         failed_session=_failed_shared_session_for_process_network_error(error_code, self.session),
                     ) from exc
+                except (StreamIdleTimeoutError, StreamEventTooLargeError) as exc:
+                    raise _proxy_response_error_from_compact_sse_stream_exception(
+                        exc,
+                        upstream_status_code=resp.status,
+                    ) from exc
+                except ProxyResponseError:
+                    raise
                 except Exception as exc:
                     error_code = "upstream_error"
                     error_message = "Invalid JSON from upstream"
@@ -3941,12 +4313,14 @@ class _CompactCommandTransport:
                         failure_exception_type=failure_exception_type,
                         upstream_status_code=resp.status,
                     ) from exc
+                raw_data = data
+                data = _normalize_compact_response_payload_shape(data)
                 parsed = parse_compact_response_payload(data)
                 archive_json(
                     direction="server_to_codex",
                     kind="compact",
                     transport="http",
-                    payload=data,
+                    payload=raw_data,
                     account_id=self.account_id,
                     method="POST",
                     url=url,

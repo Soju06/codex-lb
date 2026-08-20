@@ -30,7 +30,7 @@ const ApiKeyUsageSummarySchema = z.object({
   totalCostUsd: z.number().nonnegative().default(0),
 });
 
-const SERVICE_TIERS = ["auto", "default", "priority", "flex"] as const;
+const SERVICE_TIERS = ["auto", "default", "priority", "flex", "ultrafast"] as const;
 export type ServiceTierType = (typeof SERVICE_TIERS)[number];
 
 export const TRAFFIC_CLASSES = ["foreground", "opportunistic"] as const;
@@ -48,6 +48,7 @@ export const ApiKeySchema = z.object({
   allowedModels: z.array(z.string()).nullable(),
   applyToCodexModel: z.boolean().default(false),
   enforcedModel: z.string().nullable().default(null),
+  allowedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).nullable().default(null),
   trafficClass: z
     .enum(TRAFFIC_CLASSES)
     .default("foreground"),
@@ -88,6 +89,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
+  allowedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).min(1).nullable().optional(),
   enforcedReasoningEffort: z.enum(ENFORCED_REASONING_EFFORTS).nullable().optional(),
   enforcedServiceTier: z
     .enum(SERVICE_TIERS)
@@ -112,6 +114,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
+  allowedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).min(1).nullable().optional(),
   enforcedReasoningEffort: z.enum(ENFORCED_REASONING_EFFORTS).nullable().optional(),
   enforcedServiceTier: z
     .enum(SERVICE_TIERS)

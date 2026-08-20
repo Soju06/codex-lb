@@ -21,6 +21,7 @@ const CAPABILITY_TOGGLES = [
   ["supportsChatCompletions", "modelSources.capabilities.chatCompletions"] as const,
   ["supportsResponses", "modelSources.capabilities.responses"] as const,
   ["supportsAudioTranscriptions", "modelSources.capabilities.audioTranscriptions"] as const,
+  ["supportsEmbeddings", "modelSources.capabilities.embeddings"] as const,
   ["supportsStreaming", "modelSources.capabilities.streaming"] as const,
   ["supportsTools", "modelSources.capabilities.tools"] as const,
   ["supportsVision", "modelSources.capabilities.vision"] as const,

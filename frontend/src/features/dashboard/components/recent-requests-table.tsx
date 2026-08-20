@@ -511,6 +511,13 @@ export function RecentRequestsTable({
                           {t("common.units.cachedShort", { count: formatCompactNumber(request.cachedInputTokens) })}
                         </div>
                       )}
+                      {request.reasoningTokens != null ? (
+                        <div className="text-[11px] text-muted-foreground">
+                          {t("dashboard.requests.reasoningTokensShort", {
+                            count: formatCompactNumber(request.reasoningTokens),
+                          })}
+                        </div>
+                      ) : null}
                     </div>
                   </TableCell> : null}
                   {isColumnVisible("cost") ? <TableCell className="text-right align-top font-mono text-xs tabular-nums">
@@ -595,6 +602,13 @@ export function RecentRequestsTable({
                 <RequestDetailField label="TTFT" value={formatElapsed(selectedRequest?.latencyFirstTokenMs ?? null)} />
                 <RequestDetailField label={t("dashboard.requestDetails.queue")} value={formatElapsed(selectedRequest?.latencyQueueMs ?? null)} />
                 <RequestDetailField label="TPS" value={selectedRequest ? (formatGenerationSpeed(selectedRequest) ?? "—") : "—"} />
+                {selectedRequest?.reasoningTokens != null ? (
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.reasoningTokensIncluded")}
+                    value={String(selectedRequest.reasoningTokens)}
+                    mono
+                  />
+                ) : null}
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label={t("dashboard.requests.columns.transport")} value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />

@@ -9,6 +9,7 @@ translation -> public response shape pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -17,6 +18,7 @@ from typing import Any, cast
 
 import pytest
 from httpx import AsyncByteStream
+from sqlalchemy import select
 from starlette.datastructures import UploadFile
 from starlette.responses import JSONResponse
 
@@ -25,7 +27,9 @@ import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
 from app.core.exceptions import ProxyModelNotAllowed, ProxyRateLimitError
 from app.core.multipart import MultipartPolicy
-from app.db.models import DashboardSettings
+from app.db.models import ApiKeyUsageReservation, DashboardSettings
+from app.db.session import SessionLocal
+from app.modules.api_keys.repository import ApiKeysRepository
 
 pytestmark = pytest.mark.integration
 
@@ -1608,12 +1612,30 @@ async def test_images_edits_accepts_image_brackets_form_key(async_client, monkey
 
 
 @pytest.mark.asyncio
-async def test_images_generations_succeeds_when_reservation_finalize_fails(async_client, monkeypatch):
-    """A successful image generation must NOT 500 when the post-hoc
-    API-key reservation finalize raises (e.g. transient DB failure).
-    The accounting failure is swallowed and logged; the client still
-    receives the image envelope.
-    """
+async def test_images_generations_finalize_failure_tracks_release_recovery(
+    async_client,
+    monkeypatch,
+):
+    """A successful image keeps tracked ownership after finalization fails."""
+    await _enable_api_key_auth(async_client)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "images-finalize-release-recovery",
+            "limits": [
+                {
+                    "limitType": "total_tokens",
+                    "limitWindow": "weekly",
+                    "maxValue": 1_000_000,
+                },
+            ],
+        },
+    )
+    assert created.status_code == 200, created.text
+    key_payload = created.json()
+    api_key = key_payload["key"]
+    api_key_id = key_payload["id"]
+
     await _import_account(async_client, "acc_images_finalize_fail", "img-fin-fail@example.com")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **kwargs):
@@ -1650,14 +1672,23 @@ async def test_images_generations_succeeds_when_reservation_finalize_fails(async
     # Patch finalize to blow up so we can confirm the route still 200s.
     from app.modules.api_keys.service import ApiKeysService
 
+    release_completed = asyncio.Event()
+    original_release = ApiKeysService.release_usage_reservation
+
     async def fake_finalize(self, *args, **kwargs):
         del self, args, kwargs
         raise RuntimeError("simulated DB failure during finalize")
 
+    async def tracked_release(self, reservation_id):
+        await original_release(self, reservation_id)
+        release_completed.set()
+
     monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", fake_finalize)
+    monkeypatch.setattr(ApiKeysService, "release_usage_reservation", tracked_release)
 
     response = await async_client.post(
         "/v1/images/generations",
+        headers={"Authorization": f"Bearer {api_key}"},
         json={
             "model": "gpt-image-2",
             "prompt": "x",
@@ -1669,3 +1700,185 @@ async def test_images_generations_succeeds_when_reservation_finalize_fails(async
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["data"] == [{"b64_json": "B64_FINFAIL"}]
+    await asyncio.wait_for(release_completed.wait(), timeout=1.0)
+
+    async with SessionLocal() as session:
+        reservations = (
+            (
+                await session.execute(
+                    select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.api_key_id == api_key_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [reservation.status for reservation in reservations] == ["released"]
+
+        limits = await ApiKeysRepository(session).get_limits_by_key(api_key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "stream"),
+    [
+        ("generations", False),
+        ("generations", True),
+        ("edits", False),
+        ("edits", True),
+    ],
+)
+async def test_image_routes_handoff_captured_usage_exactly_once(
+    async_client,
+    monkeypatch,
+    route,
+    stream,
+):
+    await _enable_api_key_auth(async_client)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": f"images-{route}-{'stream' if stream else 'json'}-handoff",
+            "limits": [
+                {
+                    "limitType": "total_tokens",
+                    "limitWindow": "weekly",
+                    "maxValue": 1_000_000,
+                },
+            ],
+        },
+    )
+    assert created.status_code == 200, created.text
+    api_key = created.json()["key"]
+
+    await _import_account(
+        async_client,
+        f"acc_images_{route}_{stream}",
+        f"img-{route}-{stream}@example.com",
+    )
+
+    async def fake_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status, kwargs
+        yield _sse(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "image_generation_call",
+                    "id": f"ig_{route}_{stream}",
+                    "status": "completed",
+                    "result": "B64_HANDOFF",
+                },
+            }
+        )
+        yield _sse(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": f"resp_{route}_{stream}",
+                    "tool_usage": {
+                        "image_gen": {
+                            "input_tokens": 3,
+                            "output_tokens": 4,
+                        }
+                    },
+                },
+            }
+        )
+
+    async def fake_ensure_fresh(self, account, **kwargs):
+        del self, kwargs
+        return account
+
+    internal_reservations: list[object] = []
+    original_stream_responses = proxy_module.ProxyService.stream_responses
+
+    async def tracked_stream_responses(self, *args, **kwargs):
+        internal_reservations.append(kwargs.get("api_key_reservation"))
+        async for chunk in original_stream_responses(self, *args, **kwargs):
+            yield chunk
+
+    handoffs: list[dict[str, object]] = []
+    original_settle_image = proxy_module.ProxyService.settle_image_api_key_usage
+
+    async def tracked_settle_image(
+        self,
+        api_key_arg,
+        reservation_arg,
+        **kwargs,
+    ):
+        handoffs.append(
+            {
+                "api_key": api_key_arg,
+                "reservation": reservation_arg,
+                **kwargs,
+            }
+        )
+        return await original_settle_image(
+            self,
+            api_key_arg,
+            reservation_arg,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
+    monkeypatch.setattr(proxy_module.ProxyService, "stream_responses", tracked_stream_responses)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "settle_image_api_key_usage",
+        tracked_settle_image,
+    )
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if route == "generations":
+        response = await async_client.post(
+            "/v1/images/generations",
+            headers=headers,
+            json={
+                "model": "gpt-image-2",
+                "prompt": "handoff",
+                "stream": stream,
+                "size": "1024x1024",
+                "quality": "low",
+            },
+        )
+    else:
+        response = await async_client.post(
+            "/v1/images/edits",
+            headers=headers,
+            data={
+                "model": "gpt-image-2",
+                "prompt": "handoff",
+                "stream": str(stream).lower(),
+                "size": "1024x1024",
+                "quality": "low",
+            },
+            files={
+                "image": (
+                    "source.png",
+                    b"\x89PNG\r\n\x1a\n" + b"\x00" * 16,
+                    "image/png",
+                ),
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert internal_reservations == [None]
+    assert len(handoffs) == 1
+    handoff = handoffs[0]
+    assert handoff["api_key"] is not None
+    assert handoff["reservation"] is not None
+    assert handoff["model"] == "gpt-image-2"
+    assert handoff["input_tokens"] == 3
+    assert handoff["output_tokens"] == 4
+    assert handoff["cached_input_tokens"] is None

@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call_item
@@ -612,6 +612,8 @@ class ResponsesTextControls(BaseModel):
 
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
+    _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -731,7 +733,9 @@ class ResponsesRequest(BaseModel):
         return payload
 
     def to_payload(self) -> JsonObject:
-        return _strip_unsupported_fields(self.model_dump_for_forwarding())
+        payload = _strip_unsupported_fields(self.model_dump_for_forwarding())
+        _normalize_compaction_trigger_singleton(payload)
+        return payload
 
     def to_replay_safety_payload(self) -> JsonObject:
         return _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
@@ -739,6 +743,7 @@ class ResponsesRequest(BaseModel):
 
 class ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -983,6 +988,7 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     if is_json_mapping(normalized_payload):
         payload = dict(normalized_payload)
     _trim_compact_input_for_upstream(payload)
+    _normalize_compaction_trigger_singleton(payload)
     payload.pop("store", None)
     payload.pop("text", None)
     payload.pop("tools", None)
@@ -990,6 +996,21 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     payload.pop("client_metadata", None)
     payload["parallel_tool_calls"] = False
     return payload
+
+
+def _normalize_compaction_trigger_singleton(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value) or not input_value:
+        return
+
+    trigger_items = [item for item in input_value if is_json_mapping(item) and item.get("type") == "compaction_trigger"]
+    if not trigger_items:
+        return
+
+    payload["input"] = [
+        item for item in input_value if not (is_json_mapping(item) and item.get("type") == "compaction_trigger")
+    ]
+    cast(list[JsonValue], payload["input"]).append({"type": "compaction_trigger"})
 
 
 def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
@@ -1197,6 +1218,12 @@ def _compact_discard_consumed_continuity_output_pairs(
     latest_index = len(input_value) - 1
     latest_mapping = _json_mapping_or_none(input_value[latest_index])
     latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    if latest_type == "compaction_trigger":
+        if latest_index == 0:
+            return
+        latest_index -= 1
+        latest_mapping = _json_mapping_or_none(input_value[latest_index])
+        latest_type = latest_mapping.get("type") if latest_mapping is not None else None
     if (
         latest_mapping is None
         or not isinstance(latest_type, str)
@@ -1230,33 +1257,55 @@ def _compact_terminal_required_indices(
     latest_index = len(input_value) - 1
     latest_mapping = _json_mapping_or_none(input_value[latest_index])
     latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    terminal_trigger_indices: set[int] = set()
+    if latest_type == "compaction_trigger":
+        terminal_trigger_indices.add(latest_index)
+        if latest_index == 0:
+            return terminal_trigger_indices, True, False
+        latest_index -= 1
+        latest_mapping = _json_mapping_or_none(input_value[latest_index])
+        latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+
+    def with_terminal_trigger(indices: set[int]) -> set[int]:
+        return indices | terminal_trigger_indices
+
     if latest_type not in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
-        return {latest_index}, True, False
+        return with_terminal_trigger({latest_index}), True, False
     if latest_mapping is not None and _compact_item_is_state_anchor(latest_mapping):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     if latest_mapping is not None and _compact_item_has_elidable_inline_image(latest_mapping):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     matching_call_index = _compact_matching_tool_call_index(input_value, latest_index)
     if latest_mapping is not None and _compact_terminal_item_is_side_effect(
         input_value,
         latest_index,
         matching_call_index=matching_call_index,
     ):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     if latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES and has_continuity_anchor and matching_call_index is None:
-        return {latest_index}, True, False
+        return with_terminal_trigger({latest_index}), True, False
     if latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
+
+    if terminal_trigger_indices:
+        # The trigger is the only mandatory suffix sentinel. An ordinary
+        # matched tool pair immediately before it remains best-effort context
+        # and may be dropped when other anchors consume the wire budget.
+        return terminal_trigger_indices, True, False
 
     paired_tail = _compact_reconciled_tool_call_indices(
         input_value,
-        {latest_index},
+        with_terminal_trigger({latest_index}),
         token_counts=token_counts,
         token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
     )
     if latest_index in paired_tail:
         return paired_tail, False, False
-    return set(), False, False
+    return terminal_trigger_indices, bool(terminal_trigger_indices), False
 
 
 def _compact_item_has_elidable_inline_image(item: JsonValue) -> bool:
@@ -1769,6 +1818,7 @@ def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:
 
 def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     reasoning_effort = payload.pop("reasoningEffort", None)
+    snake_case_reasoning_effort = payload.pop("reasoning_effort", None)
     reasoning_summary = payload.pop("reasoningSummary", None)
     provider_thinking = payload.pop("thinking", None)
     provider_enable_thinking = payload.pop("enable_thinking", None)
@@ -1779,8 +1829,20 @@ def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     else:
         reasoning_map = {}
 
-    if isinstance(reasoning_effort, str) and "effort" not in reasoning_map:
-        reasoning_map["effort"] = reasoning_effort
+    existing_effort = reasoning_map.get("effort")
+    if isinstance(existing_effort, str) and not existing_effort.strip():
+        reasoning_map.pop("effort")
+
+    alias_effort = next(
+        (
+            candidate.strip()
+            for candidate in (reasoning_effort, snake_case_reasoning_effort)
+            if isinstance(candidate, str) and candidate.strip()
+        ),
+        None,
+    )
+    if alias_effort is not None and "effort" not in reasoning_map:
+        reasoning_map["effort"] = alias_effort
     if isinstance(reasoning_summary, str) and "summary" not in reasoning_map:
         reasoning_map["summary"] = reasoning_summary
 
@@ -1804,15 +1866,14 @@ def _normalize_thinking_alias(
     enable_thinking: JsonValue,
 ) -> MutableJsonObject | None:
     if isinstance(thinking, bool):
-        return {"effort": "medium"} if thinking else None
+        if thinking:
+            return {"effort": "medium"}
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+        if normalized in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
             return {"effort": normalized}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}
-        if normalized in {"disabled", "false", "off"}:
-            return None
     thinking_mapping = _json_mapping_or_none(thinking)
     if thinking_mapping is not None:
         normalized: MutableJsonObject = {}
@@ -1822,19 +1883,19 @@ def _normalize_thinking_alias(
             normalized["effort"] = effort.strip().lower()
         if isinstance(summary, str) and summary.strip():
             normalized["summary"] = summary.strip()
+        thinking_type = thinking_mapping.get("type")
+        if "effort" not in normalized and isinstance(thinking_type, str) and thinking_type.strip().lower() == "enabled":
+            normalized["effort"] = "medium"
+        enabled = thinking_mapping.get("enabled")
+        if "effort" not in normalized and enabled is True:
+            normalized["effort"] = "medium"
+        if "effort" not in normalized and enable_thinking is True:
+            normalized["effort"] = "medium"
         if normalized:
             return normalized
-        thinking_type = thinking_mapping.get("type")
-        if isinstance(thinking_type, str):
-            normalized_type = thinking_type.strip().lower()
-            if normalized_type == "enabled":
-                return {"effort": "medium"}
-            if normalized_type == "disabled":
-                return None
-        enabled = thinking_mapping.get("enabled")
-        if isinstance(enabled, bool):
-            return {"effort": "medium"} if enabled else None
 
+    # Disabled `thinking` spellings are inactive, not authoritative: a
+    # separate enabled alias must still participate in policy evaluation.
     if isinstance(enable_thinking, bool):
         return {"effort": "medium"} if enable_thinking else None
     return None

@@ -162,6 +162,7 @@ const ModelSourceCreatePayloadSchema = z.looseObject({
   supportsChatCompletions: z.boolean().optional(),
   supportsResponses: z.boolean().optional(),
   supportsAudioTranscriptions: z.boolean().optional(),
+  supportsEmbeddings: z.boolean().optional(),
   models: z
     .array(
       z.looseObject({
@@ -179,6 +180,7 @@ const ModelSourceCreatePayloadSchema = z.looseObject({
 
 const ModelSourceUpdatePayloadSchema = z.looseObject({
   isEnabled: z.boolean().optional(),
+  supportsEmbeddings: z.boolean().optional(),
 });
 
 const QuotaPlannerSettingsPayloadSchema = z.looseObject({
@@ -2121,6 +2123,7 @@ export const handlers = [
       supportsChatCompletions: payload?.supportsChatCompletions ?? true,
       supportsResponses: payload?.supportsResponses ?? false,
       supportsAudioTranscriptions: payload?.supportsAudioTranscriptions ?? false,
+      supportsEmbeddings: payload?.supportsEmbeddings ?? false,
       models: (payload?.models ?? [{ model: `model-${sequence}` }]).map(
         (model, index) => ({
           id: index + 1,
@@ -2160,6 +2163,9 @@ export const handlers = [
     const updated = createModelSource({
       ...existing,
       ...(payload?.isEnabled !== undefined ? { isEnabled: payload.isEnabled } : {}),
+      ...(payload?.supportsEmbeddings !== undefined
+        ? { supportsEmbeddings: payload.supportsEmbeddings }
+        : {}),
       updatedAt: new Date().toISOString(),
     });
     state.modelSources = state.modelSources.map((source) =>

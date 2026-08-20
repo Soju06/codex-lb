@@ -424,6 +424,13 @@ externalSecrets:
   enabled: true                    # Use External Secrets Operator
 ```
 
+The Grafana sidecar imports the dashboard JSON but does not provision
+datasources or database credentials. In the **codex-lb TTFT Breakdown**
+dashboard, select the Grafana PostgreSQL datasource that points to the
+codex-lb database from the visible **PostgreSQL** (`DS_SQL`) dropdown. All
+four SQL panels follow that one runtime selection. The owning contract is in
+[proxy runtime observability](../../../openspec/specs/proxy-runtime-observability/).
+
 Install with:
 
 ```bash

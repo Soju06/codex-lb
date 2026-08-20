@@ -1237,26 +1237,26 @@ async def test_select_account_filters_requested_service_tier_plans(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_select_account_filters_requested_service_tier_accounts(monkeypatch) -> None:
-    no_fast = _make_account("acc-tier-pro-default", "tier-pro-default@example.com")
-    no_fast.plan_type = "pro"
-    fast = _make_account("acc-tier-pro-fast", "tier-pro-fast@example.com")
-    fast.plan_type = "pro"
+    no_ultrafast = _make_account("acc-tier-pro-default", "tier-pro-default@example.com")
+    no_ultrafast.plan_type = "pro"
+    ultrafast = _make_account("acc-tier-pro-ultrafast", "tier-pro-ultrafast@example.com")
+    ultrafast.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     usage_repo = StubUsageRepository(
         primary={
-            no_fast.id: UsageHistory(
+            no_ultrafast.id: UsageHistory(
                 id=63,
-                account_id=no_fast.id,
+                account_id=no_ultrafast.id,
                 recorded_at=now,
                 window="primary",
                 used_percent=1.0,
                 reset_at=now_epoch + 300,
                 window_minutes=5,
             ),
-            fast.id: UsageHistory(
+            ultrafast.id: UsageHistory(
                 id=64,
-                account_id=fast.id,
+                account_id=ultrafast.id,
                 recorded_at=now,
                 window="primary",
                 used_percent=2.0,
@@ -1272,7 +1272,7 @@ async def test_select_account_filters_requested_service_tier_accounts(monkeypatc
         lambda: SimpleNamespace(
             plan_types_for_model=lambda _model: frozenset({"pro"}),
             account_ids_for_model_service_tier=lambda _model, tier: (
-                frozenset({fast.id}) if tier == "priority" else None
+                frozenset({ultrafast.id}) if tier == "ultrafast" else None
             ),
             plan_types_for_model_service_tier=lambda _model, _tier: frozenset({"pro"}),
         ),
@@ -1280,15 +1280,15 @@ async def test_select_account_filters_requested_service_tier_accounts(monkeypatc
 
     balancer = LoadBalancer(
         lambda: _repo_factory(
-            StubAccountsRepository([no_fast, fast]),
+            StubAccountsRepository([no_ultrafast, ultrafast]),
             usage_repo,
             StubStickySessionsRepository(),
         )
     )
-    selection = await balancer.select_account(model="gpt-5.5", service_tier="priority")
+    selection = await balancer.select_account(model="gpt-5.6-sol", service_tier="ultrafast")
 
     assert selection.account is not None
-    assert selection.account.id == fast.id
+    assert selection.account.id == ultrafast.id
 
 
 @pytest.mark.asyncio

@@ -30,6 +30,7 @@ _JSON_BODY_DENY_PATHS = frozenset(
         "/v1/responses",
         "/v1/responses/compact",
         "/v1/chat/completions",
+        "/v1/embeddings",
         "/v1/images/generations",
         "/v1/reset-credit",
         "/v1/warmup",

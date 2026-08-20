@@ -354,6 +354,7 @@ class ApiKeysRepository:
         apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
+        allowed_reasoning_efforts: str | None | _Unset = _UNSET,
         enforced_service_tier: str | None | _Unset = _UNSET,
         traffic_class: str | _Unset = _UNSET,
         transport_policy_override: str | None | _Unset = _UNSET,
@@ -384,6 +385,9 @@ class ApiKeysRepository:
         if enforced_reasoning_effort is not _UNSET:
             assert enforced_reasoning_effort is None or isinstance(enforced_reasoning_effort, str)
             row.enforced_reasoning_effort = enforced_reasoning_effort
+        if allowed_reasoning_efforts is not _UNSET:
+            assert allowed_reasoning_efforts is None or isinstance(allowed_reasoning_efforts, str)
+            row.allowed_reasoning_efforts = allowed_reasoning_efforts
         if enforced_service_tier is not _UNSET:
             assert enforced_service_tier is None or isinstance(enforced_service_tier, str)
             row.enforced_service_tier = enforced_service_tier

@@ -16,7 +16,7 @@ from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIError, ResponseUsage
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
-from app.core.plan_types import account_plan_matches_allowed
+from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.pricing import get_pricing_for_model
 from app.core.utils.time import naive_utc_to_epoch, utcnow
@@ -342,6 +342,7 @@ class LimitWarmupService:
         before_secondary: dict[str, UsageHistory],
         after_primary: dict[str, UsageHistory],
         after_secondary: dict[str, UsageHistory],
+        previous_plan_types: dict[str, str | None] | None = None,
         refresh_started_at: datetime | None = None,
         usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
     ) -> None:
@@ -386,6 +387,14 @@ class LimitWarmupService:
                         before_secondary=before_secondary,
                         after_primary=after_primary,
                         after_secondary=after_secondary,
+                        min_available_percent=settings.limit_warmup_min_available_percent,
+                    )
+                if candidate is None and window == "secondary":
+                    candidate = _build_paid_to_free_transition_candidate(
+                        account=account,
+                        previous_plan_type=(previous_plan_types or {}).get(account.id),
+                        after_secondary=after_secondary,
+                        refresh_started_at=refresh_started_at,
                         min_available_percent=settings.limit_warmup_min_available_percent,
                     )
                 if (
@@ -743,6 +752,34 @@ def usage_reset_confirmed(*, before: UsageHistory | None, after: UsageHistory | 
     if not crossed_previous_reset and not reanchored_between_samples:
         return False
     return True
+
+
+def _build_paid_to_free_transition_candidate(
+    *,
+    account: Account,
+    previous_plan_type: str | None,
+    after_secondary: dict[str, UsageHistory],
+    refresh_started_at: datetime | None,
+    min_available_percent: float,
+) -> _WarmupCandidate | None:
+    normalized_previous_plan = normalize_account_plan_type(previous_plan_type)
+    if normalized_previous_plan is None or normalized_previous_plan == "free":
+        return None
+    if normalize_account_plan_type(account.plan_type) != "free":
+        return None
+    if refresh_started_at is None:
+        return None
+    after = after_secondary.get(account.id)
+    if after is None or after.window != "monthly" or after.reset_at is None:
+        return None
+    if after.recorded_at < refresh_started_at:
+        return None
+    if after.used_percent >= 100.0:
+        return None
+    available_percent = 100.0 - after.used_percent
+    if min_available_percent < 100.0 and available_percent < min_available_percent:
+        return None
+    return _WarmupCandidate(reset_at=after.reset_at, window="monthly")
 
 
 def _build_staggered_idle_candidate(

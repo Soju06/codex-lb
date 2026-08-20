@@ -15,6 +15,7 @@ export type ReportsFiltersState = {
   startDate: string;
   endDate: string;
   accountId: string[];
+  apiKeyId: string[];
   model: string;
   useragent: string;
 };
@@ -23,6 +24,7 @@ export type ReportsFiltersProps = {
   filters: ReportsFiltersState;
   selectedPresetDays: number | null;
   accountOptions: MultiSelectOption[];
+  apiKeyOptions: MultiSelectOption[];
   modelOptions: MultiSelectOption[];
   useragentOptions: MultiSelectOption[];
   visibleChartIds: ReportChartId[];
@@ -41,6 +43,7 @@ export function ReportsFilters({
   filters,
   selectedPresetDays,
   accountOptions,
+  apiKeyOptions,
   modelOptions,
   useragentOptions,
   visibleChartIds,
@@ -85,6 +88,12 @@ export function ReportsFilters({
         values={filters.accountId}
         options={accountOptions}
         onChange={(accountId) => onFiltersChange({ ...filters, accountId })}
+      />
+      <MultiSelectFilter
+        label={t("dashboard.filters.apiKeys")}
+        values={filters.apiKeyId}
+        options={apiKeyOptions}
+        onChange={(apiKeyId) => onFiltersChange({ ...filters, apiKeyId })}
       />
       <MultiSelectFilter
         label={t("dashboard.filters.model")}

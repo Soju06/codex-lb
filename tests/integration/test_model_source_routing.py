@@ -41,6 +41,7 @@ async def _create_model_source(
     supports_responses: bool = False,
     supports_streaming: bool = True,
     supports_audio_transcriptions: bool = False,
+    supports_embeddings: bool = False,
 ) -> str:
     model_entry: dict[str, object] = {
         "model": model,
@@ -69,6 +70,7 @@ async def _create_model_source(
             "supportsChatCompletions": True,
             "supportsResponses": supports_responses,
             "supportsAudioTranscriptions": supports_audio_transcriptions,
+            "supportsEmbeddings": supports_embeddings,
             "models": [model_entry],
         },
     )
@@ -2507,6 +2509,566 @@ async def test_allowlisted_source_model_routes_through(async_client, source_upst
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reasoning_controls",
+    [
+        {"reasoning_effort": "max"},
+        {"thinking": "minimal"},
+        {"reasoning_effort": "max", "reasoning": {"summary": "auto"}},
+        {"thinking": False, "enable_thinking": True},
+        {"thinking": "disabled", "enable_thinking": True},
+        {"thinking": {"summary": "auto", "enabled": True}},
+        {"thinking": {"summary": "auto"}, "enable_thinking": True},
+    ],
+)
+async def test_source_chat_reasoning_allowlist_rejects_before_source_dispatch(
+    async_client,
+    source_upstream,
+    reasoning_controls,
+):
+    await _enable_api_key_auth(async_client)
+    source_hits = 0
+
+    async def completion(_request: web.Request) -> web.Response:
+        nonlocal source_hits
+        source_hits += 1
+        return web.json_response(_chat_completion_body("source-reasoning-policy"))
+
+    base_url = await source_upstream(completion)
+    model = "source-reasoning-policy"
+    source_id = await _create_model_source(async_client, name="source-reasoning-policy", model=model, base_url=base_url)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-reasoning-policy-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["low"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            **reasoning_controls,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+    assert source_hits == 0
+
+
+@pytest.mark.asyncio
+async def test_source_chat_reasoning_allowlist_preserves_client_plane_effort(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def completion(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("source-client-plane-reasoning"))
+
+    base_url = await source_upstream(completion)
+    model = "source-client-plane-reasoning"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-client-plane-reasoning",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-client-plane-reasoning-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["minimal"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "minimal",
+            "thinking": {
+                "effort": "minimal",
+                "type": "disabled",
+                "enabled": False,
+                "vendor_hint": "keep",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["reasoning_effort"] == "minimal"
+    assert captured["thinking"] == {"effort": "minimal", "vendor_hint": "keep"}
+    assert "reasoning" not in captured
+
+
+@pytest.mark.asyncio
+async def test_source_chat_reasoning_allowlist_preserves_enable_thinking(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def completion(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("source-enable-thinking"))
+
+    base_url = await source_upstream(completion)
+    model = "source-enable-thinking"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-enable-thinking",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-enable-thinking-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["medium"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "enable_thinking": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["enable_thinking"] is True
+    assert "reasoning" not in captured
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("thinking", "enable_thinking", "expected_thinking"),
+    [
+        (
+            {"type": "enabled", "budget_tokens": 2048},
+            False,
+            {"type": "enabled", "budget_tokens": 2048},
+        ),
+        (
+            {"enabled": True, "summary": "auto", "vendor_hint": "keep"},
+            False,
+            {"enabled": True, "summary": "auto", "vendor_hint": "keep"},
+        ),
+        (
+            {"effort": " ", "enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"},
+            False,
+            {"enabled": True, "budget_tokens": 2048, "vendor_hint": "keep"},
+        ),
+        ({"enabled": False}, True, None),
+        ({"type": "disabled"}, True, None),
+    ],
+)
+async def test_source_chat_reasoning_allowlist_preserves_implicit_thinking_object(
+    async_client,
+    source_upstream,
+    thinking,
+    enable_thinking,
+    expected_thinking,
+):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def completion(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("source-implicit-thinking"))
+
+    base_url = await source_upstream(completion)
+    model = "source-implicit-thinking"
+    source_id = await _create_model_source(
+        async_client,
+        name=model,
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-implicit-thinking-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["medium"],
+        },
+    )
+    assert created.status_code == 200
+
+    request_payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": thinking,
+    }
+    if enable_thinking:
+        request_payload["enable_thinking"] = True
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json=request_payload,
+    )
+
+    assert response.status_code == 200
+    if expected_thinking is None:
+        assert "thinking" not in captured
+    else:
+        assert captured["thinking"] == expected_thinking
+    if enable_thinking:
+        assert captured["enable_thinking"] is True
+    assert "reasoning" not in captured
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alias_source", ["requested", "enforced"])
+async def test_source_chat_reasoning_allowlist_materializes_canonicalized_model_alias_effort(
+    async_client,
+    source_upstream,
+    alias_source,
+):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def completion(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(_chat_completion_body("gpt-5.6-sol"))
+
+    base_url = await source_upstream(completion)
+    model = "gpt-5.6-sol"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-canonical-model-alias-effort",
+        model=model,
+        base_url=base_url,
+        raw_metadata_json='{"supports_reasoning": true}',
+    )
+    key_payload = {
+        "name": "source-canonical-model-alias-effort-key",
+        "assignedSourceIds": [source_id],
+        "allowedReasoningEfforts": ["xhigh"],
+    }
+    if alias_source == "enforced":
+        key_payload["enforcedModel"] = f"{model}-xhigh"
+    created = await async_client.post("/api/api-keys/", json=key_payload)
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": f"{model}-xhigh" if alias_source == "requested" else model,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["model"] == model
+    assert captured["reasoning_effort"] == "xhigh"
+    assert "reasoning" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("with_allowlist", "reasoning", "enable_thinking", "thinking_effort"),
+    [
+        (False, None, False, None),
+        (True, None, False, None),
+        (True, {"effort": "low"}, False, None),
+        (True, {"effort": "low"}, True, None),
+        (True, {"effort": "low"}, False, " "),
+    ],
+)
+async def test_source_responses_preserves_effortless_provider_thinking_object(
+    async_client,
+    source_upstream,
+    with_allowlist,
+    reasoning,
+    enable_thinking,
+    thinking_effort,
+):
+    if with_allowlist:
+        await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def responses(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(
+            {
+                "id": "resp_provider_thinking",
+                "object": "response",
+                "status": "completed",
+                "model": "source-provider-thinking",
+                "output": [],
+            }
+        )
+
+    base_url = await source_upstream(responses)
+    model = "source-provider-thinking"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-provider-thinking",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    thinking = {"type": "adaptive", "budget": 4096, "budget_tokens": 2048, "vendor_hint": "keep"}
+    if thinking_effort is not None:
+        thinking["effort"] = thinking_effort
+    headers: dict[str, str] = {}
+    if with_allowlist:
+        created = await async_client.post(
+            "/api/api-keys/",
+            json={
+                "name": "source-provider-thinking-key",
+                "assignedSourceIds": [source_id],
+                "allowedReasoningEfforts": ["low"],
+            },
+        )
+        assert created.status_code == 200
+        headers["Authorization"] = f"Bearer {created.json()['key']}"
+
+    request_payload = {
+        "model": model,
+        "instructions": "hi",
+        "input": [],
+        "thinking": thinking,
+    }
+    if reasoning is not None:
+        request_payload["reasoning"] = reasoning
+    if enable_thinking:
+        request_payload["enable_thinking"] = True
+
+    response = await async_client.post("/v1/responses", headers=headers, json=request_payload)
+
+    assert response.status_code == 200
+    expected_thinking = {key: value for key, value in thinking.items() if key != "effort"}
+    assert captured["thinking"] == expected_thinking
+    if reasoning is None:
+        assert "reasoning" not in captured
+    else:
+        assert captured["reasoning"] == reasoning
+    if enable_thinking:
+        assert "enable_thinking" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key_policy", "reasoning_control", "expected_control"),
+    [
+        ("none", {"thinking": "minimal"}, {"thinking": "minimal"}),
+        ("unrestricted", {"thinking": "minimal"}, {"thinking": "minimal"}),
+        ("allowlisted", {"thinking": "minimal"}, {"reasoning": {"effort": "minimal"}}),
+        ("enforced", {"thinking": "low"}, {"reasoning": {"effort": "minimal"}}),
+        ("none", {"reasoning": {"effort": "minimal"}}, {"reasoning": {"effort": "minimal"}}),
+        ("allowlisted", {"reasoning": {"effort": "minimal"}}, {"reasoning": {"effort": "minimal"}}),
+    ],
+)
+async def test_source_responses_preserves_client_plane_reasoning_effort(
+    async_client,
+    source_upstream,
+    key_policy,
+    reasoning_control,
+    expected_control,
+):
+    if key_policy != "none":
+        await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def responses(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(
+            {
+                "id": "resp_provider_reasoning_alias",
+                "object": "response",
+                "status": "completed",
+                "model": "source-provider-reasoning-alias",
+                "output": [],
+            }
+        )
+
+    base_url = await source_upstream(responses)
+    model = "source-provider-reasoning-alias"
+    source_id = await _create_model_source(
+        async_client,
+        name=model,
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    headers: dict[str, str] = {}
+    if key_policy != "none":
+        key_payload = {
+            "name": "source-provider-reasoning-alias-key",
+            "assignedSourceIds": [source_id],
+        }
+        if key_policy == "allowlisted":
+            key_payload["allowedReasoningEfforts"] = ["minimal"]
+        elif key_policy == "enforced":
+            key_payload["enforcedReasoningEffort"] = "minimal"
+        created = await async_client.post(
+            "/api/api-keys/",
+            json=key_payload,
+        )
+        assert created.status_code == 200
+        headers["Authorization"] = f"Bearer {created.json()['key']}"
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers=headers,
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            **reasoning_control,
+        },
+    )
+
+    assert response.status_code == 200
+    for field in ("thinking", "reasoning"):
+        if field in expected_control:
+            assert captured[field] == expected_control[field]
+        else:
+            assert field not in captured
+
+
+@pytest.mark.asyncio
+async def test_source_responses_reasoning_allowlist_strips_conflicting_aliases(async_client, source_upstream):
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def responses(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return web.json_response(
+            {
+                "id": "resp_reasoning_policy",
+                "object": "response",
+                "status": "completed",
+                "model": "source-responses-reasoning-policy",
+                "output": [],
+            }
+        )
+
+    base_url = await source_upstream(responses)
+    model = "source-responses-reasoning-policy"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-responses-reasoning-policy",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-responses-reasoning-policy-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["low"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            "reasoning": {"effort": "low"},
+            "thinking": "max",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["reasoning"] == {"effort": "low"}
+    assert "thinking" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reasoning_controls",
+    [
+        {"reasoningEffort": " ", "thinking": "max"},
+        {"thinking": False, "enable_thinking": True},
+        {"thinking": "disabled", "enable_thinking": True},
+        {"thinking": {"summary": "auto", "enabled": True}},
+        {"thinking": {"summary": "auto"}, "enable_thinking": True},
+    ],
+)
+async def test_source_responses_reasoning_allowlist_rejects_effort_hidden_by_inactive_alias(
+    async_client,
+    source_upstream,
+    reasoning_controls,
+):
+    await _enable_api_key_auth(async_client)
+    source_hits = 0
+
+    async def responses(_request: web.Request) -> web.Response:
+        nonlocal source_hits
+        source_hits += 1
+        return web.json_response(
+            {
+                "id": "resp_blank_reasoning_alias",
+                "object": "response",
+                "status": "completed",
+                "model": "source-blank-reasoning-alias",
+                "output": [],
+            }
+        )
+
+    base_url = await source_upstream(responses)
+    model = "source-blank-reasoning-alias"
+    source_id = await _create_model_source(
+        async_client,
+        name="source-blank-reasoning-alias",
+        model=model,
+        base_url=base_url,
+        supports_responses=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "source-blank-reasoning-alias-key",
+            "assignedSourceIds": [source_id],
+            "allowedReasoningEfforts": ["low"],
+        },
+    )
+    assert created.status_code == 200
+
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"Authorization": f"Bearer {created.json()['key']}"},
+        json={
+            "model": model,
+            "instructions": "hi",
+            "input": [],
+            **reasoning_controls,
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "reasoning_effort_not_allowed"
+    assert source_hits == 0
+
+
+@pytest.mark.asyncio
 async def test_scoped_key_does_not_route_to_unassigned_source(async_client, source_upstream):
     await _enable_api_key_auth(async_client)
     unassigned_hits = 0
@@ -2738,3 +3300,222 @@ async def test_codex_responses_payload_restores_declared_minimal_effort(async_cl
     reasoning = captured["reasoning"]
     assert isinstance(reasoning, dict)
     assert reasoning["effort"] == "minimal"
+
+
+@pytest.mark.asyncio
+async def test_source_embeddings_routes_payload_and_settles_usage(async_client, source_upstream) -> None:
+    await _enable_api_key_auth(async_client)
+    captured: dict[str, object] = {}
+
+    async def embed(request: web.Request) -> web.Response:
+        captured["path"] = request.path
+        captured["authorization"] = request.headers.get("authorization")
+        captured["payload"] = await request.json()
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+                "model": "all-minilm:latest",
+                "usage": {"prompt_tokens": 21, "total_tokens": 21},
+            }
+        )
+
+    base_url = await source_upstream(embed)
+    model = "all-minilm:latest"
+    source_id = await _create_model_source(
+        async_client,
+        name="embedder",
+        model=model,
+        base_url=base_url,
+        input_per_1m=0.02,
+        supports_embeddings=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "embeddings-source-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "input": ["hello", "world"], "encoding_format": "float"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "list"
+    assert body["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+    assert captured["path"] == "/v1/embeddings"
+    assert captured["authorization"] == "Bearer token-embedder"
+    # Extra OpenAI params pass through verbatim.
+    assert captured["payload"] == {
+        "model": model,
+        "input": ["hello", "world"],
+        "encoding_format": "float",
+    }
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.account_id is None
+        assert log.model_source_id == source_id
+        assert log.source == "model_source"
+        assert log.input_tokens == 21
+        assert log.output_tokens == 0
+        assert log.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_source_embeddings_unknown_model_returns_model_not_found(async_client) -> None:
+    await _enable_api_key_auth(async_client)
+    created = await async_client.post("/api/api-keys/", json={"name": "embeddings-404-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "no-such-embedder", "input": "hello"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "model_not_found"
+
+    # Rejection happens before source selection succeeds, so no source was
+    # contacted: the attempt must not appear in the request log at all.
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == "no-such-embedder"))
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_source_embeddings_transport_failure_logs_without_upstream_status(async_client) -> None:
+    await _enable_api_key_auth(async_client)
+    model = "unreachable-embedder"
+    closed_port = _free_port()
+    source_id = await _create_model_source(
+        async_client,
+        name="unreachable-embedder-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{closed_port}/v1",
+        supports_embeddings=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "embeddings-unreachable-key", "assignedSourceIds": [source_id]},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "input": "hello"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "model_source_unreachable"
+
+    # The attempt reached dispatch, so it is logged -- but no upstream response
+    # ever arrived, so there is no upstream status code to carry.
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.status == "error"
+        assert log.model_source_id == source_id
+        assert log.upstream_status_code is None
+
+
+@pytest.mark.asyncio
+async def test_source_embeddings_upstream_error_passes_through_and_logs(async_client, source_upstream) -> None:
+    await _enable_api_key_auth(async_client)
+
+    async def embed(request: web.Request) -> web.Response:
+        return web.json_response(
+            {"error": {"message": "model exploded", "type": "server_error"}},
+            status=500,
+        )
+
+    base_url = await source_upstream(embed)
+    model = "broken-embedder"
+    source_id = await _create_model_source(
+        async_client,
+        name="broken-embedder-source",
+        model=model,
+        base_url=base_url,
+        supports_embeddings=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "embeddings-error-key", "assignedSourceIds": [source_id]},
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "input": "hello"},
+    )
+
+    assert response.status_code == 500
+    assert "model exploded" in response.json()["error"]["message"]
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        log = result.scalar_one()
+        assert log.status == "error"
+        assert log.model_source_id == source_id
+
+
+@pytest.mark.asyncio
+async def test_source_embeddings_without_usage_fails_closed_for_limited_key(async_client, source_upstream) -> None:
+    await _enable_api_key_auth(async_client)
+
+    async def embed(request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.5]}],
+                "model": "usage-less-embedder",
+            }
+        )
+
+    base_url = await source_upstream(embed)
+    model = "usage-less-embedder"
+    source_id = await _create_model_source(
+        async_client,
+        name="usage-less-embedder-source",
+        model=model,
+        base_url=base_url,
+        supports_embeddings=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "embeddings-limited-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "input": "hello"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "usage_unavailable"

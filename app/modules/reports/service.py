@@ -33,6 +33,7 @@ class ReportsService:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        api_key_ids: list[str] | None = None,
     ) -> ReportsResponse:
         timezone_info = _resolve_timezone(report_timezone)
         now = utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info)
@@ -53,15 +54,20 @@ class ReportsService:
         previous_start_at = _local_midnight_to_utc_naive(previous_start_date, timezone_info)
         previous_end_at = _local_midnight_to_utc_naive(previous_end_date + timedelta(days=1), timezone_info)
 
-        summary = await self._repository.aggregate_summary(start_at, end_at, account_ids, model, useragent_group)
+        summary = await self._repository.aggregate_summary(
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+        )
         previous_summary = await self._repository.aggregate_summary(
             previous_start_at,
             previous_end_at,
             account_ids,
             model,
             useragent_group,
+            api_key_ids,
         )
-        earliest_activity_at = await self._repository.earliest_report_activity_at(account_ids, model, useragent_group)
+        earliest_activity_at = await self._repository.earliest_report_activity_at(
+            account_ids, model, useragent_group, api_key_ids
+        )
         daily_rows = await self._repository.aggregate_daily_rows(
             start_date,
             end_date,
@@ -69,6 +75,7 @@ class ReportsService:
             account_ids,
             model,
             useragent_group,
+            api_key_ids,
         )
         daily = [
             DailyReportRow(
@@ -76,6 +83,7 @@ class ReportsService:
                 requests=row.requests,
                 input_tokens=row.input_tokens,
                 output_tokens=row.output_tokens,
+                reasoning_tokens=row.reasoning_tokens,
                 cached_input_tokens=row.cached_input_tokens,
                 cost_usd=round(row.cost_usd, 4),
                 active_accounts=row.active_accounts,
@@ -88,14 +96,19 @@ class ReportsService:
             )
             for row in daily_rows
         ]
-        by_model = await self._repository.aggregate_by_model(start_at, end_at, account_ids, model, useragent_group)
-        by_account = await self._repository.aggregate_by_account(start_at, end_at, account_ids, model, useragent_group)
+        by_model = await self._repository.aggregate_by_model(
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+        )
+        by_account = await self._repository.aggregate_by_account(
+            start_at, end_at, account_ids, model, useragent_group, api_key_ids
+        )
         by_useragent = await self._repository.aggregate_by_useragent(
             start_at,
             end_at,
             account_ids,
             model,
             useragent_group,
+            api_key_ids,
         )
 
         model_total = sum(m.cost_usd for m in by_model)
@@ -114,6 +127,8 @@ class ReportsService:
                 total_cost_usd=round(summary.total_cost_usd, 4),
                 total_input_tokens=summary.total_input_tokens,
                 total_output_tokens=summary.total_output_tokens,
+                total_reasoning_tokens=summary.total_reasoning_tokens,
+                reasoning_usage_known_requests=summary.reasoning_usage_known_requests,
                 total_cached_tokens=summary.total_cached_tokens,
                 total_requests=summary.total_requests,
                 total_errors=summary.total_errors,

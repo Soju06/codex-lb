@@ -175,17 +175,18 @@ def test_strip_unsupported_fields_namespace_flag_controls_replayed_calls(namespa
     assert stripped["input"] == [{"type": "function_call"}]
 
 
-def test_responses_preserves_service_tier():
+@pytest.mark.parametrize("service_tier", ["priority", "ultrafast"])
+def test_responses_preserves_service_tier(service_tier: str):
     payload = {
         "model": "gpt-5.1",
         "instructions": "hi",
         "input": [],
-        "service_tier": "priority",
+        "service_tier": service_tier,
     }
     request = ResponsesRequest.model_validate(payload)
 
     dumped = request.to_payload()
-    assert dumped["service_tier"] == "priority"
+    assert dumped["service_tier"] == service_tier
 
 
 def test_responses_normalizes_fast_service_tier_to_priority_for_upstream():
@@ -465,6 +466,41 @@ def test_openai_compatible_reasoning_aliases_are_normalized():
     assert "reasoningSummary" not in dumped
 
 
+@pytest.mark.parametrize("request_type", [ResponsesRequest, ResponsesCompactRequest])
+@pytest.mark.parametrize("alias", ["reasoningEffort", "reasoning_effort", "thinking"])
+def test_reasoning_aliases_are_preserved_until_wire_serialization(request_type, alias):
+    request = request_type.model_validate(
+        {
+            "model": "gpt-5.6-sol",
+            "instructions": "hi",
+            "input": [],
+            alias: "ultra",
+        }
+    )
+
+    assert request.reasoning is None
+    assert (request.model_extra or {})[alias] == "ultra"
+    dumped = request.to_payload()
+    assert dumped["reasoning"] == {"effort": "ultra"}
+    assert alias not in dumped
+
+
+def test_source_forwarding_preserves_provider_thinking_object():
+    thinking = {"type": "enabled", "budget": 4096, "budget_tokens": 2048, "vendor_hint": "keep"}
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "source-model",
+            "instructions": "hi",
+            "input": [],
+            "thinking": thinking,
+        }
+    )
+
+    forwarded = request.model_dump_for_forwarding()
+    assert forwarded["thinking"] == thinking
+    assert "reasoning" not in forwarded
+
+
 def test_provider_thinking_aliases_are_normalized():
     payload = {
         "model": "gpt-5.1",
@@ -485,7 +521,7 @@ def test_provider_thinking_string_alias_accepts_catalog_advertised_efforts():
     # GPT-5.6 catalog entries advertise ``max`` and ``ultra``
     # (codex-rs/models-manager/models.json at rust-v0.144.1); the string-form
     # thinking alias must accept every catalog-advertised effort.
-    for effort in ("low", "medium", "high", "xhigh", "max", "ultra"):
+    for effort in ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
         payload = {
             "model": "gpt-5.6-sol",
             "instructions": "hi",
@@ -544,16 +580,17 @@ def test_openai_compatible_top_level_verbosity_is_normalized():
     assert "verbosity" not in dumped
 
 
-def test_v1_responses_preserves_service_tier():
+@pytest.mark.parametrize("service_tier", ["priority", "ultrafast"])
+def test_v1_responses_preserves_service_tier(service_tier: str):
     payload = {
         "model": "gpt-5.1",
         "input": "hello",
-        "service_tier": "priority",
+        "service_tier": service_tier,
     }
     request = V1ResponsesRequest.model_validate(payload).to_responses_request()
 
     dumped = request.to_payload()
-    assert dumped["service_tier"] == "priority"
+    assert dumped["service_tier"] == service_tier
 
 
 def test_v1_responses_normalizes_fast_service_tier_to_priority_for_upstream():

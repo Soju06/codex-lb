@@ -36,6 +36,7 @@ function protocolBadges(source: ModelSource) {
     source.supportsChatCompletions ? "chat" : null,
     source.supportsResponses ? "responses" : null,
     source.supportsAudioTranscriptions ? "audio" : null,
+    source.supportsEmbeddings ? "embeddings" : null,
   ].filter((value): value is string => value !== null);
 }
 

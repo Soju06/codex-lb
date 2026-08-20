@@ -144,10 +144,7 @@ class ChatCompletionsRequest(BaseModel):
         stream_options = data.pop("stream_options", None)
         raw_tools = data.pop("tools", [])
         raw_tool_choice = data.pop("tool_choice", None)
-        reasoning_effort = data.pop("reasoning_effort", None)
         preserve_instruction_roles = _is_json_object_response_format(response_format)
-        if reasoning_effort is not None and "reasoning" not in data:
-            data["reasoning"] = {"effort": reasoning_effort}
         normalize_reasoning_aliases(data)
         if response_format is not None:
             _apply_response_format(data, response_format)

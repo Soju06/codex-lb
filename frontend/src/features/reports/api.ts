@@ -5,6 +5,7 @@ export type ReportsParams = {
   startDate?: string;
   endDate?: string;
   accountId?: string[];
+  apiKeyId?: string[];
   model?: string;
   useragent?: string;
   timezone?: string;
@@ -20,6 +21,11 @@ export function getReports(params: ReportsParams = {}) {
   if (params.accountId) {
     for (const id of params.accountId) {
       query.append("account_id", id);
+    }
+  }
+  if (params.apiKeyId) {
+    for (const id of params.apiKeyId) {
+      query.append("api_key_id", id);
     }
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";

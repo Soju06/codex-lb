@@ -524,21 +524,23 @@ def routing_eligible_states(
     *,
     now: float | None = None,
     traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+    include_error_backoff: bool = False,
 ) -> list[AccountState]:
     """Return the pool-wide states eligible for the requested traffic class."""
     current = time.time() if now is None else now
     state_list = list(states)
     evaluated_states = [replace(state) for state in state_list]
-    available, _, _ = _prepare_routing_candidates(
+    available, in_error_backoff, _ = _prepare_routing_candidates(
         evaluated_states,
         current=current,
         ignore_standard_quota=False,
         bypass_quota_exceeded=False,
         bypass_account_ids=None,
     )
-    if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and available:
-        available, _ = _filter_opportunistic_candidates(available, current)
-    eligible_evaluations = {id(state) for state in available}
+    eligible = [*available, *in_error_backoff] if include_error_backoff else available
+    if traffic_class == TRAFFIC_CLASS_OPPORTUNISTIC and eligible:
+        eligible, _ = _filter_opportunistic_candidates(eligible, current)
+    eligible_evaluations = {id(state) for state in eligible}
     return [
         state
         for state, evaluated in zip(state_list, evaluated_states, strict=True)

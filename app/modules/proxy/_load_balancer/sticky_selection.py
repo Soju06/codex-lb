@@ -1606,8 +1606,13 @@ def _filter_states_for_usage_limit_and_account_caps(
                 return usage_limit_blocked, False
             return [], True
         return [*fallback_eligible, *usage_limit_blocked], False
+    cap_eligible = routing_eligible_states(
+        usage_limit_eligible,
+        traffic_class=traffic_class,
+        include_error_backoff=True,
+    )
     filtered = _filter_states_for_account_caps(
-        routing_eligible,
+        cap_eligible,
         lease_kind=lease_kind,
         caps=caps,
         stream_reserve_slots=stream_reserve_slots,

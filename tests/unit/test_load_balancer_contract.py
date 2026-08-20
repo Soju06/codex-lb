@@ -487,6 +487,41 @@ async def test_public_unbound_backoff_fallback_respects_stream_cap(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sticky", [False, True], ids=["unbound", "sticky"])
+async def test_public_account_caps_retain_under_cap_backoff_fallback(
+    selection_cache: AccountSelectionCache,
+    sticky: bool,
+) -> None:
+    capped = _account(f"contract-cap-healthy-{sticky}")
+    nearer_backoff = _account(f"contract-cap-nearer-backoff-{sticky}")
+    farther_backoff = _account(f"contract-cap-farther-backoff-{sticky}")
+    balancer, _, _, _ = _balancer([capped, nearer_backoff, farther_backoff], selection_cache)
+    now = datetime.now(UTC).timestamp()
+    balancer._runtime[capped.id] = load_balancer_module.RuntimeState(inflight_streams=1)
+    balancer._runtime[nearer_backoff.id] = load_balancer_module.RuntimeState(
+        error_count=3,
+        last_error_at=now - 10,
+    )
+    balancer._runtime[farther_backoff.id] = load_balancer_module.RuntimeState(
+        error_count=3,
+        last_error_at=now - 5,
+    )
+
+    selection = await balancer.select_account(
+        "contract-cap-backoff-sticky" if sticky else None,
+        sticky_kind=StickySessionKind.PROMPT_CACHE if sticky else None,
+        sticky_max_age_seconds=600 if sticky else None,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=_CONCURRENCY_CAPS,
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == nearer_backoff.id
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("other_block", ["usage_limit", "paused"])
 async def test_public_backoff_fallback_cannot_reintroduce_usage_limited_accounts(
     selection_cache: AccountSelectionCache,

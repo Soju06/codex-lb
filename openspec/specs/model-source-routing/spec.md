@@ -1,9 +1,5 @@
 # Model Source Routing Specification
 
-## Purpose
-
-Define capability-based routing and accounting for OpenAI-compatible model sources, including field-preserving embeddings forwarding.
-
 ## Requirements
 
 ### Requirement: Model sources declare an embeddings capability

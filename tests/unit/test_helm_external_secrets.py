@@ -1001,18 +1001,32 @@ def test_network_policy_uses_default_port_for_external_database_url_without_port
 
 
 @pytest.mark.parametrize(
-    ("database_url", "expected_port"),
+    ("database_url", "expected_ports"),
     [
-        ("postgresql+asyncpg://codexlb@db.example.test:5432/codexlb?port=6432", 6432),
-        ("postgresql+asyncpg://codexlb@/codexlb?host=db.example.test:6432", 6432),
-        ("postgresql+asyncpg://codexlb@/codexlb?host=db.example.test%3A6432", 6432),
-        ("postgresql+asyncpg://codexlb@db.example.test:06432/codexlb", 6432),
+        ("postgresql+asyncpg://codexlb@db.example.test:5432/codexlb?port=6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=db.example.test:6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=db.example.test%3A6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@db.example.test:06432/codexlb", (6432,)),
+        ("postgresql+asyncpg://codexlb@db.example.test/codexlb?port=%36%34%33%32", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=2001:db8::1", (5432,)),
+        (
+            "postgresql+asyncpg://codexlb@/codexlb?host=db1.example.test:6432&host=db2.example.test:7432",
+            (6432, 7432),
+        ),
     ],
-    ids=["query-port-override", "query-host-port", "encoded-query-host-port", "leading-zero-port"],
+    ids=[
+        "query-port-override",
+        "query-host-port",
+        "encoded-query-host-port",
+        "leading-zero-port",
+        "encoded-query-port",
+        "portless-ipv6-query-host",
+        "multihost-query-ports",
+    ],
 )
 def test_network_policy_uses_effective_port_from_external_database_url(
     database_url: str,
-    expected_port: int,
+    expected_ports: tuple[int, ...],
 ) -> None:
     rendered = _helm_template(
         "--set",
@@ -1031,7 +1045,9 @@ def test_network_policy_uses_effective_port_from_external_database_url(
         if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
     ]
     assert secret["stringData"]["database-url"] == database_url
-    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": expected_port, "protocol": "TCP"}]}
+    assert network_policy["spec"]["egress"][1] == {
+        "ports": [{"port": port, "protocol": "TCP"} for port in expected_ports]
+    }
 
 
 @pytest.mark.parametrize(
@@ -1075,8 +1091,9 @@ def test_network_policy_ignores_inactive_external_database_url(source_args: tupl
     [
         "postgresql+asyncpg://codexlb@db.example.test:0/codexlb",
         "postgresql+asyncpg://codexlb@db.example.test:65536/codexlb",
+        "postgresql+asyncpg://codexlb@db.example.test/codexlb?port=-1",
     ],
-    ids=["zero", "above-maximum"],
+    ids=["zero", "above-maximum", "negative-query-port"],
 )
 def test_network_policy_rejects_invalid_external_database_url_port(database_url: str) -> None:
     failure = _helm_template_failure(

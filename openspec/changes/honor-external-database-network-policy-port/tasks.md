@@ -23,3 +23,9 @@
 - [x] 5.1 Add failing rendered regressions for source precedence, query ports, and leading-zero normalization.
 - [x] 5.2 Match chart database-source precedence and normalize the effective direct URL port.
 - [ ] 5.3 Re-run focused tests, template checks, strict OpenSpec validation, and committed-diff review.
+
+## 6. Advanced Direct URL Forms
+
+- [x] 6.1 Add failing rendered regressions for encoded query ports, portless IPv6, multihost ports, and invalid query ports.
+- [x] 6.2 Render a unique validated port set matching direct URL failover semantics.
+- [ ] 6.3 Re-run focused verification and committed-diff review.

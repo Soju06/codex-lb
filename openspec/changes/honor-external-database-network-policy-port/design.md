@@ -25,18 +25,21 @@ Select the external egress port from the same source as the database URL. Parse
 `externalDatabase.url` only when chart-managed Secret rendering makes it the
 active source; existing Secret and ExternalSecret inputs use the separately
 configured `externalDatabase.port` because Helm cannot inspect their contents.
-For an active direct URL, honor an explicit authority port, SQLAlchemy's
-query-level `port` override, or a port embedded in its query-level `host`, then
-normalize it to a decimal integer in the Kubernetes range. Use PostgreSQL's
-5432 default when the active direct URL omits a port. Otherwise use
+For an active direct URL, honor an explicit authority port, URL-decoded
+SQLAlchemy query-level `port` overrides, or ports embedded in query-level
+`host` values. Collect every unique effective port for multihost failover,
+distinguish portless IPv6 literals, and normalize ports to decimal integers in
+the Kubernetes range. Use PostgreSQL's 5432 default for each active direct URL
+host that omits a port. Otherwise use
 `.Values.externalDatabase.port | default 5432`, matching the synthesized or
 secret-backed URL contract. Keep the bundled branch's service-selected TCP 5432
 rule unchanged because it targets the chart-managed PostgreSQL service.
 
-The regressions render discrete custom/default fields, direct URL authority and
-query forms, inactive stale URLs beside secret-backed sources, invalid ports,
-and bundled mode. They compare the generated Secret and NetworkPolicy's
-machine-consumed port values without requiring a cluster.
+The regressions render discrete custom/default fields, direct URL authority,
+encoded query, IPv6, and multihost forms, inactive stale URLs beside
+secret-backed sources, invalid ports, and bundled mode. They compare the
+generated Secret and NetworkPolicy's machine-consumed port values without
+requiring a cluster.
 
 ## Risks / Trade-offs
 

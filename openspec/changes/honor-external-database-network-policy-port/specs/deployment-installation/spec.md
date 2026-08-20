@@ -2,7 +2,7 @@
 
 ### Requirement: External database network egress matches the connection source
 
-When bundled PostgreSQL is disabled and NetworkPolicy is enabled, the Helm chart MUST permit external PostgreSQL egress on the port selected by the database connection source. When `externalDatabase.url` is the active source, its authority port or supported SQLAlchemy query port MUST take precedence and render as a decimal Kubernetes port, or default to 5432 when omitted; a port outside 1 through 65535 MUST fail rendering. When an existing Secret or ExternalSecret is the active source, a stale direct URL MUST be ignored and egress MUST use `externalDatabase.port` because Helm cannot inspect the secret value. A chart-generated database URL MUST use `externalDatabase.port`, defaulting both URL and egress to 5432 when the operator does not override it. Bundled PostgreSQL egress MUST continue to target its chart-managed service on port 5432.
+When bundled PostgreSQL is disabled and NetworkPolicy is enabled, the Helm chart MUST permit external PostgreSQL egress on every port selected by the database connection source. When `externalDatabase.url` is the active source, its authority port or URL-decoded supported SQLAlchemy query ports MUST take precedence and render as unique decimal Kubernetes ports, while portless hosts including IPv6 literals default to 5432; a port outside 1 through 65535 MUST fail rendering. When an existing Secret or ExternalSecret is the active source, a stale direct URL MUST be ignored and egress MUST use `externalDatabase.port` because Helm cannot inspect the secret value. A chart-generated database URL MUST use `externalDatabase.port`, defaulting both URL and egress to 5432 when the operator does not override it. Bundled PostgreSQL egress MUST continue to target its chart-managed service on port 5432.
 
 #### Scenario: Custom external database port is rendered consistently
 
@@ -35,9 +35,22 @@ When bundled PostgreSQL is disabled and NetworkPolicy is enabled, the Helm chart
 #### Scenario: Equivalent direct URL port forms are normalized
 
 - **WHEN** an active direct database URL supplies its effective port through an
-  authority with leading zeros, a query `port`, or a query `host`
+  authority with leading zeros, a URL-encoded query `port`, or a query `host`
 - **THEN** the external PostgreSQL NetworkPolicy egress rule permits the same
   decimal TCP port used by SQLAlchemy
+
+#### Scenario: Portless IPv6 query host keeps the PostgreSQL default
+
+- **WHEN** an active direct database URL supplies a portless IPv6 query `host`
+- **THEN** the external PostgreSQL NetworkPolicy egress rule permits TCP 5432
+- **AND** no IPv6 hextet is interpreted as a port
+
+#### Scenario: Multihost direct URL permits every failover port
+
+- **WHEN** an active direct database URL supplies multiple query hosts on
+  different valid ports
+- **THEN** the external PostgreSQL NetworkPolicy egress rule permits every
+  unique TCP port used by those hosts
 
 #### Scenario: Secret-backed database source ignores a stale direct URL
 

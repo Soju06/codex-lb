@@ -2803,6 +2803,7 @@ class _HTTPBridgeRequestSubmitMixin:
     ) -> None:
         async with session.pending_lock:
             retired_request_states = list(session.pending_requests)
+            baseline_completed_response_id = session.last_completed_response_id
             if retired_request_count is None:
                 retired_request_count = sum(
                     1
@@ -2875,12 +2876,48 @@ class _HTTPBridgeRequestSubmitMixin:
                         cache_key_family=session.key.affinity_kind,
                         model_class=_extract_model_class(session.request_model) if session.request_model else None,
                     )
-        session.closed = True
+
+        async with session.pending_lock:
+            current_response_events_seen = max(
+                (getattr(request_state, "response_event_count", 0) for request_state in session.pending_requests),
+                default=0,
+            )
+            current_response_created = any(
+                request_state.response_id is not None or request_state.latency_response_created_ms is not None
+                for request_state in session.pending_requests
+            )
+            completed_response_id = session.last_completed_response_id
+            current_event_generation = session.last_upstream_event_generation
+        # The snapshot above avoids awaiting pending_lock while the global
+        # registry lock is held, preserving bounded cleanup for other sessions.
+        caller_response_events_seen = response_events_seen or 0
+        observed_new_completed_response = (
+            completed_response_id is not None and completed_response_id != baseline_completed_response_id
+        )
+        became_healthy_during_suspend = current_response_events_seen > caller_response_events_seen or (
+            caller_response_events_seen == 0 and (current_response_created or observed_new_completed_response)
+        )
+        should_close = False
         async with self._http_bridge_lock:
+            if session.last_upstream_event_generation != current_event_generation:
+                became_healthy_during_suspend = True
             # Bounded close may return while resource finalization is still
             # running. Detachment transfers ownership instead of freeing the
             # capacity slot at canonical removal, and leaves a failed close
             # discoverable by shutdown/account invalidation for a later retry.
+            if session.upstream_close_attempted:
+                session.closed = True
+                self._detach_http_bridge_session_locked(session.key, expected_session=session)
+                return
+            if became_healthy_during_suspend:
+                # The pending snapshot is only advisory; a terminal response
+                # may already have left the deque. A close owner cannot have
+                # claimed retirement in between: the branch above returns under
+                # this same lock hold without awaiting.
+                session.closed = False
+                session.upstream_control.reconnect_requested = False
+                session.upstream_control.retire_after_drain = False
+                return
             self._detach_http_bridge_session_locked(session.key, expected_session=session)
         async with session.pending_lock:
             should_close = not session.upstream_close_attempted

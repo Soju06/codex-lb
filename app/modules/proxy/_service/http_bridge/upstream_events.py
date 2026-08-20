@@ -1837,6 +1837,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # that attempt transition before any later recovery await can
                 # classify the send as eventless.
                 _mark_response_create_attempt_observed(matched_request_state, event_type)
+                session.last_upstream_event_generation += 1
                 now = _service_time().monotonic()
                 if matched_request_state.latency_first_upstream_event_ms is None:
                     matched_request_state.latency_first_upstream_event_ms = int(

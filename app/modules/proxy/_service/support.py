@@ -1218,6 +1218,7 @@ class _HTTPBridgeSession:
     durable_session_id: str | None = None
     durable_owner_epoch: int | None = None
     upstream_reader: asyncio.Task[None] | None = None
+    last_upstream_event_generation: int = 0
     last_upstream_close_code: int | None = None
     last_upstream_close_generation: int = 0
     closed: bool = False

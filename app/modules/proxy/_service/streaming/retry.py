@@ -3143,10 +3143,12 @@ class _StreamingRetryMixin:
 
                 async def _release_reservation_then_drain_backoffs() -> None:
                     nonlocal settled
+                    attempted_ordered_settle = False
                     if pending_post_refresh_transient_penalties:
                         # Mid-loop keyed health may already be queued. Prefer
                         # settle-then-flush so cancel cleanup still applies the
                         # deferred account penalty after the reservation closes.
+                        attempted_ordered_settle = True
                         settled = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         if settled:
                             return
@@ -3157,7 +3159,12 @@ class _StreamingRetryMixin:
                     )
                     if released:
                         await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
-                        await _flush_pending_post_refresh_penalties()
+                        # If ordered settle already ran and returned False, keep
+                        # the deferred penalties withheld (unconfirmed settlement
+                        # must not write account health). Cancel before any
+                        # ordered settle still flushes after release.
+                        if pending_post_refresh_transient_penalties and not attempted_ordered_settle:
+                            await _flush_pending_post_refresh_penalties()
 
                 release_coro = _release_reservation_then_drain_backoffs()
                 current_task = asyncio.current_task()
@@ -3171,9 +3178,7 @@ class _StreamingRetryMixin:
                     await release_coro
             elif settled and deferred_account_error_backoffs:
                 await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
-            if pending_post_refresh_transient_penalties and (
-                settled or settlement.usage_settlement_transferred
-            ):
+            if pending_post_refresh_transient_penalties and settled:
                 # Finish any penalties left behind if a prior flush was cancelled
                 # mid-loop after settlement already closed the reservation.
                 await _flush_pending_post_refresh_penalties()

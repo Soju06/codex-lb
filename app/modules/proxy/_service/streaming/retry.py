@@ -452,26 +452,38 @@ class _StreamingRetryMixin:
             return format_sse_event(event)
 
         async def _flush_pending_post_refresh_penalties() -> None:
-            if not pending_post_refresh_transient_penalties:
-                return
-            pending_penalties = list(pending_post_refresh_transient_penalties)
-            pending_post_refresh_transient_penalties.clear()
-            for pending_penalty in pending_penalties:
+            # Consume one queued penalty at a time only after that entry's
+            # health write finishes (success or logged failure). Clearing the
+            # whole queue first would drop later accounts if one write raises
+            # or cancellation lands on an await (compact flush isolates entries
+            # the same way).
+            while pending_post_refresh_transient_penalties:
                 (
                     failed_account,
                     transient_error_payload,
                     transient_error_code,
                     transient_http_status,
                     transient_retry_count,
-                ) = pending_penalty
-                await proxy._handle_stream_error(
-                    failed_account,
-                    transient_error_payload,
-                    transient_error_code,
-                    http_status=transient_http_status,
-                )
-                if transient_retry_count > 1:
-                    await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
+                ) = pending_post_refresh_transient_penalties[0]
+                try:
+                    await proxy._handle_stream_error(
+                        failed_account,
+                        transient_error_payload,
+                        transient_error_code,
+                        http_status=transient_http_status,
+                    )
+                    if transient_retry_count > 1:
+                        await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
+                except Exception:
+                    logger.warning(
+                        "Failed to flush deferred keyed stream health account_id=%s request_id=%s",
+                        failed_account.id,
+                        request_id,
+                        exc_info=True,
+                    )
+                # CancelledError propagates before this pop, leaving remaining
+                # entries for terminal cleanup to finish.
+                del pending_post_refresh_transient_penalties[0]
 
         async def _settle_stream_usage_before_pending_penalty(
             current_settlement: _StreamSettlement,
@@ -3159,3 +3171,9 @@ class _StreamingRetryMixin:
                     await release_coro
             elif settled and deferred_account_error_backoffs:
                 await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
+            if pending_post_refresh_transient_penalties and (
+                settled or settlement.usage_settlement_transferred
+            ):
+                # Finish any penalties left behind if a prior flush was cancelled
+                # mid-loop after settlement already closed the reservation.
+                await _flush_pending_post_refresh_penalties()

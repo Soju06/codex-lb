@@ -1,5 +1,15 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $httpPort := .Values.service.port | default 2455 }}
+{{- $externalDatabasePort := 5432 }}
+{{- if .Values.externalDatabase.url }}
+{{- $urlHost := (urlParse .Values.externalDatabase.url).host }}
+{{- $urlPort := regexFind ":[0-9]+$" $urlHost | trimPrefix ":" }}
+{{- if $urlPort }}
+{{- $externalDatabasePort = $urlPort }}
+{{- end }}
+{{- else }}
+{{- $externalDatabasePort = .Values.externalDatabase.port | default 5432 }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -66,7 +76,7 @@ spec:
           protocol: TCP
     {{- else }}
     - ports:
-        - port: {{ .Values.externalDatabase.port | default 5432 }}
+        - port: {{ $externalDatabasePort }}
           protocol: TCP
     {{- end }}
     # HTTPS for OpenAI API

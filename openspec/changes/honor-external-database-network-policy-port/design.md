@@ -21,16 +21,18 @@ currently permits only TCP 5432.
 
 ## Decisions
 
-Use `.Values.externalDatabase.port | default 5432` directly in the external
-branch of `templates/networkpolicy.yaml`, matching the database URL helper. This
-is smaller and less error-prone than introducing a new helper or setting. Keep
-the bundled branch's service-selected TCP 5432 rule unchanged because it targets
-the chart-managed PostgreSQL service.
+Select the external egress port from the same source as the database URL. When
+`externalDatabase.url` is set, parse its host and use an explicit terminal port,
+or PostgreSQL's 5432 default when the URL omits one. Otherwise use
+`.Values.externalDatabase.port | default 5432`, matching the synthesized URL.
+This preserves direct URL precedence without introducing another setting or a
+one-off helper. Keep the bundled branch's service-selected TCP 5432 rule
+unchanged because it targets the chart-managed PostgreSQL service.
 
-The regression renders the chart once with port 6432 and once without a port
-override, parses the generated Secret and NetworkPolicy, and compares their
-machine-consumed port values. This covers the operator-visible template surface
-without requiring a cluster.
+The regressions render discrete custom/default fields, direct URLs with and
+without explicit ports, and bundled mode, then compare the generated Secret and
+NetworkPolicy's machine-consumed port values. This covers the operator-visible
+template surface without requiring a cluster.
 
 ## Risks / Trade-offs
 

@@ -8,7 +8,7 @@ external database.
 ## What Changes
 
 - Render the configured external database port in the external PostgreSQL
-  egress rule.
+  egress rule, or derive it from a direct external database URL.
 - Add real Helm-rendering regression coverage for custom and default ports.
 - Preserve bundled PostgreSQL egress, workload selectors, and additional
   operator-defined egress rules.

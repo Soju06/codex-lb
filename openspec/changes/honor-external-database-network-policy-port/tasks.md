@@ -11,3 +11,9 @@
 
 - [x] 3.1 Run focused Helm tests, custom/default manual renders, Python lint, template/YAML checks, and strict OpenSpec validation.
 - [x] 3.2 Review the committed diff for application/migration selector coverage, internal/external mode separation, and default behavior.
+
+## 4. Direct URL Review Repair
+
+- [x] 4.1 Add failing real Helm regressions for a direct URL with a custom port and a no-port precedence control.
+- [x] 4.2 Derive NetworkPolicy egress from an explicit direct-URL port or PostgreSQL's 5432 default.
+- [x] 4.3 Re-run focused Helm, lint, rendered surface, and strict OpenSpec verification.

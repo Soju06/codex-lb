@@ -954,6 +954,52 @@ def test_network_policy_uses_external_database_port() -> None:
     assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 6432, "protocol": "TCP"}]}
 
 
+def test_network_policy_uses_port_from_external_database_url() -> None:
+    database_url = "postgresql+asyncpg://codexlb@db.example.test:6432/codexlb"
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == database_url
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 6432, "protocol": "TCP"}]}
+
+
+def test_network_policy_uses_default_port_for_external_database_url_without_port() -> None:
+    database_url = "postgresql+asyncpg://codexlb@db.example.test/codexlb"
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+        "--set",
+        "externalDatabase.port=6432",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == database_url
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 5432, "protocol": "TCP"}]}
+
+
 def test_network_policy_uses_default_external_database_port() -> None:
     rendered = _helm_template(
         "--set",

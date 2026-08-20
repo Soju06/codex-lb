@@ -2,7 +2,7 @@
 
 ### Requirement: External database network egress matches the connection source
 
-When bundled PostgreSQL is disabled and NetworkPolicy is enabled, the Helm chart MUST permit external PostgreSQL egress on the port selected by the database connection source. A direct `externalDatabase.url` MUST use its explicit port or PostgreSQL's default port 5432 when omitted. A chart-generated database URL MUST use `externalDatabase.port`, defaulting both URL and egress to 5432 when the operator does not override it. Bundled PostgreSQL egress MUST continue to target its chart-managed service on port 5432.
+When bundled PostgreSQL is disabled and NetworkPolicy is enabled, the Helm chart MUST permit external PostgreSQL egress on the port selected by the database connection source. When `externalDatabase.url` is the active source, its authority port or supported SQLAlchemy query port MUST take precedence and render as a decimal Kubernetes port, or default to 5432 when omitted; a port outside 1 through 65535 MUST fail rendering. When an existing Secret or ExternalSecret is the active source, a stale direct URL MUST be ignored and egress MUST use `externalDatabase.port` because Helm cannot inspect the secret value. A chart-generated database URL MUST use `externalDatabase.port`, defaulting both URL and egress to 5432 when the operator does not override it. Bundled PostgreSQL egress MUST continue to target its chart-managed service on port 5432.
 
 #### Scenario: Custom external database port is rendered consistently
 
@@ -31,6 +31,25 @@ When bundled PostgreSQL is disabled and NetworkPolicy is enabled, the Helm chart
   sets `externalDatabase.url` without an explicit port
 - **THEN** the chart-generated Secret retains the direct database URL
 - **AND** the external PostgreSQL NetworkPolicy egress rule permits TCP 5432
+
+#### Scenario: Equivalent direct URL port forms are normalized
+
+- **WHEN** an active direct database URL supplies its effective port through an
+  authority with leading zeros, a query `port`, or a query `host`
+- **THEN** the external PostgreSQL NetworkPolicy egress rule permits the same
+  decimal TCP port used by SQLAlchemy
+
+#### Scenario: Secret-backed database source ignores a stale direct URL
+
+- **WHEN** an existing Secret or ExternalSecret supplies the database URL
+- **AND** an inactive direct URL declares a different port
+- **THEN** the external PostgreSQL NetworkPolicy ignores the inactive URL
+- **AND** its egress rule uses `externalDatabase.port`
+
+#### Scenario: Invalid direct URL port fails rendering
+
+- **WHEN** an active direct database URL declares a port outside 1 through 65535
+- **THEN** Helm rendering fails before resources are applied
 
 #### Scenario: Bundled PostgreSQL egress is unchanged
 

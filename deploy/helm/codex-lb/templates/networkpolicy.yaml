@@ -1,11 +1,24 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- $httpPort := .Values.service.port | default 2455 }}
 {{- $externalDatabasePort := 5432 }}
-{{- if .Values.externalDatabase.url }}
-{{- $urlHost := (urlParse .Values.externalDatabase.url).host }}
-{{- $urlPort := regexFind ":[0-9]+$" $urlHost | trimPrefix ":" }}
+{{- $usesDirectDatabaseUrl := and (not .Values.postgresql.enabled) (not .Values.externalDatabase.existingSecret) (not .Values.auth.existingSecret) (not .Values.externalSecrets.enabled) .Values.externalDatabase.url }}
+{{- if $usesDirectDatabaseUrl }}
+{{- $parsedUrl := urlParse .Values.externalDatabase.url }}
+{{- $urlPort := regexFind ":[0-9]+$" $parsedUrl.host | trimPrefix ":" }}
+{{- $queryPort := regexFind "(^|&)port=[0-9]+(&|$)" $parsedUrl.query }}
+{{- if $queryPort }}
+{{- $urlPort = regexFind "[0-9]+" $queryPort }}
+{{- else }}
+{{- $queryHost := regexFind "(?i)(^|&)host=[^&]*(%3a|:)[0-9]+(&|$)" $parsedUrl.query }}
+{{- if $queryHost }}
+{{- $urlPort = regexFind "[0-9]+(&|$)" $queryHost | trimSuffix "&" }}
+{{- end }}
+{{- end }}
 {{- if $urlPort }}
-{{- $externalDatabasePort = $urlPort }}
+{{- $externalDatabasePort = atoi $urlPort }}
+{{- if or (lt $externalDatabasePort 1) (gt $externalDatabasePort 65535) }}
+{{- fail "externalDatabase.url port must be between 1 and 65535" }}
+{{- end }}
 {{- end }}
 {{- else }}
 {{- $externalDatabasePort = .Values.externalDatabase.port | default 5432 }}

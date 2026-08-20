@@ -17,3 +17,9 @@
 - [x] 4.1 Add failing real Helm regressions for a direct URL with a custom port and a no-port precedence control.
 - [x] 4.2 Derive NetworkPolicy egress from an explicit direct-URL port or PostgreSQL's 5432 default.
 - [x] 4.3 Re-run focused Helm, lint, rendered surface, and strict OpenSpec verification.
+
+## 5. Equivalent Direct URL Paths
+
+- [x] 5.1 Add failing rendered regressions for source precedence, query ports, and leading-zero normalization.
+- [x] 5.2 Match chart database-source precedence and normalize the effective direct URL port.
+- [ ] 5.3 Re-run focused tests, template checks, strict OpenSpec validation, and committed-diff review.

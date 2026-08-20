@@ -24,6 +24,7 @@ import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
 from app.core.openai.model_registry import ModelRegistry
+from app.core.types import JsonValue
 from app.core.utils.request_id import (
     reset_request_id,
     reset_request_scope_id,
@@ -15066,6 +15067,183 @@ async def test_v1_responses_http_bridge_stream_cancel_retires_session(
     assert session.closed is True
     assert session.upstream_control.retire_after_drain is True
     assert fake_upstream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_live_event_queue_applies_backpressure(
+    async_client,
+    app_instance,
+) -> None:
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_event_backpressure",
+        "http-bridge-event-backpressure@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    payload = proxy_module.ResponsesRequest(
+        model="gpt-5.4",
+        instructions="Return exactly OK.",
+        input="event-backpressure",
+        prompt_cache_key="event-backpressure",
+    )
+
+    def prepare_request(suffix: str) -> tuple[proxy_module._WebSocketRequestState, proxy_module._HTTPBridgeSession]:
+        request_state, _ = service._prepare_http_bridge_request(
+            payload,
+            {},
+            api_key=None,
+            api_key_reservation=None,
+            request_id=f"req_event_backpressure_{suffix}",
+        )
+        request_state.skip_request_log = True
+        session = _make_dummy_bridge_session(
+            proxy_module._HTTPBridgeSessionKey("prompt_cache", f"event-backpressure-{suffix}", None)
+        )
+        session.account = account
+        session.pending_requests.append(request_state)
+        session.queued_request_count = 1
+        return request_state, session
+
+    def response_events(response_id: str) -> list[dict[str, JsonValue]]:
+        events: list[dict[str, JsonValue]] = [
+            {
+                "type": "response.created",
+                "response": {"id": response_id, "object": "response", "status": "in_progress"},
+            }
+        ]
+        for index in range(4):
+            events.append(
+                {
+                    "type": "response.output_text.delta",
+                    "response_id": response_id,
+                    "delta": str(index),
+                }
+            )
+        events.append(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 4,
+                        "output_tokens": 4,
+                        "total_tokens": 8,
+                        "input_tokens_details": {"cached_tokens": 0},
+                        "output_tokens_details": {"reasoning_tokens": 0},
+                    },
+                },
+            }
+        )
+        return events
+
+    paced_state, paced_session = prepare_request("paced")
+    paced_queue = paced_state.event_queue
+    assert paced_queue is not None
+    paced_types: list[str] = []
+    paced_max_qsize = 0
+    for event in response_events("resp_event_backpressure_paced")[:-1]:
+        await service._process_http_bridge_upstream_text(
+            paced_session,
+            json.dumps(event, separators=(",", ":")),
+        )
+        paced_max_qsize = max(paced_max_qsize, paced_queue.qsize())
+        event_block = paced_queue.get_nowait()
+        assert event_block is not None
+        event_payload = proxy_module.parse_sse_data_json(event_block)
+        assert event_payload is not None
+        paced_types.append(cast(str, event_payload["type"]))
+
+    slow_state, slow_session = prepare_request("slow")
+    slow_queue = slow_state.event_queue
+    assert slow_queue is not None
+    slow_events = response_events("resp_event_backpressure_slow")
+    queue_full = asyncio.Event()
+    blocked_enqueue_started = asyncio.Event()
+    producer_done = asyncio.Event()
+
+    async def relay_slow_events() -> None:
+        for index, event in enumerate(slow_events):
+            if index == slow_queue.maxsize:
+                blocked_enqueue_started.set()
+            await service._process_http_bridge_upstream_text(
+                slow_session,
+                json.dumps(event, separators=(",", ":")),
+            )
+            if slow_queue.full():
+                queue_full.set()
+        producer_done.set()
+
+    producer_task = asyncio.create_task(relay_slow_events())
+    if slow_queue.maxsize == 0:
+        await _wait_for_event(producer_done)
+        assert slow_queue.maxsize > 0, (
+            "prepared HTTP bridge live queue is unbounded: "
+            f"producer_completed={producer_task.done()} qsize={slow_queue.qsize()}"
+        )
+    await _wait_for_event(queue_full)
+    await _wait_for_event(blocked_enqueue_started)
+    assert producer_task.done() is False
+    assert slow_queue.qsize() == slow_queue.maxsize
+
+    delivered_types: list[str] = []
+    while True:
+        event_block = await asyncio.wait_for(slow_queue.get(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+        if event_block is None:
+            break
+        event_payload = proxy_module.parse_sse_data_json(event_block)
+        assert event_payload is not None
+        delivered_types.append(cast(str, event_payload["type"]))
+    await _wait_for_event(producer_done)
+    await asyncio.wait_for(producer_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+
+    assert paced_types == [event["type"] for event in slow_events[:-1]]
+    assert paced_max_qsize <= max(1, paced_queue.maxsize)
+    assert delivered_types == [event["type"] for event in slow_events]
+    assert slow_queue.empty()
+    assert not slow_session.pending_requests
+    assert slow_session.queued_request_count == 0
+    assert slow_state.api_key_reservation is None
+
+    detached_state, detached_session = prepare_request("detached")
+    detached_queue = detached_state.event_queue
+    assert detached_queue is not None
+    detached_queue_full = asyncio.Event()
+    detached_blocked_enqueue_started = asyncio.Event()
+    detached_producer_done = asyncio.Event()
+
+    async def relay_detached_events() -> None:
+        for index, event in enumerate(response_events("resp_event_backpressure_detached")):
+            if index == detached_queue.maxsize:
+                detached_blocked_enqueue_started.set()
+            await service._process_http_bridge_upstream_text(
+                detached_session,
+                json.dumps(event, separators=(",", ":")),
+            )
+            if detached_queue.full():
+                detached_queue_full.set()
+        detached_producer_done.set()
+
+    detached_producer_task = asyncio.create_task(relay_detached_events())
+    await _wait_for_event(detached_queue_full)
+    await _wait_for_event(detached_blocked_enqueue_started)
+    assert detached_queue.full()
+    assert detached_producer_task.done() is False
+
+    await service._detach_http_bridge_request(detached_session, request_state=detached_state)
+    await _wait_for_event(detached_producer_done)
+    await asyncio.wait_for(detached_producer_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+
+    assert detached_state.event_queue is None
+    assert not detached_session.pending_requests
+    assert detached_session.queued_request_count == 0
+    assert detached_state.api_key_reservation is None
+    assert not [
+        task for task in asyncio.all_tasks() if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
+    ]
 
 
 @pytest.mark.asyncio

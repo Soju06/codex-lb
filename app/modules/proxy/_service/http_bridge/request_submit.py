@@ -227,6 +227,9 @@ logger = logging.getLogger("app.modules.proxy.service")
 
 _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_MAX_COUNT = 1
 _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS = 2.0
+# A local startup failure must enqueue its terminal frame and end marker before
+# the downstream consumer loop starts; the third unread live event backpressures.
+_HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE = 2
 
 _REQUEST_TRANSPORT_HTTP = "http"
 _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
@@ -236,6 +239,39 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
+
+
+class _HTTPBridgeLiveEventQueue(asyncio.Queue[str | None]):
+    """Finite live queue whose blocked producer exits when downstream detaches."""
+
+    def __init__(self, *, maxsize: int, revoked: asyncio.Event) -> None:
+        super().__init__(maxsize=maxsize)
+        self._revoked = revoked
+
+    async def put(self, item: str | None) -> None:
+        if self._revoked.is_set():
+            return
+        try:
+            self.put_nowait(item)
+        except asyncio.QueueFull:
+            put_task = asyncio.create_task(
+                super().put(item),
+                name="http-bridge-event-put",
+            )
+            revoke_task = asyncio.create_task(
+                self._revoked.wait(),
+                name="http-bridge-event-revoke",
+            )
+            tasks = (put_task, revoke_task)
+            try:
+                done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if put_task in done:
+                    put_task.result()
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -663,6 +699,7 @@ class _HTTPBridgeRequestSubmitMixin:
         request_kind = (
             "normal" if connection_request_kind == "prewarm" and not generate_false_prewarm else header_request_kind
         )
+        event_queue_revoked = asyncio.Event()
         request_state = _WebSocketRequestState(
             request_id=resolved_request_id,
             request_log_id=request_log_id,
@@ -674,7 +711,15 @@ class _HTTPBridgeRequestSubmitMixin:
             started_at=_service_time().monotonic(),
             requested_service_tier=forwarded_service_tier,
             awaiting_response_created=True,
-            event_queue=asyncio.Queue() if attach_event_queue else None,
+            event_queue=(
+                _HTTPBridgeLiveEventQueue(
+                    maxsize=_HTTP_BRIDGE_LIVE_EVENT_QUEUE_MAX_SIZE,
+                    revoked=event_queue_revoked,
+                )
+                if attach_event_queue
+                else None
+            ),
+            event_queue_revoked=event_queue_revoked,
             transport=transport,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
             api_key=api_key,
@@ -1307,9 +1352,11 @@ class _HTTPBridgeRequestSubmitMixin:
                             request_state.operation_id = operation.operation_id
                             request_state.operation_fingerprint = operation_fingerprint
                             request_state.operation_registered = True
+                            replay_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=len(replay_events) + 1)
+                            request_state.event_queue = replay_queue
                             for replay_event in replay_events:
-                                await request_state.event_queue.put(replay_event)
-                            await request_state.event_queue.put(None)
+                                replay_queue.put_nowait(replay_event)
+                            replay_queue.put_nowait(None)
                             return
                 if recovery_attempt_consumed:
                     raise ProxyResponseError(
@@ -2621,6 +2668,7 @@ class _HTTPBridgeRequestSubmitMixin:
             # completed handler that wins first keeps its local queue reference;
             # a detach that wins first leaves no queue for that handler to claim.
             request_state.event_queue = None
+            request_state.event_queue_revoked.set()
         await _release_websocket_response_create_gate(request_state, session.response_create_gate)
         if not detached:
             if request_state.operation_replay:

@@ -939,6 +939,7 @@ class _WebSocketRequestState:
     response_id: str | None = None
     awaiting_response_created: bool = False
     event_queue: asyncio.Queue[str | None] | None = None
+    event_queue_revoked: asyncio.Event = field(default_factory=asyncio.Event)
     transport: str = _REQUEST_TRANSPORT_WEBSOCKET
     upstream_transport: str | None = _REQUEST_TRANSPORT_WEBSOCKET
     enforce_openai_sdk_contract: bool = True

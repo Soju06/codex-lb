@@ -1013,6 +1013,34 @@ def test_network_policy_uses_default_port_for_external_database_url_without_port
             "postgresql+asyncpg://codexlb@/codexlb?host=db1.example.test:6432&host=db2.example.test:7432",
             (6432, 7432),
         ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=2001:db8::a",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?port=7432&port=",
+            (7432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test:7432&host=",
+            (7432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:5432/codexlb?port=%096432%09",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:5432/codexlb?port=6_432",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test:%2D1",
+            (6432,),
+        ),
     ],
     ids=[
         "query-port-override",
@@ -1022,6 +1050,13 @@ def test_network_policy_uses_default_port_for_external_database_url_without_port
         "encoded-query-port",
         "portless-ipv6-query-host",
         "multihost-query-ports",
+        "query-host-inherits-authority-port",
+        "portless-ipv6-query-host-inherits-authority-port",
+        "blank-query-port-is-ignored",
+        "blank-query-host-is-ignored",
+        "encoded-query-port-whitespace",
+        "underscored-query-port",
+        "signed-query-host-suffix-is-not-a-port",
     ],
 )
 def test_network_policy_uses_effective_port_from_external_database_url(

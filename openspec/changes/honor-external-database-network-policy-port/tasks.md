@@ -29,3 +29,5 @@
 - [x] 6.1 Add failing rendered regressions for encoded query ports, portless IPv6, multihost ports, and invalid query ports.
 - [x] 6.2 Render a unique validated port set matching direct URL failover semantics.
 - [ ] 6.3 Re-run focused verification and committed-diff review.
+- [x] 6.4 Add rendered regressions for authority fallback, blank query items, and encoded numeric whitespace found by committed review.
+- [x] 6.5 Match SQLAlchemy authority fallback and blank-item semantics.

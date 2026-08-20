@@ -387,6 +387,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     classify_upstream_failure,
+    is_model_scoped_upstream_rejection,
     is_upstream_model_capacity_error,
 )
 from app.modules.proxy.http_bridge_forwarding import (
@@ -867,6 +868,36 @@ def _is_account_neutral_request_rejection(
     return bool(_facade()._is_missing_tool_output_message(message))
 
 
+def _is_model_scoped_rejection(
+    *,
+    http_status: int | None,
+    message: str | None,
+) -> bool:
+    """Return whether upstream rejected the requested model, not the account.
+
+    The ChatGPT model-entitlement rejection is scoped to the model named in the
+    message. It proves nothing about the account's ability to serve the models
+    it *is* entitled to, so it must never move that account's ``error_count``:
+    otherwise one client looping on a model no account can serve drives every
+    serving account into ``ERROR_BACKOFF_THRESHOLD`` backoff and starves all
+    unrelated traffic on those accounts -- the exact failure mode when a model
+    reaches subscription selection because its OpenAI-compatible model source
+    is disabled or unreachable.
+
+    Failover is deliberately untouched: the classified failure is still
+    returned, so the caller keeps trying other accounts, whose entitlements may
+    differ.
+
+    The normalized code is not part of the match. Upstream delivers this
+    rejection with neither ``code`` nor ``type`` on the streaming path, which
+    normalizes to ``upstream_error``; on other paths it arrives as
+    ``invalid_request_error``. Only the exact message shape decides membership.
+    """
+    if http_status is not None and http_status != 400:
+        return False
+    return is_model_scoped_upstream_rejection(message)
+
+
 async def _handle_stream_error(
     proxy: Any,
     account: Account,
@@ -891,6 +922,17 @@ async def _handle_stream_error(
     ):
         _facade().logger.info(
             "Skipped account error penalty for account-neutral request rejection account_id=%s request_id=%s code=%s",
+            "<redacted>" if privacy_policy.redacts_sensitive_details else account.id,
+            get_request_id(),
+            code,
+        )
+        return classified
+    if _is_model_scoped_rejection(
+        http_status=http_status,
+        message=error.get("message"),
+    ):
+        _facade().logger.info(
+            "Skipped account error penalty for model-scoped upstream rejection account_id=%s request_id=%s code=%s",
             "<redacted>" if privacy_policy.redacts_sensitive_details else account.id,
             get_request_id(),
             code,

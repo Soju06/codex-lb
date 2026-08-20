@@ -424,8 +424,13 @@ class _AliasSourceCatalog:
                 *,
                 allowed_source_ids=None,  # noqa: ANN001
                 require_streaming: bool = False,
+                only_disabled: bool = False,
             ):  # noqa: ANN202
                 catalog.seen_candidates.append(candidate)
+                # Every source in this fake catalog is enabled, so the
+                # disabled-source lookup is always a miss.
+                if only_disabled:
+                    return None
                 if candidate in catalog.source_models:
                     return SimpleNamespace(id="src_alias", name="alias-source", enabled=True)
                 return None

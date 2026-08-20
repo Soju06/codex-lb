@@ -68,6 +68,7 @@ from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy import helpers as proxy_helpers_module
 from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service import compact as proxy_compact_service
@@ -278,8 +279,9 @@ async def test_process_network_failure_does_not_update_account_health() -> None:
             "No tool output found for function call call_abc.",
             True,
         ),
-        # A model-entitlement rejection is account scoped and must stay
-        # penalizing even though it shares the invalid_request_error code.
+        # A model-entitlement rejection is not a payload-shape rejection, so it
+        # is not a member of this narrow set. Its own health-neutrality is
+        # decided by ``_is_model_scoped_rejection`` instead.
         (
             "invalid_request_error",
             400,
@@ -338,8 +340,101 @@ async def test_missing_tool_output_rejection_does_not_penalize_account() -> None
     load_balancer.mark_permanent_failure.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account.",
+            True,
+        ),
+        (
+            "The 'qwen3-4b-instruct-2507-q8-notools:latest' model is not supported "
+            "when using Codex with a ChatGPT account.",
+            True,
+        ),
+        # Whitespace folding matches the existing entitlement matcher.
+        (
+            "The 'gpt-5.3-codex' model is not supported\n  when using Codex with a ChatGPT account.",
+            True,
+        ),
+        ("No tool output found for function call call_abc.", False),
+        ("The selected model is at capacity.", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_model_scoped_upstream_rejection(message: str | None, expected: bool) -> None:
+    assert proxy_helpers_module.is_model_scoped_upstream_rejection(message) is expected
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # The live streaming path normalizes this rejection to the
+        # ``upstream_error`` fallback because upstream sends neither ``code``
+        # nor ``type``; other paths surface ``invalid_request_error``.
+        "upstream_error",
+        "invalid_request_error",
+    ],
+)
 @pytest.mark.asyncio
-async def test_account_scoped_invalid_request_error_still_penalizes_account() -> None:
+async def test_model_scoped_rejection_does_not_penalize_account(code: str) -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        record_errors=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {
+            "message": (
+                "The 'qwen3-4b-instruct-2507-q8-notools:latest' model is not supported "
+                "when using Codex with a ChatGPT account."
+            )
+        },
+        code,
+        400,
+    )
+
+    # Failover is untouched: another account may hold a different entitlement.
+    assert classified["error_code"] == code
+    load_balancer.record_error.assert_not_awaited()
+    load_balancer.record_errors.assert_not_awaited()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
+    load_balancer.mark_permanent_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_model_scoped_rejection_classification_still_fails_over() -> None:
+    """The health skip must not turn the rejection into a terminal success."""
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    classified = await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."},
+        "upstream_error",
+        400,
+    )
+
+    assert classified["failure_class"] == "retryable_transient"
+
+
+@pytest.mark.asyncio
+async def test_genuine_upstream_error_still_penalizes_account() -> None:
+    """Negative control: a real ChatGPT upstream failure keeps penalizing."""
     load_balancer = SimpleNamespace(
         record_error=AsyncMock(),
         mark_rate_limit=AsyncMock(),
@@ -351,12 +446,57 @@ async def test_account_scoped_invalid_request_error_still_penalizes_account() ->
     await streaming_helpers_module._handle_stream_error(
         proxy,
         cast(Account, SimpleNamespace(id="acc-1")),
-        {"message": "The 'gpt-5.3-codex' model is not supported when using Codex with a ChatGPT account."},
-        "invalid_request_error",
+        {"message": "Upstream request failed"},
+        "upstream_error",
         400,
     )
 
     load_balancer.record_error.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_non_400_model_rejection_message_still_penalizes_account() -> None:
+    """Negative control: only a genuine 400 is an entitlement rejection."""
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."},
+        "server_error",
+        500,
+    )
+
+    load_balancer.record_error.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_still_marks_rate_limit() -> None:
+    """Negative control: quota/rate-limit accounting is unchanged."""
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": "Rate limit reached"},
+        "rate_limit_exceeded",
+        429,
+    )
+
+    load_balancer.mark_rate_limit.assert_awaited_once()
+    load_balancer.record_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio

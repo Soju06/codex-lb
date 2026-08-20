@@ -473,6 +473,198 @@ async def test_source_unreachable_returns_error_envelope_and_releases_reservatio
         assert result.scalars().all() == []
 
 
+async def _set_source_enabled(async_client, source_id: str, enabled: bool) -> None:
+    response = await async_client.patch(f"/api/model-sources/{source_id}", json={"isEnabled": enabled})
+    assert response.status_code == 200
+    assert response.json()["isEnabled"] is enabled
+
+
+async def _disable_source_model(async_client, source_id: str, model: str) -> None:
+    response = await async_client.patch(
+        f"/api/model-sources/{source_id}",
+        json={
+            "models": [
+                {
+                    "model": model,
+                    "displayName": model,
+                    "contextWindow": 8192,
+                    "maxOutputTokens": 1024,
+                    "supportsStreaming": True,
+                    "supportsTools": True,
+                    "isEnabled": False,
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["models"][0]["isEnabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_disabled_source_chat_is_refused_instead_of_hitting_a_subscription(async_client):
+    """A disabled source's model must not be handed to a subscription account.
+
+    Subscription upstreams answer such a request with "The '<model>' model is
+    not supported when using Codex with a ChatGPT account.", which tells the
+    caller nothing and spends the account's health signal on a request no
+    account could ever serve.
+    """
+    await _enable_api_key_auth(async_client)
+    model = "disabled-source-chat-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="disabled-chat-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+    )
+    await _set_source_enabled(async_client, source_id, False)
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "disabled-source-chat-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "model_source_disabled"
+    assert model in error["message"]
+
+    # Refused before any account was selected, so nothing was dispatched and no
+    # reservation was taken.
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        assert result.scalars().all() == []
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
+        )
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_source_model_row_chat_is_refused_instead_of_hitting_a_subscription(async_client):
+    await _enable_api_key_auth(async_client)
+    model = "disabled-row-chat-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="disabled-row-chat-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+    )
+    await _disable_source_model(async_client, source_id, model)
+    created = await async_client.post("/api/api-keys/", json={"name": "disabled-row-chat-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "model_source_disabled"
+    assert "has that model disabled" in error["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/responses", "/backend-api/codex/responses"])
+async def test_disabled_source_responses_is_refused_instead_of_hitting_a_subscription(async_client, path):
+    await _enable_api_key_auth(async_client)
+    model = "disabled-source-responses-model"
+    source_id = await _create_model_source(
+        async_client,
+        name="disabled-responses-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+        supports_responses=True,
+    )
+    await _set_source_enabled(async_client, source_id, False)
+    created = await async_client.post("/api/api-keys/", json={"name": "disabled-source-responses-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        path,
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "input": "hi", "stream": True},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "model_source_disabled"
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).where(RequestLog.model == model))
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_still_falls_through_to_subscription_routing(async_client):
+    """Negative control: a model no source ever claimed keeps today's path.
+
+    The refusal above must key on "a model source owns this slug and is off",
+    not on "the slug is unfamiliar" -- custom subscription catalogs and alias
+    slugs legitimately reach the account pool.
+    """
+    await _enable_api_key_auth(async_client)
+    created = await async_client.post("/api/api-keys/", json={"name": "unknown-model-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "no-source-ever-claimed-this", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    # Unchanged behaviour: subscription selection runs and reports the account
+    # pool's own verdict.
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_accounts"
+
+
+@pytest.mark.asyncio
+async def test_disabled_source_does_not_capture_a_subscription_model_slug(async_client):
+    """Negative control: subscription slugs keep winning over source rows.
+
+    An unscoped key never source-routes a slug the subscription registry
+    already serves, so a disabled source that happens to list that slug must
+    not start refusing subscription traffic.
+    """
+    await _enable_api_key_auth(async_client)
+    model = "gpt-5.6-sol"
+    source_id = await _create_model_source(
+        async_client,
+        name="disabled-shadow-source",
+        model=model,
+        base_url=f"http://127.0.0.1:{_free_port()}/v1",
+    )
+    await _set_source_enabled(async_client, source_id, False)
+    created = await async_client.post("/api/api-keys/", json={"name": "shadow-slug-key"})
+    assert created.status_code == 200
+    key = created.json()["key"]
+
+    response = await async_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": model, "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.json()["error"]["code"] == "no_accounts"
+
+
 @pytest.mark.asyncio
 async def test_patch_model_source_returns_updated_model_list(async_client):
     source_id = await _create_model_source(

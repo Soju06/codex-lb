@@ -34,8 +34,19 @@ async def select_responses_model_source(
     *,
     raw_model: str | None = None,
     require_streaming: bool = False,
+    only_disabled: bool = False,
 ) -> tuple[ModelSource, str] | None:
-    """Resolve ``model`` to a Responses-capable model source, if any."""
+    """Resolve ``model`` to a Responses-capable model source, if any.
+
+    ``only_disabled`` inverts the enabled-state filter and leaves every other
+    rule -- candidate order, API key model allowlist, source assignment scope,
+    subscription-registry precedence, route shape, streaming -- untouched, so
+    the answer is exactly "the source this request would have used, had the
+    operator not switched it off". Callers use it after the ordinary lookup
+    misses, to refuse the request instead of handing a source-owned model to a
+    subscription account that cannot serve it. Sharing one function keeps the
+    two lookups from drifting apart the way the transports once did.
+    """
     assigned_source_ids = allowed_source_ids_for_api_key(api_key)
     exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     candidates = [candidate for candidate in (raw_model, model) if candidate]
@@ -55,6 +66,7 @@ async def select_responses_model_source(
                 candidate,
                 allowed_source_ids=assigned_source_ids,
                 require_streaming=require_streaming,
+                only_disabled=only_disabled,
             )
             if source is not None:
                 break

@@ -23,8 +23,10 @@ from app.modules.dashboard.schemas import (
     DashboardProjectionsResponse,
     DashboardUsageWindows,
     DepletionResponse,
+    WeeklyCreditApiKeyAttribution,
+    WeeklyCreditPaceResponse,
 )
-from app.modules.dashboard.weekly_pace import build_weekly_credit_pace
+from app.modules.dashboard.weekly_pace import DEMAND_WINDOW, build_weekly_credit_pace
 from app.modules.usage.builders import (
     align_bucket_window_start,
     build_activity_summaries,
@@ -38,6 +40,7 @@ from app.modules.usage.depletion_service import (
     prune_depletion_cache,
 )
 from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.repository import NormalizedUsageWindow
 
 # Newest-first per-account row bound for the projections history fetch
 # (PostgreSQL; the SQLite snapshot cache keeps the shared floor). Live
@@ -173,6 +176,32 @@ class DashboardService:
             ),
         )
 
+        dashboard_settings = await self._repo.get_settings()
+        _, secondary_history = await _load_projection_histories(
+            self._repo,
+            primary_usage,
+            secondary_usage,
+            now,
+            smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
+        )
+        settings = get_settings()
+        trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
+            _weekly_history_windows(primary_usage, secondary_usage),
+            since=now - DEMAND_WINDOW,
+            until=now,
+        )
+        weekly_credit_pace = build_weekly_credit_pace(
+            accounts=accounts,
+            account_summaries=account_summaries,
+            secondary_history=secondary_history,
+            now=now,
+            usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            trailing_demand_used_percent_by_account=trailing_demand,
+            working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
+            smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
+        )
+        await _attach_top_api_keys(self._repo, weekly_credit_pace, now)
+
         additional_ts = await self._repo.latest_additional_recorded_at()
         return DashboardOverviewResponse(
             last_sync_at=_latest_recorded_at(primary_usage, secondary_usage, monthly_usage, additional_ts),
@@ -181,6 +210,7 @@ class DashboardService:
             summary=summary,
             windows=windows,
             trends=trends,
+            weekly_credit_pace=weekly_credit_pace,
         )
 
     async def get_projections(self) -> DashboardProjectionsResponse:
@@ -207,20 +237,48 @@ class DashboardService:
         )
         pri_depletion, sec_depletion = _build_depletion_by_window(primary_history, secondary_history, now)
         settings = get_settings()
+        trailing_demand = await self._repo.positive_used_percent_deltas_by_account(
+            _weekly_history_windows(primary_usage, secondary_usage),
+            since=now - DEMAND_WINDOW,
+            until=now,
+        )
         weekly_credit_pace = build_weekly_credit_pace(
             accounts=accounts,
             account_summaries=account_summaries,
             secondary_history=secondary_history,
             now=now,
             usage_refresh_interval_seconds=settings.usage_refresh_interval_seconds,
+            trailing_demand_used_percent_by_account=trailing_demand,
             working_days=_parse_weekly_pace_working_days(dashboard_settings.weekly_pace_working_days),
             smoothing_window_minutes=dashboard_settings.weekly_pace_smoothing_minutes,
         )
+        await _attach_top_api_keys(self._repo, weekly_credit_pace, now)
         return DashboardProjectionsResponse(
             depletion_primary=pri_depletion,
             depletion_secondary=sec_depletion,
             weekly_credit_pace=weekly_credit_pace,
         )
+
+
+async def _attach_top_api_keys(
+    repo: DashboardRepository,
+    weekly_credit_pace: WeeklyCreditPaceResponse | None,
+    now: datetime,
+) -> None:
+    if weekly_credit_pace is None:
+        return
+    rows = await repo.top_api_key_attribution_since(now - timedelta(hours=2), now=now)
+    weekly_credit_pace.top_api_keys = [
+        WeeklyCreditApiKeyAttribution(
+            api_key_id=row.api_key_id,
+            name=row.name,
+            requests=row.requests,
+            billable_tokens=row.billable_tokens,
+            cached_tokens=row.cached_tokens,
+            dominant_model=row.dominant_model,
+        )
+        for row in rows
+    ]
 
 
 async def _load_projection_histories(
@@ -411,6 +469,31 @@ def _should_use_weekly_primary_history(
         usage_history_to_window_row(primary_entry),
         usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None,
     )
+
+
+def _weekly_history_windows(
+    primary_usage: dict[str, UsageHistory],
+    secondary_usage: dict[str, UsageHistory],
+) -> dict[str, NormalizedUsageWindow]:
+    primary_rows, _ = usage_core.normalize_weekly_only_rows(
+        _rows_from_latest(primary_usage),
+        _rows_from_latest(secondary_usage),
+    )
+    normalized_primary_ids = {row.account_id for row in primary_rows}
+    windows: dict[str, NormalizedUsageWindow] = {}
+    for account_id in set(primary_usage) | set(secondary_usage):
+        if account_id in normalized_primary_ids:
+            if account_id in secondary_usage:
+                windows[account_id] = "secondary"
+        elif account_id in primary_usage:
+            windows[account_id] = (
+                "primary"
+                if _should_use_weekly_primary_history(primary_usage[account_id], secondary_usage.get(account_id))
+                else "secondary"
+            )
+        else:
+            windows[account_id] = "secondary"
+    return windows
 
 
 def _latest_recorded_at(

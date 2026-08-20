@@ -2781,6 +2781,172 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
 
 
 @pytest.mark.asyncio
+async def test_source_responses_stream_starts_sse_keepalive_before_first_upstream_event(monkeypatch):
+    """Source-routed /v1/responses must keep SSE alive like account streams."""
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
+
+    release_upstream = asyncio.Event()
+    keepalives: list[str] = []
+
+    async def delayed_body():
+        await release_upstream.wait()
+        # Split across chunk boundaries so reassembly is required.
+        event = _sse_event({"type": "response.completed", "response": {"id": "resp_source_delayed"}})
+        mid = max(1, len(event) // 2)
+        yield event[:mid].encode("utf-8")
+        yield event[mid:].encode("utf-8")
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=delayed_body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0.01)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+    monkeypatch.setattr(
+        proxy_api_module,
+        "_record_stream_keepalive",
+        lambda surface: keepalives.append(surface),
+    )
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.9", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_keepalive",
+        name="keepalive-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    iterator = response.body_iterator.__aiter__()
+    first_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first_chunk == SSE_KEEPALIVE_FRAME
+    assert keepalives == ["responses_source"]
+    release_upstream.set()
+    remaining: list[str] = []
+    while True:
+        try:
+            remaining.append(cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)))
+        except StopAsyncIteration:
+            break
+    joined = "".join(remaining)
+    assert "resp_source_delayed" in joined
+    # Public contract synthesizes response.created before the delayed terminal.
+    assert "response.created" in joined
+
+
+@pytest.mark.asyncio
+async def test_source_responses_normalize_error_still_settles_reservation(monkeypatch):
+    """Normalize early-return must not aclose settlement as client_disconnected."""
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsage, SourceUsageHolder
+
+    settle_calls: list[object] = []
+    log_statuses: list[str] = []
+
+    async def error_then_completed_body():
+        yield b'data: {"type":"error","error":{"message":"boom","code":"server_error"}}\n\n'
+        yield b'data: {"type":"response.completed","response":{"id":"resp_should_not_matter"}}\n\n'
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=error_then_completed_body(),
+            usage_holder=SourceUsageHolder(usage=SourceUsage(input_tokens=1, output_tokens=1)),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return object()
+
+    async def record_settle(reservation, **kwargs):
+        del kwargs
+        settle_calls.append(reservation)
+        return True
+
+    async def record_log(*args, **kwargs):
+        del args
+        log_statuses.append(str(kwargs.get("status")))
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+    monkeypatch.setattr(proxy_api_module, "_settle_source_reservation", record_settle)
+    monkeypatch.setattr(proxy_api_module, "_log_source_chat_completion", record_log)
+    monkeypatch.setattr(proxy_api_module, "_reservation_requires_usage", lambda _reservation: False)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.10", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_normalize_error",
+        name="normalize-error-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+    assert isinstance(response, StreamingResponse)
+    chunks = [cast(str, chunk) async for chunk in response.body_iterator]
+    joined = "".join(chunks)
+    assert "response.failed" in joined or '"type":"error"' in joined or "boom" in joined
+    assert settle_calls, "normalize early-return must still settle the outer reservation"
+    assert "cancelled" not in log_statuses
+
+
+@pytest.mark.asyncio
 async def test_backend_desktop_openai_shape_uses_codex_heartbeat_with_sdk_normalization(
     async_client,
     monkeypatch,

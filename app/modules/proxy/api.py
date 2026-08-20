@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 import json
 import logging
 import math
@@ -48,10 +47,13 @@ from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import (
+    _SSE_SEPARATOR_OVERLAP,
     CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     CodexControlRequestPrivacyPolicy,
     CodexControlResponse,
     ProxyResponseError,
+    StreamEventTooLargeError,
+    _find_sse_separator,
     _is_native_codex_request,
 )
 from app.core.clients.proxy_websocket import (
@@ -1152,6 +1154,8 @@ async def responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
+            enforce_openai_sdk_contract=openai_sdk_request,
+            native_codex_heartbeat=native_codex_heartbeat,
         )
 
     apply_enforced_service_tier_model_fallback(
@@ -4735,6 +4739,8 @@ async def _source_responses_response(
     api_key: ApiKeyData | None,
     rate_limit_headers: Mapping[str, str],
     pre_normalization_effort: str | None,
+    enforce_openai_sdk_contract: bool = True,
+    native_codex_heartbeat: bool = False,
 ) -> Response:
     # This is the first point where the request is known to be served by a
     # model source rather than a subscription account, so it is the only place
@@ -4823,14 +4829,22 @@ async def _source_responses_response(
             # that buffer gate remains.
             if isinstance(response, StreamingResponse):
                 return StreamingResponse(
-                    _wrap_source_responses_public_stream(response.body_iterator),
+                    _wrap_source_responses_public_stream(
+                        response.body_iterator,
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                        native_codex_heartbeat=native_codex_heartbeat,
+                    ),
                     media_type=response.media_type,
                     status_code=response.status_code,
                     headers=dict(response.headers),
                 )
             return response
         body = _source_chat_stream_with_settlement(
-            _wrap_source_responses_public_stream(stream.body),
+            _wrap_source_responses_public_stream(
+                stream.body,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                native_codex_heartbeat=native_codex_heartbeat,
+            ),
             usage_holder=stream.usage_holder,
             request=request,
             source=source,
@@ -5507,16 +5521,18 @@ async def _buffered_limited_source_chat_stream_response(
 
 async def _iter_source_sse_event_blocks(
     stream: AsyncIterable[bytes | str | memoryview[int]],
+    *,
+    max_event_bytes: int | None = None,
 ) -> AsyncIterator[str]:
     """Reassemble chunked source bytes into SSE event blocks for public shaping.
 
-    SSE permits CR, LF, and CRLF line endings. Decode incrementally so multi-byte
-    UTF-8 characters spanning chunks survive, and hold a trailing ``\\r`` until the
-    next chunk so a split CRLF cannot become a false ``\\n\\n`` boundary.
+    Detects LF, CRLF, and CR-only blank-line separators without rewriting the
+    retained event's terminator bytes, so unmodified pass-through stays
+    byte-identical. Bounds reassembly with ``max_sse_event_bytes``.
     """
-    decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    buffer = ""
-    pending_cr = False
+    limit = max_event_bytes if max_event_bytes is not None else get_settings().max_sse_event_bytes
+    buffer = bytearray()
+    scanned = 0
     iterator: AsyncIterator[bytes | str | memoryview[int]] | None = None
     try:
         iterator = stream.__aiter__()
@@ -5529,28 +5545,28 @@ async def _iter_source_sse_event_blocks(
                 raw = chunk.encode("utf-8")
             else:
                 raw = chunk
-            text = decoder.decode(raw)
-            if pending_cr:
-                if text.startswith("\n"):
-                    text = text[1:]
-                buffer += "\n"
-                pending_cr = False
-            if text.endswith("\r"):
-                pending_cr = True
-                text = text[:-1]
-            buffer += text.replace("\r\n", "\n").replace("\r", "\n")
-            while "\n\n" in buffer:
-                raw_block, buffer = buffer.split("\n\n", 1)
-                if raw_block:
-                    yield f"{raw_block}\n\n"
-        trailing = decoder.decode(b"", final=True)
-        if pending_cr:
-            buffer += "\n"
-            pending_cr = False
-        if trailing:
-            buffer += trailing.replace("\r\n", "\n").replace("\r", "\n")
-        if buffer.strip():
-            yield buffer
+            buffer.extend(raw)
+            while True:
+                separator = _find_sse_separator(buffer, max(0, scanned - _SSE_SEPARATOR_OVERLAP))
+                if separator is None:
+                    scanned = len(buffer)
+                    if len(buffer) > limit:
+                        raise StreamEventTooLargeError(len(buffer), limit)
+                    break
+                index, separator_len = separator
+                event_end = index + separator_len
+                raw_event = bytes(buffer[:event_end])
+                del buffer[:event_end]
+                scanned = 0
+                if len(raw_event) > limit:
+                    raise StreamEventTooLargeError(len(raw_event), limit)
+                if raw_event.strip():
+                    yield raw_event.decode("utf-8", errors="replace")
+        if buffer:
+            if len(buffer) > limit:
+                raise StreamEventTooLargeError(len(buffer), limit)
+            if buffer.strip():
+                yield bytes(buffer).decode("utf-8", errors="replace")
     finally:
         try:
             if iterator is not None:
@@ -5560,24 +5576,69 @@ async def _iter_source_sse_event_blocks(
                 await _aclose_stream(stream)
 
 
-def _wrap_source_responses_public_stream(
+async def _wrap_source_responses_public_stream(
     stream: AsyncIterable[bytes | str | memoryview[int]],
+    *,
+    enforce_openai_sdk_contract: bool = True,
+    native_codex_heartbeat: bool = False,
 ) -> AsyncIterator[str]:
     """Normalize and keep source-routed Responses SSE proxy-timeout friendly.
 
     Account-backed ``_stream_responses`` already reassembles, normalizes, and
-    injects keepalives. Source-routed ``/v1/responses`` previously forwarded
-    raw upstream byte chunks and could idle out through front-door proxies.
+    injects keepalives. Source-routed Responses previously forwarded raw
+    upstream byte chunks and could idle out through front-door proxies.
+
+    Transport-aware: public OpenAI SDK clients get contract enforcement and
+    comment keepalives; native Codex clients keep ``codex.*`` events and
+    ``codex.keepalive`` framing like the subscription path.
     """
-    return inject_sse_keepalives(
-        _normalize_public_responses_stream(
-            _iter_source_sse_event_blocks(stream),
-            enforce_openai_sdk_contract=True,
-        ),
-        get_settings().sse_keepalive_interval_seconds,
-        keepalive_frame=SSE_KEEPALIVE_FRAME,
+    use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
+    keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
+    settings = get_settings()
+    event_blocks = _iter_source_sse_event_blocks(
+        stream,
+        max_event_bytes=getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024),
+    )
+    normalized = _normalize_public_responses_stream(
+        event_blocks,
+        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+    )
+    keepalive_stream = inject_sse_keepalives(
+        normalized,
+        settings.sse_keepalive_interval_seconds,
+        keepalive_frame=keepalive_frame,
         on_keepalive=lambda: _record_stream_keepalive("responses_source"),
     )
+    outbound: AsyncIterator[str] = keepalive_stream
+    if use_codex_keepalive:
+        outbound = _prepend_initial_sse_heartbeat(
+            keepalive_stream,
+            keepalive_frame,
+            request_id=get_request_id(),
+            route_family="responses_source",
+        )
+    try:
+        async for chunk in outbound:
+            yield chunk
+    finally:
+        # Deterministic cascade: outer stream first, then any layers it may not
+        # have closed when the client disconnects mid-flight.
+        try:
+            await _aclose_stream(outbound)
+        finally:
+            if outbound is not keepalive_stream:
+                try:
+                    await _aclose_stream(keepalive_stream)
+                finally:
+                    try:
+                        await _aclose_stream(normalized)
+                    finally:
+                        await _aclose_stream(event_blocks)
+            else:
+                try:
+                    await _aclose_stream(normalized)
+                finally:
+                    await _aclose_stream(event_blocks)
 
 
 async def _source_chat_stream_with_settlement(

@@ -60,42 +60,51 @@ async def inject_sse_keepalives(
 
     A non-positive ``interval_seconds`` disables injection entirely.
     """
-    if interval_seconds <= 0:
-        async for chunk in source:
-            yield chunk
-        return
-
-    async def _next_chunk(it: AsyncIterator[str]) -> str:
-        return await it.__anext__()
-
     iterator = source.__aiter__()
-    pending: asyncio.Task[str] | None = None
     try:
-        while True:
-            if pending is None:
-                pending = asyncio.create_task(_next_chunk(iterator))
-            try:
-                chunk = await asyncio.wait_for(
-                    asyncio.shield(pending),
-                    timeout=interval_seconds,
-                )
-            except asyncio.TimeoutError:
-                if on_keepalive is not None:
-                    on_keepalive()
-                yield keepalive_frame
-                continue
-            except StopAsyncIteration:
+        if interval_seconds <= 0:
+            async for chunk in iterator:
+                yield chunk
+            return
+
+        async def _next_chunk(it: AsyncIterator[str]) -> str:
+            return await it.__anext__()
+
+        pending: asyncio.Task[str] | None = None
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(_next_chunk(iterator))
+                try:
+                    chunk = await asyncio.wait_for(
+                        asyncio.shield(pending),
+                        timeout=interval_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    if on_keepalive is not None:
+                        on_keepalive()
+                    yield keepalive_frame
+                    continue
+                except StopAsyncIteration:
+                    pending = None
+                    break
                 pending = None
-                break
-            pending = None
-            yield chunk
+                yield chunk
+        finally:
+            if pending is not None and not pending.done():
+                pending.cancel()
+                try:
+                    await pending
+                except BaseException:
+                    pass
     finally:
-        if pending is not None and not pending.done():
-            pending.cancel()
-            try:
-                await pending
-            except BaseException:
-                pass
+        aclose = getattr(iterator, "aclose", None)
+        if aclose is not None:
+            await aclose()
+        elif iterator is not source:
+            source_aclose = getattr(source, "aclose", None)
+            if source_aclose is not None:
+                await source_aclose()
 
 
 def format_sse_event(payload: JsonPayload) -> str:

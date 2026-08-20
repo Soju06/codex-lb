@@ -2982,6 +2982,144 @@ async def test_iter_source_sse_event_blocks_closes_owner_when_iterator_close_fai
 
 
 @pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_preserves_crlf_and_cr_terminators():
+    async def body():
+        yield b'event: response.completed\r\ndata: {"type":"response.completed"}\r\n\r\n'
+        yield b'event: response.failed\rdata: {"type":"response.failed"}\r\r'
+
+    blocks = [block async for block in proxy_api_module._iter_source_sse_event_blocks(body())]
+    assert blocks == [
+        'event: response.completed\r\ndata: {"type":"response.completed"}\r\n\r\n',
+        'event: response.failed\rdata: {"type":"response.failed"}\r\r',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_dispatches_cr_only_without_waiting():
+    release_next = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def body():
+        try:
+            yield b'data: {"type":"response.completed","response":{"id":"resp_cr"}}\r\r'
+            await release_next.wait()
+            yield b'data: {"type":"response.failed"}\r\r'
+        finally:
+            closed.set()
+
+    iterator = proxy_api_module._iter_source_sse_event_blocks(body()).__aiter__()
+    first = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first == 'data: {"type":"response.completed","response":{"id":"resp_cr"}}\r\r'
+    release_next.set()
+    second = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert second.endswith("\r\r")
+    with pytest.raises(StopAsyncIteration):
+        await iterator.__anext__()
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_rejects_oversize_event():
+    from app.core.clients.proxy import StreamEventTooLargeError
+
+    async def body():
+        yield b"data: " + (b"x" * 64) + b"\n\n"
+
+    with pytest.raises(StreamEventTooLargeError):
+        async for _ in proxy_api_module._iter_source_sse_event_blocks(body(), max_event_bytes=32):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_wrap_source_responses_native_codex_preserves_codex_events_and_keepalive(monkeypatch):
+    keepalives: list[str] = []
+    release_upstream = asyncio.Event()
+
+    async def delayed_body():
+        await release_upstream.wait()
+        yield (
+            b'data: {"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true}}\n\n'
+            b'data: {"type":"response.completed","response":{"id":"resp_codex_src","output":[]}}\n\n'
+        )
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0.01, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_api_module,
+        "_record_stream_keepalive",
+        lambda surface: keepalives.append(surface),
+    )
+
+    stream = proxy_api_module._wrap_source_responses_public_stream(
+        delayed_body(),
+        enforce_openai_sdk_contract=False,
+        native_codex_heartbeat=True,
+    )
+    iterator = stream.__aiter__()
+    first = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first == CODEX_KEEPALIVE_FRAME
+    # Prefixed heartbeat does not record metrics; wait for an injected idle frame.
+    second = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert second == CODEX_KEEPALIVE_FRAME
+    assert keepalives == ["responses_source"]
+    release_upstream.set()
+    remaining = [cast(str, chunk) async for chunk in iterator]
+    joined = "".join(remaining)
+    assert "codex.rate_limits" in joined
+    assert "response.created" not in joined
+    assert "resp_codex_src" in joined
+
+
+@pytest.mark.asyncio
+async def test_wrap_source_responses_closes_source_on_early_error_and_client_close(monkeypatch):
+    closed: list[str] = []
+
+    async def error_body():
+        try:
+            yield b'data: {"type":"error","error":{"message":"boom","code":"server_error"}}\n\n'
+            yield b'data: {"type":"response.completed","response":{"id":"resp_skip"}}\n\n'
+        finally:
+            closed.append("source")
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        cast(str, chunk)
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            error_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert "response.failed" in joined
+    assert "resp_skip" not in joined
+    assert closed == ["source"]
+
+    closed.clear()
+    hold = asyncio.Event()
+
+    async def held_body():
+        try:
+            yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_hold"}}\n\n'
+            await hold.wait()
+            yield b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_hold"}}\n\n'
+        finally:
+            closed.append("source")
+
+    stream = proxy_api_module._wrap_source_responses_public_stream(
+        held_body(),
+        enforce_openai_sdk_contract=True,
+    )
+    iterator = stream.__aiter__()
+    first = await iterator.__anext__()
+    assert "response.created" in first
+    await iterator.aclose()
+    assert closed == ["source"]
+    hold.set()
+
+
+@pytest.mark.asyncio
 async def test_source_responses_stream_preserves_split_utf8_and_crlf(monkeypatch):
     from app.db.models import ModelSource
     from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder

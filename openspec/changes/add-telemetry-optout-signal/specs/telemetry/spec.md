@@ -64,4 +64,3 @@ MUST remain completely silent.
 - **WHEN** telemetry is disabled and the service runs through startup and a 24-hour scheduler
   cycle outside the dashboard decision-time transition
 - **THEN** no connection attempt to the telemetry endpoint is made
-

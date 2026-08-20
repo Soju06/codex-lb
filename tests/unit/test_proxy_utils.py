@@ -15478,8 +15478,9 @@ async def test_stream_with_retry_keyed_cancel_during_deferred_health_flush_still
     release_flush.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    while service._background_cleanup_tasks:
-        await asyncio.sleep(0)
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    if cleanup_tasks:
+        await asyncio.wait_for(asyncio.gather(*cleanup_tasks), timeout=1)
     assert settlement_order == [
         "settle",
         f"health:{account_a.id}:upstream_unavailable",

@@ -2934,6 +2934,54 @@ async def test_source_responses_stream_reassembles_crlf_event_blocks(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_closes_owner_when_aiter_fails():
+    closed: list[str] = []
+
+    class _Owner:
+        def __aiter__(self):
+            closed.append("aiter")
+            raise RuntimeError("aiter failed")
+
+        async def aclose(self) -> None:
+            closed.append("owner")
+
+    with pytest.raises(RuntimeError, match="aiter failed"):
+        async for _ in proxy_api_module._iter_source_sse_event_blocks(_Owner()):
+            pass
+
+    assert closed == ["aiter", "owner"]
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_closes_owner_when_iterator_close_fails():
+    closed: list[str] = []
+
+    class _Iterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            closed.append("iterator")
+            raise RuntimeError("iterator close failed")
+
+    class _Owner:
+        def __aiter__(self):
+            return _Iterator()
+
+        async def aclose(self) -> None:
+            closed.append("owner")
+
+    with pytest.raises(RuntimeError, match="iterator close failed"):
+        async for _ in proxy_api_module._iter_source_sse_event_blocks(_Owner()):
+            pass
+
+    assert closed == ["iterator", "owner"]
+
+
+@pytest.mark.asyncio
 async def test_source_responses_stream_preserves_split_utf8_and_crlf(monkeypatch):
     from app.db.models import ModelSource
     from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder

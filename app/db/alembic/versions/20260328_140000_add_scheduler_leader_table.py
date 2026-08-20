@@ -11,16 +11,20 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        op.execute("PRAGMA journal_mode=WAL")
+        op.execute("PRAGMA busy_timeout=10000")
     inspector = sa.inspect(bind)
     if not inspector.has_table("scheduler_leader"):
         op.create_table(
             "scheduler_leader",
-            sa.Column("id", sa.Integer(), nullable=False),
+            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=False),
             sa.Column("leader_id", sa.String(length=100), nullable=False),
             sa.Column("acquired_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-            sa.PrimaryKeyConstraint("id"),
         )
+        # Single-row table: ensure only one row can exist
+        op.execute("INSERT INTO scheduler_leader (id, leader_id, acquired_at, expires_at) VALUES (1, '', '1970-01-01 00:00:00', '1970-01-01 00:00:00')")
 
     index_names = {index["name"] for index in inspector.get_indexes("scheduler_leader")}
     if "ix_scheduler_leader_expires_at" not in index_names:

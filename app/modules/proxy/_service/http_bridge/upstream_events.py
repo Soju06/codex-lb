@@ -430,6 +430,24 @@ async def _persist_http_bridge_operation_event(
     append_event = getattr(getattr(service, "_durable_bridge", None), "append_operation_event", None)
     if not operation_id or session_id is None or owner_epoch is None:
         return False
+    append_barrier_released = False
+    delivery_barrier_released = False
+    terminal_enqueued = False
+
+    async def release_terminal_append_barrier() -> None:
+        nonlocal append_barrier_released
+        if terminal_append_barrier is None or append_barrier_released:
+            return
+        append_barrier_released = True
+        await terminal_append_barrier()
+
+    async def release_terminal_delivery_barrier() -> None:
+        nonlocal delivery_barrier_released
+        if terminal_delivery_barrier is None or delivery_barrier_released:
+            return
+        delivery_barrier_released = True
+        await terminal_delivery_barrier()
+
     try:
         batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
         append_terminal_batch = getattr(batcher, "append_terminal_event", None)
@@ -487,14 +505,16 @@ async def _persist_http_bridge_operation_event(
                 ),
                 name=f"http-bridge-terminal-append-{operation_id}",
             )
-            append_result, deferred_cancellation = await _await_task_deferring_cancellation(append_task)
-            if terminal_append_barrier is not None:
-                await terminal_append_barrier()
+            # Counted grouped siblings wait on this barrier; release it even when
+            # append raises so gather(..., return_exceptions=True) cannot strand them.
+            try:
+                append_result, deferred_cancellation = await _await_task_deferring_cancellation(append_task)
+            finally:
+                await release_terminal_append_barrier()
             persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
             settlement_required = bool(getattr(append_result, "settlement_required", False))
-            terminal_enqueued = False
             if settlement_required:
                 terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                 deferred_cancellation = deferred_cancellation or delivery_cancellation
@@ -502,7 +522,7 @@ async def _persist_http_bridge_operation_event(
                 if not terminal_enqueued:
                     terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                     deferred_cancellation = deferred_cancellation or delivery_cancellation
-                await terminal_delivery_barrier()
+                await release_terminal_delivery_barrier()
             if settlement_required:
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
 
@@ -581,7 +601,23 @@ async def _persist_http_bridge_operation_event(
         # when every event was durably persisted, so never fail a live stream
         # because the optional spool is unavailable.
         logger.warning("Failed to persist HTTP bridge operation event operation_id=%s", operation_id, exc_info=True)
-        return False
+        await release_terminal_append_barrier()
+        if terminal_event_queue is not None and terminal and not terminal_enqueued:
+            try:
+                await terminal_event_queue.put(event_block)
+                await terminal_event_queue.put(None)
+                if terminal_delivery_scope is not None:
+                    async with session.pending_lock:
+                        terminal_delivery_scope.terminal_enqueued = True
+                terminal_enqueued = True
+            except Exception:
+                logger.debug(
+                    "Failed to enqueue HTTP bridge terminal after spool error operation_id=%s",
+                    operation_id,
+                    exc_info=True,
+                )
+        await release_terminal_delivery_barrier()
+        return terminal_enqueued
 
 
 async def _wait_for_http_bridge_recovery_settlement_retry(

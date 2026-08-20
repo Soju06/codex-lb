@@ -21,9 +21,6 @@ export type TelemetrySettingsProps = {
   disabled: boolean;
 };
 
-const OPT_OUT_NOTICE =
-  "Disabling from the dashboard sends one anonymous opt-out notice to keep aggregate counts accurate.";
-
 export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
   const { t } = useTranslation();
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -58,7 +55,7 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
           />
         </div>
 
-        <p className="text-xs text-muted-foreground">{OPT_OUT_NOTICE}</p>
+        <p className="text-xs text-muted-foreground">{t("settings.telemetry.optOutNotice")}</p>
 
         {envControlled ? (
           <div className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs font-medium text-foreground">

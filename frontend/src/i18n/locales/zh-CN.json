@@ -1293,6 +1293,7 @@
   "settings.telemetry.description": "分享匿名使用统计，帮助改进 codex-lb。",
   "settings.telemetry.toggleAria": "启用匿名遥测",
   "settings.telemetry.envNotice": "遥测当前由 CODEX_LB_TELEMETRY_ENABLED 环境变量控制。如需在仪表盘中管理此设置，请取消设置该变量。",
+  "settings.telemetry.optOutNotice": "从仪表盘中禁用遥测时，系统会发送一次匿名的选择退出通知，以确保汇总计数准确。",
   "settings.telemetry.collectedData.label": "收集的数据",
   "settings.telemetry.collectedData.description": "查看此实例将发送的匿名数据的完整内容。",
   "settings.telemetry.collectedData.view": "查看收集的数据",

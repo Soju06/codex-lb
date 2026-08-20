@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { TelemetryConsentDialog } from "@/features/settings/components/telemetry-consent-dialog";
+import i18n from "@/i18n";
 import { createTelemetryConsent, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
@@ -34,9 +35,7 @@ describe("TelemetryConsentDialog", () => {
     expect(within(dialog).getByText(/"schema_version": 1/)).toBeInTheDocument();
     expect(within(dialog).getByText(/"consent": "undecided"/)).toBeInTheDocument();
     expect(
-      within(dialog).getByText(
-        "Disabling from the dashboard sends one anonymous opt-out notice to keep aggregate counts accurate.",
-      ),
+      within(dialog).getByText(i18n.t("settings.telemetry.optOutNotice")),
     ).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Keep enabled" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Disable telemetry" })).toBeInTheDocument();

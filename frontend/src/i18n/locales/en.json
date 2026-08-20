@@ -1293,6 +1293,7 @@
   "settings.telemetry.description": "Share anonymous usage statistics to help improve codex-lb.",
   "settings.telemetry.toggleAria": "Enable anonymous telemetry",
   "settings.telemetry.envNotice": "Telemetry is controlled by the CODEX_LB_TELEMETRY_ENABLED environment variable. Unset it to manage this setting from the dashboard.",
+  "settings.telemetry.optOutNotice": "Disabling from the dashboard sends one anonymous opt-out notice to keep aggregate counts accurate.",
   "settings.telemetry.collectedData.label": "Collected data",
   "settings.telemetry.collectedData.description": "Review the exact anonymous payload this instance would send.",
   "settings.telemetry.collectedData.view": "View collected data",

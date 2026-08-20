@@ -4,6 +4,7 @@ import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 
 import { TelemetrySettings } from "@/features/settings/components/telemetry-settings";
+import i18n from "@/i18n";
 import { createTelemetryConsent, createTelemetrySnapshotEnvelope } from "@/test/mocks/factories";
 import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
@@ -27,11 +28,7 @@ describe("TelemetrySettings", () => {
     const toggle = await screen.findByRole("switch", { name: "Enable anonymous telemetry" });
     await waitFor(() => expect(toggle).toBeChecked());
     expect(toggle).toBeEnabled();
-    expect(
-      screen.getByText(
-        "Disabling from the dashboard sends one anonymous opt-out notice to keep aggregate counts accurate.",
-      ),
-    ).toBeInTheDocument();
+    expect(screen.getByText(i18n.t("settings.telemetry.optOutNotice"))).toBeInTheDocument();
 
     await user.click(toggle);
 

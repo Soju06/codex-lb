@@ -897,7 +897,9 @@ def responses_source_route_excluded(payload: ResponsesRequest) -> bool:
     """True when a Responses request must stay on subscription accounts.
 
     Hard continuity via a nonblank ``previous_response_id`` is owner-bound on
-    the subscription account that produced the prior response. A terminal
+    the subscription account that produced the prior response.
+    ``ResponsesRequest`` already normalizes blank/whitespace values to
+    ``None``, so a non-``None`` field here is always nonblank. A terminal
     compaction trigger is served by the upstream compact flow on the turn's
     owner account, and an ``input_file``/``input_image`` file reference is
     pinned to the subscription account that received the upload — none of

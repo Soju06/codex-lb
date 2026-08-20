@@ -10,4 +10,4 @@
 ## 3. Verification
 
 - [x] 3.1 Run focused Helm tests, custom/default manual renders, Python lint, template/YAML checks, and strict OpenSpec validation.
-- [ ] 3.2 Review the committed diff for application/migration selector coverage, internal/external mode separation, and default behavior.
+- [x] 3.2 Review the committed diff for application/migration selector coverage, internal/external mode separation, and default behavior.

@@ -4460,7 +4460,7 @@ async def _source_embeddings_response(
         request_model=model,
         request_service_tier=None,
     )
-    outbound = payload.model_dump(exclude_none=True)
+    outbound = payload.model_dump(exclude_unset=True)
     outbound["model"] = model
     try:
         result = await forward_source_embeddings(source, outbound)

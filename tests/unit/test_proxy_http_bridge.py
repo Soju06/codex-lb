@@ -193,6 +193,103 @@ async def test_http_bridge_event_put_stops_when_queue_is_revoked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_cancellation_before_consumer_loop_revokes_full_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="cancel-before-consumer")
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=2, revoked=revoked)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-cancel-before-consumer",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=event_queue,
+        event_queue_revoked=revoked,
+        transport="http",
+    )
+    producer_started = asyncio.Event()
+    producer_released = asyncio.Event()
+    cooldown_entered = asyncio.Event()
+    producer_task: asyncio.Task[None] | None = None
+
+    async def produce_after_capacity() -> None:
+        producer_started.set()
+        await event_queue.put("third")
+        producer_released.set()
+
+    async def submit_request(
+        target_session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        nonlocal producer_task
+        del text_data, queue_limit
+        async with target_session.pending_lock:
+            target_session.pending_requests.append(request_state)
+            target_session.queued_request_count += 1
+        event_queue.put_nowait("first")
+        event_queue.put_nowait("second")
+        producer_task = asyncio.create_task(produce_after_capacity(), name="test-http-bridge-blocked-producer")
+        await producer_started.wait()
+        assert not producer_task.done()
+
+    async def hold_precreated_cooldown(target_session: proxy_service._HTTPBridgeSession) -> float:
+        del target_session
+        cooldown_entered.set()
+        await asyncio.Event().wait()
+        return 0.0
+
+    monkeypatch.setattr(service, "_submit_http_bridge_request", submit_request)
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", hold_precreated_cooldown)
+    stream = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    consumer_task = asyncio.create_task(anext(stream))
+
+    try:
+        await asyncio.wait_for(cooldown_entered.wait(), timeout=1.0)
+        consumer_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(consumer_task, timeout=1.0)
+        await asyncio.wait_for(producer_released.wait(), timeout=1.0)
+        await stream.aclose()
+
+        assert revoked.is_set()
+        assert request_state.event_queue is None
+        assert request_state.draining_until_terminal is True
+        assert request_state not in session.pending_requests
+        assert session.queued_request_count == 0
+        assert session.upstream_control.reconnect_requested is True
+        assert session.upstream_control.retire_after_drain is True
+        assert session.upstream_close_attempted is True
+        assert [event_queue.get_nowait(), event_queue.get_nowait()] == ["first", "second"]
+        assert event_queue.empty()
+        assert producer_task is not None and producer_task.done()
+        assert not [
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
+        ]
+    finally:
+        consumer_task.cancel()
+        if producer_task is not None:
+            producer_task.cancel()
+            await asyncio.gather(producer_task, return_exceptions=True)
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_durable_replay_uses_finite_transcript_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

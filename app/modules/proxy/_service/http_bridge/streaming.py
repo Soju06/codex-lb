@@ -3854,6 +3854,12 @@ class _HTTPBridgeStreamingMixin:
                 )
             )
 
+        async def detach_downstream_request() -> None:
+            with anyio.CancelScope(shield=True):
+                await self._detach_http_bridge_request(session, request_state=request_state)
+                session.last_used_at = _service_time().monotonic()
+                await self._maybe_release_idle_http_bridge_session_lease(session)
+
         while True:
             budget_terminal_event = await operation_fenced_request_budget_terminal_event()
             if budget_terminal_event is not None:
@@ -3949,10 +3955,17 @@ class _HTTPBridgeStreamingMixin:
                 # injected previous_response_id and its continuity anchor.
                 text_data = request_state.request_text or text_data
                 continue
+            except BaseException:
+                await detach_downstream_request()
+                raise
             break
         event_queue = request_state.event_queue
         assert event_queue is not None
-        initial_retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+        try:
+            initial_retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
+        except BaseException:
+            await detach_downstream_request()
+            raise
         if (
             initial_retry_cooldown_seconds > 0
             and session.key.strength == "hard"
@@ -4488,7 +4501,4 @@ class _HTTPBridgeStreamingMixin:
                 yield event_block
                 yielded_any = True
         finally:
-            with anyio.CancelScope(shield=True):
-                await self._detach_http_bridge_request(session, request_state=request_state)
-                session.last_used_at = _service_time().monotonic()
-                await self._maybe_release_idle_http_bridge_session_lease(session)
+            await detach_downstream_request()

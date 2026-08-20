@@ -19,8 +19,8 @@ view it later from Settings. The signed snapshot body has three fields:
 
 The versioned `metrics` schema contains only these fields:
 
-- `schema_version`, random `instance_id`, codex-lb `version`, Python version, OS, architecture,
-  and process uptime
+- `schema_version`, active `consent` (`undecided` or `enabled`), random `instance_id`, codex-lb
+  `version`, Python version, OS, architecture, and process uptime
 - `deploy`: deployment method, database backend and size bucket, replica count, and whether
   trusted reverse-proxy headers are enabled
 - `accounts`: bucketed pool and plan counts, whether workspace accounts exist, routing policy,
@@ -52,7 +52,31 @@ CODEX_LB_TELEMETRY_ENABLED=false
 ```
 
 An environment value overrides the saved dashboard setting. When telemetry resolves to
-disabled, codex-lb opens no connection to the telemetry endpoint.
+disabled, codex-lb opens no connection to the telemetry endpoint. The environment kill switch
+is always completely silent.
+
+When a dashboard decision changes telemetry from active to inactive, codex-lb makes one final
+signed request to `POST /v1/optout` so aggregate opt-out counts remain accurate. If the instance
+has not contacted the collector in this process, it first performs the normal registration and
+activation. Re-enabling and later disabling from the dashboard sends one new notice for that new
+transition. Repeating an already-disabled decision sends nothing.
+
+The opt-out request uses the same `X-Instance-ID` and Ed25519 `X-Signature` headers as a snapshot.
+Its canonical JSON body is:
+
+```json
+{
+  "app_version": "<codex-lb version>",
+  "event": "optout",
+  "instance_id": "<random UUIDv4>",
+  "occurred_at": "<current ISO 8601 UTC time>"
+}
+```
+
+This single decision-time notice is the only exception to disabled telemetry silence. It is
+sent only for a dashboard-driven active-to-inactive transition; setting
+`CODEX_LB_TELEMETRY_ENABLED=false`, or changing a saved decision while either environment
+override value controls telemetry, never sends it.
 
 ## Retention and failures
 
@@ -61,7 +85,8 @@ codex-lb does not keep a separate local telemetry history and does not queue a f
 collector's server-side retention duration is not currently specified; assume transmitted
 snapshots remain stored until a published retention policy or explicit deletion.
 
-Endpoint failures use a bounded timeout, are logged only at debug level, and never interrupt
-proxy traffic.
+Snapshot and opt-out endpoint failures use a five-second total timeout, retry no more than once,
+are logged only at debug level, and never interrupt proxy traffic or change the dashboard
+settings response.
 
 *Source of truth: [telemetry OpenSpec capability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/telemetry)*

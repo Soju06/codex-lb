@@ -1436,11 +1436,49 @@ async def test_model_context_window_override_clamped_to_max_context_window(async
     assert resp_v1.status_code == 200
     v1_entry = next(m for m in resp_v1.json()["data"] if m["id"] == "gpt-5.4")
 
-    # The reported input budget never exceeds the upstream-declared ceiling.
+    # The reported input budget never exceeds the upstream-declared ceiling, and
+    # `metadata.context_window` reports the same clamped value: the override is
+    # resolved once, so the clamp cannot reintroduce a dual-budget split.
+    assert v1_entry["metadata"]["context_window"] == 872_000
     assert v1_entry["metadata"]["input_context_window"] == 872_000
     assert v1_entry["capabilities"]["context_length"] == 872_000
     assert v1_entry["contextLength"] == 872_000
     assert v1_entry["context_length"] == 872_000
+
+    # The Codex-native catalog shares the same single resolution.
+    resp_codex = await async_client.get("/backend-api/codex/models")
+    assert resp_codex.status_code == 200
+    native_entry = next(m for m in resp_codex.json()["models"] if m["slug"] == "gpt-5.4")
+    assert native_entry["context_window"] == 872_000
+    assert native_entry["max_context_window"] == 872_000
+
+
+@pytest.mark.asyncio
+async def test_model_context_window_override_applies_to_codex_models_data_alias(async_client, monkeypatch):
+    registry = get_model_registry()
+    models = [_make_upstream_model("gpt-5.4")]
+    await registry.update({"pro": models})
+
+    from app.core.config.settings import get_settings
+    from app.modules.proxy import api as proxy_api_module
+
+    patched = get_settings().model_copy(update={"model_context_window_overrides": {"gpt-5.4": 515_000}})
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+
+    # The OpenAI-compatible `data` alias on /backend-api/codex/models is built
+    # from the same list-item shape as /v1/models, so the override reaches its
+    # context_length-family fields too (pinned: both views advertise one budget).
+    resp = await async_client.get("/backend-api/codex/models")
+    assert resp.status_code == 200
+    payload = resp.json()
+    native_entry = next(m for m in payload["models"] if m["slug"] == "gpt-5.4")
+    assert native_entry["context_window"] == 515_000
+    alias_item = next(m for m in payload["data"] if m["id"] == "gpt-5.4")
+    assert alias_item["metadata"]["context_window"] == 515_000
+    assert alias_item["metadata"]["input_context_window"] == 515_000
+    assert alias_item["capabilities"]["context_length"] == 515_000
+    assert alias_item["contextLength"] == 515_000
+    assert alias_item["context_length"] == 515_000
 
 
 @pytest.mark.asyncio

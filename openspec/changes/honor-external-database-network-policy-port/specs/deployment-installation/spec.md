@@ -2,12 +2,7 @@
 
 ### Requirement: External database network egress uses the configured port
 
-The Helm chart MUST permit external PostgreSQL egress on the same
-`externalDatabase.port` used by the chart-generated database URL when bundled
-PostgreSQL is disabled and NetworkPolicy is enabled. If the operator does not
-override the external database port, both rendered values MUST default to 5432. Bundled
-PostgreSQL egress MUST continue to target its chart-managed service on port
-5432.
+The Helm chart MUST permit external PostgreSQL egress on the same `externalDatabase.port` used by the chart-generated database URL when bundled PostgreSQL is disabled and NetworkPolicy is enabled. If the operator does not override the external database port, both rendered values MUST default to 5432. Bundled PostgreSQL egress MUST continue to target its chart-managed service on port 5432.
 
 #### Scenario: Custom external database port is rendered consistently
 

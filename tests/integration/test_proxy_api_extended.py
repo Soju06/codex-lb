@@ -3063,7 +3063,7 @@ async def test_wrap_source_responses_native_codex_preserves_codex_events_and_kee
     assert second == CODEX_KEEPALIVE_FRAME
     assert keepalives == ["responses_source"]
     release_upstream.set()
-    remaining = [cast(str, chunk) async for chunk in iterator]
+    remaining = [chunk async for chunk in iterator]
     joined = "".join(remaining)
     assert "codex.rate_limits" in joined
     assert "response.created" not in joined
@@ -3085,7 +3085,7 @@ async def test_wrap_source_responses_closes_source_on_early_error_and_client_clo
     monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
 
     chunks = [
-        cast(str, chunk)
+        chunk
         async for chunk in proxy_api_module._wrap_source_responses_public_stream(
             error_body(),
             enforce_openai_sdk_contract=True,
@@ -3114,7 +3114,7 @@ async def test_wrap_source_responses_closes_source_on_early_error_and_client_clo
     iterator = stream.__aiter__()
     first = await iterator.__anext__()
     assert "response.created" in first
-    await iterator.aclose()
+    await cast(Any, iterator).aclose()
     assert closed == ["source"]
     hold.set()
 

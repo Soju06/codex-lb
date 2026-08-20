@@ -60,18 +60,21 @@ async def update_telemetry_consent(
     previous = await store.resolve()
     consent = await store.set_decision(payload.enabled)
     if previous.active and not consent.active:
-        identity = await store.get_or_create_identity()
-        task = asyncio.create_task(
-            TelemetrySender().send_opt_out(
-                identity,
-                app_version=__version__,
-                deployment_mode=deployment_method(),
-                os_arch=f"{platform.system().lower()}/{platform.machine().lower()}",
-            ),
-            name="anonymous-telemetry-opt-out",
-        )
-        _OPT_OUT_TASKS.add(task)
-        task.add_done_callback(_handle_opt_out_task_done)
+        try:
+            identity = await store.get_or_create_identity()
+            task = asyncio.create_task(
+                TelemetrySender().send_opt_out(
+                    identity,
+                    app_version=__version__,
+                    deployment_mode=deployment_method(),
+                    os_arch=f"{platform.system().lower()}/{platform.machine().lower()}",
+                ),
+                name="anonymous-telemetry-opt-out",
+            )
+            _OPT_OUT_TASKS.add(task)
+            task.add_done_callback(_handle_opt_out_task_done)
+        except Exception as exc:
+            logger.debug("Unable to schedule anonymous telemetry opt-out", exc_info=exc)
     return await _response(session, store, consent, include_preview=False)
 
 

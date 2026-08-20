@@ -188,6 +188,37 @@ async def test_opt_out_background_send_does_not_block_settings_response(
 
 
 @pytest.mark.asyncio
+async def test_opt_out_identity_failure_is_debug_only_and_preserves_disabled_state(
+    async_client,
+    monkeypatch,
+    opt_out_sender,
+    caplog,
+) -> None:
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+
+    async def fail_identity(_store) -> None:
+        raise RuntimeError("identity decryption failed")
+
+    monkeypatch.setattr(
+        "app.modules.telemetry.api.TelemetryConsentStore.get_or_create_identity",
+        fail_identity,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="app.modules.telemetry.api"):
+        response = await async_client.put("/api/settings/telemetry", json={"enabled": False})
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "disabled"
+    persisted = await async_client.get("/api/settings/telemetry")
+    assert persisted.status_code == 200
+    assert persisted.json()["state"] == "disabled"
+    opt_out_sender.send_opt_out.assert_not_awaited()
+    assert "Unable to schedule anonymous telemetry opt-out" in caplog.messages
+    assert all(record.levelno == logging.DEBUG for record in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_unexpected_opt_out_task_failure_is_debug_only_and_does_not_change_response(
     async_client,
     monkeypatch,

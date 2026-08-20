@@ -723,6 +723,149 @@ _SECURITY_WORK_RETRY_MESSAGE = (
     "Upstream flagged this request as possible cybersecurity work. "
     "codex-lb is retrying on an account marked as authorized for security work."
 )
+_HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_CODES = frozenset({"overloaded_error", "server_is_overloaded"})
+_HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_MESSAGES = (
+    "selected model is at capacity",
+    "servers are currently overloaded",
+)
+
+
+def _http_bridge_terminal_payload_contains_output(payload: dict[str, JsonValue] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    candidates: list[JsonValue | None] = [payload.get("output")]
+    response = payload.get("response")
+    if isinstance(response, dict):
+        candidates.append(response.get("output"))
+    usage_candidates: list[JsonValue | None] = [payload.get("usage")]
+    if isinstance(response, dict):
+        usage_candidates.append(response.get("usage"))
+    for output in candidates:
+        if output is None:
+            continue
+        if isinstance(output, list):
+            if output:
+                return True
+            continue
+        return True
+    for usage in usage_candidates:
+        if not isinstance(usage, dict):
+            continue
+        output_tokens = usage.get("output_tokens")
+        if isinstance(output_tokens, (int, float)) and not isinstance(output_tokens, bool) and output_tokens > 0:
+            return True
+        output_token_details = usage.get("output_tokens_details")
+        if not isinstance(output_token_details, dict):
+            continue
+        reasoning_tokens = output_token_details.get("reasoning_tokens")
+        if (
+            isinstance(reasoning_tokens, (int, float))
+            and not isinstance(reasoning_tokens, bool)
+            and reasoning_tokens > 0
+        ):
+            return True
+    return False
+
+
+def _http_bridge_terminal_capacity_retry_message(message: str | None) -> bool:
+    if not isinstance(message, str):
+        return False
+    normalized = " ".join(message.casefold().split())
+    return any(marker in normalized for marker in _HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_MESSAGES)
+
+
+def _http_bridge_terminal_capacity_retry_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+    has_other_pending_requests: bool,
+    output_payload: dict[str, JsonValue] | None = None,
+) -> str | None:
+    """Classify one output-free accepted overload that native Codex can replay.
+
+    ``payload`` supplies the classification fields and is normally the
+    normalized terminal payload, which carries the request-state error
+    overrides. ``output_payload`` supplies the "did upstream already produce
+    output" evidence and defaults to ``payload``. The two differ because
+    error normalization rebuilds the event from its error fields alone and
+    drops ``usage``: reading the produced-output check off the normalized
+    payload would see no tokens for a turn upstream already billed and would
+    let it replay.
+    """
+    if request_state is None or request_state.enforce_openai_sdk_contract:
+        return None
+    if has_other_pending_requests:
+        return None
+    if request_state.last_downstream_sequence_number is not None:
+        return None
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return None
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return None
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return None
+    if request_state.response_event_count < 1:
+        return None
+    if request_state.event_queue is None:
+        return None
+    if not request_state.request_text or request_state.replay_count >= 1:
+        return None
+    if event_type not in {"error", "response.failed"}:
+        return None
+    if _http_bridge_terminal_payload_contains_output(output_payload if output_payload is not None else payload):
+        return None
+    error_code = _normalize_error_code(
+        _websocket_event_error_code(event_type, payload),
+        _websocket_event_error_type(event_type, payload),
+    )
+    if error_code in _HTTP_BRIDGE_TERMINAL_CAPACITY_RETRY_CODES:
+        return error_code
+    if not _http_bridge_terminal_capacity_retry_message(_websocket_event_error_message(event_type, payload)):
+        return None
+    return error_code or "model_at_capacity"
+
+
+def _http_bridge_transport_close_capacity_retry_error_code(
+    request_state: _WebSocketRequestState | None,
+    *,
+    has_other_pending_requests: bool,
+    error_code: str | None,
+    error_message: str | None,
+) -> str | None:
+    """Classify output-free accepted disconnects that native Codex can replay."""
+    if request_state is None or request_state.enforce_openai_sdk_contract:
+        return None
+    if has_other_pending_requests:
+        return None
+    # A numbered frame already reached the client. The replay carries the
+    # downstream response id forward, but a fresh upstream generation restarts
+    # its own ``sequence_number`` from zero, so the client would see the
+    # counter go backwards under an id it is already reading. Same refusal as
+    # ``_websocket_precreated_retry_error_code`` and the pre-created replay
+    # eligibility in ``support.py``.
+    if request_state.last_downstream_sequence_number is not None:
+        return None
+    if request_state.downstream_visible or request_state.upstream_model_output_seen:
+        return None
+    if request_state.pending_function_call_ids or request_state.pending_tool_call_types:
+        return None
+    if request_state.response_id is None or request_state.awaiting_response_created:
+        return None
+    if request_state.response_event_count < 1:
+        return None
+    if request_state.event_queue is None:
+        return None
+    if not request_state.request_text or request_state.replay_count >= 1:
+        return None
+    normalized_error_code = _normalize_error_code(error_code, None)
+    if normalized_error_code == "proxy_network_unavailable":
+        return None
+    if _http_bridge_terminal_capacity_retry_message(error_message):
+        return normalized_error_code or "model_at_capacity"
+    if normalized_error_code in {"stream_incomplete", "upstream_error", "upstream_unavailable"}:
+        return "stream_incomplete"
+    return None
 
 
 async def _wait_before_http_bridge_model_capacity_retry(
@@ -1508,6 +1651,7 @@ class _HTTPBridgeUpstreamEventsMixin:
 
                 async with session.pending_lock:
                     archive_request_state = session.pending_requests[0] if len(session.pending_requests) == 1 else None
+                    has_other_pending_requests = len(session.pending_requests) != 1
                     response_events_seen = max(
                         (request_state.response_event_count for request_state in session.pending_requests),
                         default=0,
@@ -1535,8 +1679,31 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # side effects. Clean closes remain eligible for the bounded
                 # pre-created retry circuit maintained by the session.
                 account_neutral = is_account_neutral_websocket_error_code(message.error_code)
-                if not account_neutral:
-                    retried = await self._retry_http_bridge_precreated_request(session)
+                if not account_neutral and message.error_code != "proxy_network_unavailable":
+                    capacity_retry_code = _http_bridge_transport_close_capacity_retry_error_code(
+                        archive_request_state,
+                        has_other_pending_requests=has_other_pending_requests,
+                        error_code=message.error_code,
+                        error_message=message.error,
+                    )
+                    capacity_retry_attempted = capacity_retry_code is not None and archive_request_state is not None
+                    if capacity_retry_attempted and archive_request_state is not None:
+                        retried = await self._retry_http_bridge_terminal_capacity_request(
+                            session,
+                            archive_request_state,
+                            error_code=capacity_retry_code,
+                            preserve_for_reader_failure=True,
+                        )
+                        # A capacity retry that did not reach the wire rolls
+                        # its own replay state back in ``finally``, so a refusal
+                        # here -- lost pending ownership, an expired request
+                        # deadline, admission failure, a reconnect that landed
+                        # on another account -- leaves the request exactly as
+                        # the pre-created circuit expects to find it. That
+                        # circuit handled these closes before this classifier
+                        # existed and must keep handling them.
+                    if not retried:
+                        retried = await self._retry_http_bridge_precreated_request(session)
                 if retried:
                     continue
                 close_classification = (
@@ -2787,6 +2954,7 @@ class _HTTPBridgeUpstreamEventsMixin:
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
         ) and (matched_request_state is None or matched_request_state.enforce_openai_sdk_contract)
+        raw_terminal_payload = payload
         settlement_payload = payload
         settlement_event = event
         settlement_event_type = event_type
@@ -2942,6 +3110,22 @@ class _HTTPBridgeUpstreamEventsMixin:
                     retried = await self._retry_http_bridge_security_work_request(session, terminal_request_state)
                     if retried:
                         return
+
+            capacity_retry_code = _http_bridge_terminal_capacity_retry_error_code(
+                terminal_request_state,
+                event_type=settlement_event_type,
+                payload=settlement_payload,
+                output_payload=raw_terminal_payload,
+                has_other_pending_requests=has_other_pending_requests,
+            )
+            if capacity_retry_code is not None:
+                retried = await self._retry_http_bridge_terminal_capacity_request(
+                    session,
+                    terminal_request_state,
+                    error_code=capacity_retry_code,
+                )
+                if retried:
+                    return
 
         matched_event_queue = (
             completed_event_queue

@@ -162,6 +162,99 @@ def _without_installation_metadata(text: str) -> dict[str, Any]:
     return payload
 
 
+@pytest.mark.asyncio
+async def test_http_bridge_event_put_delivers_after_capacity_frees() -> None:
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=1, revoked=revoked)
+    event_queue.put_nowait("first")
+
+    put_task = asyncio.create_task(event_queue.put("second"))
+    first = event_queue.get_nowait()
+    await put_task
+
+    assert first == "first"
+    assert event_queue.get_nowait() == "second"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_put_stops_when_queue_is_revoked() -> None:
+    revoked = asyncio.Event()
+    event_queue = http_bridge_request_submit_module._HTTPBridgeLiveEventQueue(maxsize=1, revoked=revoked)
+    event_queue.put_nowait("first")
+    revoked.set()
+
+    await event_queue.put("second")
+
+    assert event_queue.get_nowait() == "first"
+    assert event_queue.empty()
+    assert not [
+        task for task in asyncio.all_tasks() if task.get_name() in {"http-bridge-event-put", "http-bridge-event-revoke"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_durable_replay_uses_finite_transcript_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="finite-replay")
+    session.durable_session_id = "durable-finite-replay"
+    session.durable_owner_epoch = 3
+    live_queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=1)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-finite-replay",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp-parent",
+        event_queue=live_queue,
+        request_text='{"type":"response.create","previous_response_id":"resp-parent"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    operation = SimpleNamespace(
+        created=False,
+        operation_id="operation-finite-replay",
+        state="completed",
+        response_id="resp-replay",
+        event_spool_complete=True,
+    )
+    replay_events = ["data: first\n\n", "data: second\n\n"]
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=operation),
+            get_operation=AsyncMock(return_value=operation),
+            record_operation=AsyncMock(return_value=operation),
+            get_operation_events=AsyncMock(return_value=replay_events),
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_instance_id="instance-finite-replay"),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    await service._submit_http_bridge_request_with_handoff(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+        queue_limit=8,
+        request_scope_id="scope-finite-replay",
+        owned_unanchored_handoff=False,
+    )
+
+    replay_queue = request_state.event_queue
+    assert replay_queue is not None
+    assert replay_queue is not live_queue
+    assert replay_queue.maxsize == len(replay_events) + 1
+    assert [replay_queue.get_nowait() for _ in range(replay_queue.qsize())] == [*replay_events, None]
+    assert request_state.operation_replay is True
+
+
 def test_http_bridge_operation_metadata_is_stable_and_non_destructive() -> None:
     payload = {"type": "response.create", "previous_response_id": "resp_parent", "input": "continue"}
     text = json.dumps(payload)

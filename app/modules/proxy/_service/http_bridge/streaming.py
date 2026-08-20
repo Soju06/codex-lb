@@ -4054,6 +4054,7 @@ class _HTTPBridgeStreamingMixin:
                         # prevents a later completion from claiming an
                         # orphaned downstream consumer.
                         request_state.event_queue = None
+                        request_state.event_queue_revoked.set()
 
                 if completed_delivery_owns_queue and not completed_delivery_suppression_logged:
                     logger.info(

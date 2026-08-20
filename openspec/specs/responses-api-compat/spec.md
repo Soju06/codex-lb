@@ -3604,7 +3604,9 @@ those paths.
 
 - **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
 - **AND** a client calls `/backend-api/codex/responses` or `/v1/responses` for that
-  model with a ChatGPT/Codex-backend-shaped `previous_response_id`
+  model with a `previous_response_id` matching `^resp_[0-9a-fA-F]{48,}$`
+  (ChatGPT/Codex-backend shape: `resp_` prefix plus at least 48 hexadecimal
+  characters, case-insensitive)
 - **THEN** the request is not forwarded to the external source
 - **AND** it follows the subscription path so hard continuity stays owner-bound
 
@@ -3612,8 +3614,9 @@ those paths.
 
 - **GIVEN** an enabled Responses-compatible source exposes model `deepseek-v4-flash`
 - **AND** a client calls `/backend-api/codex/responses` or `/v1/responses` for that
-  model with a non-ChatGPT-shaped `previous_response_id` minted by a prior
-  source-routed turn
+  model with a `previous_response_id` that does not match
+  `^resp_[0-9a-fA-F]{48,}$` (for example a source-minted id such as
+  `resp_source_owned_continuation`)
 - **THEN** the request remains eligible for that Responses-compatible source
 - **AND** it is not forced onto subscription account selection solely because
   `previous_response_id` is present

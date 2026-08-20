@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Literal
 
 import aiohttp
 
@@ -13,6 +12,7 @@ from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.telemetry.consent import TelemetryConsentStore, TelemetryIdentity
 from app.modules.telemetry.schemas import (
+    DeploymentMethod,
     TelemetryActivation,
     TelemetryModel,
     TelemetryOptOut,
@@ -64,7 +64,7 @@ class TelemetrySender:
         identity: TelemetryIdentity,
         *,
         app_version: str,
-        deployment_mode: Literal["docker", "k8s", "pip", "bare"],
+        deployment_mode: DeploymentMethod,
         os_arch: str,
     ) -> None:
         try:
@@ -123,7 +123,7 @@ class TelemetrySender:
         event: TelemetryOptOut,
         identity: TelemetryIdentity,
         *,
-        deployment_mode: Literal["docker", "k8s", "pip", "bare"],
+        deployment_mode: DeploymentMethod,
         os_arch: str,
     ) -> None:
         await self._ensure_activated(
@@ -141,7 +141,7 @@ class TelemetrySender:
         identity: TelemetryIdentity,
         *,
         app_version: str,
-        deployment_mode: Literal["docker", "k8s", "pip", "bare"],
+        deployment_mode: DeploymentMethod,
         os_arch: str,
     ) -> None:
         if self._activated_instance_id == identity.instance_id:

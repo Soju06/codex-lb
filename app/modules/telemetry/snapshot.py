@@ -39,6 +39,8 @@ from app.modules.settings.repository import SettingsRepository
 from app.modules.telemetry.clients import ClientCount, catalog_model_name, client_shares
 from app.modules.telemetry.schemas import (
     AccountsSnapshot,
+    ActiveConsentState,
+    DeploymentMethod,
     DeploymentSnapshot,
     FeaturesSnapshot,
     ModelUsageSnapshot,
@@ -159,7 +161,7 @@ class TelemetrySnapshotBuilder:
         self,
         instance_id: str,
         *,
-        consent: Literal["undecided", "enabled"],
+        consent: ActiveConsentState,
     ) -> TelemetrySnapshot:
         now = utcnow()
         start = now - timedelta(days=7)
@@ -468,7 +470,7 @@ def _canonical_routing_policy(raw_policy: str | None) -> str:
     return normalized if normalized in _ROUTING_POLICIES else "other"
 
 
-def deployment_method() -> Literal["docker", "k8s", "pip", "bare"]:
+def deployment_method() -> DeploymentMethod:
     if os.environ.get("KUBERNETES_SERVICE_HOST") or Path("/var/run/secrets/kubernetes.io/serviceaccount").exists():
         return "k8s"
     if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():

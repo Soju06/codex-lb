@@ -5,13 +5,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+DeploymentMethod = Literal["docker", "k8s", "pip", "bare"]
+ActiveConsentState = Literal["undecided", "enabled"]
+
 
 class TelemetryModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
 class DeploymentSnapshot(TelemetryModel):
-    method: Literal["docker", "k8s", "pip", "bare"]
+    method: DeploymentMethod
     db_backend: Literal["sqlite", "postgres"]
     db_size_bucket: Literal["unknown", "<100MB", "100MB-1GB", "1-5GB", "5-10GB", "10-50GB", "50GB+"]
     replicas: int = Field(ge=1)
@@ -97,7 +100,7 @@ class FeaturesSnapshot(TelemetryModel):
 
 class TelemetrySnapshot(TelemetryModel):
     schema_version: Literal[1] = 1
-    consent: Literal["undecided", "enabled"]
+    consent: ActiveConsentState
     instance_id: str
     version: str
     python: str
@@ -113,7 +116,7 @@ class TelemetrySnapshot(TelemetryModel):
 class TelemetryRegistration(TelemetryModel):
     app_name: Literal["codex-lb"] = "codex-lb"
     app_version: str
-    deployment_mode: Literal["docker", "k8s", "pip", "bare"]
+    deployment_mode: DeploymentMethod
     environment: str = ""
     instance_id: str
     os_arch: str

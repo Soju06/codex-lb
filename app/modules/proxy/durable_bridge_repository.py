@@ -141,6 +141,7 @@ class DurableBridgeSessionSnapshot:
     account_id: str | None
     model: str | None
     service_tier: str | None
+    requires_security_work_authorized: bool
     latest_turn_state: str | None
     latest_response_id: str | None
     latest_input_item_count: int | None
@@ -677,6 +678,7 @@ class DurableBridgeRepository:
                     latest_input_item_count=None,
                     latest_input_full_fingerprint=None,
                     latest_pending_tool_calls=None,
+                    requires_security_work_authorized=False,
                     last_seen_at=now,
                     closed_at=None,
                 )
@@ -793,6 +795,12 @@ class DurableBridgeRepository:
                     cast("str | None", written_response_id),
                     cast("str | None", written_pending_json),
                 ),
+                requires_security_work_authorized=bool(
+                    values.get(
+                        "requires_security_work_authorized",
+                        existing.requires_security_work_authorized,
+                    )
+                ),
                 last_seen_at=now,
                 closed_at=None,
             )
@@ -844,6 +852,23 @@ class DurableBridgeRepository:
             owner_epoch=owner_epoch,
             values=values,
         )
+
+    async def require_security_work_authorized(
+        self,
+        *,
+        session_id: str,
+    ) -> DurableBridgeSessionSnapshot | None:
+        statement = (
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == session_id)
+            .values(requires_security_work_authorized=True)
+            .returning(*_SNAPSHOT_COLUMNS)
+        )
+        async with sqlite_writer_section():
+            result = await self._session.execute(statement)
+            await self._session.commit()
+        row = result.first()
+        return _returned_row_to_snapshot(row) if row is not None else None
 
     async def rebind_session_account(
         self,
@@ -3017,6 +3042,7 @@ _SNAPSHOT_COLUMNS = (
     HttpBridgeSessionRecord.account_id,
     HttpBridgeSessionRecord.model,
     HttpBridgeSessionRecord.service_tier,
+    HttpBridgeSessionRecord.requires_security_work_authorized,
     HttpBridgeSessionRecord.latest_turn_state,
     HttpBridgeSessionRecord.latest_response_id,
     HttpBridgeSessionRecord.latest_input_item_count,
@@ -3043,6 +3069,7 @@ def _returned_row_to_snapshot(row: Row[tuple[object, ...]]) -> DurableBridgeSess
         account_id=mapping[HttpBridgeSessionRecord.account_id],
         model=mapping[HttpBridgeSessionRecord.model],
         service_tier=mapping[HttpBridgeSessionRecord.service_tier],
+        requires_security_work_authorized=bool(mapping[HttpBridgeSessionRecord.requires_security_work_authorized]),
         latest_turn_state=mapping[HttpBridgeSessionRecord.latest_turn_state],
         latest_response_id=mapping[HttpBridgeSessionRecord.latest_response_id],
         latest_input_item_count=mapping[HttpBridgeSessionRecord.latest_input_item_count],
@@ -3073,6 +3100,7 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         account_id=row.account_id,
         model=row.model,
         service_tier=row.service_tier,
+        requires_security_work_authorized=bool(row.requires_security_work_authorized),
         latest_turn_state=row.latest_turn_state,
         latest_response_id=row.latest_response_id,
         latest_input_item_count=row.latest_input_item_count,

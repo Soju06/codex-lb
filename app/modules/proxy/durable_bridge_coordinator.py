@@ -49,6 +49,7 @@ class DurableBridgeLookup:
     model: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
     owner_process_epoch: str | None = None
+    requires_security_work_authorized: bool = False
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -356,6 +357,17 @@ class DurableBridgeSessionCoordinator:
                 latest_pending_tool_calls=latest_pending_tool_calls,
                 state=state,
             )
+        if snapshot is None:
+            return None
+        return _to_lookup(snapshot)
+
+    async def require_security_work_authorized(
+        self,
+        *,
+        session_id: str,
+    ) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).require_security_work_authorized(session_id=session_id)
         if snapshot is None:
             return None
         return _to_lookup(snapshot)
@@ -947,4 +959,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
         latest_pending_tool_calls=snapshot.latest_pending_tool_calls,
+        requires_security_work_authorized=snapshot.requires_security_work_authorized,
     )

@@ -112,6 +112,10 @@ _PROPAGATED_RESPONSES_OWNER_FORWARD_REJECTED: ContextVar[asyncio.Event | None] =
 )
 
 
+def _security_lineage_ids(*values: object) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(value.strip() for value in values if isinstance(value, str) and value.strip()))
+
+
 def _strip_blank_html_comment_lines(text: str) -> str:
     terminal_match = None
     for match in _REASONING_SUMMARY_BLANK_HTML_COMMENT_RE.finditer(text):

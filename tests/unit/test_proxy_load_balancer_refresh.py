@@ -226,7 +226,14 @@ class StubStickySessionsRepository(StickySessionsRepository):
         )
         return StickyOwnerLookup(account_id=account_id, continuity_abandoned=False)
 
-    async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
+    async def upsert(
+        self,
+        key: str,
+        account_id: str | None,
+        *,
+        kind: StickySessionKind,
+        requires_security_work_authorized: bool = False,
+    ) -> StickySession:
         row = self._build_row(key, account_id, kind)
         self.upserts.append(row)
         return row
@@ -236,7 +243,7 @@ class StubStickySessionsRepository(StickySessionsRepository):
         return False
 
     @staticmethod
-    def _build_row(key: str, account_id: str, kind: StickySessionKind) -> StickySession:
+    def _build_row(key: str, account_id: str | None, kind: StickySessionKind) -> StickySession:
         return StickySession(key=key, account_id=account_id, kind=kind)
 
 

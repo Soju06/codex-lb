@@ -179,7 +179,17 @@ class UsageHistory(Base):
     __tablename__ = "usage_history"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    requires_security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     window: Mapped[str | None] = mapped_column(String, nullable=True)
     used_percent: Mapped[float] = mapped_column(Float, nullable=False)
@@ -794,7 +804,19 @@ class StickySession(Base):
         server_default=text("'sticky_thread'"),
         nullable=False,
     )
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Detached CODEX_SESSION markers retain a security requirement after the
+    # account that originally owned the lineage has been deleted.
+    requires_security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -1690,6 +1712,21 @@ class QuotaPlannerSettings(Base):
     )
     warmup_model_preference: Mapped[str | None] = mapped_column(String, nullable=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
+    # Retain these compatibility fields for databases that previously ran the
+    # broader security-lineage aggregate. This carrier does not enable the
+    # retired planner behavior, but its schema must remain drift-free.
+    auto_redeem_expiring_reset_credits: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    reset_credit_redeem_lead_minutes: Mapped[int] = mapped_column(
+        Integer,
+        default=30,
+        server_default=text("30"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -1884,6 +1921,12 @@ class HttpBridgeSessionRecord(Base):
     )
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    requires_security_work_authorized: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

@@ -143,6 +143,32 @@ async def test_durable_bridge_lookup_prefers_turn_state_then_previous_response_t
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_can_persist_security_requirement(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-security",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+
+    updated = await coordinator.require_security_work_authorized(session_id=claimed.session_id)
+
+    assert updated is not None
+    assert updated.session_id == claimed.session_id
+    assert updated.requires_security_work_authorized is True
+
+
+@pytest.mark.asyncio
 async def test_reversible_recovery_turn_state_registration_restores_previous_owner(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

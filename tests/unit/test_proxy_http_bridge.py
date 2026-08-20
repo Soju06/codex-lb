@@ -17056,6 +17056,7 @@ async def test_get_or_create_http_bridge_session_preserves_explicit_forwarded_af
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        require_security_work_authorized: bool = False,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,
@@ -17067,6 +17068,7 @@ async def test_get_or_create_http_bridge_session_preserves_explicit_forwarded_af
             preferred_account_id,
             require_preferred_account,
             fallback_on_preferred_account_unavailable,
+            require_security_work_authorized,
         )
         captured["key"] = create_key
         return created_session
@@ -17141,6 +17143,7 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        require_security_work_authorized: bool = False,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,
@@ -17152,6 +17155,7 @@ async def test_get_or_create_http_bridge_session_falls_back_to_session_header_wh
             preferred_account_id,
             require_preferred_account,
             fallback_on_preferred_account_unavailable,
+            require_security_work_authorized,
         )
         captured["key"] = create_key
         return created_session
@@ -17350,6 +17354,7 @@ async def test_get_or_create_http_bridge_session_preserves_durable_canonical_pro
         preferred_account_id: str | None = None,
         require_preferred_account: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        **_kwargs: Any,
     ) -> proxy_service._HTTPBridgeSession:
         del (
             headers,
@@ -24711,6 +24716,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
         latest_turn_state="http_turn_model_parent",
         latest_response_id="resp_model_parent",
         model="gpt-5.6-sol",
+        requires_security_work_authorized=True,
     )
     owner_unavailable = ProxyResponseError(
         502,
@@ -24803,6 +24809,7 @@ async def test_durable_model_transition_preserves_owner_provenance_when_replacin
     assert all(call["previous_response_id"] is None for call in creation_calls)
     assert all(call["preferred_account_id"] == "acc-model-owner" for call in creation_calls)
     assert all(call["preferred_account_has_continuity_provenance"] is True for call in creation_calls)
+    assert all(call["require_security_work_authorized"] is True for call in creation_calls)
 
 
 @pytest.mark.asyncio

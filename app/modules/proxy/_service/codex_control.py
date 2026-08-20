@@ -30,10 +30,11 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import openai_error
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.request_id import ensure_request_id, get_request_id
-from app.db.models import Account
+from app.db.models import Account, StickySessionKind
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
+from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
 from app.modules.proxy.selection_errors import selection_failure_response
@@ -45,6 +46,7 @@ T = TypeVar("T")
 class _CodexControlServiceProtocol(Protocol):
     _encryptor: Any
     _load_balancer: Any
+    _repo_factory: Any
 
     async def _select_account_with_budget_compatible(self, deadline: float, **kwargs: object) -> AccountSelection: ...
     async def _select_account_with_budget(self, deadline: float, **kwargs: Any) -> AccountSelection: ...
@@ -223,6 +225,19 @@ class _CodexControlMixin:
             if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
                 return None
             scoped_account_ids = {selected_account_id}
+        # A lineage that already proved security-work authorization must keep
+        # selecting an authorized account; otherwise the follow-up silently
+        # lands somewhere the earlier turn was refused.
+        require_security_work_authorized = False
+        if affinity.kind == StickySessionKind.CODEX_SESSION and affinity.selection_key:
+            async with proxy._repo_factory() as repos:
+                require_security_work_authorized = (
+                    await repos.sticky_sessions.security_work_required(
+                        tuple(key for key in (affinity.selection_key, affinity.legacy_selection_key) if key),
+                        api_key_scope=durable_bridge_api_key_scope(api_key.id if api_key is not None else None),
+                    )
+                    is True
+                )
         selection = await proxy._load_balancer.select_account(
             sticky_key=affinity.selection_key,
             sticky_kind=affinity.kind,
@@ -241,6 +256,7 @@ class _CodexControlMixin:
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
             concurrency_caps=effective_account_concurrency_caps(settings),
+            require_security_work_authorized=require_security_work_authorized,
         )
         if selection.account is None:
             return None

@@ -498,6 +498,7 @@ from app.modules.proxy._service.response_create import (
 from app.modules.proxy._service.response_create import (
     _write_response_create_dump as _write_response_create_dump,
 )
+from app.modules.proxy._service.security_lineage import _SecurityLineageMixin
 from app.modules.proxy._service.streaming import (
     _StreamingMixin,
 )
@@ -577,6 +578,7 @@ from app.modules.proxy._service.support import (
     _request_log_useragent_fields,  # noqa: F401
     _RequestLogFailureMetadata,
     _RetryableStreamError,  # noqa: F401
+    _security_lineage_ids,
     _selection_api_key_fair_share_threshold_pct,
     _stream_settlement_error_payload,  # noqa: F401
     _StreamSettlement,  # noqa: F401
@@ -728,6 +730,7 @@ from app.modules.proxy.durable_bridge_coordinator import (
 from app.modules.proxy.durable_bridge_coordinator import (
     DurableBridgeSessionCoordinator,
 )
+from app.modules.proxy.durable_bridge_repository import durable_bridge_api_key_scope
 from app.modules.proxy.helpers import (
     _apply_error_metadata,
     _header_account_id,
@@ -914,6 +917,7 @@ def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
 
 
 class ProxyService(
+    _SecurityLineageMixin,
     _ApiKeyUsageMixin,
     _RequestLogMixin,
     _RateLimitMixin,
@@ -1430,6 +1434,28 @@ class ProxyService(
             **required_capability_kwargs,
         )
 
+    async def _persist_security_work_lineage_markers(
+        self,
+        lineage_ids: Collection[str],
+        *,
+        api_key_id: str | None,
+    ) -> bool:
+        normalized_lineage_ids = tuple(dict.fromkeys(value.strip() for value in lineage_ids if value.strip()))
+        if not normalized_lineage_ids:
+            # A request without a reusable lineage has no future selection to
+            # constrain. Its current in-memory retry is therefore sufficient.
+            return True
+        try:
+            async with self._repo_factory() as repos:
+                marker_keys = await repos.sticky_sessions.require_security_work_authorized(
+                    normalized_lineage_ids,
+                    api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                )
+        except Exception:
+            logger.warning("Failed to persist security-work lineage markers", exc_info=True)
+            return False
+        return bool(marker_keys)
+
     @asynccontextmanager
     async def _accounts_refresh_scope(self) -> AsyncIterator[AccountsRepositoryPort]:
         # A self-contained repo prevents request cancellation from closing the
@@ -1720,6 +1746,8 @@ class ProxyService(
         preferred_account_id: str | None = None,
         preferred_account_is_continuity_owner: bool = False,
         require_security_work_authorized: bool = False,
+        security_lineage_ids: Collection[str] = (),
+        enforce_persisted_security_lineage: bool = True,
         lease_kind: Literal["response_create", "stream"] | None = None,
         estimated_lease_tokens: float = 0.0,
         fallback_on_preferred_account_unavailable: bool = True,
@@ -1772,6 +1800,19 @@ class ProxyService(
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                lineage_ids = _security_lineage_ids(
+                    *security_lineage_ids,
+                    *((sticky_key, legacy_sticky_key) if sticky_kind == StickySessionKind.CODEX_SESSION else ()),
+                )
+                if lineage_ids and enforce_persisted_security_lineage:
+                    async with self._repo_factory() as repos:
+                        persisted_security_requirement = await repos.sticky_sessions.security_work_required(
+                            lineage_ids,
+                            api_key_scope=durable_bridge_api_key_scope(api_key.id if api_key is not None else None),
+                        )
+                    require_security_work_authorized = (
+                        require_security_work_authorized or persisted_security_requirement is True
+                    )
                 concurrency_caps = effective_account_concurrency_caps(settings)
                 stream_reserve_slots = (
                     (

@@ -358,6 +358,7 @@ class _HTTPBridgeMixin(
         preferred_account_id: str | None = None,
         preferred_account_has_continuity_provenance: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        require_security_work_authorized: bool = False,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
@@ -391,6 +392,7 @@ class _HTTPBridgeMixin(
         preferred_account_id: str | None = None,
         preferred_account_has_continuity_provenance: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        require_security_work_authorized: bool = False,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
@@ -423,6 +425,7 @@ class _HTTPBridgeMixin(
         preferred_account_id: str | None = None,
         preferred_account_has_continuity_provenance: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        require_security_work_authorized: bool = False,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         session_header_fallback_key: "_HTTPBridgeSessionKey | None" = None,
@@ -1519,6 +1522,7 @@ class _HTTPBridgeMixin(
                     "fallback_on_preferred_account_unavailable": (
                         fallback_on_preferred_account_unavailable and not require_preferred_account
                     ),
+                    "require_security_work_authorized": require_security_work_authorized,
                     "request_usage_budget": request_usage_budget,
                     "request_deadline": request_deadline,
                     "exclude_account_ids": exclude_account_ids,
@@ -1542,6 +1546,7 @@ class _HTTPBridgeMixin(
                         "preferred_account_is_continuity_owner",
                         "deferred_account_backoff_lifecycle",
                         "defer_account_health_writes",
+                        "require_security_work_authorized",
                     ):
                         if optional_kwarg not in create_signature.parameters:
                             create_kwargs.pop(optional_kwarg, None)
@@ -1683,6 +1688,7 @@ class _HTTPBridgeMixin(
         require_preferred_account: bool = False,
         preferred_account_is_continuity_owner: bool = False,
         fallback_on_preferred_account_unavailable: bool = True,
+        require_security_work_authorized: bool = False,
         request_usage_budget: ApiKeyRequestUsageBudget | None = None,
         request_deadline: float | None = None,
         exclude_account_ids: Collection[str] | None = None,
@@ -1739,6 +1745,7 @@ class _HTTPBridgeMixin(
                 "lease_kind": "stream",
                 "estimated_lease_tokens": _estimated_lease_tokens_from_request_usage_budget(request_usage_budget),
                 "fallback_on_preferred_account_unavailable": fallback_on_preferred_account_unavailable,
+                "require_security_work_authorized": require_security_work_authorized,
             }
             selection = await self._select_account_with_budget_for_stream(deadline, **select_kwargs)
             selected_account_lease = selection.lease

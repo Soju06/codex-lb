@@ -409,7 +409,8 @@ def _latest_by_account_sqlite(
             row = conn.execute(latest_sql, [account_id, *window_params]).fetchone()
             if row is not None:
                 entry = _usage_history_from_sqlite_row(row)
-                latest[entry.account_id] = entry
+                if entry.account_id is not None:
+                    latest[entry.account_id] = entry
     return latest
 
 
@@ -900,7 +901,7 @@ class UsageRepository:
             )
             stmt = select(UsageHistory).where(UsageHistory.id.in_(id_query))
             result = await self._session.execute(stmt)
-            return {entry.account_id: entry for entry in result.scalars().all()}
+            return {entry.account_id: entry for entry in result.scalars().all() if entry.account_id is not None}
 
         acct_stmt = select(Account.id)
         if account_ids is not None:
@@ -920,7 +921,7 @@ class UsageRepository:
         id_rows = select(latest_id.label("usage_id")).select_from(acct_subq).subquery("latest_ids")
         stmt = select(UsageHistory).join(id_rows, UsageHistory.id == id_rows.c.usage_id)
         result = await self._session.execute(stmt)
-        return {entry.account_id: entry for entry in result.scalars().all()}
+        return {entry.account_id: entry for entry in result.scalars().all() if entry.account_id is not None}
 
     async def history_since(
         self,

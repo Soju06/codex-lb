@@ -332,6 +332,7 @@ from app.modules.proxy._service.support import (
     _record_response_event,
     _record_websocket_route_metadata,
     _request_log_client_fields,
+    _security_lineage_ids,
     _sleep_for_account_selection_recovery,
     _stream_settlement_error_payload,
     _StreamSettlement,
@@ -2194,6 +2195,7 @@ class _WebSocketMixin:
                         model=request_state.model,
                         preferred_account_id=account.id,
                         require_security_work_authorized=request_state.require_security_work_authorized,
+                        security_lineage_ids=proxy._websocket_security_lineage_ids(request_state),
                         fallback_on_preferred_account_unavailable=False,
                     )
                     if ownership_selection.account is None:
@@ -3314,6 +3316,17 @@ class _WebSocketMixin:
             affinity_policy=affinity_policy,
         )
 
+    def _websocket_security_lineage_ids(
+        self,
+        request_state: _WebSocketRequestState,
+    ) -> tuple[str, ...]:
+        return _security_lineage_ids(
+            request_state.affinity_policy.selection_key,
+            request_state.affinity_policy.legacy_selection_key,
+            request_state.session_id,
+            request_state.previous_response_id,
+        )
+
     async def _revalidate_open_websocket_account(
         self,
         account: Account,
@@ -3337,6 +3350,7 @@ class _WebSocketMixin:
             service_tier=request_state.requested_service_tier,
             preferred_account_id=account.id,
             require_security_work_authorized=request_state.require_security_work_authorized,
+            security_lineage_ids=self._websocket_security_lineage_ids(request_state),
             fallback_on_preferred_account_unavailable=False,
         )
         await proxy._load_balancer.release_account_lease(selection.lease)
@@ -3723,6 +3737,7 @@ class _WebSocketMixin:
                     exclude_account_ids=exclude_account_ids,
                     preferred_account_id=preferred_account_id,
                     require_security_work_authorized=require_security_work_authorized,
+                    security_lineage_ids=proxy._websocket_security_lineage_ids(request_state),
                     lease_kind="stream",
                     request_stage=request_state.request_stage,
                     estimated_lease_tokens=_facade()._estimated_lease_tokens_from_request_usage_budget(
@@ -5635,8 +5650,25 @@ class _WebSocketMixin:
             )
             terminal_error_message = error.message if error else None
             if _facade()._is_security_work_authorization_required_error(terminal_error_code, terminal_error_message):
+                security_lineage_ids = tuple(
+                    dict.fromkeys(
+                        value
+                        for value in (
+                            request_state.affinity_policy.selection_key,
+                            request_state.affinity_policy.legacy_selection_key,
+                            request_state.session_id,
+                            request_state.previous_response_id,
+                        )
+                        if value
+                    )
+                )
+                security_requirement_persisted = await proxy._persist_security_work_lineage_markers(
+                    security_lineage_ids,
+                    api_key_id=request_state.api_key.id if request_state.api_key is not None else None,
+                )
                 can_retry_security_work = (
-                    not account.security_work_authorized
+                    security_requirement_persisted
+                    and not account.security_work_authorized
                     and not has_other_pending_requests
                     and request_state.last_downstream_sequence_number is None
                     and request_state.response_id is None

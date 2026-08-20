@@ -35,6 +35,7 @@ class _WebSocketServiceProtocol(Protocol):
     _open_upstream_websocket_with_budget: Any
     _prepare_response_bridge_request_state: Any
     _prepare_websocket_response_create_request: Any
+    _persist_security_work_lineage_markers: Any
     _process_upstream_websocket_text: Any
     _raise_for_unsupported_input_image_references: Any
     _refresh_websocket_api_key_policy: Any
@@ -63,6 +64,7 @@ class _WebSocketServiceProtocol(Protocol):
     _websocket_continuity_index: Any
     _websocket_continuity_state_for_request: Any
     _websocket_previous_response_account_index: Any
+    _websocket_security_lineage_ids: Any
     _write_request_log: Any
     _write_websocket_connect_failure: Any
     proxy_responses_websocket: Any

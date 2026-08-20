@@ -977,6 +977,7 @@ class AccountsRepository:
             result = await self._session.execute(
                 update(Account)
                 .where(Account.id == account_id)
+                .where(Account.delete_requested_at.is_(None))
                 .values(
                     usage_limit_enabled=enabled,
                     usage_limit_percent=percent,

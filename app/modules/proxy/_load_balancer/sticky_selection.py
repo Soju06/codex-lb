@@ -1595,7 +1595,17 @@ def _filter_states_for_usage_limit_and_account_caps(
         traffic_class=traffic_class,
     )
     if not routing_eligible:
-        return usage_limit_blocked or state_list, False
+        fallback_eligible = _filter_states_for_account_caps(
+            usage_limit_eligible,
+            lease_kind=lease_kind,
+            caps=caps,
+            stream_reserve_slots=stream_reserve_slots,
+        )
+        if not fallback_eligible:
+            if usage_limit_blocked:
+                return usage_limit_blocked, False
+            return [], True
+        return [*fallback_eligible, *usage_limit_blocked], False
     filtered = _filter_states_for_account_caps(
         routing_eligible,
         lease_kind=lease_kind,

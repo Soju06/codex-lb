@@ -461,6 +461,32 @@ async def test_public_account_caps_consider_only_routable_usage_eligible_peers(
 
 
 @pytest.mark.asyncio
+async def test_public_unbound_backoff_fallback_respects_stream_cap(
+    selection_cache: AccountSelectionCache,
+) -> None:
+    accounts = [_account(f"contract-backoff-capped-{index}") for index in range(2)]
+    balancer, _, _, _ = _balancer(accounts, selection_cache)
+    now = datetime.now(UTC).timestamp()
+    for account in accounts:
+        balancer._runtime[account.id] = load_balancer_module.RuntimeState(
+            error_count=3,
+            last_error_at=now,
+            inflight_streams=1,
+        )
+
+    selection = await balancer.select_account(
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=_CONCURRENCY_CAPS,
+    )
+
+    assert selection.account is None
+    assert selection.lease is None
+    assert selection.error_code == "account_stream_cap"
+    assert {runtime.inflight_streams for runtime in balancer._runtime.values()} == {1}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("other_block", ["usage_limit", "paused"])
 async def test_public_backoff_fallback_cannot_reintroduce_usage_limited_accounts(
     selection_cache: AccountSelectionCache,

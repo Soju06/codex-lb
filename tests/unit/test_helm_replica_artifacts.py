@@ -248,7 +248,10 @@ def test_helm_codex_prewarm_defaults_off_like_settings() -> None:
 
     assert defaults["config"]["sessionBridgeCodexPrewarmEnabled"] is False
     assert bundled["config"]["sessionBridgeCodexPrewarmEnabled"] is False
-    assert "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED" in configmap
+    assert (
+        "CODEX_LB_HTTP_RESPONSES_SESSION_BRIDGE_CODEX_PREWARM_ENABLED: "
+        "{{ .Values.config.sessionBridgeCodexPrewarmEnabled | toString | quote }}"
+    ) in configmap
 
 
 def test_helm_pool_budget_values_flow_to_runtime_and_hpa_templates() -> None:

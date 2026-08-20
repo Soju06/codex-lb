@@ -488,6 +488,7 @@ class _StreamingRetryMixin:
         async def _settle_stream_usage_before_pending_penalty(
             current_settlement: _StreamSettlement,
         ) -> bool:
+            nonlocal settled
             apply_pending_penalty = post_refresh_transient_replacement_selected and bool(
                 pending_post_refresh_transient_penalties
             )
@@ -502,6 +503,11 @@ class _StreamingRetryMixin:
             )
             if not settled_result:
                 return False
+            # Commit settlement visibility before any cancellable health flush.
+            # CancelledError during flush must not leave ``settled`` false while
+            # ``usage_settlement_transferred`` is already true — that combination
+            # skips both reservation cleanup and retained-queue flush.
+            settled = True
             await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
             if apply_pending_penalty:
                 await _flush_pending_post_refresh_penalties()
@@ -3181,4 +3187,13 @@ class _StreamingRetryMixin:
             if pending_post_refresh_transient_penalties and settled:
                 # Finish any penalties left behind if a prior flush was cancelled
                 # mid-loop after settlement already closed the reservation.
-                await _flush_pending_post_refresh_penalties()
+                flush_coro = _flush_pending_post_refresh_penalties()
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    proxy._schedule_cancel_safe_cleanup(
+                        flush_coro,
+                        action="flush_deferred_keyed_stream_health",
+                        request_id=request_id,
+                    )
+                else:
+                    await flush_coro

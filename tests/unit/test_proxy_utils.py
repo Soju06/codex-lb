@@ -15375,6 +15375,224 @@ async def test_stream_with_retry_keyed_queued_penalty_flushes_on_cancel(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_keyed_cancel_during_deferred_health_flush_still_applies(
+    monkeypatch,
+):
+    """Cancel during post-settle deferred health flush must still apply the penalty.
+
+    Codex P1: settlement can commit (``usage_settlement_transferred``) before the
+    enclosing ``settled = await ...`` assignment completes. If cancel lands while
+    the flush awaits ``_handle_stream_error``, cleanup must still see settled and
+    finish the retained deferred penalty.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_flush_cancel_a")
+    account_b = _make_account("acc_keyed_flush_cancel_b")
+    settlement_order: list[str] = []
+    flush_started = asyncio.Event()
+    release_flush = asyncio.Event()
+    api_key = _make_api_key_data("key_keyed_flush_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_flush_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock(return_value=True)
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        flush_started.set()
+        await release_flush.wait()
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        assert account.id == account_b.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_flush_cancel_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    async def _consume() -> None:
+        async for _ in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-flush-cancel"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            pass
+
+    task = asyncio.create_task(_consume())
+    await asyncio.wait_for(flush_started.wait(), timeout=1)
+    assert settlement_order == ["settle"]
+    task.cancel()
+    await asyncio.sleep(0)
+    release_flush.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    while service._background_cleanup_tasks:
+        await asyncio.sleep(0)
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:upstream_unavailable",
+    ]
+    release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_route_keyed_refresh_connect_settles_before_account_health(
+    monkeypatch,
+):
+    """Product ``_stream_responses`` path must settle before keyed mid-loop health.
+
+    Codex P1: helper-only ``_stream_with_retry`` coverage is insufficient; cover the
+    streaming Responses route entry that owns reservation lifecycle + cancel cleanup.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_route_keyed_refresh_a")
+    account_b = _make_account("acc_route_keyed_refresh_b")
+    stream_account_ids: list[str] = []
+    settlement_order: list[str] = []
+    api_key = _make_api_key_data("key_route_keyed_refresh")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_route_keyed_refresh",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock()
+
+    async def skip_limits(*_args: object, **_kwargs: object) -> proxy_service.ApiKeyUsageReservationData:
+        return reservation
+
+    async def no_rate_limit_headers(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_account_ids.append(account.id)
+        assert account.id == account_b.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_route_keyed_refresh_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", no_rate_limit_headers)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": "hello", "stream": True}
+    )
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=api_key,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+    assert "resp_route_keyed_refresh_ok" in body
+    assert stream_account_ids == [account_b.id]
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:upstream_unavailable",
+    ]
+    release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_stream_with_retry_keyed_penalty_flush_keeps_later_entries_after_failure(monkeypatch):
     """A failed deferred health write must not discard later queued penalties."""
     settings = _make_proxy_settings()

@@ -2284,10 +2284,26 @@ class _StreamingRetryMixin:
                                 transient_retries,
                                 error_code,
                             )
-                            await proxy._handle_stream_error(account, error_payload, error_code)
-                            # Record remaining errors so total equals transient_retries,
-                            # meeting the load balancer backoff threshold (error_count >= 3).
-                            await proxy._load_balancer.record_errors(account, transient_retries - 1)
+                            if api_key is not None and api_key_reservation is not None:
+                                # Keyed streams must settle the shared reservation
+                                # before any account-health write (same ordering as
+                                # compact HTTP 500 and post-refresh transient
+                                # exhaustion). Immediate health here would run,
+                                # then ``break`` would skip the settle helper below.
+                                pending_post_refresh_transient_penalties.append(
+                                    (
+                                        account,
+                                        error_payload,
+                                        error_code,
+                                        (tex.status_code if isinstance(tex, ProxyResponseError) else 502),
+                                        transient_retries,
+                                    )
+                                )
+                            else:
+                                await proxy._handle_stream_error(account, error_payload, error_code)
+                                # Record remaining errors so total equals transient_retries,
+                                # meeting the load balancer backoff threshold (error_count >= 3).
+                                await proxy._load_balancer.record_errors(account, transient_retries - 1)
                             # Preserve last ProxyResponseError for propagate_http_errors path.
                             if isinstance(tex, ProxyResponseError):
                                 last_transient_exc = tex

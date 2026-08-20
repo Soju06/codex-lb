@@ -4,15 +4,18 @@ import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Literal
 
 import aiohttp
 
 from app.core.config.settings import get_settings
+from app.core.utils.time import utcnow
 from app.db.session import get_background_session
 from app.modules.telemetry.consent import TelemetryConsentStore, TelemetryIdentity
 from app.modules.telemetry.schemas import (
     TelemetryActivation,
     TelemetryModel,
+    TelemetryOptOut,
     TelemetryRegistration,
     TelemetrySnapshot,
     build_snapshot_envelope,
@@ -52,20 +55,44 @@ class TelemetrySender:
             async with asyncio.timeout(_TIMEOUT_SECONDS):
                 timeout = aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS)
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-                    await self._send_with_retry(session, snapshot, identity)
+                    await self._send_with_retry(lambda: self._transmit_once(session, snapshot, identity))
         except Exception as exc:
             logger.debug("Anonymous telemetry transmission failed", exc_info=exc)
 
-    async def _send_with_retry(
+    async def send_opt_out(
         self,
-        session: aiohttp.ClientSession,
-        snapshot: TelemetrySnapshot,
         identity: TelemetryIdentity,
+        *,
+        app_version: str,
+        deployment_mode: Literal["docker", "k8s", "pip", "bare"],
+        os_arch: str,
     ) -> None:
+        try:
+            event = TelemetryOptOut(
+                app_version=app_version,
+                instance_id=identity.instance_id,
+                occurred_at=f"{utcnow().isoformat()}Z",
+            )
+            async with asyncio.timeout(_TIMEOUT_SECONDS):
+                timeout = aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS)
+                async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                    await self._send_with_retry(
+                        lambda: self._transmit_opt_out_once(
+                            session,
+                            event,
+                            identity,
+                            deployment_mode=deployment_mode,
+                            os_arch=os_arch,
+                        )
+                    )
+        except Exception as exc:
+            logger.debug("Anonymous telemetry opt-out transmission failed", exc_info=exc)
+
+    async def _send_with_retry(self, operation: Callable[[], Awaitable[None]]) -> None:
         last_error: Exception | None = None
         for attempt in range(_MAX_ATTEMPTS):
             try:
-                await self._transmit_once(session, snapshot, identity)
+                await operation()
                 return
             except Exception as exc:
                 last_error = exc
@@ -79,22 +106,58 @@ class TelemetrySender:
         snapshot: TelemetrySnapshot,
         identity: TelemetryIdentity,
     ) -> None:
-        if self._activated_instance_id != identity.instance_id:
-            registration = TelemetryRegistration(
-                app_version=snapshot.version,
-                deployment_mode=snapshot.deploy.method,
-                instance_id=identity.instance_id,
-                os_arch=f"{snapshot.os}/{snapshot.arch}",
-                public_key=identity.public_key_hex,
-            )
-            await self._post(session, "/v1/register", _json_bytes(registration), accepted={200, 201})
-
-            activation = TelemetryActivation()
-            await self._post_signed(session, "/v1/activate", _json_bytes(activation), identity, accepted={200})
-            self._activated_instance_id = identity.instance_id
+        await self._ensure_activated(
+            session,
+            identity,
+            app_version=snapshot.version,
+            deployment_mode=snapshot.deploy.method,
+            os_arch=f"{snapshot.os}/{snapshot.arch}",
+        )
 
         envelope = build_snapshot_envelope(snapshot)
         await self._post_signed(session, "/v1/snapshot", _json_bytes(envelope), identity, accepted={200, 202})
+
+    async def _transmit_opt_out_once(
+        self,
+        session: aiohttp.ClientSession,
+        event: TelemetryOptOut,
+        identity: TelemetryIdentity,
+        *,
+        deployment_mode: Literal["docker", "k8s", "pip", "bare"],
+        os_arch: str,
+    ) -> None:
+        await self._ensure_activated(
+            session,
+            identity,
+            app_version=event.app_version,
+            deployment_mode=deployment_mode,
+            os_arch=os_arch,
+        )
+        await self._post_signed(session, "/v1/optout", _json_bytes(event), identity, accepted={200})
+
+    async def _ensure_activated(
+        self,
+        session: aiohttp.ClientSession,
+        identity: TelemetryIdentity,
+        *,
+        app_version: str,
+        deployment_mode: Literal["docker", "k8s", "pip", "bare"],
+        os_arch: str,
+    ) -> None:
+        if self._activated_instance_id == identity.instance_id:
+            return
+        registration = TelemetryRegistration(
+            app_version=app_version,
+            deployment_mode=deployment_mode,
+            instance_id=identity.instance_id,
+            os_arch=os_arch,
+            public_key=identity.public_key_hex,
+        )
+        await self._post(session, "/v1/register", _json_bytes(registration), accepted={200, 201})
+
+        activation = TelemetryActivation()
+        await self._post_signed(session, "/v1/activate", _json_bytes(activation), identity, accepted={200})
+        self._activated_instance_id = identity.instance_id
 
     async def _post_signed(
         self,

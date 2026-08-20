@@ -83,8 +83,12 @@ class TelemetryScheduler:
                         )
                     if not consent.active:
                         return
+                    assert consent.state != "disabled"
                     identity = await store.get_or_create_identity()
-                    snapshot = await TelemetrySnapshotBuilder(session).build(identity.instance_id)
+                    snapshot = await TelemetrySnapshotBuilder(session).build(
+                        identity.instance_id,
+                        consent=consent.state,
+                    )
                 await self.sender.send_snapshot(snapshot)
             except Exception as exc:
                 logger.debug("Anonymous telemetry scheduler tick failed", exc_info=exc)

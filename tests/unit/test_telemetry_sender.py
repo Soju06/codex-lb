@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -14,9 +15,38 @@ from app.modules.telemetry.sender import TelemetrySender
 pytestmark = pytest.mark.unit
 
 
+class _FakeResponse:
+    status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    async def read(self) -> bytes:
+        return b""
+
+
+class _FakeClientSession:
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, bytes, dict[str, str]]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def post(self, url: str, *, data: bytes, headers: dict[str, str]) -> _FakeResponse:
+        self.requests.append((url, data, headers))
+        return _FakeResponse()
+
+
 def _snapshot() -> TelemetrySnapshot:
     return TelemetrySnapshot.model_validate(
         {
+            "consent": "enabled",
             "instance_id": "00000000-0000-4000-8000-000000000004",
             "version": "1.0.0",
             "python": "3.13",
@@ -106,6 +136,84 @@ async def test_sender_disabled_guard_does_not_construct_http_client(monkeypatch)
     await TelemetrySender(context_provider=context_provider).send_snapshot(_snapshot())
 
     client_session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_opt_out_registers_activates_and_posts_exact_signed_canonical_body(monkeypatch) -> None:
+    identity = TelemetryIdentity("00000000-0000-4000-8000-000000000004", Ed25519PrivateKey.generate())
+    session = _FakeClientSession()
+    client_session = Mock(return_value=session)
+    context_provider = AsyncMock(side_effect=AssertionError("opt-out must not resolve inactive consent"))
+    monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", client_session)
+    monkeypatch.setattr("app.modules.telemetry.sender.utcnow", lambda: datetime(2026, 8, 20, 12, 0, 0))
+
+    await TelemetrySender(
+        "https://telemetry.example",
+        context_provider=context_provider,
+    ).send_opt_out(
+        identity,
+        app_version="1.24.0",
+        deployment_mode="docker",
+        os_arch="linux/x86_64",
+    )
+
+    assert [request[0] for request in session.requests] == [
+        "https://telemetry.example/v1/register",
+        "https://telemetry.example/v1/activate",
+        "https://telemetry.example/v1/optout",
+    ]
+    expected_body = (
+        b'{"app_version":"1.24.0","event":"optout",'
+        b'"instance_id":"00000000-0000-4000-8000-000000000004",'
+        b'"occurred_at":"2026-08-20T12:00:00Z"}'
+    )
+    _, body, headers = session.requests[-1]
+    assert body == expected_body
+    assert headers["X-Instance-ID"] == identity.instance_id
+    identity.private_key.public_key().verify(bytes.fromhex(headers["X-Signature"]), body)
+    context_provider.assert_not_awaited()
+    client_session.assert_called_once()
+    assert client_session.call_args.kwargs["timeout"].total == 5.0
+    assert client_session.call_args.kwargs["trust_env"] is False
+
+
+@pytest.mark.asyncio
+async def test_opt_out_retries_once_then_succeeds(monkeypatch) -> None:
+    identity = TelemetryIdentity("00000000-0000-4000-8000-000000000004", Ed25519PrivateKey.generate())
+    session = _FakeClientSession()
+    monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", Mock(return_value=session))
+    sender = TelemetrySender()
+    sender._transmit_opt_out_once = AsyncMock(side_effect=[OSError("transient"), None])
+
+    await sender.send_opt_out(
+        identity,
+        app_version="1.24.0",
+        deployment_mode="bare",
+        os_arch="linux/x86_64",
+    )
+
+    assert sender._transmit_opt_out_once.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_opt_out_failure_is_swallowed_and_logged_at_debug(monkeypatch, caplog) -> None:
+    identity = TelemetryIdentity("00000000-0000-4000-8000-000000000004", Ed25519PrivateKey.generate())
+    session = _FakeClientSession()
+    monkeypatch.setattr("app.modules.telemetry.sender.aiohttp.ClientSession", Mock(return_value=session))
+    sender = TelemetrySender()
+    sender._transmit_opt_out_once = AsyncMock(side_effect=OSError("collector unavailable"))
+
+    with caplog.at_level(logging.DEBUG, logger="app.modules.telemetry.sender"):
+        await sender.send_opt_out(
+            identity,
+            app_version="1.24.0",
+            deployment_mode="bare",
+            os_arch="linux/x86_64",
+        )
+
+    assert sender._transmit_opt_out_once.await_count == 2
+    assert caplog.records
+    assert all(record.levelno == logging.DEBUG for record in caplog.records)
 
 
 @pytest.mark.asyncio

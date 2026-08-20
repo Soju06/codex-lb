@@ -88,6 +88,22 @@ async def test_disabled_scheduler_tick_makes_zero_sender_calls(db_setup, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_enabled_scheduler_snapshot_declares_enabled_consent(db_setup, monkeypatch) -> None:
+    del db_setup
+    monkeypatch.delenv("CODEX_LB_TELEMETRY_ENABLED", raising=False)
+    get_settings.cache_clear()
+    async with SessionLocal() as session:
+        store = TelemetryConsentStore(session)
+        await store.set_decision(True)
+
+    sender = AsyncMock()
+    await TelemetryScheduler(sender=sender)._tick()
+
+    sender.send_snapshot.assert_awaited_once()
+    assert sender.send_snapshot.await_args.args[0].consent == "enabled"
+
+
+@pytest.mark.asyncio
 async def test_non_leader_scheduler_tick_builds_and_transmits_nothing(monkeypatch) -> None:
     import app.modules.telemetry.scheduler as scheduler_module
 
@@ -144,6 +160,7 @@ async def test_scheduler_sends_startup_and_interval_snapshots_with_one_undecided
         await scheduler.stop()
 
     assert sender.send_snapshot.await_count >= 2
+    assert all(call.args[0].consent == "undecided" for call in sender.send_snapshot.await_args_list)
     notices = [
         record.getMessage() for record in caplog.records if "Anonymous telemetry is active" in record.getMessage()
     ]

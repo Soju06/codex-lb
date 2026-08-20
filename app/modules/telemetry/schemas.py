@@ -97,6 +97,7 @@ class FeaturesSnapshot(TelemetryModel):
 
 class TelemetrySnapshot(TelemetryModel):
     schema_version: Literal[1] = 1
+    consent: Literal["undecided", "enabled"]
     instance_id: str
     version: str
     python: str
@@ -121,6 +122,13 @@ class TelemetryRegistration(TelemetryModel):
 
 class TelemetryActivation(TelemetryModel):
     action: Literal["activate"] = "activate"
+
+
+class TelemetryOptOut(TelemetryModel):
+    app_version: str
+    event: Literal["optout"] = "optout"
+    instance_id: str
+    occurred_at: str
 
 
 class TelemetrySnapshotEnvelope(TelemetryModel):

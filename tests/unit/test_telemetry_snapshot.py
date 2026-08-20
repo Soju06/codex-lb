@@ -19,7 +19,12 @@ from app.modules.telemetry.clients import (
     client_family,
     client_shares,
 )
-from app.modules.telemetry.schemas import TelemetryActivation, TelemetryRegistration, build_snapshot_envelope
+from app.modules.telemetry.schemas import (
+    TelemetryActivation,
+    TelemetryOptOut,
+    TelemetryRegistration,
+    build_snapshot_envelope,
+)
 from app.modules.telemetry.snapshot import (
     _ROUTING_POLICIES,
     TelemetrySnapshotBuilder,
@@ -79,11 +84,16 @@ async def test_snapshot_serialized_field_set_matches_documented_schema(async_ses
     async_session.add(_request_log("schema", model="gpt-5.4", useragent_group="codex_exec"))
     await async_session.commit()
 
-    snapshot = await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000001")
+    snapshot = await TelemetrySnapshotBuilder(async_session).build(
+        "00000000-0000-4000-8000-000000000001",
+        consent="undecided",
+    )
     payload = snapshot.model_dump()
 
+    assert payload["consent"] == "undecided"
     assert set(payload) == {
         "schema_version",
+        "consent",
         "instance_id",
         "version",
         "python",
@@ -157,6 +167,11 @@ async def test_snapshot_serialized_field_set_matches_documented_schema(async_ses
         public_key="00",
     ).model_dump(mode="json")
     activation = TelemetryActivation().model_dump(mode="json")
+    opt_out = TelemetryOptOut(
+        app_version=snapshot.version,
+        instance_id=snapshot.instance_id,
+        occurred_at="2026-08-20T12:00:00Z",
+    ).model_dump(mode="json")
     envelope = build_snapshot_envelope(snapshot).model_dump(mode="json")
     assert set(registration) == {
         "app_name",
@@ -168,6 +183,7 @@ async def test_snapshot_serialized_field_set_matches_documented_schema(async_ses
         "public_key",
     }
     assert set(activation) == {"action"}
+    assert set(opt_out) == {"app_version", "event", "instance_id", "occurred_at"}
     assert set(envelope) == {"instance_id", "metrics", "timestamp"}
 
 
@@ -228,7 +244,13 @@ async def test_model_catalog_filter_merges_custom_models_and_scopes_reasoning(
     )
     await async_session.commit()
 
-    payload = (await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000002")).model_dump()
+    payload = (
+        await TelemetrySnapshotBuilder(async_session).build(
+            "00000000-0000-4000-8000-000000000002",
+            consent="enabled",
+        )
+    ).model_dump()
+    assert payload["consent"] == "enabled"
     models = {model["name"]: model for model in payload["usage_7d"]["models"]}
 
     assert set(models) == {"gpt-5.4", "other"}
@@ -264,7 +286,10 @@ async def test_request_kind_mix_fails_honest_without_persisted_route_family(asyn
     )
     await async_session.commit()
 
-    payload = await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000005")
+    payload = await TelemetrySnapshotBuilder(async_session).build(
+        "00000000-0000-4000-8000-000000000005",
+        consent="undecided",
+    )
 
     assert payload.usage_7d.request_kinds.model_dump() == {
         "responses": 0.0,
@@ -411,7 +436,10 @@ async def test_privacy_quick_check_identifying_values_never_serialize(async_sess
     await async_session.commit()
 
     serialized = (
-        await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000003")
+        await TelemetrySnapshotBuilder(async_session).build(
+            "00000000-0000-4000-8000-000000000003",
+            consent="undecided",
+        )
     ).model_dump_json()
 
     for private_value in (
@@ -466,7 +494,10 @@ async def test_success_rate_excludes_cancelled_terminals(async_session: AsyncSes
     )
     await async_session.commit()
 
-    snapshot = await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000004")
+    snapshot = await TelemetrySnapshotBuilder(async_session).build(
+        "00000000-0000-4000-8000-000000000004",
+        consent="undecided",
+    )
 
     # 1 success out of 4 requests: cancellations are neither successes nor
     # errors, so they must not inflate the numerator.
@@ -496,7 +527,10 @@ async def test_top_upstream_errors_exclude_cancelled_terminals(async_session: As
     )
     await async_session.commit()
 
-    snapshot = await TelemetrySnapshotBuilder(async_session).build("00000000-0000-4000-8000-000000000005")
+    snapshot = await TelemetrySnapshotBuilder(async_session).build(
+        "00000000-0000-4000-8000-000000000005",
+        consent="undecided",
+    )
 
     # High-volume disconnects (status='cancelled' with a retained
     # client_disconnected code) must not displace genuine upstream failures.

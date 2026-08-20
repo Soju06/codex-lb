@@ -155,7 +155,12 @@ class TelemetrySnapshotBuilder:
         self._session = session
         self._settings = settings or get_settings()
 
-    async def build(self, instance_id: str) -> TelemetrySnapshot:
+    async def build(
+        self,
+        instance_id: str,
+        *,
+        consent: Literal["undecided", "enabled"],
+    ) -> TelemetrySnapshot:
         now = utcnow()
         start = now - timedelta(days=7)
         reports = ReportsRepository(self._session)
@@ -180,7 +185,7 @@ class TelemetrySnapshotBuilder:
         top_errors = await self._top_upstream_errors(conditions)
         feature_counts = await self._feature_counts(conditions)
 
-        method = _deployment_method()
+        method = deployment_method()
         db_backend = "postgres" if self._session.get_bind().dialect.name == "postgresql" else "sqlite"
         plan_mix = PlanMixSnapshot(
             plus=count_bucket(plan_counts.get("plus", 0)),
@@ -189,6 +194,7 @@ class TelemetrySnapshotBuilder:
             free=count_bucket(plan_counts.get("free", 0)),
         )
         return TelemetrySnapshot(
+            consent=consent,
             instance_id=instance_id,
             version=__version__,
             python=f"{platform.python_version_tuple()[0]}.{platform.python_version_tuple()[1]}",
@@ -462,7 +468,7 @@ def _canonical_routing_policy(raw_policy: str | None) -> str:
     return normalized if normalized in _ROUTING_POLICIES else "other"
 
 
-def _deployment_method() -> Literal["docker", "k8s", "pip", "bare"]:
+def deployment_method() -> Literal["docker", "k8s", "pip", "bare"]:
     if os.environ.get("KUBERNETES_SERVICE_HOST") or Path("/var/run/secrets/kubernetes.io/serviceaccount").exists():
         return "k8s"
     if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():

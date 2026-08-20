@@ -5665,6 +5665,92 @@ async def test_grouped_terminal_fanout_queues_all_siblings_before_stalled_settle
 
 
 @pytest.mark.asyncio
+async def test_grouped_terminal_fanout_releases_append_barrier_when_sibling_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hard append failure before the barrier must not strand sibling waiters."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    queues: list[asyncio.Queue[str | None]] = [asyncio.Queue(), asyncio.Queue()]
+    request_states: list[proxy_service._WebSocketRequestState] = []
+    for index, event_queue in enumerate(queues):
+        request_state = proxy_service._WebSocketRequestState(
+            request_id=f"req-grouped-append-raise-{index}",
+            model="gpt-5.6-sol",
+            service_tier=None,
+            reasoning_effort=None,
+            api_key_reservation=None,
+            started_at=time.monotonic(),
+            event_queue=event_queue,
+            transport="http",
+            previous_response_id="resp-shared-grouped-append-raise",
+            skip_request_log=True,
+        )
+        request_state.operation_id = f"op-grouped-append-raise-{index}"
+        request_states.append(request_state)
+    session = _make_bridge_session(
+        key_value="grouped-terminal-append-raise",
+        pending_requests=deque(request_states),
+        queued_request_count=2,
+    )
+    session.durable_session_id = "durable-grouped-terminal-append-raise"
+    session.durable_owner_epoch = 7
+    all_appends_started = asyncio.Event()
+    append_calls: list[str] = []
+
+    async def append_terminal_event(*args: Any, **kwargs: Any) -> TerminalOperationEventAppendResult:
+        del args
+        operation_id = kwargs["operation_id"]
+        append_calls.append(operation_id)
+        if len(append_calls) == 2:
+            all_appends_started.set()
+        if operation_id == "op-grouped-append-raise-0":
+            raise RuntimeError("append raised before barrier")
+        return TerminalOperationEventAppendResult(persisted=True, settlement_required=False)
+
+    async def settle_terminal_event(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+
+    finalize_request = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request)
+    monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", AsyncMock())
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(
+            append_terminal_event=append_terminal_event,
+            settle_terminal_event=settle_terminal_event,
+        ),
+    )
+    process_task = asyncio.create_task(
+        service._process_http_bridge_upstream_text(
+            session,
+            json.dumps(
+                {
+                    "type": "error",
+                    "status": 400,
+                    "error": {
+                        "type": "invalid_request_error",
+                        "code": "previous_response_not_found",
+                        "message": "Previous response with id 'resp-shared-grouped-append-raise' not found.",
+                        "param": "previous_response_id",
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        )
+    )
+
+    await asyncio.wait_for(all_appends_started.wait(), timeout=1.0)
+    await asyncio.wait_for(process_task, timeout=1.0)
+    assert sorted(append_calls) == ["op-grouped-append-raise-0", "op-grouped-append-raise-1"]
+    for event_queue in queues:
+        terminal_event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+        assert terminal_event is not None
+        assert '"type":"response.failed"' in terminal_event
+        assert await asyncio.wait_for(event_queue.get(), timeout=1.0) is None
+    assert finalize_request.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_ordinary_completed_alias_rejection_preserves_successful_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

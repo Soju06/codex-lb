@@ -302,6 +302,7 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+_SourceStreamChunkT = TypeVar("_SourceStreamChunkT", bytes, str)
 
 _REASONING_SUMMARY_DELTA_TYPES = frozenset({"response.reasoning_summary_text.delta"})
 _REASONING_SUMMARY_DONE_TYPES = frozenset(
@@ -4816,7 +4817,7 @@ async def _source_responses_response(
                 rate_limit_headers=rate_limit_headers,
             )
         body = _source_chat_stream_with_settlement(
-            stream.body,
+            _wrap_source_responses_public_stream(stream.body),
             usage_holder=stream.usage_holder,
             request=request,
             source=source,
@@ -5491,8 +5492,45 @@ async def _buffered_limited_source_chat_stream_response(
     )
 
 
+async def _iter_source_sse_event_blocks(stream: AsyncIterator[bytes]) -> AsyncIterator[str]:
+    """Reassemble chunked source bytes into SSE event blocks for public shaping."""
+    buffer = b""
+    try:
+        async for chunk in stream:
+            if not chunk:
+                continue
+            buffer += chunk
+            while b"\n\n" in buffer:
+                raw_block, buffer = buffer.split(b"\n\n", 1)
+                text = raw_block.decode("utf-8")
+                if text:
+                    yield f"{text}\n\n"
+        if buffer.strip():
+            yield buffer.decode("utf-8")
+    finally:
+        await _aclose_stream(stream)
+
+
+def _wrap_source_responses_public_stream(stream: AsyncIterator[bytes]) -> AsyncIterator[str]:
+    """Normalize and keep source-routed Responses SSE proxy-timeout friendly.
+
+    Account-backed ``_stream_responses`` already reassembles, normalizes, and
+    injects keepalives. Source-routed ``/v1/responses`` previously forwarded
+    raw upstream byte chunks and could idle out through front-door proxies.
+    """
+    return inject_sse_keepalives(
+        _normalize_public_responses_stream(
+            _iter_source_sse_event_blocks(stream),
+            enforce_openai_sdk_contract=True,
+        ),
+        get_settings().sse_keepalive_interval_seconds,
+        keepalive_frame=SSE_KEEPALIVE_FRAME,
+        on_keepalive=lambda: _record_stream_keepalive("responses_source"),
+    )
+
+
 async def _source_chat_stream_with_settlement(
-    stream: AsyncIterator[bytes],
+    stream: AsyncIterator[_SourceStreamChunkT],
     *,
     usage_holder: SourceUsageHolder,
     request: Request,
@@ -5500,7 +5538,7 @@ async def _source_chat_stream_with_settlement(
     api_key: ApiKeyData | None,
     model: str,
     reservation: ApiKeyUsageReservationData | None,
-) -> AsyncIterator[bytes]:
+) -> AsyncIterator[_SourceStreamChunkT]:
     status = "success"
     error_code: str | None = None
     error_message: str | None = None

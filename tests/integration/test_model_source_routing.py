@@ -2373,6 +2373,34 @@ async def test_v1_models_metadata_reflects_reasoning_optin(async_client):
 
 
 @pytest.mark.asyncio
+async def test_v1_models_context_window_override_applies_to_source_model(async_client, monkeypatch):
+    # Source-catalog models synthesize `max_context_window == context_window`
+    # purely so Codex clients can parse the entry; that parseability default
+    # must not clamp an operator raise override to the un-raised window.
+    await _create_model_source(
+        async_client,
+        name="override-source",
+        model="override-source-model",
+        base_url="http://127.0.0.1:9/v1",
+    )
+
+    from app.core.config.settings import get_settings
+    from app.modules.proxy import api as proxy_api_module
+
+    patched = get_settings().model_copy(update={"model_context_window_overrides": {"override-source-model": 32_768}})
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: patched)
+
+    response = await async_client.get("/v1/models")
+    assert response.status_code == 200
+    item = next(m for m in response.json()["data"] if m["id"] == "override-source-model")
+    assert item["metadata"]["context_window"] == 32_768
+    assert item["metadata"]["input_context_window"] == 32_768
+    assert item["capabilities"]["context_length"] == 32_768
+    assert item["contextLength"] == 32_768
+    assert item["context_length"] == 32_768
+
+
+@pytest.mark.asyncio
 async def test_source_chat_payload_keeps_reasoning_toggles_for_optin_model(async_client, source_upstream):
     captured: dict[str, object] = {}
 

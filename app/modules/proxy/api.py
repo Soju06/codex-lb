@@ -4020,7 +4020,13 @@ def _resolved_context_window(model: UpstreamModel) -> int:
     # un-overridden upstream budget while Codex-native clients use the wider window.
     # The override is clamped to the upstream-declared `max_context_window` so it can
     # never advertise more input than the backend sanctions — the same clamp the Codex
-    # client applies to `model_context_window` in config.toml.
+    # client applies to `model_context_window` in config.toml. The clamp only applies
+    # when upstream declares a ceiling strictly above `context_window`: bootstrap
+    # subscription models (`_bootstrap_model`) and source-catalog models
+    # (`source_models_to_upstream_models`) synthesize `max_context_window ==
+    # context_window` purely so Codex clients can parse the entry, and treating that
+    # parseability default as a real ceiling would silently disable every raise
+    # override for those models.
     #
     # This is the single resolution point for the reported window: the Codex-native
     # `context_window`/`max_context_window` rewrite, `metadata.context_window`, and
@@ -4031,7 +4037,11 @@ def _resolved_context_window(model: UpstreamModel) -> int:
     if override is None:
         return model.context_window
     max_context_window = model.raw.get("max_context_window")
-    if isinstance(max_context_window, int) and not isinstance(max_context_window, bool) and max_context_window > 0:
+    if (
+        isinstance(max_context_window, int)
+        and not isinstance(max_context_window, bool)
+        and max_context_window > model.context_window
+    ):
         return min(override, max_context_window)
     return override
 

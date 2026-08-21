@@ -19,7 +19,7 @@ from app.core.exceptions import ProxyAuthError, ProxyRateLimitError
 from app.core.openai.models import CompactResponsePayload
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute, UpstreamProxyRouteError
 from app.core.utils.time import utcnow
-from app.db.models import ApiKeyLimit, RequestLog
+from app.db.models import Account, ApiKeyLimit, RequestLog
 from app.db.session import SessionLocal
 from app.modules.usage.repository import UsageRepository
 
@@ -96,16 +96,31 @@ async def _create_api_key(
     return payload["id"], payload["key"]
 
 
-async def _add_primary_usage(account_id: str, *, used_percent: float, window_minutes: int) -> None:
+async def _add_usage(
+    account_id: str,
+    *,
+    window: str,
+    used_percent: float,
+    window_minutes: int,
+) -> None:
     async with SessionLocal() as session:
         repo = UsageRepository(session)
         await repo.add_entry(
             account_id=account_id,
             used_percent=used_percent,
-            window="primary",
+            window=window,
             window_minutes=window_minutes,
-            reset_at=int((utcnow() + timedelta(hours=5)).timestamp()),
+            reset_at=int((utcnow() + timedelta(minutes=window_minutes)).timestamp()),
         )
+
+
+async def _add_primary_usage(account_id: str, *, used_percent: float, window_minutes: int) -> None:
+    await _add_usage(
+        account_id,
+        window="primary",
+        used_percent=used_percent,
+        window_minutes=window_minutes,
+    )
 
 
 def _install_successful_warmup_stub(monkeypatch: pytest.MonkeyPatch, captured_models: list[str]) -> None:
@@ -189,6 +204,156 @@ async def test_warmup_normal_mode_uses_configured_model_and_logs_warmup_kind(asy
     assert rows[0].request_kind == "warmup"
     assert rows[0].model == "gpt-5.4-nano"
     assert limit.current_value == 0
+
+
+@pytest.mark.asyncio
+async def test_warmup_normal_mode_skips_account_reached_on_secondary_usage_limit(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(
+        async_client,
+        "acc-warmup-secondary-limit",
+        "warmup-secondary-limit@example.com",
+    )
+    await _add_primary_usage(account_id, used_percent=0.0, window_minutes=300)
+    await _add_usage(
+        account_id,
+        window="secondary",
+        used_percent=10.0,
+        window_minutes=10080,
+    )
+    usage_limit = await async_client.put(
+        f"/api/accounts/{account_id}/usage-limit",
+        json={"enabled": True, "percent": 10.0},
+    )
+    assert usage_limit.status_code == 200
+    _, key = await _create_api_key(async_client, name="warmup-secondary-limit")
+
+    upstream_called = False
+
+    async def _unexpected_compact(*args, **kwargs):
+        del args, kwargs
+        nonlocal upstream_called
+        upstream_called = True
+        raise AssertionError("usage-limited warmup must not reach upstream")
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _unexpected_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "mode": "normal",
+        "total_accounts": 1,
+        "submitted": [],
+        "skipped": [{"account_id": account_id, "reason": "account_usage_limit_reached"}],
+        "failed": [],
+    }
+    assert upstream_called is False
+
+
+@pytest.mark.asyncio
+async def test_warmup_force_mode_does_not_override_account_usage_limit(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(
+        async_client,
+        "acc-warmup-force-limit",
+        "warmup-force-limit@example.com",
+    )
+    await _add_primary_usage(account_id, used_percent=10.0, window_minutes=300)
+    usage_limit = await async_client.put(
+        f"/api/accounts/{account_id}/usage-limit",
+        json={"enabled": True, "percent": 10.0},
+    )
+    assert usage_limit.status_code == 200
+    _, key = await _create_api_key(async_client, name="warmup-force-limit")
+
+    async def _unexpected_compact(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("force mode must not bypass a hard account usage limit")
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _unexpected_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "force"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "mode": "force",
+        "total_accounts": 1,
+        "submitted": [],
+        "skipped": [{"account_id": account_id, "reason": "account_usage_limit_reached"}],
+        "failed": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_warmup_rechecks_account_usage_limit_immediately_before_submit(async_client, monkeypatch):
+    await _enable_api_key_auth(async_client)
+    account_id = await _import_account(
+        async_client,
+        "acc-warmup-final-limit-check",
+        "warmup-final-limit-check@example.com",
+    )
+    await _add_primary_usage(account_id, used_percent=0.0, window_minutes=300)
+    usage_limit = await async_client.put(
+        f"/api/accounts/{account_id}/usage-limit",
+        json={"enabled": True, "percent": 10.0},
+    )
+    assert usage_limit.status_code == 200
+    _, key = await _create_api_key(async_client, name="warmup-final-limit-check")
+
+    async def _reach_limit_after_planning(self, account, *, force=False, timeout_seconds=None):
+        del self, force, timeout_seconds
+        await _add_primary_usage(account_id, used_percent=10.0, window_minutes=300)
+        return account
+
+    async def _unexpected_compact(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("final usage authorization must run before upstream submission")
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", _reach_limit_after_planning)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", _unexpected_compact)
+
+    response = await async_client.post(
+        "/v1/warmup",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"mode": "normal"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "mode": "normal",
+        "total_accounts": 1,
+        "submitted": [],
+        "skipped": [],
+        "failed": [
+            {
+                "account_id": account_id,
+                "error_code": "account_usage_limit_reached",
+                "error_message": (
+                    "All otherwise available accounts have reached their usage limit or lack current usage data"
+                ),
+            }
+        ],
+    }
+
+    async with SessionLocal() as session:
+        log_row = (
+            await session.execute(
+                select(RequestLog).where(RequestLog.request_kind == "warmup").order_by(RequestLog.id.desc())
+            )
+        ).scalar_one()
+        stored_account = await session.get(Account, account_id)
+    assert log_row.error_code == "account_usage_limit_reached"
+    assert stored_account is not None
+    assert stored_account.status.value == "active"
 
 
 @pytest.mark.asyncio

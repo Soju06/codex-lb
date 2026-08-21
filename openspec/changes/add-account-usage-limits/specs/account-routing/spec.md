@@ -156,6 +156,10 @@ Account summaries SHALL expose the configured percentage, enabled flag, and eval
 
 ### Requirement: Synthetic warmups respect account usage limits
 
+The public `/v1/warmup` entry point MUST evaluate every target account's current standard primary, secondary, and monthly observations with the canonical usage-limit evaluator before choosing submissions in `normal`, `strict`, or `force` mode. `force` mode MAY bypass the legacy zero-percent primary-window warmup heuristic, but it MUST NOT bypass an enabled account usage limit whose state is `reached` or `data_unavailable`. A blocked target MUST NOT produce upstream traffic; `normal` and `force` responses MUST report it as skipped with reason `account_usage_limit_reached`, while `strict` mode MUST reject the operation because not every target is usage-eligible.
+
+After credential refresh and before each public warmup compact request is dispatched, execution MUST freshly reload the account and its current standard primary, secondary, and monthly observations, MUST require the account to remain `active`, and MUST reapply the canonical evaluator. A missing account MUST fail that target with code `account_not_found`; a non-active account MUST fail it with code `account_not_active`; a `reached` or `data_unavailable` policy MUST fail it with code `account_usage_limit_reached`; and a final authorization read failure MUST fail it with code `account_usage_limit_authorization_failed`. None of these outcomes may send the compact request upstream.
+
 Quota warmup planning MUST exclude an already-evaluated account state whose enabled usage-limit state is `reached` or `data_unavailable`. After atomically claiming a planned decision and acquiring any API-key reservation, execution MUST freshly load the account and its current standard primary, secondary, and monthly observations, MUST require the fresh account status to remain `active`, and MUST apply the canonical standard usage-limit evaluator and shape rules immediately before sending the synthetic probe. A missing fresh account MUST skip with reason `account_not_found`; any fresh non-active account MUST skip with reason `account_status_<status>`; and either account denial MUST release any reservation, transition the claimed decision from `executing` to `skipped`, and MUST NOT send the probe. If the authoritative usage-limit evaluation is `reached` or `data_unavailable`, execution MUST perform the same cleanup with reason `account_usage_limit_reached`. Disabled and `available` policies MUST preserve normal short-window planning and execution behavior.
 
 If the final standard-usage authorization read fails, execution MUST perform the same cleanup with reason `account_usage_limit_authorization_failed`; if that read is cancelled, it MUST use reason `account_usage_limit_authorization_cancelled` and propagate cancellation after cleanup. Neither authorization outcome MUST be persisted as `account_usage_limit_reached`.
@@ -169,6 +173,21 @@ Reset-confirmed and staggered limit-warmup planning MUST apply the canonical sta
 - **WHEN** the execution gate re-evaluates the account
 - **THEN** the warmup is skipped
 - **AND** no synthetic upstream request is sent
+
+#### Scenario: Force warmup cannot override the hard account policy
+
+- **GIVEN** a target account has an enabled maximum-usage policy in state `reached` or `data_unavailable`
+- **WHEN** the operator invokes `/v1/warmup` in `force` mode
+- **THEN** the account is reported as skipped with reason `account_usage_limit_reached`
+- **AND** no compact request is sent upstream
+
+#### Scenario: Public warmup reaches the limit after planning
+
+- **GIVEN** `/v1/warmup` selected an account while its enabled policy was available
+- **AND** a newer standard observation reaches the maximum before per-account submission
+- **WHEN** final warmup authorization reloads the account and observations
+- **THEN** that target fails with code `account_usage_limit_reached`
+- **AND** no compact request is sent upstream
 
 #### Scenario: Account pauses after warmup planning
 

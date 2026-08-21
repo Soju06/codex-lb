@@ -1881,8 +1881,8 @@ def test_request_log_client_fields_detect_conversation(headers, expected):
 @pytest.mark.asyncio
 async def test_warmup_persists_conversation_id_in_request_log(monkeypatch):
     request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_warmup_conversation")
+    service = proxy_service.ProxyService(_repo_factory(request_logs, accounts=[account]))
     snapshot = proxy_warmup_service._snapshot_warmup_account(account)
 
     monkeypatch.setattr(service._encryptor, "decrypt", lambda _token: "access-token")
@@ -5519,6 +5519,8 @@ class _RepoContext:
         capability_lineage.require.return_value = ("test-marker",)
         accounts_repository = AsyncMock(spec=AccountsRepository)
         accounts_repository.list_accounts.return_value = list(accounts)
+        accounts_by_id = {account.id: account for account in accounts}
+        accounts_repository.get_by_id_fresh.side_effect = accounts_by_id.get
         usage_repository = AsyncMock(spec=UsageRepository)
         usage_repository.latest_by_account.return_value = {}
         self._repos = ProxyRepositories(

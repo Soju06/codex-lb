@@ -92,17 +92,22 @@ describe("RoutingSettings", () => {
     expect(screen.getAllByText(/Inherited effective value:/)).toHaveLength(4);
   });
 
-  it("sends only an explicit null when clearing one capacity override", async () => {
+  it.each([
+    ["Response-create limit", "proxyAccountResponseCreateLimit"],
+    ["Stream limit", "proxyAccountStreamLimit"],
+    ["Stream recovery reserve", "proxyAccountStreamRecoveryReserve"],
+    ["API key fair-share threshold (%)", "proxyApiKeyFairShareCongestionThresholdPct"],
+  ] as const)("sends only an explicit null when clearing %s", async (label, field) => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
 
-    await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
+    await user.clear(screen.getByRole("spinbutton", { name: label }));
     await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
 
     expect(onSave).toHaveBeenCalledWith({
       ...BASE_UPDATE_PAYLOAD,
-      proxyAccountStreamLimit: null,
+      [field]: null,
     });
   });
 

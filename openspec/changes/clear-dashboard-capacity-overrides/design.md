@@ -22,9 +22,11 @@ The existing row-version CAS and settings cache invalidation remain unchanged.
 
 ## Frontend Contract
 
-Routing settings will initialize each input from its raw override. A `NULL`
-effective value. Clearing an input sends explicit `null`; entering a number
-sends that number. The card sends only fields changed by the operator.
+Routing settings will initialize each input from its raw override. A `NULL` raw
+override renders as an empty input, while the effective value remains resolved
+from the raw override or environment. Clearing an input sends explicit `null`;
+entering a number sends that number. The card sends only fields changed by the
+operator.
 
 The four fields share one existing capacity save action. Validation must allow
 an empty value as a clear operation while validating the effective candidate

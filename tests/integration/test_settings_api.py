@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import text
 
+import app.modules.settings.api as settings_api_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings_cache import get_settings_cache
 from app.db.models import Account, AccountStatus, DashboardSettings
@@ -371,6 +372,37 @@ async def test_settings_api_rejects_stream_recovery_reserve_above_bounded_stream
     assert unlimited.status_code == 200
     assert unlimited.json()["proxyAccountStreamLimit"] == 0
     assert unlimited.json()["proxyAccountStreamRecoveryReserve"] == 3
+
+
+@pytest.mark.asyncio
+async def test_settings_api_rejects_clear_that_would_violate_environment_capacity(
+    async_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        settings.proxy_account_stream_limit = 24
+        settings.proxy_account_stream_recovery_reserve = 3
+        await session.commit()
+    await get_settings_cache().invalidate()
+
+    startup_settings = settings_api_module.get_app_settings()
+    monkeypatch.setattr(
+        settings_api_module,
+        "get_app_settings",
+        lambda: startup_settings.model_copy(update={"proxy_account_stream_limit": 2}),
+    )
+
+    response = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": None})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_proxy_account_stream_recovery_reserve"
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        assert settings.proxy_account_stream_limit == 24
+        assert settings.proxy_account_stream_recovery_reserve == 3
 
 
 @pytest.mark.asyncio

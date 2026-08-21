@@ -623,14 +623,19 @@ async def update_settings(
         single_account_id = (
             payload.single_account_id if "single_account_id" in payload.model_fields_set else current.single_account_id
         )
+        startup_settings = get_app_settings()
         stream_limit = (
             payload.proxy_account_stream_limit
             if payload.proxy_account_stream_limit is not None
+            else startup_settings.proxy_account_stream_limit
+            if "proxy_account_stream_limit" in payload.model_fields_set
             else current.proxy_account_stream_limit
         )
         stream_recovery_reserve = (
             payload.proxy_account_stream_recovery_reserve
             if payload.proxy_account_stream_recovery_reserve is not None
+            else startup_settings.proxy_account_stream_recovery_reserve
+            if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
             else current.proxy_account_stream_recovery_reserve
         )
         cap_fields_changed = bool(

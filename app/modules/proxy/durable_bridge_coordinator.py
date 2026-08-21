@@ -586,6 +586,20 @@ class DurableBridgeSessionCoordinator:
                 max_bytes=max_bytes,
             )
 
+    async def get_complete_transcript(
+        self,
+        *,
+        response_id: str,
+        max_turns: int = 128,
+        max_bytes: int = 8 * 1024 * 1024,
+    ) -> list[DurableBridgeTranscriptTurn] | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_complete_transcript(
+                response_id=response_id,
+                max_turns=max_turns,
+                max_bytes=max_bytes,
+            )
+
     async def purge_operation_spool(self, *, cutoff: datetime, batch_size: int = 500) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).purge_operation_spool(
@@ -702,6 +716,8 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         state: str,
         response_id: str | None = None,
+        response_output_items_json: str | None = None,
+        response_output_items_complete: bool = False,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).update_operation(
@@ -711,6 +727,8 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 state=state,
                 response_id=response_id,
+                response_output_items_json=response_output_items_json,
+                response_output_items_complete=response_output_items_complete,
             )
 
     async def get_operation(self, *, operation_id: str) -> DurableBridgeOperationSnapshot | None:

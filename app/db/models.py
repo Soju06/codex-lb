@@ -1990,6 +1990,13 @@ class HttpBridgeOperationRecord(Base):
     recovery_dispatch_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_bytes: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     event_spool_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # The raw response.create body is retained in ``request_text``.  Store the
+    # terminal response output separately so a complete parent chain can be
+    # reconstructed without depending on an SSE spool that may be pruned or
+    # deliberately bounded for latency.
+    transcript_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    response_output_items_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_output_items_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )
@@ -2010,6 +2017,7 @@ class HttpBridgeOperationRecord(Base):
         ),
         Index("idx_http_bridge_operations_session_parent_state", "session_id", "parent_response_id", "state"),
         Index("idx_http_bridge_operations_parent_state", "parent_response_id", "state", "updated_at"),
+        Index("idx_http_bridge_operations_response_state", "response_id", "state"),
         Index("idx_http_bridge_operations_state_updated", "state", "updated_at"),
     )
 

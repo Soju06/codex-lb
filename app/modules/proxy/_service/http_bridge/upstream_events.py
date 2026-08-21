@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -194,6 +195,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _extract_model_class,
 )
+from app.modules.proxy.complete_transcript import build_complete_replay_payload
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.helpers import (
     _normalize_error_code,
@@ -300,6 +302,33 @@ async def _update_http_bridge_operation_state(
     if not operation_id or session_id is None or owner_epoch is None or not callable(update_operation):
         return
     try:
+        response_output_items_json: str | None = None
+        response_output_items_complete = False
+        if (
+            state == "completed"
+            and bool(
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_complete_transcript_recovery_enabled",
+                    False,
+                )
+            )
+            and bool(getattr(request_state, "response_output_items_complete", False))
+        ):
+            response_output_items_json = json.dumps(
+                getattr(request_state, "response_output_items", []),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+            response_output_items_complete = len(response_output_items_json.encode("utf-8")) <= int(
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_complete_transcript_max_bytes",
+                    8 * 1024 * 1024,
+                )
+            )
+            if not response_output_items_complete:
+                response_output_items_json = None
         marked = await update_operation(
             operation_id=operation_id,
             session_id=session_id,
@@ -307,6 +336,8 @@ async def _update_http_bridge_operation_state(
             owner_epoch=owner_epoch,
             state=state,
             response_id=response_id,
+            response_output_items_json=response_output_items_json,
+            response_output_items_complete=response_output_items_complete,
         )
         if marked and response_id is not None:
             request_state.operation_persisted_response_id = response_id
@@ -676,6 +707,148 @@ def _record_http_bridge_tool_call_lifecycle(
         request_state.tool_call_manifest_invalid = True
         return
     target[call_id] = item_type
+
+
+def _record_http_bridge_response_output(
+    request_state: _WebSocketRequestState,
+    *,
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+) -> None:
+    """Capture the canonical terminal output for durable transcript replay."""
+    if event_type != "response.completed" or not isinstance(payload, dict):
+        return
+    response = payload.get("response")
+    output = response.get("output") if isinstance(response, dict) else None
+    if not isinstance(output, list) or not all(isinstance(item, dict) for item in output):
+        # An absent/partial output must never be mistaken for a complete
+        # transcript. The operation will remain fail-closed for reconstruction.
+        request_state.response_output_items = []
+        request_state.response_output_items_complete = False
+        return
+    request_state.response_output_items = cast(list[JsonValue], output)
+    request_state.response_output_items_complete = True
+
+
+async def _try_complete_transcript_recovery(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    request_state: _WebSocketRequestState,
+) -> bool:
+    """Retry a stale anchor using a durable, complete transcript when enabled."""
+    settings = _service_get_settings()
+    if not bool(getattr(settings, "http_responses_session_bridge_complete_transcript_recovery_enabled", False)):
+        return False
+    previous_response_id = request_state.previous_response_id
+    if not previous_response_id or not request_state.request_text:
+        return False
+    get_transcript = getattr(getattr(service, "_durable_bridge", None), "get_complete_transcript", None)
+    if not callable(get_transcript):
+        return False
+    try:
+        turns = await get_transcript(
+            response_id=previous_response_id,
+            max_turns=int(getattr(settings, "http_responses_session_bridge_complete_transcript_max_turns", 128)),
+            max_bytes=int(
+                getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024)
+            ),
+        )
+        if not turns:
+            return False
+        replay_text = build_complete_replay_payload(
+            turns,
+            continuation_request_text=request_state.request_text,
+            max_input_items=int(
+                getattr(settings, "http_responses_session_bridge_complete_transcript_max_input_items", 4096)
+            ),
+            max_bytes=int(
+                getattr(settings, "http_responses_session_bridge_complete_transcript_max_bytes", 8 * 1024 * 1024)
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Complete HTTP bridge transcript recovery lookup failed request_id=%s",
+            request_state.request_id,
+            exc_info=True,
+        )
+        return False
+    if not replay_text:
+        _log_http_bridge_event(
+            "complete_transcript_recovery_ineligible",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail="transcript_reconstruction_failed",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        return False
+
+    # The old anchored operation is no longer a viable continuation. Mark it
+    # failed before replacing the request body so a later client retry can
+    # rebind the durable identity instead of remaining fenced as UNKNOWN.
+    await _update_http_bridge_operation_state(
+        service,
+        session,
+        request_state,
+        state="failed",
+        response_id=None,
+    )
+    request_state.request_text = replay_text
+    request_state.fresh_upstream_request_text = replay_text
+    request_state.fresh_upstream_request_is_retry_safe = True
+    request_state.previous_response_id = None
+    request_state.proxy_injected_previous_response_id = False
+    request_state.hard_continuity_anchor = False
+    request_state.response_id = None
+    request_state.response_event_count = 0
+    request_state.awaiting_response_created = True
+    request_state.operation_id = None
+    request_state.operation_fingerprint = None
+    request_state.operation_parent_response_id = None
+    request_state.operation_registered = False
+    request_state.operation_created = False
+    request_state.operation_recovery_claimed = False
+    request_state.operation_dispatched = False
+    request_state.response_output_items = []
+    request_state.response_output_items_complete = False
+    async with session.pending_lock:
+        if request_state not in session.pending_requests:
+            session.pending_requests.appendleft(request_state)
+            if _http_bridge_request_counts_against_queue(request_state):
+                session.queued_request_count += 1
+    _log_http_bridge_event(
+        "complete_transcript_recovery_retry",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail=f"previous_response_id={previous_response_id}",
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+    try:
+        retried = await service._retry_http_bridge_request_on_fresh_upstream(
+            session,
+            request_state=request_state,
+            text_data=replay_text,
+            require_same_account=True,
+        )
+        if retried:
+            return True
+    except UpstreamWebSocketTransportError:
+        raise
+    except Exception:
+        logger.warning(
+            "Complete HTTP bridge transcript recovery retry failed request_id=%s",
+            request_state.request_id,
+            exc_info=True,
+        )
+    async with session.pending_lock:
+        if request_state in session.pending_requests:
+            session.pending_requests.remove(request_state)
+            if _http_bridge_request_counts_against_queue(request_state):
+                session.queued_request_count = max(0, session.queued_request_count - 1)
+    return False
 
 
 def _response_completed_tool_call_types(payload: dict[str, JsonValue] | None) -> dict[str, str] | None:
@@ -1855,6 +2028,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type=event_type,
                     payload=payload,
                 )
+                _record_http_bridge_response_output(
+                    matched_request_state,
+                    event_type=event_type,
+                    payload=payload,
+                )
                 completed_tool_call = _response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call
@@ -2276,6 +2454,8 @@ class _HTTPBridgeUpstreamEventsMixin:
             event_block = f"data: {rewritten_text}\n\n"
 
         if status_request_state is not None and is_previous_response_not_found_event:
+            if await _try_complete_transcript_recovery(self, session, status_request_state):
+                return
             status_request_state.error_http_status_override = 502
             status_request_state.previous_response_not_found_rewritten = (
                 response_id is None and not has_other_pending_requests

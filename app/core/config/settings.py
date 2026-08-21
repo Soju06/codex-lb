@@ -343,6 +343,13 @@ class Settings(BaseSettings):
         "server_anchored_replay_once",
         "server_indefinite_recovery",
     ] = "fail_closed"
+    # Persist terminal response output items and allow the bridge to rebuild a
+    # bounded unanchored transcript after a stale previous_response_id. This
+    # is opt-in because transcripts contain sensitive prompt/output content.
+    http_responses_session_bridge_complete_transcript_recovery_enabled: bool = False
+    http_responses_session_bridge_complete_transcript_max_turns: int = Field(default=128, gt=0, le=512)
+    http_responses_session_bridge_complete_transcript_max_input_items: int = Field(default=4096, gt=0, le=32768)
+    http_responses_session_bridge_complete_transcript_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None

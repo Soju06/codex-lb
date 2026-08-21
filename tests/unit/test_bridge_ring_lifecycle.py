@@ -636,6 +636,8 @@ async def test_operation_ledger_is_fenced_and_idempotent(
             owner_epoch=claim.owner_epoch,
             state="completed",
             response_id="resp-completed",
+            response_output_items_json="[]",
+            response_output_items_complete=True,
         )
         completed = await repository.get_latest_completed_operation(
             session_id=claim.id,

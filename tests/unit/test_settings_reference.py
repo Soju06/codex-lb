@@ -69,7 +69,10 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # operator-selectable because startup invariant failures need two supported
 # modes: report-only by default for mixed/self-hosted environments, and
 # fail-fast when CI or strict operators want config drift to abort startup.
-MAX_SETTINGS_FIELDS = 131
+# 131 -> 135: complete durable transcript recovery controls. These remain
+# opt-in because they retain sensitive prompt/output material and increase
+# database storage proportional to conversation length.
+MAX_SETTINGS_FIELDS = 135
 
 
 def test_generated_settings_reference_matches_code() -> None:

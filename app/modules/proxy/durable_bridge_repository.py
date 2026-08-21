@@ -188,6 +188,9 @@ class DurableBridgeOperationSnapshot:
     recovery_dispatch_count: int = 0
     request_text: str | None = None
     event_spool_complete: bool = True
+    transcript_version: int = 0
+    response_output_items_json: str | None = None
+    response_output_items_complete: bool = False
     created: bool = False
     rebound: bool = False
     rebound_from_session_id: str | None = None
@@ -200,6 +203,7 @@ class DurableBridgeOperationSnapshot:
 class DurableBridgeTranscriptTurn:
     operation: DurableBridgeOperationSnapshot
     events: tuple[str, ...]
+    response_output_items_json: str = "[]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1401,6 +1405,9 @@ class DurableBridgeRepository:
                     )
                     operation.event_bytes = 0
                     operation.event_spool_complete = False
+                    operation.response_output_items_json = None
+                    operation.response_output_items_complete = False
+                    operation.transcript_version = 0
                     operation.updated_at = utcnow()
                     rebound = True
                 if request_text is not None and operation.request_text is None:
@@ -1502,6 +1509,9 @@ class DurableBridgeRepository:
             )
             operation.event_bytes = 0
             operation.event_spool_complete = False
+            operation.response_output_items_json = None
+            operation.response_output_items_complete = False
+            operation.transcript_version = 0
             operation.updated_at = utcnow()
             await self._session.commit()
         return True
@@ -1556,6 +1566,9 @@ class DurableBridgeRepository:
             operation.recovery_dispatch_count += 1
             operation.event_bytes = 0
             operation.event_spool_complete = False
+            operation.response_output_items_json = None
+            operation.response_output_items_complete = False
+            operation.transcript_version = 0
             operation.updated_at = utcnow()
             await self._session.commit()
         return True
@@ -1743,8 +1756,67 @@ class DurableBridgeRepository:
             total_bytes += turn_bytes
             if total_bytes > max_bytes:
                 return None
-            turns.append(DurableBridgeTranscriptTurn(operation=operation, events=tuple(events)))
+            turns.append(
+                DurableBridgeTranscriptTurn(
+                    operation=operation,
+                    events=tuple(events),
+                    response_output_items_json=operation.response_output_items_json or "[]",
+                )
+            )
             current_response_id = operation.parent_response_id
+        turns.reverse()
+        return turns
+
+    async def get_complete_transcript(
+        self,
+        *,
+        response_id: str,
+        max_turns: int = 128,
+        max_bytes: int = 8 * 1024 * 1024,
+    ) -> list[DurableBridgeTranscriptTurn] | None:
+        """Return the request/output chain without requiring SSE spool replay.
+
+        Complete transcript recovery only needs the canonical request body and
+        terminal response output for each parent turn. The event spool remains
+        independently bounded and may be incomplete without invalidating this
+        reconstruction path.
+        """
+        turns: list[DurableBridgeTranscriptTurn] = []
+        visited: set[str] = set()
+        total_bytes = 0
+        current_response_id: str | None = response_id
+        while current_response_id is not None:
+            if current_response_id in visited or len(turns) >= max_turns:
+                return None
+            visited.add(current_response_id)
+            operation = await self._session.scalar(
+                select(HttpBridgeOperationRecord).where(
+                    HttpBridgeOperationRecord.response_id == current_response_id,
+                    HttpBridgeOperationRecord.state == "completed",
+                )
+            )
+            snapshot = _to_operation_snapshot(operation) if operation is not None else None
+            if (
+                snapshot is None
+                or snapshot.request_text is None
+                or not snapshot.response_output_items_complete
+                or not snapshot.response_output_items_json
+            ):
+                return None
+            turn_bytes = len(snapshot.request_text.encode("utf-8")) + len(
+                snapshot.response_output_items_json.encode("utf-8")
+            )
+            total_bytes += turn_bytes
+            if total_bytes > max_bytes:
+                return None
+            turns.append(
+                DurableBridgeTranscriptTurn(
+                    operation=snapshot,
+                    events=(),
+                    response_output_items_json=snapshot.response_output_items_json,
+                )
+            )
+            current_response_id = snapshot.parent_response_id
         turns.reverse()
         return turns
 
@@ -2187,6 +2259,8 @@ class DurableBridgeRepository:
         owner_epoch: int,
         state: str,
         response_id: str | None = None,
+        response_output_items_json: str | None = None,
+        response_output_items_complete: bool = False,
     ) -> bool:
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
@@ -2204,6 +2278,10 @@ class DurableBridgeRepository:
             values: dict[str, object] = {"state": state, "updated_at": utcnow()}
             if response_id is not None:
                 values["response_id"] = response_id
+            if response_output_items_json is not None:
+                values["response_output_items_json"] = response_output_items_json
+                values["response_output_items_complete"] = response_output_items_complete
+                values["transcript_version"] = 1
             result = await self._session.execute(
                 update(HttpBridgeOperationRecord)
                 .where(
@@ -3228,6 +3306,9 @@ def _to_operation_snapshot(
         recovery_dispatch_count=row.recovery_dispatch_count,
         request_text=row.request_text,
         event_spool_complete=bool(row.event_spool_complete),
+        transcript_version=int(row.transcript_version or 0),
+        response_output_items_json=row.response_output_items_json,
+        response_output_items_complete=bool(row.response_output_items_complete),
         created=created,
         rebound=rebound,
         rebound_from_session_id=rebound_from_session_id,

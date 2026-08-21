@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import json
+
+from app.modules.proxy.complete_transcript import build_complete_replay_payload
+from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationSnapshot, DurableBridgeTranscriptTurn
+
+
+def _turn(
+    number: int,
+    *,
+    parent_response_id: str | None,
+    response_id: str,
+    request_input: list[dict[str, object]],
+    output: list[dict[str, object]],
+) -> DurableBridgeTranscriptTurn:
+    operation = DurableBridgeOperationSnapshot(
+        operation_id=f"op_{number}",
+        session_id="session",
+        request_fingerprint=f"fingerprint_{number}",
+        account_id="account",
+        model="gpt-test",
+        parent_response_id=parent_response_id,
+        state="completed",
+        response_id=response_id,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "previous_response_id": parent_response_id,
+                "input": request_input,
+            }
+        ),
+    )
+    return DurableBridgeTranscriptTurn(operation=operation, events=(), response_output_items_json=json.dumps(output))
+
+
+def test_build_complete_replay_payload_inserts_prior_assistant_output() -> None:
+    turns = [
+        _turn(
+            1,
+            parent_response_id=None,
+            response_id="resp_1",
+            request_input=[{"type": "message", "role": "user", "content": "first"}],
+            output=[
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                }
+            ],
+        ),
+    ]
+
+    payload = build_complete_replay_payload(
+        turns,
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "previous_response_id": "resp_1",
+                "input": [{"type": "message", "role": "user", "content": "follow up"}],
+            }
+        ),
+    )
+
+    assert payload is not None
+    parsed = json.loads(payload)
+    assert "previous_response_id" not in parsed
+    assert [item["role"] for item in parsed["input"]] == ["user", "assistant", "user"]
+    assert all("id" not in item for item in parsed["input"])
+
+
+def test_build_complete_replay_payload_rejects_broken_parent_continuation() -> None:
+    turns = [
+        _turn(
+            1,
+            parent_response_id=None,
+            response_id="resp_1",
+            request_input=[{"type": "message", "role": "user", "content": "first"}],
+            output=[
+                {
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "answer"}],
+                }
+            ],
+        ),
+    ]
+
+    assert (
+        build_complete_replay_payload(
+            turns,
+            continuation_request_text=json.dumps(
+                {
+                    "type": "response.create",
+                    "model": "gpt-test",
+                    "previous_response_id": "not_resp_1",
+                    "input": [{"type": "message", "role": "user", "content": "follow up"}],
+                }
+            ),
+        )
+        is None
+    )

@@ -185,22 +185,29 @@ def _sqlite_file_identity(db_path: Path) -> dict[str, int] | None:
     }
 
 
-def _fsync_directory(directory: Path) -> None:
+def _fsync_directory(directory: Path) -> bool:
     """Persist a directory entry so a rename survives power loss.
 
-    Windows and some network filesystems refuse to open or sync a directory;
-    there the rename durability guarantee is the platform's to make.
+    Returns ``False`` only when a sync was attempted and failed, which means
+    the storage is unhealthy and the record must not be trusted.
+
+    A platform that does not allow a directory handle at all reports success.
+    Windows raises on ``os.open`` of a directory, so failing closed there
+    would mean no Windows deployment could ever record a clean shutdown;
+    rename durability on those platforms is the platform's guarantee to make,
+    not something this code can verify.
     """
     try:
         directory_fd = os.open(directory, os.O_RDONLY)
     except OSError:
-        return
+        return True
     try:
         os.fsync(directory_fd)
     except OSError:
-        pass
+        return False
     finally:
         os.close(directory_fd)
+    return True
 
 
 def read_sqlite_runstate(db_path: Path) -> SqliteRunState | None:
@@ -235,7 +242,9 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
 
     The payload and the directory entry are both fsynced, so a power loss
     cannot retain an earlier ``clean`` record while losing the ``running``
-    transition that replaced it. In WAL mode the main database file can keep
+    transition that replaced it. A directory sync that is attempted and fails
+    is treated as a failed write, because a record whose durability could not
+    be established must not be trusted. In WAL mode the main database file can keep
     its size and mtime across a long run, so the sidecar cannot rely on the
     file identity alone to invalidate a lost transition.
 
@@ -253,7 +262,8 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, target)
-        _fsync_directory(target.parent)
+        if not _fsync_directory(target.parent):
+            raise OSError("could not sync the run-state directory entry")
         return True
     except OSError:
         for cleanup in (tmp, target):

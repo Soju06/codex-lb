@@ -12,6 +12,9 @@
   letting the error abort startup.
 - [x] 1.6 Fsync the record's contents before the rename and the directory
   entry after it, so a power loss cannot lose a `running` transition.
+- [x] 1.7 Treat a directory sync that is attempted and fails as a failed
+  write, while treating a platform that refuses a directory handle at all
+  (Windows) as success rather than a storage failure.
 
 ## 2. Startup
 
@@ -38,7 +41,8 @@
   runs it for a missing sidecar, a `running` sidecar, and a disabled check.
 - [x] 4.3 Unit-test that a failed integrity check leaves the state unclean.
 - [x] 4.4 Unit-test the invalid-UTF-8 sidecar, the timestamp-preserving
-  restore, and that both syncs happen on a write.
+  restore, that both syncs happen on a write, that a failed directory sync
+  fails the write closed, and both directory-sync outcomes.
 - [x] 4.5 Unit-test that a raised or cancelled `close_db()` does not record a
   clean shutdown.
 - [x] 4.6 Run Ruff check/format and `ty`.

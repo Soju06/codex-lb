@@ -215,3 +215,44 @@ def test_runstate_write_syncs_the_payload_and_the_directory_entry(
 
     # One for the sidecar payload, one for the directory entry the rename created.
     assert len(synced) == 2
+
+
+def test_runstate_write_fails_closed_when_the_directory_sync_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Storage that cannot confirm durability must not leave a trusted record."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", lambda _directory: False)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+
+    monkeypatch.undo()
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+    assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_fsync_directory_reports_success_when_the_platform_refuses_a_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Windows cannot open a directory handle; that is not a storage failure."""
+
+    def _refuse(*_args: object, **_kwargs: object) -> int:
+        raise PermissionError("directory handles are not supported here")
+
+    monkeypatch.setattr(os, "open", _refuse)
+
+    assert sqlite_utils_module._fsync_directory(tmp_path) is True
+
+
+def test_fsync_directory_reports_failure_when_the_sync_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+
+    def _fail(_fd: int) -> None:
+        raise OSError("I/O error")
+
+    monkeypatch.setattr(os, "fsync", _fail)
+
+    assert sqlite_utils_module._fsync_directory(tmp_path) is False

@@ -38,7 +38,12 @@ a `running` record stays readable while the process writes to the store.
 Run-state transitions MUST be durable. The system MUST sync both the record's
 contents and the directory entry that names it, so a power loss cannot retain
 an earlier `clean` record while losing the `running` transition that replaced
-it. The file fence cannot substitute for this: in WAL mode the main database
+it. A sync that is attempted and fails MUST be treated as a failed write, so
+storage that cannot confirm durability leaves no trusted record. A platform
+that does not permit a directory handle at all MUST NOT be treated as a
+failure, because rename durability there is the platform's guarantee and
+failing closed would prevent those deployments from ever recording a clean
+shutdown. The file fence cannot substitute for this: in WAL mode the main database
 file can keep its size and modification time across a long run, so a lost
 transition would leave a `clean` record that still matches.
 
@@ -85,6 +90,13 @@ requirement governs only whether the selected mode runs on a given startup.
   time
 - **THEN** the clean record reads as unknown
 - **AND** the configured integrity check runs against the restored file
+
+#### Scenario: Unverifiable durability leaves no trusted record
+
+- **GIVEN** storage whose directory sync fails
+- **WHEN** the system records a run-state transition
+- **THEN** the write reports failure and no sidecar remains
+- **AND** the next startup runs the integrity check
 
 #### Scenario: Corrupt sidecar content does not abort startup
 

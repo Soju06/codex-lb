@@ -63,7 +63,14 @@ from app.core.timeout_invariants import validate_runtime_timeout_invariants
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
-from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
+from app.db.session import (
+    SessionLocal,
+    close_db,
+    close_session,
+    init_background_db,
+    init_db,
+    mark_sqlite_shutdown_clean,
+)
 from app.modules.accounts import api as accounts_api
 from app.modules.accounts.deletion import build_account_deletion_scheduler
 from app.modules.accounts.repository import AccountsRepository
@@ -313,6 +320,17 @@ def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
         "across worker processes.",
         port,
     )
+
+
+async def _close_db_and_record_clean_shutdown() -> None:
+    """Dispose the database engines, then record the shutdown as clean.
+
+    The record is only reached once disposal returns. A cancellation or a
+    failed dispose must leave the run state unclean, because that is exactly
+    the incomplete shutdown the next startup's integrity scan is for.
+    """
+    await close_db()
+    mark_sqlite_shutdown_clean()
 
 
 @asynccontextmanager
@@ -769,7 +787,7 @@ async def lifespan(app: FastAPI):
             finally:
                 mark_process_dead()
                 try:
-                    await close_db()
+                    await _close_db_and_record_clean_shutdown()
                 finally:
                     shutdown_state.mark_lifespan_completed()
 

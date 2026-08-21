@@ -1098,3 +1098,52 @@ async def test_in_flight_middleware_allows_drain_stop_during_drain() -> None:
 
     assert app_called is True
     assert sent_messages[0]["status"] == 200
+
+
+@pytest.mark.asyncio
+async def test_clean_shutdown_is_recorded_after_successful_disposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    async def _close_db() -> None:
+        order.append("close_db")
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", lambda: order.append("mark_clean"))
+
+    await app_main._close_db_and_record_clean_shutdown()
+
+    assert order == ["close_db", "mark_clean"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        pytest.param(RuntimeError("dispose failed"), RuntimeError, id="dispose-raises"),
+        pytest.param(asyncio.CancelledError(), asyncio.CancelledError, id="dispose-cancelled"),
+    ],
+)
+async def test_clean_shutdown_is_not_recorded_when_disposal_does_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+    expected: type[BaseException],
+) -> None:
+    """An incomplete teardown is exactly what the next startup's scan is for."""
+    marked = False
+
+    async def _close_db() -> None:
+        raise failure
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    with pytest.raises(expected):
+        await app_main._close_db_and_record_clean_shutdown()
+
+    assert marked is False

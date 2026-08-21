@@ -21,10 +21,15 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config.settings import get_settings
 from app.db.sqlite_utils import (
+    IntegrityCheck,
     SqliteIntegrityCheckMode,
+    SqliteRunState,
     check_sqlite_integrity,
+    integrity_check_pragma_name,
     normalize_sqlite_url,
+    read_sqlite_runstate,
     sqlite_db_path_from_url,
+    write_sqlite_runstate,
 )
 
 if TYPE_CHECKING:
@@ -361,6 +366,77 @@ def _startup_sqlite_check_mode(raw_mode: str) -> SqliteIntegrityCheckMode | None
     if raw_mode == "off":
         return None
     return SqliteIntegrityCheckMode(raw_mode)
+
+
+def _sqlite_startup_check_required(sqlite_path: Path, *, mode: SqliteIntegrityCheckMode) -> bool:
+    """Decide whether this startup has to scan the whole SQLite file.
+
+    The scan reads every page, so its cost grows with the store and the
+    listener cannot bind until it returns. SQLite is already consistent after
+    a clean close, so the scan only earns its cost when the previous process
+    did not get to record one. Anything other than a recorded clean shutdown
+    (a crash, an OOM kill, a power loss, a first run, or an upgrade from a
+    build that never wrote the sidecar) still pays for the scan.
+    """
+    if read_sqlite_runstate(sqlite_path) is not SqliteRunState.CLEAN:
+        return True
+    logger.info(
+        "Skipping SQLite startup %s after a recorded clean shutdown path=%s",
+        integrity_check_pragma_name(mode),
+        sqlite_path,
+    )
+    return False
+
+
+def _run_startup_sqlite_check(sqlite_path: Path, *, mode: SqliteIntegrityCheckMode) -> IntegrityCheck:
+    """Run the startup scan, announcing it so the stall is never unexplained."""
+    pragma_name = integrity_check_pragma_name(mode)
+    try:
+        size_bytes = sqlite_path.stat().st_size
+    except OSError:
+        size_bytes = 0
+    logger.info(
+        "Running SQLite startup %s path=%s size_bytes=%s; the listener does not bind until it completes",
+        pragma_name,
+        sqlite_path,
+        size_bytes,
+    )
+    started_monotonic = time.monotonic()
+    integrity = check_sqlite_integrity(sqlite_path, mode=mode)
+    elapsed_seconds = time.monotonic() - started_monotonic
+    if integrity.ok:
+        logger.info(
+            "SQLite startup %s passed in %.1fs path=%s",
+            pragma_name,
+            elapsed_seconds,
+            sqlite_path,
+        )
+    return integrity
+
+
+def _mark_sqlite_running(sqlite_path: Path) -> None:
+    if not write_sqlite_runstate(sqlite_path, SqliteRunState.RUNNING):
+        logger.warning(
+            "Failed to record the SQLite run state path=%s; the next startup will re-run the integrity check",
+            sqlite_path,
+        )
+
+
+def mark_sqlite_shutdown_clean() -> None:
+    """Record that this process closed the SQLite store cleanly.
+
+    Call this after the engines are disposed. The next startup reads it and
+    skips the integrity scan, which is what keeps an operator restart from
+    paying a whole-file read that grows with the store.
+    """
+    sqlite_path = sqlite_db_path_from_url(normalize_sqlite_url(_settings.database_url))
+    if sqlite_path is None:
+        return
+    if not write_sqlite_runstate(sqlite_path, SqliteRunState.CLEAN):
+        logger.warning(
+            "Failed to record a clean SQLite shutdown path=%s; the next startup will run the integrity check",
+            sqlite_path,
+        )
 
 
 async def _shielded(awaitable: Awaitable[object]) -> None:
@@ -843,11 +919,11 @@ async def init_db() -> None:
     sqlite_path = sqlite_db_path_from_url(database_url)
     if sqlite_path is not None:
         check_mode = _startup_sqlite_check_mode(_settings.database_sqlite_startup_check_mode)
-        if check_mode is not None:
-            integrity = check_sqlite_integrity(sqlite_path, mode=check_mode)
+        if check_mode is not None and _sqlite_startup_check_required(sqlite_path, mode=check_mode):
+            integrity = _run_startup_sqlite_check(sqlite_path, mode=check_mode)
             if not integrity.ok:
                 details = integrity.details or "unknown error"
-                pragma_name = "quick_check" if check_mode == SqliteIntegrityCheckMode.QUICK else "integrity_check"
+                pragma_name = integrity_check_pragma_name(check_mode)
                 logger.error(
                     "SQLite %s failed path=%s details=%s",
                     pragma_name,
@@ -868,6 +944,9 @@ async def init_db() -> None:
                         "or restore a backup from the same directory."
                     )
                 raise RuntimeError(message)
+        # Record the run state even when the check is disabled, so turning it
+        # back on cannot trust a sidecar this build never maintained.
+        _mark_sqlite_running(sqlite_path)
 
     try:
         inspect_migration_state, run_startup_migrations, check_schema_drift = _load_migration_entrypoints()

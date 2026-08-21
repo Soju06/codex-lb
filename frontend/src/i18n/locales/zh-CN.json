@@ -1329,6 +1329,7 @@
   "settings.totp.validation.codeLength": "请输入 6 位验证码",
   "settings.totp.toasts.configured": "TOTP 已配置",
   "settings.totp.toasts.disabled": "TOTP 已禁用",
+  "settings.toasts.loadFailed": "加载设置失败",
   "settings.toasts.saved": "设置已保存",
   "settings.toasts.saveFailed": "保存设置失败",
   "statusBar.serviceReady": "服务就绪：",

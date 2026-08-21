@@ -40,6 +40,19 @@ README and sample env stay slim without losing content.
   by `tests/unit/test_helm_replica_artifacts.py`.
 - **OpenSpec stays normative.** Docs pages carry footer links to their
   governing capability; they render behavior, they do not define it.
+- **Community companions stay separate.** Small operator tools that consume an
+  existing API can be maintained in independent repositories and linked from
+  the docs once they are public and tested. A listing keeps the tool
+  discoverable without adding its runtime, CI, release process, or support
+  surface to codex-lb. The first listings cover the independently published
+  [Codex LB Status Bar](https://github.com/sm1ee/codex-lb-statusbar) and the
+  read-only
+  [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar),
+  following the maintainer direction in
+  [PR #1233](https://github.com/Soju06/codex-lb/pull/1233#issuecomment-4988227303).
+  Listings also carry least-privilege guidance: guest access for monitoring
+  where the companion supports it, and admin access only for control features;
+  each companion remains responsible for documenting its current auth modes.
 - **zh-CN README gets a canonical-English banner** rather than a parallel diet;
   full i18n (mkdocs-static-i18n) is a deferred follow-up.
 

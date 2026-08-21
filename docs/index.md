@@ -28,6 +28,23 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 - [Deployment](deployment/docker.md) — Docker, [Kubernetes](deployment/kubernetes.md), [remote access](deployment/remote.md)
 - [Troubleshooting](troubleshooting.md)
 
+## Community companions
+
+These independent projects consume the existing dashboard API and are
+maintained outside codex-lb:
+
+- [Codex LB Status Bar](https://github.com/sm1ee/codex-lb-statusbar) — a native
+  macOS app with account status, quota details, and authenticated account
+  controls.
+- [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — a
+  read-only SwiftBar/Bun monitor for account-pool status and quota headroom.
+
+Prefer a guest dashboard session for monitoring-only access when the companion
+supports it, and grant admin access only for Status Bar account controls.
+codex-lb SwiftBar is read-only; consult its compatibility table for the
+authentication modes supported by the current release. Review each project's
+repository and release notes before connecting it.
+
 ## Screenshots
 
 | Settings | Login |

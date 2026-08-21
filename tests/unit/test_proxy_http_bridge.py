@@ -5597,6 +5597,34 @@ async def test_completed_bridge_operation_materializes_output_items_from_event_s
     assert update_operation.await_args.kwargs["response_output_items_complete"] is True
 
 
+def test_response_output_capture_reconstructs_empty_completed_output() -> None:
+    request_state = SimpleNamespace(
+        response_output_items=[],
+        response_output_items_by_index={},
+        response_output_items_event_invalid=False,
+        response_output_items_complete=False,
+    )
+
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 1, "item": {"type": "message", "id": "msg_1"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.output_item.done",
+        payload={"output_index": 0, "item": {"type": "reasoning", "id": "rs_1"}},
+    )
+    http_bridge_upstream_events_module._record_http_bridge_response_output(
+        request_state,
+        event_type="response.completed",
+        payload={"response": {"output": []}},
+    )
+
+    assert [item["type"] for item in request_state.response_output_items] == ["reasoning", "message"]
+    assert request_state.response_output_items_complete is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("upstream_response_id", "replay_response_id", "expected_response_id", "alternate_expected_response_id"),

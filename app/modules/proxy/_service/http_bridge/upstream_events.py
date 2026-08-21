@@ -756,13 +756,49 @@ def _record_http_bridge_response_output(
     payload: dict[str, JsonValue] | None,
 ) -> None:
     """Capture the canonical terminal output for durable transcript replay."""
-    if event_type != "response.completed" or not isinstance(payload, dict):
+    if not isinstance(payload, dict):
+        return
+    if event_type == "response.output_item.done":
+        output_index = payload.get("output_index")
+        item = payload.get("item")
+        if not isinstance(output_index, int) or output_index < 0 or not isinstance(item, dict):
+            request_state.response_output_items_event_invalid = True
+            return
+        existing = request_state.response_output_items_by_index.get(output_index)
+        if existing is not None and json.dumps(existing, sort_keys=True, separators=(",", ":")) != json.dumps(
+            item,
+            sort_keys=True,
+            separators=(",", ":"),
+        ):
+            request_state.response_output_items_event_invalid = True
+            return
+        request_state.response_output_items_by_index[output_index] = cast(JsonValue, item)
+        return
+    if event_type != "response.completed":
         return
     response = payload.get("response")
     output = response.get("output") if isinstance(response, dict) else None
     if not isinstance(output, list) or not all(isinstance(item, dict) for item in output):
+        if request_state.response_output_items_by_index:
+            request_state.response_output_items = [
+                request_state.response_output_items_by_index[index]
+                for index in sorted(request_state.response_output_items_by_index)
+            ]
+            request_state.response_output_items_complete = not request_state.response_output_items_event_invalid
+            return
         # An absent/partial output must never be mistaken for a complete
         # transcript. The operation will remain fail-closed for reconstruction.
+        request_state.response_output_items = []
+        request_state.response_output_items_complete = False
+        return
+    if output == [] and request_state.response_output_items_by_index:
+        if not request_state.response_output_items_event_invalid:
+            request_state.response_output_items = [
+                request_state.response_output_items_by_index[index]
+                for index in sorted(request_state.response_output_items_by_index)
+            ]
+            request_state.response_output_items_complete = True
+            return
         request_state.response_output_items = []
         request_state.response_output_items_complete = False
         return
@@ -851,6 +887,8 @@ async def _try_complete_transcript_recovery(
     request_state.operation_recovery_claimed = False
     request_state.operation_dispatched = False
     request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_items_event_invalid = False
     request_state.response_output_items_complete = False
     async with session.pending_lock:
         if request_state not in session.pending_requests:

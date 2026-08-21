@@ -1124,6 +1124,11 @@ class _WebSocketRequestState:
     # The terminal response output is retained independently of the SSE event
     # spool.  It is the assistant side of the durable replay transcript.
     response_output_items: list[JsonValue] = field(default_factory=list)
+    # Some Codex streams put the canonical output only on output_item.done
+    # events and leave response.completed.response.output empty. Keep the
+    # completed items keyed by output_index until the terminal event arrives.
+    response_output_items_by_index: dict[int, JsonValue] = field(default_factory=dict)
+    response_output_items_event_invalid: bool = False
     response_output_items_complete: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0

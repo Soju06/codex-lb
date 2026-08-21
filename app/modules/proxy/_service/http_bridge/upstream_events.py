@@ -1011,6 +1011,48 @@ async def _abandon_durable_http_bridge_continuity(
     return True
 
 
+async def _invalidate_denied_http_bridge_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    denied_response_id: str | None,
+) -> bool:
+    """Retire an anchor upstream has explicitly denied.
+
+    ``previous_response_not_found`` against an anchor the proxy injected is a
+    verdict, not a symptom: the id came from this proxy's own durable record,
+    no client asked for it, and upstream says it does not exist. The poison
+    counter cannot act on that verdict because it only scores reader failures
+    (see ``_HTTP_BRIDGE_ANCHOR_POISON_DETAILS``), so the dead id survives at
+    any threshold and is re-injected into the following turn, where the
+    store-context trim strips the resent history against it and upstream never
+    emits ``response.created``.
+
+    Clearing costs nothing that is not already lost. The next turn simply
+    dispatches unanchored with the history the client sends, which is the
+    client's own replay rather than a server-side one, so no forked child
+    response can be created against a parent this proxy cannot see.
+    """
+    if denied_response_id is None:
+        return False
+    # Another request may have completed and advanced the anchor between the
+    # denied dispatch and this frame. Only retire the id that was refused.
+    if session.last_completed_response_id != denied_response_id:
+        return False
+    cleared = await _abandon_durable_http_bridge_continuity(
+        service,
+        session,
+        detail="upstream_denied_proxy_injected_anchor",
+    )
+    await service._unregister_http_bridge_previous_response_ids(session)
+    session.last_completed_response_id = None
+    session.last_completed_response_account_id = None
+    session.last_completed_input_count = 0
+    session.last_completed_input_prefix_fingerprint = None
+    session.last_pending_tool_calls.clear()
+    return cleared
+
+
 class _HTTPBridgeUpstreamEventsMixin:
     async def _fail_http_bridge_reader_and_maybe_retire(
         self: Any,
@@ -2289,6 +2331,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                 original_text=text,
             )
             event_block = f"data: {rewritten_text}\n\n"
+            if status_request_state.proxy_injected_previous_response_id:
+                await _invalidate_denied_http_bridge_anchor(
+                    self,
+                    session,
+                    denied_response_id=status_request_state.previous_response_id,
+                )
 
         retry_error_code = _websocket_precreated_retry_error_code(
             status_request_state,

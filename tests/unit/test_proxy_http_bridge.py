@@ -31522,3 +31522,107 @@ async def test_admission_waiters_do_not_accumulate_callbacks_on_shared_inflight_
     remaining = await asyncio.gather(*waiters[25:], return_exceptions=True)
     assert all(isinstance(result, ProxyResponseError) and result.status_code == 429 for result in remaining)
     assert key not in service._http_bridge_inflight_sessions
+
+
+def _denied_anchor_session(
+    *,
+    anchor: str | None = "resp_denied",
+) -> proxy_service._HTTPBridgeSession:
+    session = _make_bridge_session(key_value="denied-anchor")
+    session.durable_session_id = "durable-denied-anchor"
+    session.durable_owner_epoch = 4
+    session.last_completed_response_id = anchor
+    session.last_completed_response_account_id = "acc-bridge"
+    session.last_completed_input_count = 12
+    session.last_completed_input_prefix_fingerprint = "fingerprint-denied"
+    session.last_pending_tool_calls["call-1"] = "tool-1"
+    return session
+
+
+def _denied_anchor_service(*, cleared: bool = True) -> Any:
+    return SimpleNamespace(
+        _durable_bridge=SimpleNamespace(rebind_session_account=AsyncMock(return_value=cleared)),
+        _unregister_http_bridge_previous_response_ids=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalidate_denied_bridge_anchor_clears_both_carriers():
+    """An upstream denial of a proxy-injected anchor retires it on the first occurrence.
+
+    The poison counter cannot reach this failure class at any threshold, so the
+    dead id would otherwise survive in the durable row and in memory and be
+    re-injected into the next turn.
+    """
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+
+    cleared = await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id="resp_denied",
+    )
+
+    assert cleared is True
+    rebind_kwargs = service._durable_bridge.rebind_session_account.await_args.kwargs
+    assert rebind_kwargs["clear_continuity"] is True
+    assert rebind_kwargs["session_id"] == "durable-denied-anchor"
+    assert rebind_kwargs["owner_epoch"] == 4
+    service._unregister_http_bridge_previous_response_ids.assert_awaited_once_with(session)
+    assert session.last_completed_response_id is None
+    assert session.last_completed_response_account_id is None
+    assert session.last_completed_input_count == 0
+    assert session.last_completed_input_prefix_fingerprint is None
+    assert session.last_pending_tool_calls == {}
+
+
+@pytest.mark.asyncio
+async def test_invalidate_denied_bridge_anchor_keeps_an_anchor_a_sibling_already_advanced():
+    """A concurrent completion may advance the anchor before the denial is handled."""
+    session = _denied_anchor_session(anchor="resp_completed_meanwhile")
+    service = _denied_anchor_service()
+
+    cleared = await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id="resp_denied",
+    )
+
+    assert cleared is False
+    service._durable_bridge.rebind_session_account.assert_not_awaited()
+    service._unregister_http_bridge_previous_response_ids.assert_not_awaited()
+    assert session.last_completed_response_id == "resp_completed_meanwhile"
+    assert session.last_completed_input_count == 12
+
+
+@pytest.mark.asyncio
+async def test_invalidate_denied_bridge_anchor_ignores_a_missing_anchor():
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+
+    cleared = await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id=None,
+    )
+
+    assert cleared is False
+    service._durable_bridge.rebind_session_account.assert_not_awaited()
+    assert session.last_completed_response_id == "resp_denied"
+
+
+@pytest.mark.asyncio
+async def test_invalidate_denied_bridge_anchor_drops_memory_even_when_the_durable_clear_is_fenced():
+    """A fenced durable clear must not leave the dead id addressable in memory."""
+    session = _denied_anchor_session()
+    service = _denied_anchor_service(cleared=False)
+
+    cleared = await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id="resp_denied",
+    )
+
+    assert cleared is False
+    assert session.last_completed_response_id is None
+    assert session.last_completed_input_prefix_fingerprint is None

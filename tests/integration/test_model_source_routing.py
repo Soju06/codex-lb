@@ -3402,6 +3402,72 @@ async def test_source_embeddings_routes_payload_and_settles_usage(async_client, 
 
 
 @pytest.mark.asyncio
+async def test_source_embeddings_cancellation_releases_reservation(async_client, source_upstream) -> None:
+    await _enable_api_key_auth(async_client)
+    forward_started = asyncio.Event()
+    allow_upstream_finish = asyncio.Event()
+
+    async def embed(_request: web.Request) -> web.Response:
+        forward_started.set()
+        await allow_upstream_finish.wait()
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1]}],
+                "model": "cancelled-embedder",
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            }
+        )
+
+    base_url = await source_upstream(embed)
+    model = "cancelled-embedder"
+    source_id = await _create_model_source(
+        async_client,
+        name="cancelled-embedder-source",
+        model=model,
+        base_url=base_url,
+        supports_embeddings=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "cancelled-embeddings-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    request_task = asyncio.create_task(
+        async_client.post(
+            "/v1/embeddings",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": model, "input": "hello"},
+        )
+    )
+    await asyncio.wait_for(forward_started.wait(), timeout=1)
+
+    request_task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+    finally:
+        allow_upstream_finish.set()
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(
+                ApiKeyUsageReservation.api_key_id == key_id,
+                ApiKeyUsageReservation.model == model,
+            )
+        )
+        assert result.scalar_one().status == "released"
+
+
+@pytest.mark.asyncio
 async def test_source_embeddings_unknown_model_returns_model_not_found(async_client) -> None:
     await _enable_api_key_auth(async_client)
     created = await async_client.post("/api/api-keys/", json={"name": "embeddings-404-key"})

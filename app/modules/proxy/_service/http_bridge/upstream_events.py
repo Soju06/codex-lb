@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -49,6 +49,7 @@ from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.time import utcnow
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -72,6 +73,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
+    _clear_http_bridge_quarantine_key,
+    _http_bridge_session_key_quarantine_generation,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -195,6 +198,7 @@ from app.modules.proxy.affinity import (
     _extract_model_class,
 )
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     is_upstream_model_capacity_error,
@@ -208,6 +212,103 @@ from app.modules.proxy.tool_call_dedupe import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+
+async def _advance_http_bridge_quarantine_clear_key(
+    service: Any,
+    *,
+    key: Any,
+    api_key_id: str | None,
+    account_id: str,
+    response_id: str,
+    input_item_count: int | None,
+    input_full_fingerprint: str | None,
+    pending_tool_calls: Mapping[str, str] | None,
+    quarantine_generation: int | None,
+    expected_session_id: str | None = None,
+    expected_owner_epoch: int | None = None,
+) -> bool:
+    def generation_matches() -> bool:
+        if quarantine_generation is None:
+            return True
+        return _http_bridge_session_key_quarantine_generation(service, key) == quarantine_generation
+
+    if not generation_matches():
+        return False
+    lookup = await service._durable_bridge.lookup_request_targets(
+        session_key_kind=key.affinity_kind,
+        session_key_value=key.affinity_key,
+        api_key_id=api_key_id,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+    if lookup is None:
+        return False
+    if expected_session_id is not None and lookup.session_id != expected_session_id:
+        return False
+    if expected_owner_epoch is not None and lookup.owner_epoch != expected_owner_epoch:
+        return False
+    if not generation_matches():
+        return False
+    settings = _service_get_settings()
+    instance_id = settings.http_responses_session_bridge_instance_id
+    active_lookup = lookup
+    if not active_lookup.lease_is_active(now=utcnow()) or active_lookup.owner_instance_id != instance_id:
+        claimed_lookup = await service._durable_bridge.claim_live_session(
+            session_key_kind=key.affinity_kind,
+            session_key_value=key.affinity_key,
+            api_key_id=api_key_id,
+            instance_id=instance_id,
+            lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+            account_id=active_lookup.account_id,
+            model=active_lookup.model,
+            service_tier=None,
+            latest_turn_state=active_lookup.latest_turn_state,
+            latest_response_id=active_lookup.latest_response_id,
+            allow_takeover=False,
+            owner_process_epoch=http_bridge_owner_process_epoch(),
+        )
+        if claimed_lookup.owner_instance_id != instance_id:
+            return False
+        active_lookup = claimed_lookup
+    if not generation_matches():
+        return False
+    if active_lookup.account_id != account_id:
+        rebound = await service._durable_bridge.rebind_session_account(
+            session_id=active_lookup.session_id,
+            api_key_id=api_key_id,
+            instance_id=instance_id,
+            owner_epoch=active_lookup.owner_epoch,
+            account_id=account_id,
+            clear_continuity=True,
+        )
+        if not rebound:
+            return False
+    if not generation_matches():
+        return False
+    advanced = await service._durable_bridge.renew_live_session(
+        session_id=active_lookup.session_id,
+        api_key_id=api_key_id,
+        instance_id=instance_id,
+        owner_epoch=active_lookup.owner_epoch,
+        lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+        latest_response_id=response_id,
+        latest_input_item_count=input_item_count,
+        latest_input_full_fingerprint=input_full_fingerprint,
+        latest_pending_tool_calls=pending_tool_calls,
+    )
+    if not generation_matches():
+        return False
+    return (
+        advanced is not None
+        and advanced.session_id == active_lookup.session_id
+        and advanced.owner_instance_id == instance_id
+        and advanced.owner_epoch == active_lookup.owner_epoch
+        and advanced.account_id == account_id
+        and advanced.latest_response_id == response_id
+    )
+
 
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     0.25,
@@ -2783,6 +2884,41 @@ class _HTTPBridgeUpstreamEventsMixin:
         ):
             await self._clear_http_bridge_retry_circuit(session)
             _clear_http_bridge_quarantine(self, session)
+            if terminal_request_state.quarantine_clear_key is not None:
+                quarantine_advanced = False
+                if response_id is not None:
+                    try:
+                        quarantine_advanced = await _advance_http_bridge_quarantine_clear_key(
+                            self,
+                            key=terminal_request_state.quarantine_clear_key,
+                            api_key_id=session.key.api_key_id,
+                            account_id=session.account.id,
+                            response_id=response_id,
+                            input_item_count=(
+                                terminal_request_state.input_item_count
+                                if terminal_request_state.input_item_count > 0
+                                else None
+                            ),
+                            input_full_fingerprint=(
+                                terminal_request_state.input_full_fingerprint
+                                if terminal_request_state.input_item_count > 0
+                                else None
+                            ),
+                            pending_tool_calls=_durable_pending_tool_call_manifest(terminal_request_state, payload),
+                            quarantine_generation=terminal_request_state.quarantine_clear_generation,
+                            expected_session_id=terminal_request_state.quarantine_clear_session_id,
+                            expected_owner_epoch=terminal_request_state.quarantine_clear_owner_epoch,
+                        )
+                    except Exception:
+                        logger.warning("Failed to advance quarantined HTTP bridge continuity", exc_info=True)
+                if quarantine_advanced:
+                    _clear_http_bridge_quarantine_key(
+                        self,
+                        terminal_request_state.quarantine_clear_key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        generation=terminal_request_state.quarantine_clear_generation,
+                    )
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract

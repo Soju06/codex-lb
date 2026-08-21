@@ -10,6 +10,7 @@ from app.modules.proxy.continuity import (
 )
 from app.modules.proxy.replay_safety import (
     project_responses_input_for_account_neutral_fresh_replay,
+    responses_input_items_are_self_contained_fresh_replay,
     responses_input_suffix_matches_pending_tool_calls,
     responses_input_suffix_retains_prior_output,
     responses_payload_is_account_neutral_fresh_replay,
@@ -151,6 +152,310 @@ def test_account_neutral_fresh_replay_accepts_self_contained_payloads(
     assert responses_payload_is_account_neutral_fresh_replay(payload) is True
 
 
+def test_account_neutral_fresh_replay_accepts_compaction_context_item() -> None:
+    payload: dict[str, JsonValue] = {
+        "input": [
+            {
+                "type": "compaction",
+                "status": "completed",
+                "encrypted_content": "encrypted-compact-context",
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "continue"}],
+            },
+        ],
+    }
+
+    assert responses_payload_is_account_neutral_fresh_replay(payload) is True
+
+
+def test_account_neutral_replay_projection_preserves_owner_bound_compaction_id_to_fail_closed() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "compaction",
+            "id": "cmp_owner_a",
+            "status": "completed",
+            "encrypted_content": "encrypted-compact-context",
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "continue"}],
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=1)
+
+    assert projection is not None
+    assert projection.input_items[0] == {
+        "type": "compaction",
+        "id": "cmp_owner_a",
+        "status": "completed",
+        "encrypted_content": "encrypted-compact-context",
+    }
+    assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is False
+
+
+def test_account_neutral_replay_projection_accepts_compaction_without_owner_id() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "compaction",
+            "status": "completed",
+            "encrypted_content": "encrypted-compact-context",
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "continue"}],
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=1)
+
+    assert projection is not None
+    assert projection.input_items[0] == {
+        "type": "compaction",
+        "status": "completed",
+        "encrypted_content": "encrypted-compact-context",
+    }
+    assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is True
+
+
+def test_account_neutral_replay_projection_rejects_compaction_before_later_raw_prefix_bookkeeping() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "compaction",
+            "status": "completed",
+            "encrypted_content": "encrypted-compact-context",
+        },
+        {
+            "type": "web_search_call",
+            "id": "ws_owner_a",
+            "action": {"type": "search", "query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "output": "result",
+            "status": "completed",
+            "tools": [],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "continue after compaction"}],
+        },
+    ]
+
+    assert project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=2) is None
+
+
+def test_account_neutral_replay_projection_preserves_post_compact_tool_search_context_without_owner_id() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "compaction",
+            "status": "completed",
+            "encrypted_content": "encrypted-compact-context",
+        },
+        {
+            "type": "tool_search_call",
+            "id": "tsc_owner_a",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb post compact replay"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "id": "tso_owner_a",
+            "call_id": "call_search",
+            "output": "replay fix candidate",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "continue after compaction"}],
+        },
+    ]
+
+    projection = project_responses_input_for_account_neutral_fresh_replay(input_items, stored_count=1)
+
+    assert projection is not None
+    assert projection.stored_prefix_count == 1
+    assert projection.input_items == [
+        {
+            "type": "compaction",
+            "status": "completed",
+            "encrypted_content": "encrypted-compact-context",
+        },
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb post compact replay"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "output": "replay fix candidate",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "continue after compaction"}],
+        },
+    ]
+    assert (
+        responses_input_suffix_retains_prior_output(
+            projection.input_items,
+            stored_count=projection.stored_prefix_count,
+        )
+        is True
+    )
+    assert responses_payload_is_account_neutral_fresh_replay({"input": projection.input_items}) is True
+
+
+def test_account_neutral_fresh_replay_rejects_post_compact_mixed_tool_suffix_before_user_followup() -> None:
+    input_items: list[JsonValue] = [
+        {"type": "compaction", "status": "completed", "encrypted_content": "encrypted-compact-context"},
+        {
+            "type": "function_call",
+            "call_id": "call_function",
+            "name": "lookup",
+            "arguments": "{}",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb post compact replay"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {"type": "function_call_output", "call_id": "call_function", "output": "result", "status": "completed"},
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "output": "search result",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+        },
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert responses_input_suffix_retains_prior_output(input_items, stored_count=1) is False
+
+
+def test_account_neutral_fresh_replay_accepts_self_contained_tool_search_pair() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "output": "Found codex-lb",
+            "status": "completed",
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert responses_input_items_are_self_contained_fresh_replay(input_items) is True
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is True
+
+
+def test_account_neutral_fresh_replay_accepts_tools_only_client_tool_search_output() -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert responses_input_items_are_self_contained_fresh_replay(input_items) is True
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is True
+
+
+@pytest.mark.parametrize(
+    "tool_search_output",
+    [
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "server",
+            "status": "completed",
+            "tools": [],
+            "output": "Found codex-lb",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [{"type": "file_search", "vector_store_ids": ["vs_owner"]}],
+            "output": "Found codex-lb",
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "tools": [{"type": "function", "name": "lookup", "namespace": "private"}],
+            "output": "Found codex-lb",
+        },
+    ],
+)
+def test_account_neutral_fresh_replay_rejects_account_scoped_tool_search_output(
+    tool_search_output: dict[str, JsonValue],
+) -> None:
+    input_items: list[JsonValue] = [
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "codex-lb"},
+            "execution": "client",
+            "status": "completed",
+        },
+        tool_search_output,
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert responses_payload_is_account_neutral_fresh_replay({"input": input_items}) is False
+
+
 def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() -> None:
     metadata = {"turn_id": "turn_owner_a"}
     input_items: list[JsonValue] = [
@@ -195,8 +500,10 @@ def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() 
         },
         {
             "type": "tool_search_output",
+            "id": "tso_owner_a",
             "call_id": "call_search",
             "execution": "client",
+            "output": "search result",
             "status": "completed",
             "tools": [],
             "internal_chat_message_metadata_passthrough": metadata,
@@ -248,6 +555,23 @@ def test_account_neutral_replay_projection_removes_response_owned_bookkeeping() 
             "call_id": "call_boundary",
             "output": "/workspace",
             "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "arguments": {"query": "github"},
+            "execution": "client",
+            "status": "completed",
+            "internal_chat_message_metadata_passthrough": metadata,
+        },
+        {
+            "type": "tool_search_output",
+            "call_id": "call_search",
+            "execution": "client",
+            "output": "search result",
+            "status": "completed",
+            "tools": [],
             "internal_chat_message_metadata_passthrough": metadata,
         },
         {

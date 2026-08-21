@@ -216,6 +216,7 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
+    resolve_account_neutral_owner_binding,
     resolve_reconnect_preferred_account_id,
     resolve_required_account_id,
     without_http_bridge_session_affinity_headers,
@@ -1986,6 +1987,7 @@ class _HTTPBridgeMixin(
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
         require_preferred_account: bool = False,
+        allow_account_rebind: bool = False,
         owner_rebind_affinity: _AffinityPolicy | None = None,
         selection_affinity: _AffinityPolicy | None = None,
     ) -> None:
@@ -1994,10 +1996,8 @@ class _HTTPBridgeMixin(
         if selection_affinity is None and goal_restart:
             # Storage drops this bit; its request retains reconnect and account-switch authority.
             selection_affinity = request_state.affinity_policy
-        account_neutral_recovery = is_http_bridge_account_neutral_replay(
-            kind=session.key.affinity_kind, key=session.key.affinity_key
-        )
-        require_same_account = account_neutral_recovery or (require_same_account and not goal_restart)
+        neutral = resolve_account_neutral_owner_binding(session.key, request_state, allow_account_rebind)
+        require_same_account = neutral.owner_bound or (require_same_account and not goal_restart)
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         session.handoff_in_progress = True
@@ -2039,11 +2039,16 @@ class _HTTPBridgeMixin(
             forced_refresh_account_id = request_state.force_refresh_account_id
             excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
             requested_preferred_account_id = resolve_reconnect_preferred_account_id(
-                request_state, session.account.id, require_preferred_account, account_neutral_recovery
+                # A caller that allowed a rebind keeps its preferred account as a
+                # preference; promoting it to a required owner would re-pin the replay.
+                request_state,
+                session.account.id,
+                require_preferred_account and not neutral.rebind_allowed,
+                neutral.owner_bound,
             )
             required_preferred_account_id = resolve_required_account_id(
                 ("requested reconnect owner", requested_preferred_account_id),
-                ("account-neutral recovery", session.account.id if account_neutral_recovery else None),
+                ("account-neutral recovery", session.account.id if neutral.owner_bound else None),
             )
             close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
             hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
@@ -2157,7 +2162,7 @@ class _HTTPBridgeMixin(
                     service_tier=session.request_service_tier,
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_candidate_id,
-                    preferred_account_is_continuity_owner=account_neutral_recovery,
+                    preferred_account_is_continuity_owner=neutral.owner_bound,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind=None if reuse_current_account_lease else "stream",
                     estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
@@ -2179,7 +2184,7 @@ class _HTTPBridgeMixin(
                 except BaseException:
                     complete_failed_handoff()
                     raise
-                if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
+                if neutral.owner_bound and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
                     complete_failed_handoff()
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (

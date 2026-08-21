@@ -1386,7 +1386,7 @@ def _rewrite_websocket_suppressed_duplicate_tool_call_completion_event(
     request_state: _WebSocketRequestState,
 ) -> tuple[OpenAIEvent | None, dict[str, JsonValue] | None, str | None, str]:
     rewritten_event_payload = response_failed_event(
-        "stream_incomplete",
+        _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE,
         _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
         error_type="server_error",
         response_id=_websocket_downstream_response_id(request_state),

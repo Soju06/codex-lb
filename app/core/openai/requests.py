@@ -56,6 +56,7 @@ _TOOL_CALL_ITEM_TYPES = frozenset(_COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values(
 _COMPACT_INLINE_IMAGE_DATA_URL_RE = re.compile(r"""data:image/[^,\s]+,[^\s"'<>]+""")
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
+_ACTIVE_SKILL_CONTEXT_PREFIX = "<skill>"
 _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES = frozenset({"input_text", "input_image", "input_file"})
 
 
@@ -1659,6 +1660,8 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
         if stripped.startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX):
             return True
         if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
+            return True
+        if stripped.startswith(_ACTIVE_SKILL_CONTEXT_PREFIX):
             return True
     return False
 

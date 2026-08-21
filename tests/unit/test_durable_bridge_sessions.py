@@ -1880,6 +1880,54 @@ async def test_durable_bridge_release_without_draining_marks_session_closed(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_ownerless_active_row_can_be_reclaimed_without_takeover(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="prompt_cache",
+        session_key_value="ownerless-reclaim",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    released = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=True,
+    )
+
+    assert released is not None
+    assert released.owner_instance_id is None
+
+    reclaimed = await coordinator.claim_live_session(
+        session_key_kind="prompt_cache",
+        session_key_value="ownerless-reclaim",
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_process_epoch="test-process-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=False,
+    )
+
+    assert reclaimed.session_id == claimed.session_id
+    assert reclaimed.owner_instance_id == "instance-b"
+    assert reclaimed.owner_epoch == claimed.owner_epoch + 1
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_takeover_clears_stale_recovery_anchor_for_fresh_session(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

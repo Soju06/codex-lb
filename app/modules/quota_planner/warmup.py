@@ -16,7 +16,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
-from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountStatus, QuotaPlannerDecision, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
@@ -29,7 +29,7 @@ from app.modules.api_keys.service import (
     ApiKeysService,
 )
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.mappers import evaluate_account_usage_limit
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
 
@@ -206,10 +206,7 @@ class QuotaWarmupService:
             authorization_reason = "account_not_found"
         elif authorization.account.status != AccountStatus.ACTIVE:
             authorization_reason = f"account_status_{authorization.account.status.value}"
-        elif authorization.limit_state in {
-            AccountUsageLimitState.REACHED,
-            AccountUsageLimitState.DATA_UNAVAILABLE,
-        }:
+        elif authorization.limit_state is not None and authorization.limit_state.blocks_account_use:
             authorization_reason = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
         if authorization_reason is not None:
             return await self._skip_claimed_warmup_deferring_cancellation(
@@ -509,10 +506,7 @@ class QuotaWarmupService:
         if account.status != AccountStatus.ACTIVE:
             return False, f"account_status_{account.status.value}"
 
-        if standard_usage.limit_state in {
-            AccountUsageLimitState.REACHED,
-            AccountUsageLimitState.DATA_UNAVAILABLE,
-        }:
+        if standard_usage.limit_state is not None and standard_usage.limit_state.blocks_account_use:
             return False, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
         latest = standard_usage.primary
         if _sample_blocks_short_window_planning(latest):
@@ -550,13 +544,11 @@ class QuotaWarmupService:
         primary = (await self._usage.latest_by_account(account_ids=account_ids)).get(account_id)
         secondary = (await self._usage.latest_by_account(window="secondary", account_ids=account_ids)).get(account_id)
         monthly = (await self._usage.latest_by_account(window="monthly", account_ids=account_ids)).get(account_id)
-        limit_state = evaluate_standard_usage_limit(
-            enabled=bool(account.usage_limit_enabled),
-            limit_percent=account.usage_limit_percent,
-            plan_type=account.plan_type,
-            primary=usage_history_to_window_row(primary) if primary is not None else None,
-            secondary=usage_history_to_window_row(secondary) if secondary is not None else None,
-            monthly=usage_history_to_window_row(monthly) if monthly is not None else None,
+        limit_state = evaluate_account_usage_limit(
+            account,
+            primary=primary,
+            secondary=secondary,
+            monthly=monthly,
             refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
         )
         return _FreshStandardUsage(

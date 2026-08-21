@@ -19,13 +19,13 @@ from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
-from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.usage.pricing import get_pricing_for_model
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
 from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
@@ -245,10 +245,7 @@ class StreamingLimitWarmupSender:
                 error_code="account_not_active",
                 error_message=error_message,
             )
-        if authorization.limit_state in {
-            AccountUsageLimitState.REACHED,
-            AccountUsageLimitState.DATA_UNAVAILABLE,
-        }:
+        if authorization.limit_state.blocks_account_use:
             return LimitWarmupSendResult(
                 request_id=request_id,
                 success=False,
@@ -384,13 +381,11 @@ class StreamingLimitWarmupSender:
         primary = (await usage_repo.latest_by_account(window="primary", account_ids=account_ids)).get(account_id)
         secondary = (await usage_repo.latest_by_account(window="secondary", account_ids=account_ids)).get(account_id)
         monthly = (await usage_repo.latest_by_account(window="monthly", account_ids=account_ids)).get(account_id)
-        limit_state = evaluate_standard_usage_limit(
-            enabled=True,
-            limit_percent=account.usage_limit_percent,
-            plan_type=account.plan_type,
-            primary=usage_history_to_window_row(primary) if primary is not None else None,
-            secondary=usage_history_to_window_row(secondary) if secondary is not None else None,
-            monthly=usage_history_to_window_row(monthly) if monthly is not None else None,
+        limit_state = evaluate_account_usage_limit(
+            account,
+            primary=primary,
+            secondary=secondary,
+            monthly=monthly,
             refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
         )
         return _LimitWarmupAuthorization(account=account, limit_state=limit_state)
@@ -801,20 +796,15 @@ def _usage_limit_blocks_warmup(
     now: datetime,
     refresh_interval_seconds: int,
 ) -> bool:
-    limit_state = evaluate_standard_usage_limit(
-        enabled=bool(account.usage_limit_enabled),
-        limit_percent=account.usage_limit_percent,
-        plan_type=account.plan_type,
-        primary=usage_history_to_window_row(primary) if primary is not None else None,
-        secondary=usage_history_to_window_row(secondary) if secondary is not None else None,
-        monthly=usage_history_to_window_row(monthly) if monthly is not None else None,
+    limit_state = evaluate_account_usage_limit(
+        account,
+        primary=primary,
+        secondary=secondary,
+        monthly=monthly,
         now=now,
         refresh_interval_seconds=refresh_interval_seconds,
     )
-    return limit_state in {
-        AccountUsageLimitState.REACHED,
-        AccountUsageLimitState.DATA_UNAVAILABLE,
-    }
+    return limit_state.blocks_account_use
 
 
 def _in_cooldown(attempt: AccountLimitWarmup | None, *, cooldown_seconds: int) -> bool:

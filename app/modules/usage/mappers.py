@@ -10,8 +10,11 @@ so that ``app/core/`` does not need to depend on ``app/db/models``.
 
 from __future__ import annotations
 
+from datetime import datetime
+
+from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
 from app.core.usage.types import UsageWindowRow
-from app.db.models import AdditionalUsageHistory, UsageHistory
+from app.db.models import Account, AdditionalUsageHistory, UsageHistory
 
 
 def usage_history_to_window_row(entry: UsageHistory | AdditionalUsageHistory) -> UsageWindowRow:
@@ -26,4 +29,26 @@ def usage_history_to_window_row(entry: UsageHistory | AdditionalUsageHistory) ->
         reset_at=entry.reset_at,
         window_minutes=entry.window_minutes,
         recorded_at=entry.recorded_at,
+    )
+
+
+def evaluate_account_usage_limit(
+    account: Account,
+    *,
+    primary: UsageHistory | None,
+    secondary: UsageHistory | None,
+    monthly: UsageHistory | None,
+    refresh_interval_seconds: int,
+    now: datetime | None = None,
+) -> AccountUsageLimitState:
+    """Evaluate one account policy from standard usage ORM rows."""
+    return evaluate_standard_usage_limit(
+        enabled=bool(account.usage_limit_enabled),
+        limit_percent=account.usage_limit_percent,
+        plan_type=account.plan_type,
+        primary=usage_history_to_window_row(primary) if primary is not None else None,
+        secondary=usage_history_to_window_row(secondary) if secondary is not None else None,
+        monthly=usage_history_to_window_row(monthly) if monthly is not None else None,
+        refresh_interval_seconds=refresh_interval_seconds,
+        now=now,
     )

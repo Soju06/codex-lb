@@ -72,7 +72,6 @@ class SelectionInputsProtocol(Protocol):
     latest_monthly: dict[str, UsageHistory]
     standard_latest_primary: dict[str, UsageHistory]
     standard_latest_secondary: dict[str, UsageHistory]
-    standard_latest_monthly: dict[str, UsageHistory]
     quota_planner_settings: PlannerSettings
     runtime_accounts: list[Account] | None
     error_message: str | None

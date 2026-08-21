@@ -7,7 +7,6 @@ from enum import Enum
 from app.core import usage as usage_core
 from app.core.usage.types import UsageWindowRow
 
-DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS = 60
 MINIMUM_USAGE_LIMIT_FRESHNESS_SECONDS = 180
 
 
@@ -17,9 +16,9 @@ class AccountUsageLimitState(str, Enum):
     REACHED = "reached"
     DATA_UNAVAILABLE = "data_unavailable"
 
-
-def usage_limit_freshness_seconds(refresh_interval_seconds: int) -> int:
-    return max(int(refresh_interval_seconds) * 2, MINIMUM_USAGE_LIMIT_FRESHNESS_SECONDS)
+    @property
+    def blocks_account_use(self) -> bool:
+        return self is type(self).REACHED or self is type(self).DATA_UNAVAILABLE
 
 
 def evaluate_standard_usage_limit(
@@ -30,8 +29,8 @@ def evaluate_standard_usage_limit(
     primary: UsageWindowRow | None,
     secondary: UsageWindowRow | None,
     monthly: UsageWindowRow | None,
+    refresh_interval_seconds: int,
     now: datetime | None = None,
-    refresh_interval_seconds: int = DEFAULT_USAGE_REFRESH_INTERVAL_SECONDS,
 ) -> AccountUsageLimitState:
     """Evaluate an account's operator-defined cap from standard quota rows."""
 
@@ -56,7 +55,8 @@ def evaluate_standard_usage_limit(
     if not current_rows:
         return AccountUsageLimitState.DATA_UNAVAILABLE
 
-    freshness_cutoff = current_time - timedelta(seconds=usage_limit_freshness_seconds(refresh_interval_seconds))
+    freshness_seconds = max(int(refresh_interval_seconds) * 2, MINIMUM_USAGE_LIMIT_FRESHNESS_SECONDS)
+    freshness_cutoff = current_time - timedelta(seconds=freshness_seconds)
     for row in current_rows:
         recorded_at = _as_utc(row.recorded_at)
         used_percent = row.used_percent

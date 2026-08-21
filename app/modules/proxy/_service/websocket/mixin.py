@@ -87,7 +87,6 @@ from app.core.resilience.network_recovery import (
 )
 from app.core.types import JsonValue
 from app.core.upstream_proxy import UpstreamProxyRouteError
-from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import CODEX_KEEPALIVE_FRAME as CODEX_KEEPALIVE_FRAME  # noqa: F401
 from app.core.utils.sse import format_sse_event
@@ -2470,10 +2469,7 @@ class _WebSocketMixin:
                         usage_limit_state = await proxy._load_balancer.check_account_usage_limit(account.id)
                         if usage_limit_state is None:
                             raise _http_bridge_previous_response_owner_unavailable_error()
-                        if usage_limit_state in {
-                            AccountUsageLimitState.REACHED,
-                            AccountUsageLimitState.DATA_UNAVAILABLE,
-                        }:
+                        if usage_limit_state.blocks_account_use:
                             status_code, error_payload = selection_failure_response(
                                 AccountSelection(
                                     account=None,

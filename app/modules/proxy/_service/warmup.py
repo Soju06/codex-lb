@@ -164,13 +164,6 @@ def _evaluate_warmup_usage_limit(
     )
 
 
-def _usage_limit_blocks_warmup(state: AccountUsageLimitState) -> bool:
-    return state in {
-        AccountUsageLimitState.REACHED,
-        AccountUsageLimitState.DATA_UNAVAILABLE,
-    }
-
-
 def _snapshot_warmup_account(account: Account) -> _WarmupAccountSnapshot:
     return _WarmupAccountSnapshot(
         id=account.id,
@@ -281,7 +274,7 @@ class _WarmupMixin:
             for account in target_accounts
         }
         policy_eligible_accounts = [
-            account for account in target_accounts if not _usage_limit_blocks_warmup(usage_limit_states[account.id])
+            account for account in target_accounts if not usage_limit_states[account.id].blocks_account_use
         ]
         eligible_accounts = [
             account
@@ -450,7 +443,7 @@ class _WarmupMixin:
                     error_code=error_code,
                     error_message=error_message,
                 )
-            if authorization.limit_state is not None and _usage_limit_blocks_warmup(authorization.limit_state):
+            if authorization.limit_state is not None and authorization.limit_state.blocks_account_use:
                 error_code = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE
                 error_message = ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
                 return _WarmupSubmitResult(

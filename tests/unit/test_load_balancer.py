@@ -132,7 +132,6 @@ def test_select_account_never_uses_reached_limit_even_for_burn_first_policy() ->
         used_percent=1.0,
         routing_policy="burn_first",
         usage_limit_state=AccountUsageLimitState.REACHED,
-        usage_limit_percent=10.0,
     )
     available = AccountState(
         "available",
@@ -140,7 +139,6 @@ def test_select_account_never_uses_reached_limit_even_for_burn_first_policy() ->
         used_percent=90.0,
         routing_policy="preserve",
         usage_limit_state=AccountUsageLimitState.AVAILABLE,
-        usage_limit_percent=10.0,
     )
 
     result = _select_account_preferring_budget_safe(
@@ -165,7 +163,6 @@ def test_select_account_returns_stable_error_when_all_accounts_are_usage_limited
         "limited",
         AccountStatus.ACTIVE,
         usage_limit_state=limit_state,
-        usage_limit_percent=10.0,
     )
 
     result = select_account([state])
@@ -207,7 +204,6 @@ def test_additional_quota_bypass_does_not_bypass_standard_usage_limit() -> None:
         latest_monthly={},
         standard_latest_primary={account.id: standard_primary},
         standard_latest_secondary={},
-        standard_latest_monthly={},
         runtime={},
         ignore_standard_quota_account_ids=frozenset({account.id}),
     )

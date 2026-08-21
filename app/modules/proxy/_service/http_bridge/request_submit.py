@@ -54,7 +54,6 @@ from app.core.openai.requests import (
 )
 from app.core.resilience.overload import is_local_overload_error_code
 from app.core.types import JsonValue
-from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import (
     ensure_request_id,
     ensure_request_scope_id,
@@ -2504,10 +2503,7 @@ class _HTTPBridgeRequestSubmitMixin:
             session.upstream_control.reconnect_requested = True
             session.upstream_control.retire_after_drain = True
             raise _http_bridge_previous_response_owner_unavailable_error()
-        if usage_limit_state in {
-            AccountUsageLimitState.REACHED,
-            AccountUsageLimitState.DATA_UNAVAILABLE,
-        }:
+        if usage_limit_state.blocks_account_use:
             session.upstream_control.reconnect_requested = True
             session.upstream_control.retire_after_drain = True
             status_code, error_payload = selection_failure_response(

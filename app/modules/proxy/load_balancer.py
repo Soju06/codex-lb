@@ -58,7 +58,7 @@ from app.core.plan_types import account_plan_matches_allowed, normalize_account_
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
-from app.core.usage.account_limits import AccountUsageLimitState, evaluate_standard_usage_limit
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
@@ -133,7 +133,7 @@ from app.modules.usage.additional_quota_keys import (
     get_additional_quota_definition,
     get_additional_quota_routing_policy,
 )
-from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
 
 if TYPE_CHECKING:
     from app.modules.accounts.repository import AccountsRepository
@@ -236,7 +236,6 @@ class _SelectionInputs(SelectionInputsProtocol):
     sticky_mutation_authority_account_ids: frozenset[str] | None = None
     standard_latest_primary: dict[str, UsageHistory] = field(default_factory=dict)
     standard_latest_secondary: dict[str, UsageHistory] = field(default_factory=dict)
-    standard_latest_monthly: dict[str, UsageHistory] = field(default_factory=dict)
     quota_planner_settings: PlannerSettings = PlannerSettings()
     runtime_accounts: list[Account] | None = None
     error_message: str | None = None
@@ -378,11 +377,12 @@ class LoadBalancer:
             AccountStatus.PAUSED,
         }:
             return None
-        return _evaluate_account_usage_limit(
+        return evaluate_account_usage_limit(
             account,
             primary=selection_inputs.standard_latest_primary.get(account_id),
             secondary=selection_inputs.standard_latest_secondary.get(account_id),
-            monthly=selection_inputs.standard_latest_monthly.get(account_id),
+            monthly=selection_inputs.latest_monthly.get(account_id),
+            refresh_interval_seconds=_usage_refresh_interval_seconds(),
         )
 
     def _acquire_account_lease_locked(
@@ -1370,9 +1370,6 @@ class LoadBalancer:
                     account_id: _clone_standard_usage_history(entry)
                     for account_id, entry in standard_latest_secondary.items()
                 },
-                standard_latest_monthly={
-                    account_id: _clone_standard_usage_history(entry) for account_id, entry in latest_monthly.items()
-                },
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
                 ignore_standard_quota_account_ids=ignore_standard_quota_account_ids,
@@ -1421,7 +1418,6 @@ class LoadBalancer:
                 latest_monthly=selection_inputs.latest_monthly,
                 standard_latest_primary=selection_inputs.standard_latest_primary,
                 standard_latest_secondary=selection_inputs.standard_latest_secondary,
-                standard_latest_monthly=selection_inputs.standard_latest_monthly,
                 runtime=self._runtime,
                 routing_policy_override=selection_inputs.routing_policy_override,
                 ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -1628,7 +1624,6 @@ class LoadBalancer:
             latest_monthly=selection_inputs.latest_monthly,
             standard_latest_primary=selection_inputs.standard_latest_primary,
             standard_latest_secondary=selection_inputs.standard_latest_secondary,
-            standard_latest_monthly=selection_inputs.standard_latest_monthly,
             runtime=self._runtime,
             routing_policy_override=selection_inputs.routing_policy_override,
             ignore_standard_quota_account_ids=selection_inputs.ignore_standard_quota_account_ids,
@@ -2114,7 +2109,6 @@ def _build_states(
     latest_monthly: Mapping[str, UsageHistory],
     standard_latest_primary: Mapping[str, UsageHistory] | None = None,
     standard_latest_secondary: Mapping[str, UsageHistory] | None = None,
-    standard_latest_monthly: Mapping[str, UsageHistory] | None = None,
     runtime: dict[str, RuntimeState],
     routing_policy_override: str | None = None,
     ignore_standard_quota_account_ids: frozenset[str] = frozenset(),
@@ -2127,7 +2121,6 @@ def _build_states(
     effective_standard_secondary = standard_latest_secondary or {
         account_id: entry for account_id, entry in latest_secondary.items() if isinstance(entry, UsageHistory)
     }
-    effective_standard_monthly = standard_latest_monthly or latest_monthly
 
     for account in accounts:
         secondary_entry: UsageHistory | AdditionalUsageHistory | None = latest_secondary.get(account.id)
@@ -2143,37 +2136,19 @@ def _build_states(
             secondary_entry=secondary_entry,
             runtime=runtime.setdefault(account.id, RuntimeState()),
         )
-        state.usage_limit_state = _evaluate_account_usage_limit(
+        state.usage_limit_state = evaluate_account_usage_limit(
             account,
             primary=effective_standard_primary.get(account.id),
             secondary=effective_standard_secondary.get(account.id),
-            monthly=effective_standard_monthly.get(account.id),
+            monthly=latest_monthly.get(account.id),
+            refresh_interval_seconds=_usage_refresh_interval_seconds(),
         )
-        state.usage_limit_percent = account.usage_limit_percent
         if routing_policy_override is not None and account.id in ignore_standard_quota_account_ids:
             state.routing_policy = routing_policy_override
         state.ignore_standard_quota = account.id in ignore_standard_quota_account_ids
         states.append(state)
         account_map[account.id] = account
     return states, account_map
-
-
-def _evaluate_account_usage_limit(
-    account: Account,
-    *,
-    primary: UsageHistory | None,
-    secondary: UsageHistory | None,
-    monthly: UsageHistory | None,
-) -> AccountUsageLimitState:
-    return evaluate_standard_usage_limit(
-        enabled=bool(account.usage_limit_enabled),
-        limit_percent=account.usage_limit_percent,
-        plan_type=account.plan_type,
-        primary=usage_history_to_window_row(primary) if primary is not None else None,
-        secondary=usage_history_to_window_row(secondary) if secondary is not None else None,
-        monthly=usage_history_to_window_row(monthly) if monthly is not None else None,
-        refresh_interval_seconds=_usage_refresh_interval_seconds(),
-    )
 
 
 def _account_lease_stale_ttl_seconds(kind: AccountLeaseKind, settings: object) -> float:
@@ -3133,10 +3108,6 @@ def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInput
         standard_latest_secondary={
             account_id: _clone_standard_usage_history(entry)
             for account_id, entry in selection_inputs.standard_latest_secondary.items()
-        },
-        standard_latest_monthly={
-            account_id: _clone_standard_usage_history(entry)
-            for account_id, entry in selection_inputs.standard_latest_monthly.items()
         },
         quota_planner_settings=selection_inputs.quota_planner_settings,
         runtime_accounts=(

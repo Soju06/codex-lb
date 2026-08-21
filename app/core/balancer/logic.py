@@ -146,7 +146,6 @@ class AccountState:
     routing_policy: str = ROUTING_POLICY_NORMAL
     ignore_standard_quota: bool = False
     usage_limit_state: AccountUsageLimitState = AccountUsageLimitState.DISABLED
-    usage_limit_percent: float | None = None
 
 
 @dataclass
@@ -653,7 +652,11 @@ def select_account(
 
     if not available:
         in_error_backoff_ids = {state.account_id for state in in_error_backoff}
-        hard_blocked_exists = bool(_routing_relevant_usage_limit_blocks(usage_limit_blocked)) or any(
+        routing_limit_blocked = any(
+            state.status not in {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
+            for state in usage_limit_blocked
+        )
+        hard_blocked_exists = routing_limit_blocked or any(
             state.status
             in (
                 AccountStatus.PAUSED,
@@ -678,7 +681,7 @@ def select_account(
                     return SelectionResult(None, f"opportunistic burn window closed: {reason}")
                 available = opportunistic_available
         else:
-            if _routing_relevant_usage_limit_blocks(usage_limit_blocked):
+            if routing_limit_blocked:
                 return SelectionResult(
                     None,
                     ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
@@ -870,18 +873,7 @@ def _oldest_due_probing_account(
 
 
 def account_usage_limit_blocks_selection(state: AccountState) -> bool:
-    return state.usage_limit_state in {
-        AccountUsageLimitState.REACHED,
-        AccountUsageLimitState.DATA_UNAVAILABLE,
-    }
-
-
-def _routing_relevant_usage_limit_blocks(states: Iterable[AccountState]) -> list[AccountState]:
-    return [
-        state
-        for state in states
-        if state.status not in {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
-    ]
+    return state.usage_limit_state.blocks_account_use
 
 
 def _remaining_secondary_credits(state: AccountState) -> float:

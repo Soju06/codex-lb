@@ -35,3 +35,9 @@ only a backstop and MUST NOT substitute for request-owned cancellation cleanup.
 
 - **GIVEN** a limited API key has created an owned reservation for a
   source-routed `/v1/embeddings` request
+- **WHEN** cancellation interrupts the request while upstream embeddings
+  forwarding is in flight
+- **THEN** the request owner finishes releasing the reservation exactly once
+  despite active cancellation
+- **AND** the original cancellation propagates after cleanup completes
+- **AND** stale-reservation reclamation is not required for that request

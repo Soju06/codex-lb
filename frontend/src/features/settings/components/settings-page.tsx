@@ -69,7 +69,10 @@ export function SettingsPage() {
     addPoolMemberMutation.isPending ||
     testEndpointMutation.isPending;
   const controlsDisabled = busy || !canWrite;
-  const settingsLoadError = getErrorMessageOrNull(settingsQuery.error);
+  const settingsLoadError = getErrorMessageOrNull(
+    settingsQuery.error,
+    t("settings.toasts.loadFailed"),
+  );
   const displayedSettingsLoadError = settingsLoadError || initialRetryError;
   // With no settings loaded the failed-load branch below owns this message, so
   // the page-level alert would otherwise render it a second time.

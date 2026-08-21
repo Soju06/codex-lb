@@ -128,7 +128,7 @@ vi.mock("@/features/model-sources/components/model-sources-settings", () => ({
 
 type SettingsQueryState = {
   data: DashboardSettings | undefined;
-  error: Error | null;
+  error: unknown;
   isPending: boolean;
   isFetching: boolean;
   refetch: Mock;
@@ -317,7 +317,7 @@ describe("SettingsPage", () => {
   it("falls back to load-failure copy when the initial settings error has no message", () => {
     mockSettingsQuery({
       data: undefined,
-      error: new Error(""),
+      error: {},
       isPending: false,
       isFetching: false,
       refetch: vi.fn().mockResolvedValue(undefined),

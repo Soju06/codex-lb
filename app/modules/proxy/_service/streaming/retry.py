@@ -456,7 +456,9 @@ class _StreamingRetryMixin:
             # health write finishes (success or logged failure). Clearing the
             # whole queue first would drop later accounts if one write raises
             # or cancellation lands on an await (compact flush isolates entries
-            # the same way).
+            # the same way). Each entry runs in an owned cancellation-deferring
+            # task so CancelledError mid-write cannot leave a half-applied
+            # tuple for cleanup to replay (double error_count).
             while pending_post_refresh_transient_penalties:
                 (
                     failed_account,
@@ -465,25 +467,39 @@ class _StreamingRetryMixin:
                     transient_http_status,
                     transient_retry_count,
                 ) = pending_post_refresh_transient_penalties[0]
-                try:
-                    await proxy._handle_stream_error(
-                        failed_account,
-                        transient_error_payload,
-                        transient_error_code,
-                        http_status=transient_http_status,
-                    )
-                    if transient_retry_count > 1:
-                        await proxy._load_balancer.record_errors(failed_account, transient_retry_count - 1)
-                except Exception:
-                    logger.warning(
-                        "Failed to flush deferred keyed stream health account_id=%s request_id=%s",
-                        failed_account.id,
-                        request_id,
-                        exc_info=True,
-                    )
-                # CancelledError propagates before this pop, leaving remaining
-                # entries for terminal cleanup to finish.
+
+                async def _apply_deferred_penalty(
+                    account: Account = failed_account,
+                    error_payload: UpstreamError = transient_error_payload,
+                    error_code: str = transient_error_code,
+                    http_status: int | None = transient_http_status,
+                    retry_count: int = transient_retry_count,
+                ) -> None:
+                    try:
+                        await proxy._handle_stream_error(
+                            account,
+                            error_payload,
+                            error_code,
+                            http_status=http_status,
+                        )
+                        if retry_count > 1:
+                            await proxy._load_balancer.record_errors(account, retry_count - 1)
+                    except Exception:
+                        logger.warning(
+                            "Failed to flush deferred keyed stream health account_id=%s request_id=%s",
+                            account.id,
+                            request_id,
+                            exc_info=True,
+                        )
+
+                apply_task = asyncio.create_task(
+                    _apply_deferred_penalty(),
+                    name=f"flush-deferred-keyed-stream-health-{failed_account.id}-{request_id}",
+                )
+                _, cancellation = await _await_task_deferring_cancellation(apply_task)
                 del pending_post_refresh_transient_penalties[0]
+                if cancellation is not None:
+                    raise cancellation
 
         async def _settle_stream_usage_before_pending_penalty(
             current_settlement: _StreamSettlement,

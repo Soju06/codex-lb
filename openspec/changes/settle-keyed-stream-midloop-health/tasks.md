@@ -9,6 +9,8 @@
   not drop later entries.
 - [x] 1.5 Schedule cancel-safe leftover flush when cleanup runs under an already
   cancelling task.
+- [x] 1.6 Complete each deferred health entry under cancellation-deferred
+  ownership so cancel mid-write cannot replay and double-count errors.
 
 ## 2. Regression coverage
 
@@ -20,6 +22,8 @@
   write fails.
 - [x] 2.6 Assert the streaming `/v1/responses` product entry preserves
   settle-before-health for keyed mid-loop failover.
+- [x] 2.7 Assert cancel mid deferred health flush does not double-count
+  `_handle_stream_error` / `record_errors`.
 
 ## 3. Validation
 

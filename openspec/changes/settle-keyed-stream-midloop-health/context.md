@@ -19,3 +19,11 @@ runs, which skips both unsettled-reservation cleanup and retained-queue flush.
 3. Deferred flush awaits `_handle_stream_error` for A.
 4. Cancel arrives during that await.
 5. Cleanup still sees `settled` and finishes the retained deferred penalty.
+
+## Cancellation idempotency
+
+Each queued deferred health entry is applied in an owned task awaited via
+`_await_task_deferring_cancellation`. Cancel mid-write waits for that entry to
+finish (or log failure), then pops it, then re-raises. That prevents cleanup
+from replaying a half-applied tuple and double-incrementing `error_count`
+through `_handle_stream_error` / `record_errors`.

@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,7 +19,12 @@ pytestmark = pytest.mark.unit
 
 
 def _account(
-    account_id: str = "acc_1", *, enabled: bool = True, status: AccountStatus = AccountStatus.ACTIVE
+    account_id: str = "acc_1",
+    *,
+    enabled: bool = True,
+    status: AccountStatus = AccountStatus.ACTIVE,
+    usage_limit_enabled: bool = False,
+    usage_limit_percent: float | None = None,
 ) -> Account:
     return Account(
         id=account_id,
@@ -32,6 +38,8 @@ def _account(
         status=status,
         deactivation_reason=None,
         limit_warmup_enabled=enabled,
+        usage_limit_enabled=usage_limit_enabled,
+        usage_limit_percent=usage_limit_percent,
     )
 
 
@@ -425,7 +433,7 @@ async def test_streaming_limit_warmup_sender_passes_resolved_route(monkeypatch: 
         endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
     )
     calls: dict[str, Any] = {}
-    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo()))
+    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo(account=account)))
 
     async def ensure_fresh(target: Account) -> Account:
         return target
@@ -517,6 +525,55 @@ async def test_streaming_limit_warmup_sender_rechecks_account_after_auth(
 
 
 @pytest.mark.asyncio
+async def test_streaming_limit_warmup_sender_rechecks_usage_limit_before_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = utcnow()
+    reset_at = int(now.timestamp()) + 3600
+    account = _account(usage_limit_enabled=True, usage_limit_percent=50.0)
+    repo = _WarmupAccountsRepo(account=account)
+    usage_repo = SimpleNamespace(
+        latest_by_account=AsyncMock(
+            side_effect=[
+                {account.id: _usage(account.id, used_percent=10.0, reset_at=reset_at, recorded_at=now)},
+                {
+                    account.id: _usage(
+                        account.id,
+                        used_percent=75.0,
+                        reset_at=reset_at,
+                        window="secondary",
+                        recorded_at=now,
+                    )
+                },
+                {},
+            ]
+        )
+    )
+    sender = StreamingLimitWarmupSender(cast(Any, repo))
+
+    async def ensure_fresh(target: Account) -> Account:
+        return target
+
+    async def resolve_route(_account: Account) -> None:
+        return None
+
+    async def stream(*_args: object, **_kwargs: object):
+        raise AssertionError("stream_responses must not run for a usage-limited account")
+        yield ""
+
+    monkeypatch.setattr(sender._auth_manager, "ensure_fresh", ensure_fresh)
+    monkeypatch.setattr(sender, "_resolve_upstream_route", resolve_route)
+    monkeypatch.setattr(limit_warmup_service, "UsageRepository", lambda _session: usage_repo)
+    monkeypatch.setattr(limit_warmup_service, "stream_responses", stream)
+
+    result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
+
+    assert result.error_code == "account_usage_limit_reached"
+    assert repo.fresh_reads == 3
+    assert usage_repo.latest_by_account.await_count == 3
+
+
+@pytest.mark.asyncio
 async def test_streaming_limit_warmup_sender_resolves_route_with_owned_repo_factory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -532,7 +589,7 @@ async def test_streaming_limit_warmup_sender_resolves_route_with_owned_repo_fact
 
     def repo_factory() -> _WarmupAccountsRepoContext:
         calls["factory"] += 1
-        return _WarmupAccountsRepoContext(_WarmupAccountsRepo(owned_session))
+        return _WarmupAccountsRepoContext(_WarmupAccountsRepo(owned_session, account=account))
 
     sender = StreamingLimitWarmupSender(
         cast(Any, _WarmupAccountsRepo(primary_session)),
@@ -557,7 +614,7 @@ async def test_streaming_limit_warmup_sender_resolves_route_with_owned_repo_fact
     result = await sender.send(account, model="gpt-5.2", prompt="Say OK.")
 
     assert result.success is True
-    assert calls["factory"] == 1
+    assert calls["factory"] == 2
     assert calls["route_session"] is owned_session
     assert calls["route_session"] is not primary_session
 
@@ -572,7 +629,7 @@ async def test_streaming_limit_warmup_sender_returns_route_metadata(
         pool_id="pool_1",
         endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
     )
-    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo()))
+    sender = StreamingLimitWarmupSender(cast(Any, _WarmupAccountsRepo(account=account)))
 
     async def ensure_fresh(target: Account) -> Account:
         return target
@@ -659,6 +716,51 @@ async def test_reset_confirmed_candidate_sends_one_warmup() -> None:
     assert repo.rows[0].status == "succeeded"
     assert logs.logs[0]["source"] == "limit_warmup"
     assert logs.logs[0]["request_kind"] == "warmup"
+
+
+@pytest.mark.asyncio
+async def test_usage_limit_blocks_reset_confirmed_warmup_planning() -> None:
+    repo = FakeWarmupRepo()
+    sender = FakeSender()
+    service = LimitWarmupService(repo, FakeRequestLogsRepo(), sender=sender)
+    now = utcnow()
+    previous_reset_at = int(now.timestamp()) - 60
+    current_reset_at = int(now.timestamp()) + 300 * 60
+    account = _account(usage_limit_enabled=True, usage_limit_percent=50.0)
+
+    await service.run_after_usage_refresh(
+        accounts=[account],
+        settings=_settings(),
+        before_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=100.0,
+                reset_at=previous_reset_at,
+                recorded_at=now - timedelta(seconds=120),
+            )
+        },
+        before_secondary={},
+        after_primary={
+            account.id: _usage(
+                account.id,
+                used_percent=0.0,
+                reset_at=current_reset_at,
+                recorded_at=now,
+            )
+        },
+        after_secondary={
+            account.id: _usage(
+                account.id,
+                used_percent=75.0,
+                reset_at=int(now.timestamp()) + 7 * 24 * 3600,
+                window="secondary",
+                recorded_at=now,
+            )
+        },
+    )
+
+    assert sender.calls == []
+    assert repo.rows == []
 
 
 @pytest.mark.asyncio

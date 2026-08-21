@@ -12,3 +12,4 @@
 - [x] 10. Revalidate continuity-pinned HTTP bridge turns and quota-planner synthetic warmups against the canonical account usage-limit policy.
 - [x] 11. Revalidate each logical request on an existing proxy WebSocket against the pinned account's availability and usage-limit policy.
 - [x] 12. Surface a reached local usage limit on the main dashboard account card without masking non-active upstream status.
+- [x] 13. Gate reset-confirmed and staggered limit-warmup planning and execution with the canonical account usage-limit policy.

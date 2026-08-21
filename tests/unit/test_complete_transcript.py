@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
-from app.modules.proxy.complete_transcript import build_complete_replay_payload
+from app.modules.proxy.complete_transcript import (
+    build_complete_replay_payload,
+    materialize_output_items_from_events,
+)
 from app.modules.proxy.durable_bridge_repository import DurableBridgeOperationSnapshot, DurableBridgeTranscriptTurn
 
 
@@ -106,3 +109,40 @@ def test_build_complete_replay_payload_rejects_broken_parent_continuation() -> N
         )
         is None
     )
+
+
+def test_materialize_output_items_prefers_output_item_done_over_empty_completed_output() -> None:
+    events = [
+        (
+            'event: response.output_item.done\ndata: '
+            '{"type":"response.output_item.done","output_index":1,"item":'
+            '{"id":"msg_1","type":"message","role":"assistant","status":"completed",'
+            '"content":[{"type":"output_text","text":"answer"}]}}\n\n'
+        ),
+        (
+            'event: response.output_item.done\ndata: '
+            '{"type":"response.output_item.done","output_index":0,"item":'
+            '{"id":"rs_1","type":"reasoning","summary":[]}}\n\n'
+        ),
+        (
+            'event: response.completed\ndata: '
+            '{"type":"response.completed","response":{"id":"resp_1","status":"completed",'
+            '"output":[]}}\n\n'
+        ),
+    ]
+
+    output = materialize_output_items_from_events(events)
+
+    assert output is not None
+    assert [item["type"] for item in output] == ["reasoning", "message"]
+
+
+def test_materialize_output_items_requires_terminal_completion() -> None:
+    events = [
+        (
+            'event: response.output_item.done\ndata: '
+            '{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}\n\n'
+        ),
+    ]
+
+    assert materialize_output_items_from_events(events) is None

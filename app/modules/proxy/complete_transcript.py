@@ -4,12 +4,70 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from typing import cast
 
 from app.core.types import JsonValue
+from app.core.utils.sse import parse_sse_data_json
 from app.modules.proxy.durable_bridge_repository import DurableBridgeTranscriptTurn
 from app.modules.proxy.replay_safety import responses_input_items_are_self_contained_fresh_replay
 
 _OMIT_OUTPUT_TYPES = frozenset({"reasoning", "tool_search_call", "tool_search_output", "web_search_call"})
+
+
+def materialize_output_items_from_events(events: Iterable[str]) -> list[JsonValue] | None:
+    """Recover terminal output items from the durable SSE event spool.
+
+    Codex commonly sends the complete response with an empty
+    ``response.completed.response.output`` and carries the actual assistant or
+    tool items in the preceding ``response.output_item.done`` events.  Those
+    events are the canonical replay material; treating the empty terminal
+    array as authoritative silently produces an unusable transcript.
+
+    The materializer is deliberately fail-closed: malformed items, duplicate
+    output indexes, an unfinished added item, or a missing terminal event make
+    the operation ineligible for complete-transcript recovery.
+    """
+
+    completed_output: list[JsonValue] | None = None
+    output_items: dict[int, JsonValue] = {}
+    added_indexes: set[int] = set()
+    done_indexes: set[int] = set()
+    saw_completed = False
+
+    for event_text in events:
+        payload = parse_sse_data_json(event_text)
+        if not isinstance(payload, dict):
+            continue
+        event_type = payload.get("type")
+        if event_type in {"response.output_item.added", "response.output_item.done"}:
+            output_index = payload.get("output_index")
+            item = payload.get("item")
+            if not isinstance(output_index, int) or output_index < 0 or not isinstance(item, dict):
+                return None
+            if event_type == "response.output_item.added":
+                added_indexes.add(output_index)
+                continue
+            existing = output_items.get(output_index)
+            if existing is not None and _canonical_item(existing) != _canonical_item(item):
+                return None
+            output_items[output_index] = cast(JsonValue, item)
+            done_indexes.add(output_index)
+            continue
+        if event_type != "response.completed":
+            continue
+        saw_completed = True
+        response = payload.get("response")
+        output = response.get("output") if isinstance(response, dict) else None
+        if output is not None:
+            if not isinstance(output, list) or not all(isinstance(item, dict) for item in output):
+                return None
+            completed_output = cast(list[JsonValue], output)
+
+    if not saw_completed or added_indexes - done_indexes:
+        return None
+    if output_items:
+        return [output_items[index] for index in sorted(output_items)]
+    return completed_output
 
 
 def build_complete_replay_payload(

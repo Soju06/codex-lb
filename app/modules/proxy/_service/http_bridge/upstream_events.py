@@ -195,7 +195,10 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy.affinity import (
     _extract_model_class,
 )
-from app.modules.proxy.complete_transcript import build_complete_replay_payload
+from app.modules.proxy.complete_transcript import (
+    build_complete_replay_payload,
+    materialize_output_items_from_events,
+)
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.helpers import (
     _normalize_error_code,
@@ -313,22 +316,59 @@ async def _update_http_bridge_operation_state(
                     False,
                 )
             )
-            and bool(getattr(request_state, "response_output_items_complete", False))
         ):
-            response_output_items_json = json.dumps(
-                getattr(request_state, "response_output_items", []),
-                ensure_ascii=True,
-                separators=(",", ":"),
-            )
-            response_output_items_complete = len(response_output_items_json.encode("utf-8")) <= int(
-                getattr(
-                    _service_get_settings(),
-                    "http_responses_session_bridge_complete_transcript_max_bytes",
-                    8 * 1024 * 1024,
+            response_output_items = getattr(request_state, "response_output_items", [])
+            response_output_items_complete = bool(getattr(request_state, "response_output_items_complete", False))
+            # Codex may put the actual output items in output_item.done events
+            # while leaving response.completed.response.output empty. Once the
+            # terminal event has been spooled, materialize that canonical event
+            # representation before persisting the transcript.
+            if not response_output_items:
+                get_operation_events = getattr(
+                    getattr(service, "_durable_bridge", None),
+                    "get_operation_events",
+                    None,
                 )
-            )
-            if not response_output_items_complete:
-                response_output_items_json = None
+                if callable(get_operation_events):
+                    try:
+                        event_spool = await get_operation_events(operation_id=operation_id)
+                        materialized_output = materialize_output_items_from_events(event_spool)
+                    except Exception:
+                        materialized_output = None
+                        logger.warning(
+                            "Failed to materialize HTTP bridge output items operation_id=%s",
+                            operation_id,
+                            exc_info=True,
+                        )
+                    if materialized_output is not None:
+                        response_output_items = materialized_output
+                        response_output_items_complete = True
+                        _log_http_bridge_event(
+                            "complete_transcript_output_materialized",
+                            session.key,
+                            account_id=session.account.id,
+                            model=getattr(request_state, "model", None),
+                            detail=f"items={len(materialized_output)}",
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=_extract_model_class(getattr(request_state, "model", None))
+                            if getattr(request_state, "model", None)
+                            else None,
+                        )
+            if response_output_items_complete:
+                response_output_items_json = json.dumps(
+                    response_output_items,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                )
+                response_output_items_complete = len(response_output_items_json.encode("utf-8")) <= int(
+                    getattr(
+                        _service_get_settings(),
+                        "http_responses_session_bridge_complete_transcript_max_bytes",
+                        8 * 1024 * 1024,
+                    )
+                )
+                if not response_output_items_complete:
+                    response_output_items_json = None
         marked = await update_operation(
             operation_id=operation_id,
             session_id=session_id,

@@ -5538,6 +5538,66 @@ async def test_terminal_append_failure_retains_last_persisted_response_id_after_
 
 
 @pytest.mark.asyncio
+async def test_completed_bridge_operation_materializes_output_items_from_event_spool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = SimpleNamespace(
+        operation_id="op-materialize-output-items",
+        operation_attempt_generation=0,
+        operation_persisted_response_id=None,
+        response_id="resp-materialize-output-items",
+        replay_downstream_response_id=None,
+        response_output_items=[],
+        response_output_items_complete=False,
+    )
+    session = _make_bridge_session(key_value="materialize-output-items")
+    session.durable_session_id = "durable-materialize-output-items"
+    session.durable_owner_epoch = 1
+    events = [
+        (
+            'event: response.output_item.done\ndata: '
+            '{"type":"response.output_item.done","output_index":0,"item":'
+            '{"id":"msg_1","type":"message","role":"assistant",'
+            '"content":[{"type":"output_text","text":"answer"}]}}\n\n'
+        ),
+        (
+            'event: response.completed\ndata: '
+            '{"type":"response.completed","response":{"output":[]}}\n\n'
+        ),
+    ]
+    update_operation = AsyncMock(return_value=True)
+    get_operation_events = AsyncMock(return_value=events)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(update_operation=update_operation, get_operation_events=get_operation_events),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024 * 1024,
+            http_responses_session_bridge_instance_id="instance-materialize-output-items",
+        ),
+    )
+
+    await http_bridge_upstream_events_module._update_http_bridge_operation_state(
+        service,
+        session,
+        request_state,
+        state="completed",
+        response_id="resp-materialize-output-items",
+    )
+
+    get_operation_events.assert_awaited_once_with(operation_id="op-materialize-output-items")
+    persisted = update_operation.await_args.kwargs["response_output_items_json"]
+    assert persisted is not None
+    assert json.loads(persisted)[0]["type"] == "message"
+    assert update_operation.await_args.kwargs["response_output_items_complete"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("upstream_response_id", "replay_response_id", "expected_response_id", "alternate_expected_response_id"),
     [

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import urllib.parse
 from collections.abc import Iterator
@@ -18,6 +20,13 @@ class IntegrityCheck:
 class SqliteIntegrityCheckMode(str, Enum):
     QUICK = "quick"
     FULL = "full"
+
+
+class SqliteRunState(str, Enum):
+    """How the previous process left the SQLite store."""
+
+    RUNNING = "running"
+    CLEAN = "clean"
 
 
 @contextmanager
@@ -143,3 +152,72 @@ def check_sqlite_integrity(
 
     details = "; ".join(str(row) for row in rows)
     return IntegrityCheck(ok=False, details=details)
+
+
+def integrity_check_pragma_name(mode: SqliteIntegrityCheckMode) -> str:
+    return "quick_check" if mode == SqliteIntegrityCheckMode.QUICK else "integrity_check"
+
+
+def sqlite_runstate_path(db_path: Path) -> Path:
+    """Sidecar file recording how the previous process left ``db_path``."""
+    return db_path.with_name(f"{db_path.name}.runstate")
+
+
+def _sqlite_file_identity(db_path: Path) -> dict[str, int] | None:
+    """Size and mtime of the database file, used to fence a stale sidecar."""
+    try:
+        stat_result = db_path.stat()
+    except OSError:
+        return None
+    return {"size": stat_result.st_size, "mtime_ns": stat_result.st_mtime_ns}
+
+
+def read_sqlite_runstate(db_path: Path) -> SqliteRunState | None:
+    """Return the recorded run state, or ``None`` when it cannot be trusted.
+
+    ``None`` means "unknown" and callers MUST treat it as potentially
+    unclean. A missing sidecar covers both a first run and an upgrade from a
+    build that never wrote one, so the conservative reading is the only safe
+    one.
+
+    A ``clean`` record is honoured only while the database file still matches
+    the size and mtime captured when the record was written. Restoring a
+    backup or swapping the file in by hand therefore reads back as unknown
+    rather than inheriting the previous file's clean record.
+    """
+    try:
+        raw = sqlite_runstate_path(db_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        record = json.loads(raw)
+        state = SqliteRunState(record["state"])
+    except (ValueError, TypeError, KeyError):
+        return None
+    if state is SqliteRunState.CLEAN and record.get("identity") != _sqlite_file_identity(db_path):
+        return None
+    return state
+
+
+def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
+    """Record ``state`` atomically. Returns ``False`` if it could not be recorded.
+
+    A failed write must never leave a stale ``clean`` sidecar behind, because
+    that would tell the next startup to skip the integrity check for a store
+    this process may have left mid-write. The fallback is to remove the
+    sidecar entirely, which reads back as unknown and forces the check.
+    """
+    target = sqlite_runstate_path(db_path)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    payload = json.dumps({"state": state.value, "identity": _sqlite_file_identity(db_path)})
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, target)
+        return True
+    except OSError:
+        for cleanup in (tmp, target):
+            try:
+                cleanup.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False

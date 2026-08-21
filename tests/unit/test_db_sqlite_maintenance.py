@@ -104,3 +104,63 @@ def test_recover_cli_closes_connections_before_replacing_database(
             assert connection.execute("SELECT name FROM items").fetchall() == [("alpha",)]
     finally:
         _close_connections(connections)
+
+
+def test_runstate_round_trips(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is True
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.RUNNING
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN) is True
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
+
+
+def test_runstate_reads_unrecognized_content_as_unknown(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_text("half-written", encoding="utf-8")
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_write_failure_clears_a_stale_clean_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A store left mid-write must never read back as cleanly closed."""
+    db_path = tmp_path / "store.db"
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+
+    def _explode(*_args: object, **_kwargs: object) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(Path, "write_text", _explode)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+
+    monkeypatch.undo()
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+    assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
+
+
+def test_runstate_clean_is_ignored_after_the_database_file_changes(tmp_path: Path) -> None:
+    """Restoring a backup must not inherit the previous file's clean record."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite-original")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
+
+    db_path.write_bytes(b"sqlite-restored-from-a-backup")
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_running_survives_database_writes(tmp_path: Path) -> None:
+    """Only the clean record is fenced; a running record stays readable."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING)
+
+    db_path.write_bytes(b"sqlite-after-a-few-writes")
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.RUNNING

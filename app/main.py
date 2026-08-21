@@ -63,7 +63,14 @@ from app.core.timeout_invariants import validate_runtime_timeout_invariants
 from app.core.usage.refresh_scheduler import build_usage_refresh_scheduler
 from app.core.usage.reset_credits_refresh_scheduler import build_rate_limit_reset_credits_scheduler
 from app.core.utils.time import utcnow
-from app.db.session import SessionLocal, close_db, close_session, init_background_db, init_db
+from app.db.session import (
+    SessionLocal,
+    close_db,
+    close_session,
+    init_background_db,
+    init_db,
+    mark_sqlite_shutdown_clean,
+)
 from app.modules.accounts import api as accounts_api
 from app.modules.accounts.deletion import build_account_deletion_scheduler
 from app.modules.accounts.repository import AccountsRepository
@@ -771,7 +778,13 @@ async def lifespan(app: FastAPI):
                 try:
                     await close_db()
                 finally:
-                    shutdown_state.mark_lifespan_completed()
+                    try:
+                        # Only reachable on an orderly teardown. A crash or a
+                        # SIGKILL leaves the sidecar unclean, which is exactly
+                        # what makes the next startup re-scan the store.
+                        mark_sqlite_shutdown_clean()
+                    finally:
+                        shutdown_state.mark_lifespan_completed()
 
 
 def create_app() -> FastAPI:

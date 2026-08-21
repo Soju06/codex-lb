@@ -19,7 +19,13 @@ from sqlalchemy.pool import NullPool
 
 import app.db.session as session_module
 from app.db.models import Account, AccountStatus, Base
-from app.db.sqlite_utils import IntegrityCheck, SqliteIntegrityCheckMode
+from app.db.sqlite_utils import (
+    IntegrityCheck,
+    SqliteIntegrityCheckMode,
+    SqliteRunState,
+    read_sqlite_runstate,
+    write_sqlite_runstate,
+)
 
 
 @dataclass(slots=True)
@@ -1710,3 +1716,165 @@ async def test_close_db_bounds_the_wedged_teardown_drain(monkeypatch, caplog) ->
         session_module._wedged_teardown_cleanup_tasks.discard(stuck)
         never.set()
         await stuck
+
+
+def _stub_head_migration_state(monkeypatch) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_load_migration_entrypoints",
+        lambda: (
+            lambda _: _FakeMigrationState(
+                current_revision="head",
+                head_revision="head",
+                has_alembic_version_table=True,
+                has_legacy_migrations_table=False,
+                needs_upgrade=False,
+            ),
+            lambda _: (_ for _ in ()).throw(AssertionError("startup migrations should stay disabled")),
+            lambda _: (),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_init_db_skips_startup_check_after_recorded_clean_shutdown(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+
+    def _check(_: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        raise AssertionError("a cleanly closed store must not pay for the whole-file scan")
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    _stub_head_migration_state(monkeypatch)
+
+    await session_module.init_db()
+
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "recorded_state",
+    [
+        pytest.param(None, id="no-sidecar-upgrade-or-first-run"),
+        pytest.param(SqliteRunState.RUNNING, id="previous-process-did-not-finish"),
+    ],
+)
+async def test_init_db_runs_startup_check_when_shutdown_was_not_clean(monkeypatch, tmp_path, recorded_state) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    if recorded_state is not None:
+        write_sqlite_runstate(db_path, recorded_state)
+    seen: list[SqliteIntegrityCheckMode] = []
+
+    def _check(path: Path, *, mode: SqliteIntegrityCheckMode = SqliteIntegrityCheckMode.FULL) -> IntegrityCheck:
+        assert path == db_path
+        seen.append(mode)
+        return IntegrityCheck(ok=True, details=None)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(session_module, "check_sqlite_integrity", _check)
+    _stub_head_migration_state(monkeypatch)
+
+    await session_module.init_db()
+
+    assert seen == [SqliteIntegrityCheckMode.QUICK]
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_init_db_records_running_state_even_when_check_is_disabled(monkeypatch, tmp_path) -> None:
+    """Re-enabling the check must not trust a state this process never wrote."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.CLEAN)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+            database_sqlite_startup_check_mode="off",
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "check_sqlite_integrity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("check is disabled")),
+    )
+    _stub_head_migration_state(monkeypatch)
+
+    await session_module.init_db()
+
+    assert read_sqlite_runstate(db_path) is SqliteRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_init_db_leaves_state_unclean_when_the_startup_check_fails(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "check_sqlite_integrity",
+        lambda *_args, **_kwargs: IntegrityCheck(ok=False, details="database disk image is malformed"),
+    )
+    _stub_head_migration_state(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="quick_check failed"):
+        await session_module.init_db()
+
+    assert read_sqlite_runstate(db_path) is None
+
+
+def test_mark_sqlite_shutdown_clean_records_a_clean_close(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    write_sqlite_runstate(db_path, SqliteRunState.RUNNING)
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url=f"sqlite+aiosqlite:///{db_path}"),
+    )
+
+    session_module.mark_sqlite_shutdown_clean()
+
+    assert read_sqlite_runstate(db_path) is SqliteRunState.CLEAN
+
+
+def test_mark_sqlite_shutdown_clean_is_inert_for_non_sqlite_backends(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(database_url="postgresql+asyncpg://user@localhost/codexlb"),
+    )
+
+    session_module.mark_sqlite_shutdown_clean()
+
+    assert not list(tmp_path.iterdir())

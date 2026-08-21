@@ -5,6 +5,7 @@ import { useLocation } from "react-router-dom";
 
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
+import { Button } from "@/components/ui/button";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
@@ -67,8 +68,11 @@ export function SettingsPage() {
     addPoolMemberMutation.isPending ||
     testEndpointMutation.isPending;
   const controlsDisabled = busy || !canWrite;
+  const settingsLoadError = getErrorMessageOrNull(settingsQuery.error);
+  // With no settings loaded the failed-load branch below owns this message, so
+  // the page-level alert would otherwise render it a second time.
   const error =
-    getErrorMessageOrNull(settingsQuery.error) ||
+    (settings ? settingsLoadError : null) ||
     getErrorMessageOrNull(upstreamProxyQuery.error) ||
     getErrorMessageOrNull(updateSettingsMutation.error) ||
     getErrorMessageOrNull(createEndpointMutation.error) ||
@@ -91,8 +95,27 @@ export function SettingsPage() {
         <p className="mt-1 text-sm text-muted-foreground">{t("settings.page.subtitle")}</p>
       </div>
 
-      {!settings ? (
+      {settingsQuery.isPending && !settings ? (
         <SettingsSkeleton />
+      ) : !settings ? (
+        <div className="space-y-3 rounded-xl border bg-card p-4">
+          <div role="alert">
+            <AlertMessage variant="error">
+              {settingsLoadError || t("settings.toasts.loadFailed")}
+            </AlertMessage>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void settingsQuery.refetch();
+            }}
+            disabled={settingsQuery.isFetching}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
       ) : (
         <>
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}

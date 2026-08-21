@@ -1329,6 +1329,7 @@
   "settings.totp.validation.codeLength": "Enter a 6-digit code",
   "settings.totp.toasts.configured": "TOTP configured",
   "settings.totp.toasts.disabled": "TOTP disabled",
+  "settings.toasts.loadFailed": "Failed to load settings",
   "settings.toasts.saved": "Settings saved",
   "settings.toasts.saveFailed": "Failed to save settings",
   "statusBar.serviceReady": "Service ready:",

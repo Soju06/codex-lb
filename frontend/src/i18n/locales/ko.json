@@ -1309,6 +1309,7 @@
   "settings.telemetry.consentDialog.disable": "텔레메트리 비활성화",
   "settings.telemetry.toasts.saved": "텔레메트리 설정이 저장되었습니다",
   "settings.telemetry.toasts.saveFailed": "텔레메트리 설정 저장에 실패했습니다",
+  "settings.toasts.loadFailed": "설정을 불러오지 못했습니다",
   "settings.toasts.saved": "설정 저장됨",
   "settings.toasts.saveFailed": "설정 저장 실패",
   "settings.totp.actions.disable": "비활성화",

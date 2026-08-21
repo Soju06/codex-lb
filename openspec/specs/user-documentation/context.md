@@ -50,6 +50,9 @@ README and sample env stay slim without losing content.
   [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar),
   following the maintainer direction in
   [PR #1233](https://github.com/Soju06/codex-lb/pull/1233#issuecomment-4988227303).
+  Listings also carry least-privilege guidance: guest access for monitoring
+  where the companion supports it, and admin access only for control features;
+  each companion remains responsible for documenting its current auth modes.
 - **zh-CN README gets a canonical-English banner** rather than a parallel diet;
   full i18n (mkdocs-static-i18n) is a deferred follow-up.
 

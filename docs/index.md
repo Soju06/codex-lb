@@ -39,8 +39,11 @@ maintained outside codex-lb:
 - [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — a
   read-only SwiftBar/Bun monitor for account-pool status and quota headroom.
 
-Review each project's repository and release notes before giving it access to
-an authenticated dashboard.
+Prefer a guest dashboard session for monitoring-only access when the companion
+supports it, and grant admin access only for Status Bar account controls.
+codex-lb SwiftBar is read-only; consult its compatibility table for the
+authentication modes supported by the current release. Review each project's
+repository and release notes before connecting it.
 
 ## Screenshots
 

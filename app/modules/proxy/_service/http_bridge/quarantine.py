@@ -43,6 +43,7 @@ class _HTTPBridgeQuarantineEntry:
     consecutive_eventless_timeouts: int = 0
     last_touched_monotonic: float = 0.0
     reason: str | None = None
+    generation: int = 0
 
 
 def _http_bridge_quarantine_registry(
@@ -53,6 +54,18 @@ def _http_bridge_quarantine_registry(
         registry = {}
         service._http_bridge_quarantined_keys = registry
     return registry
+
+
+def _next_http_bridge_quarantine_generation(
+    service: Any,
+    registry: dict[_HTTPBridgeSessionKey, _HTTPBridgeQuarantineEntry],
+) -> int:
+    generation = getattr(service, "_http_bridge_quarantine_generation_counter", None)
+    if generation is None:
+        generation = max((entry.generation for entry in registry.values()), default=0)
+    generation += 1
+    service._http_bridge_quarantine_generation_counter = generation
+    return generation
 
 
 def _prune_http_bridge_quarantine_registry(
@@ -100,6 +113,16 @@ def _http_bridge_session_key_quarantined(service: Any, key: _HTTPBridgeSessionKe
     return entry is not None and entry.quarantined_until > now
 
 
+def _http_bridge_session_key_quarantine_generation(service: Any, key: _HTTPBridgeSessionKey) -> int | None:
+    registry = _http_bridge_quarantine_registry(service)
+    now = time.monotonic()
+    _prune_http_bridge_quarantine_registry(registry, now)
+    entry = registry.get(key)
+    if entry is None or entry.quarantined_until <= now:
+        return None
+    return entry.generation
+
+
 def _quarantine_http_bridge_session(service: Any, session: _HTTPBridgeSession, *, reason: str) -> None:
     """Quarantine a bridge session that has proven silent/wedged.
 
@@ -113,6 +136,7 @@ def _quarantine_http_bridge_session(service: Any, session: _HTTPBridgeSession, *
     entry.quarantined_until = max(entry.quarantined_until, now + _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS)
     entry.last_touched_monotonic = now
     entry.reason = reason
+    entry.generation = _next_http_bridge_quarantine_generation(service, registry)
     _prune_http_bridge_quarantine_registry(registry, now)
     session.quarantined = True
     if already_quarantined:
@@ -169,21 +193,41 @@ def _record_http_bridge_quarantine_eventless_timeout(service: Any, session: _HTT
     )
 
 
-def _clear_http_bridge_quarantine(service: Any, session: _HTTPBridgeSession) -> None:
-    """A completed response on this key disproves the wedge; drop all state."""
+def _clear_http_bridge_quarantine_key(
+    service: Any,
+    key: _HTTPBridgeSessionKey,
+    *,
+    account_id: str | None,
+    model: str | None,
+    generation: int | None = None,
+) -> None:
+    """A completed response on a recovery key disproves the original wedge."""
     registry = _http_bridge_quarantine_registry(service)
-    session.quarantined = False
-    entry = registry.pop(session.key, None)
+    entry = registry.get(key)
     if entry is None:
         return
+    if generation is not None and entry.generation != generation:
+        return
+    registry.pop(key, None)
     if entry.quarantined_until <= time.monotonic():
         return
     _log_http_bridge_event(
         "session_quarantine_cleared",
+        key,
+        account_id=account_id,
+        model=model,
+        detail=f"reason={entry.reason}",
+        cache_key_family=key.affinity_kind,
+        model_class=_extract_model_class(model) if model else None,
+    )
+
+
+def _clear_http_bridge_quarantine(service: Any, session: _HTTPBridgeSession) -> None:
+    """A completed response on this key disproves the wedge; drop all state."""
+    session.quarantined = False
+    _clear_http_bridge_quarantine_key(
+        service,
         session.key,
         account_id=session.account.id,
         model=session.request_model,
-        detail=f"reason={entry.reason}",
-        cache_key_family=session.key.affinity_kind,
-        model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )

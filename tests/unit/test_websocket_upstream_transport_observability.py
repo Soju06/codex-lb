@@ -83,6 +83,10 @@ class _DummyFacade:
         return False
 
     @staticmethod
+    def _is_previous_response_not_found_error(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    @staticmethod
     def _maybe_dump_oversized_response_create_request(*_args: object, **_kwargs: object) -> None:
         return None
 

@@ -1,0 +1,4 @@
+- [x] Add a regression for an endpointless blue-green owner in `bridge_ring_members`.
+- [x] Add a negative control for unsafe endpoint derivation.
+- [x] Implement endpointless member resolution through the bridge instance id.
+- [x] Run focused verification and record the full-file timeout blocker.

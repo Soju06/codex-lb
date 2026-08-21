@@ -2398,6 +2398,149 @@ def test_compact_trimming_preserves_codex_goal_context_anchor_from_middle():
     assert dumped_input[-1] == input_items[-1]
 
 
+def test_compact_trimming_preserves_active_skill_context_anchor_from_middle():
+    active_skill_context = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "<skill>\n"
+                    "<name>grill-me</name>\n"
+                    "<path>/home/kom/.codex/skills/grill-me/SKILL.md</path>\n"
+                    "Active objective: review every TODO row with one question at a time.\n"
+                    "</skill>"
+                ),
+            }
+        ],
+    }
+    plan_call = {
+        "type": "function_call",
+        "name": "update_plan",
+        "call_id": "call_plan",
+        "arguments": '{"plan":[{"step":"return to grill-me managed TODO queue","status":"in_progress"}]}',
+    }
+    plan_output = {
+        "type": "function_call_output",
+        "call_id": "call_plan",
+        "output": "Plan updated",
+    }
+    input_items = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "x" * 300_000},
+        active_skill_context,
+        {"role": "assistant", "content": "y" * 300_000},
+        plan_call,
+        {"role": "assistant", "content": "z" * 300_000},
+        plan_output,
+        {"role": "user", "content": "continue the managed grill queue"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert dumped_input[0] == input_items[0]
+    assert active_skill_context in dumped_input
+    assert plan_call in dumped_input
+    assert plan_output in dumped_input
+    assert dumped_input[-1] == input_items[-1]
+    assert input_items[1] not in dumped_input
+    assert input_items[3] not in dumped_input
+    assert input_items[5] not in dumped_input
+
+
+def test_compact_trimming_does_not_anchor_plain_skill_catalog_mentions():
+    catalog_context = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "<skills_instructions>\n"
+                    "- grill-me: Interview the user one question at a time.\n"
+                    "</skills_instructions>"
+                ),
+            }
+        ],
+    }
+    input_items = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "x" * 300_000},
+        catalog_context,
+        {"role": "assistant", "content": "y" * 500_000},
+        {"role": "user", "content": "latest request"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert catalog_context not in dumped_input
+    assert dumped_input[0] == input_items[0]
+    assert dumped_input[-1] == input_items[-1]
+
+
+def test_compact_trimming_does_not_promote_skill_catalog_or_checklist_prose():
+    skills_catalog = {
+        "type": "message",
+        "role": "user",
+        "content": [
+            {
+                "type": "input_text",
+                "text": (
+                    "<skills_instructions>\n"
+                    "## Skills\n"
+                    "- grill-me: Interview the user one question at a time.\n"
+                    "</skills_instructions>"
+                ),
+            }
+        ],
+    }
+    checklist_prose = {
+        "type": "message",
+        "role": "assistant",
+        "content": "TODO review: [ ] first row, [ ] second row, [ ] third row.",
+    }
+    input_items = [
+        {"role": "user", "content": "initial instructions"},
+        {"role": "assistant", "content": "x" * 300_000},
+        skills_catalog,
+        checklist_prose,
+        {"role": "assistant", "content": "y" * 500_000},
+        {"role": "user", "content": "continue"},
+    ]
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": input_items,
+    }
+
+    request = ResponsesCompactRequest.model_validate(payload)
+    dumped = request.to_payload()
+    dumped_input = dumped["input"]
+
+    assert isinstance(dumped_input, list)
+    assert skills_catalog not in dumped_input
+    assert checklist_prose not in dumped_input
+    assert dumped_input[0] == input_items[0]
+    assert dumped_input[-1] == input_items[-1]
+
+
 def test_compact_trimming_preserves_non_message_developer_directive_from_middle():
     developer_directive = {
         "type": "future_directive",
@@ -2471,6 +2614,72 @@ def test_compact_trimming_preserves_plan_and_goal_tool_call_outputs():
     assert update_plan_call in dumped_input
     assert update_plan_output in dumped_input
     assert unrelated_output not in dumped_input
+
+
+def test_compact_trimming_elides_old_state_tool_pairs_when_required_state_exceeds_budget():
+    input_items: list[JsonValue] = [{"role": "user", "content": "initial request"}]
+    old_plan_pairs: list[tuple[JsonValue, JsonValue]] = []
+    for index in range(14):
+        call = {
+            "type": "function_call",
+            "name": "update_plan",
+            "call_id": f"call-plan-{index}",
+            "arguments": json.dumps({"plan": [{"step": f"step {index}", "status": "completed"}]}),
+        }
+        output = {
+            "type": "function_call_output",
+            "call_id": f"call-plan-{index}",
+            "output": "Plan updated " + str(index) + " " + "x" * 32_000,
+        }
+        old_plan_pairs.append((call, output))
+        input_items.extend([call, output])
+    latest_request = {"role": "user", "content": "continue after compaction"}
+    input_items.append(latest_request)
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": input_items,
+    }
+
+    dumped_input = ResponsesCompactRequest.model_validate(payload).to_payload()["input"]
+
+    assert isinstance(dumped_input, list)
+    latest_call, latest_output = old_plan_pairs[-1]
+    assert latest_call in dumped_input
+    assert latest_output in dumped_input
+    assert latest_request in dumped_input
+    assert any(call not in dumped_input and output not in dumped_input for call, output in old_plan_pairs[:-1])
+    assert all((call in dumped_input) == (output in dumped_input) for call, output in old_plan_pairs)
+    assert _estimated_json_tokens(dumped_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS
+
+
+def test_compact_trimming_rejects_current_state_tool_pair_that_cannot_fit():
+    current_call = {
+        "type": "function_call",
+        "name": "update_plan",
+        "call_id": "call-current-plan",
+        "arguments": json.dumps({"plan": [{"step": "current", "status": "in_progress"}]}),
+    }
+    current_output = {
+        "type": "function_call_output",
+        "call_id": "call-current-plan",
+        "output": "Plan updated " + "x" * 450_000,
+    }
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "",
+        "input": [
+            {"role": "user", "content": "initial request"},
+            current_call,
+            current_output,
+        ],
+    }
+
+    with pytest.raises(ClientPayloadError, match="cannot be trimmed without removing required state anchors") as raised:
+        ResponsesCompactRequest.model_validate(payload).to_payload()
+
+    assert raised.value.param == "input"
+    assert raised.value.code == "responses_compact_input_too_large"
 
 
 def test_compact_trimming_preserves_historical_side_effect_tool_pair():

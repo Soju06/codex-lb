@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.utils.time import utcnow
-from app.db.models import Base, BridgeRingMember
+from app.db.models import BridgeRingMember
+from app.modules.proxy import ring_membership as ring_membership_module
 from app.modules.proxy.ring_membership import (
     RING_HEARTBEAT_INTERVAL_SECONDS,
     RING_STALE_GRACE_SECONDS,
@@ -23,7 +25,7 @@ async def async_session_factory() -> AsyncIterator[Callable[[], AsyncSession]]:
     """Create in-memory SQLite database for testing."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(lambda sync_conn: cast(Any, BridgeRingMember.__table__).create(sync_conn, checkfirst=True))
 
     async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -53,13 +55,14 @@ async def test_register_and_list_active(ring_service: RingMembershipService) -> 
 
 
 @pytest.mark.asyncio
-async def test_list_active_can_require_advertised_endpoint(ring_service: RingMembershipService) -> None:
+async def test_list_active_can_require_resolvable_endpoint(ring_service: RingMembershipService) -> None:
     await ring_service.register("pod-a", endpoint_base_url="http://10.0.0.12:8080")
     await ring_service.register("pod-b", endpoint_base_url=None)
+    await ring_service.register("bad/instance", endpoint_base_url=None)
 
     active = await ring_service.list_active(require_endpoint=True)
 
-    assert active == ["pod-a"]
+    assert active == ["pod-a", "pod-b"]
 
 
 @pytest.mark.asyncio
@@ -179,6 +182,21 @@ async def test_resolve_endpoint_returns_advertised_base_url(ring_service: RingMe
     endpoint = await ring_service.resolve_endpoint("pod-endpoint")
 
     assert endpoint == "http://10.0.0.12:8080"
+
+
+def test_resolve_endpoint_derives_container_hostname_for_endpointless_member() -> None:
+    endpoint = ring_membership_module._bridge_ring_endpoint_from_metadata(
+        None,
+        instance_id="codex-lb-before-live-stack-abc-20260821T010203Z",
+    )
+
+    assert endpoint == "http://codex-lb-before-live-stack-abc-20260821T010203Z:2455"
+
+
+def test_resolve_endpoint_does_not_derive_unsafe_instance_hostname() -> None:
+    endpoint = ring_membership_module._bridge_ring_endpoint_from_metadata(None, instance_id="bad/instance")
+
+    assert endpoint is None
 
 
 @pytest.mark.asyncio

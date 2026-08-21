@@ -1736,6 +1736,55 @@ async def test_durable_bridge_clear_response_anchor_nulls_anchor_fields_but_keep
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_clear_response_anchor_keeps_a_newer_anchor(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-clear-anchor-expected",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state="http_turn_expected",
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_newer",
+        lease_ttl_seconds=60.0,
+    )
+
+    # The rejected anchor is no longer the stored one: a concurrent turn on
+    # the same session already completed and stored ``resp_newer``. Clearing
+    # on the rejected id must leave that newer anchor in place.
+    stale_clear = await coordinator.clear_live_session_response_anchor(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        expected_response_id="resp_rejected",
+    )
+    assert stale_clear is not None
+    assert stale_clear.latest_response_id == "resp_newer"
+
+    matching_clear = await coordinator.clear_live_session_response_anchor(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        expected_response_id="resp_newer",
+    )
+    assert matching_clear is not None
+    assert matching_clear.latest_response_id is None
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_clear_response_anchor_is_noop_after_epoch_advance(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
@@ -1877,6 +1926,54 @@ async def test_durable_bridge_release_without_draining_marks_session_closed(
 
     assert reclaimed.owner_instance_id == "instance-b"
     assert reclaimed.latest_response_id == "resp_2"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_ownerless_active_row_can_be_reclaimed_without_takeover(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="prompt_cache",
+        session_key_value="ownerless-reclaim",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    released = await coordinator.release_live_session(
+        session_id=claimed.session_id,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        draining=True,
+    )
+
+    assert released is not None
+    assert released.owner_instance_id is None
+
+    reclaimed = await coordinator.claim_live_session(
+        session_key_kind="prompt_cache",
+        session_key_value="ownerless-reclaim",
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_process_epoch="test-process-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=False,
+    )
+
+    assert reclaimed.session_id == claimed.session_id
+    assert reclaimed.owner_instance_id == "instance-b"
+    assert reclaimed.owner_epoch == claimed.owner_epoch + 1
 
 
 @pytest.mark.asyncio

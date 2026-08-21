@@ -516,6 +516,21 @@ _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_ACTION = "fail_closed_capability_routing"
 
 
+def _seed_bridge_owned_stale_anchor_diagnostics(
+    request_state: _WebSocketRequestState,
+    *,
+    account_id_value: str | None,
+) -> None:
+    if request_state.previous_response_id is None:
+        return
+    if request_state.previous_response_owner_lookup_source is not None:
+        return
+    if account_id_value is None:
+        return
+    request_state.previous_response_owner_lookup_source = "http_bridge_session"
+    request_state.previous_response_owner_lookup_outcome = "hit"
+
+
 class _WebSocketReplaySequenceRegression(Exception):
     pass
 
@@ -5989,7 +6004,10 @@ class _WebSocketMixin:
                 "account_health_error_handled",
                 False,
             )
-        if request_state.suppressed_duplicate_tool_call and error_code == "stream_incomplete":
+        if (
+            request_state.suppressed_duplicate_tool_call
+            and error_code == _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE
+        ):
             settlement.account_health_error = False
         if (
             error_code == "stream_incomplete"
@@ -6448,6 +6466,15 @@ class _WebSocketMixin:
             request_error_message = request_state.error_message_override or error_message
             request_error_type = request_state.error_type_override or "server_error"
             request_error_param = request_state.error_param_override
+            if _facade()._is_previous_response_not_found_error(
+                code=_normalize_error_code(request_error_code, request_error_type),
+                param=request_error_param,
+                message=request_error_message,
+            ):
+                _seed_bridge_owned_stale_anchor_diagnostics(
+                    request_state,
+                    account_id_value=account_id_value,
+                )
             (
                 request_error_code,
                 request_error_message,

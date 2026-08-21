@@ -405,12 +405,14 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_response_id: str | None = None,
     ) -> DurableBridgeLookup | None:
         async with self._session() as session:
             snapshot = await DurableBridgeRepository(session).clear_latest_response_anchor(
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                expected_latest_response_id=expected_response_id,
             )
         if snapshot is None:
             return None

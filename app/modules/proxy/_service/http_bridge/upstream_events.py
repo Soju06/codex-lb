@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -49,6 +49,7 @@ from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.time import utcnow
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -72,6 +73,8 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
+    _clear_http_bridge_quarantine_key,
+    _http_bridge_session_key_quarantine_generation,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -195,6 +198,7 @@ from app.modules.proxy.affinity import (
     _extract_model_class,
 )
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     is_upstream_model_capacity_error,
@@ -208,6 +212,103 @@ from app.modules.proxy.tool_call_dedupe import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
+
+
+async def _advance_http_bridge_quarantine_clear_key(
+    service: Any,
+    *,
+    key: Any,
+    api_key_id: str | None,
+    account_id: str,
+    response_id: str,
+    input_item_count: int | None,
+    input_full_fingerprint: str | None,
+    pending_tool_calls: Mapping[str, str] | None,
+    quarantine_generation: int | None,
+    expected_session_id: str | None = None,
+    expected_owner_epoch: int | None = None,
+) -> bool:
+    def generation_matches() -> bool:
+        if quarantine_generation is None:
+            return True
+        return _http_bridge_session_key_quarantine_generation(service, key) == quarantine_generation
+
+    if not generation_matches():
+        return False
+    lookup = await service._durable_bridge.lookup_request_targets(
+        session_key_kind=key.affinity_kind,
+        session_key_value=key.affinity_key,
+        api_key_id=api_key_id,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+    if lookup is None:
+        return False
+    if expected_session_id is not None and lookup.session_id != expected_session_id:
+        return False
+    if expected_owner_epoch is not None and lookup.owner_epoch != expected_owner_epoch:
+        return False
+    if not generation_matches():
+        return False
+    settings = _service_get_settings()
+    instance_id = settings.http_responses_session_bridge_instance_id
+    active_lookup = lookup
+    if not active_lookup.lease_is_active(now=utcnow()) or active_lookup.owner_instance_id != instance_id:
+        claimed_lookup = await service._durable_bridge.claim_live_session(
+            session_key_kind=key.affinity_kind,
+            session_key_value=key.affinity_key,
+            api_key_id=api_key_id,
+            instance_id=instance_id,
+            lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+            account_id=active_lookup.account_id,
+            model=active_lookup.model,
+            service_tier=None,
+            latest_turn_state=active_lookup.latest_turn_state,
+            latest_response_id=active_lookup.latest_response_id,
+            allow_takeover=False,
+            owner_process_epoch=http_bridge_owner_process_epoch(),
+        )
+        if claimed_lookup.owner_instance_id != instance_id:
+            return False
+        active_lookup = claimed_lookup
+    if not generation_matches():
+        return False
+    if active_lookup.account_id != account_id:
+        rebound = await service._durable_bridge.rebind_session_account(
+            session_id=active_lookup.session_id,
+            api_key_id=api_key_id,
+            instance_id=instance_id,
+            owner_epoch=active_lookup.owner_epoch,
+            account_id=account_id,
+            clear_continuity=True,
+        )
+        if not rebound:
+            return False
+    if not generation_matches():
+        return False
+    advanced = await service._durable_bridge.renew_live_session(
+        session_id=active_lookup.session_id,
+        api_key_id=api_key_id,
+        instance_id=instance_id,
+        owner_epoch=active_lookup.owner_epoch,
+        lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
+        latest_response_id=response_id,
+        latest_input_item_count=input_item_count,
+        latest_input_full_fingerprint=input_full_fingerprint,
+        latest_pending_tool_calls=pending_tool_calls,
+    )
+    if not generation_matches():
+        return False
+    return (
+        advanced is not None
+        and advanced.session_id == active_lookup.session_id
+        and advanced.owner_instance_id == instance_id
+        and advanced.owner_epoch == active_lookup.owner_epoch
+        and advanced.account_id == account_id
+        and advanced.latest_response_id == response_id
+    )
+
 
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     0.25,
@@ -924,43 +1025,216 @@ async def _cancel_http_bridge_reader_child(
         return task.done()
 
 
+_HTTP_BRIDGE_REJECTED_ANCHOR_DETAIL = "previous_response_not_found"
+
+
 async def _clear_durable_http_bridge_response_anchor(
     service: Any,
     session: "_HTTPBridgeSession",
-) -> None:
-    """Invalidate a durable proxy-injected anchor that proved eventless.
+    *,
+    expected_response_id: str | None = None,
+    detail: str = _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+) -> bool:
+    """Invalidate a durable proxy-injected anchor that cannot be used again.
 
     Runs while ``session`` still owns the durable row (before retirement
     releases the lease), so the fenced write lands under the session's own
     owner epoch instead of silently losing the fence to a released owner.
+    ``expected_response_id`` additionally requires the row to still hold that
+    exact anchor, so a concurrent turn that already stored a newer one keeps
+    it.
     """
     if session.durable_session_id is None or session.durable_owner_epoch is None:
-        return
+        logger.info(
+            "http_bridge_anchor_clear anchor_id=%s reason=%s fence_decision=no_durable_owner",
+            expected_response_id,
+            detail,
+        )
+        return False
     try:
         lookup = await service._durable_bridge.clear_live_session_response_anchor(
             session_id=session.durable_session_id,
             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
             owner_epoch=session.durable_owner_epoch,
+            expected_response_id=expected_response_id,
         )
     except Exception:
-        logger.warning("Failed to clear durable HTTP bridge response anchor after stuck timeout", exc_info=True)
-        return
+        logger.warning("Failed to clear durable HTTP bridge response anchor detail=%s", detail, exc_info=True)
+        return False
     if lookup is None or lookup.owner_epoch != session.durable_owner_epoch or lookup.latest_response_id is not None:
         # None means the durable row is gone entirely (e.g. purged); an
         # epoch or anchor mismatch means a newer owner already claimed the
         # session before this fenced write executed. Either way, the anchor
         # was never actually cleared, so do not report an invalidation that
         # did not happen.
-        return
+        logger.info(
+            "http_bridge_anchor_clear anchor_id=%s reason=%s fence_decision=declined "
+            "current_owner_epoch=%s expected_owner_epoch=%s current_anchor_id=%s",
+            expected_response_id,
+            detail,
+            getattr(lookup, "owner_epoch", None),
+            session.durable_owner_epoch,
+            getattr(lookup, "latest_response_id", None),
+        )
+        return False
     _log_http_bridge_event(
         "durable_anchor_invalidated",
         session.key,
         account_id=session.account.id,
         model=session.request_model,
-        detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+        detail=detail,
         cache_key_family=session.key.affinity_kind,
         model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )
+    logger.info(
+        "http_bridge_anchor_clear anchor_id=%s reason=%s fence_decision=cleared owner_epoch=%s",
+        expected_response_id,
+        detail,
+        session.durable_owner_epoch,
+    )
+    return True
+
+
+def _http_bridge_rejected_response_anchor(
+    request_states: Iterable[_WebSocketRequestState | None],
+    *,
+    previous_response_id_hint: str | None,
+    session: "_HTTPBridgeSession",
+) -> str | None:
+    """Return this session's anchor upstream has just rejected, if any."""
+    candidates: set[str] = set()
+    for request_state in request_states:
+        if request_state is None:
+            continue
+        previous_response_id = request_state.previous_response_id
+        if not previous_response_id:
+            continue
+        candidates.add(previous_response_id)
+    if session.last_completed_response_id is not None:
+        candidates.add(session.last_completed_response_id)
+    # When upstream names the id it could not find, only that id is proven gone.
+    # A differently anchored request that merely matched the same anonymous
+    # error event keeps its own anchor.
+    if previous_response_id_hint is not None:
+        return previous_response_id_hint if previous_response_id_hint in candidates else None
+    for request_state in request_states:
+        if request_state is None or not request_state.proxy_injected_previous_response_id:
+            continue
+        previous_response_id = request_state.previous_response_id
+        if previous_response_id:
+            return previous_response_id
+    return None
+
+
+async def _drop_rejected_http_bridge_response_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    request_states: Iterable[_WebSocketRequestState | None],
+    previous_response_id_hint: str | None,
+) -> bool:
+    """Stop replaying an anchor upstream has said does not exist.
+
+    ``previous_response_not_found`` naming a response id is a definitive
+    upstream answer, unlike the ambiguous transport outcomes the continuation
+    recovery mode covers. codex-lb keeps that id in two places and re-injects it
+    on later turns for the same session: the durable
+    ``http_bridge_sessions.latest_response_id`` row used by the fresh-reattach
+    path, and ``session.last_completed_response_id`` used by the session-level
+    anchor path. Neither was dropped on this outcome, so every following turn
+    re-sent the rejected id, was trimmed against it, and failed the same way,
+    and the session could not recover on its own. Both are invalidated here,
+    each only while it still holds the exact rejected id.
+    """
+    rejected_response_id = _http_bridge_rejected_response_anchor(
+        request_states,
+        previous_response_id_hint=previous_response_id_hint,
+        session=session,
+    )
+    if rejected_response_id is None:
+        return False
+    durable_fence_required = session.durable_session_id is not None and session.durable_owner_epoch is not None
+    durable_cleared = await _clear_durable_http_bridge_response_anchor(
+        service,
+        session,
+        expected_response_id=rejected_response_id,
+        detail=_HTTP_BRIDGE_REJECTED_ANCHOR_DETAIL,
+    )
+    local_cleared = False
+    if session.last_completed_response_id == rejected_response_id and (durable_cleared or not durable_fence_required):
+        session.last_completed_response_id = None
+        session.last_completed_response_account_id = None
+        session.last_completed_input_count = 0
+        session.last_completed_input_prefix_fingerprint = None
+        session.last_pending_tool_calls.clear()
+        local_cleared = True
+    logger.info(
+        "http_bridge_rejected_anchor_reset anchor_id=%s reason=%s local_cleared=%s durable_cleared=%s",
+        rejected_response_id,
+        _HTTP_BRIDGE_REJECTED_ANCHOR_DETAIL,
+        local_cleared,
+        durable_cleared,
+    )
+    return local_cleared or durable_cleared
+
+
+async def _retry_http_bridge_after_rejected_anchor_clear(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    request_state: _WebSocketRequestState | None,
+    claimed_terminal_request_states: list[_WebSocketRequestState],
+) -> bool:
+    if request_state is None:
+        return False
+    if (
+        request_state.previous_response_id is None
+        or not request_state.fresh_upstream_request_text
+        or not request_state.fresh_upstream_request_is_retry_safe
+        or request_state.replay_count >= 1
+        or request_state.response_event_count > 0
+        or request_state.event_queue is None
+        or request_state.draining_until_terminal
+        or not request_state.request_text
+    ):
+        return False
+
+    async with session.pending_lock:
+        if request_state.draining_until_terminal or request_state.event_queue is None:
+            return False
+        restored_to_pending = request_state not in session.pending_requests
+        if restored_to_pending:
+            session.pending_requests.appendleft(request_state)
+            if _http_bridge_request_counts_against_queue(request_state):
+                session.queued_request_count += 1
+        request_state.awaiting_response_created = True
+        request_state.response_id = None
+        request_state.terminal_settlement_phase = None
+
+    original_previous_response_id = request_state.previous_response_id
+    original_proxy_injected_previous_response_id = request_state.proxy_injected_previous_response_id
+    retried = await service._retry_http_bridge_request_on_fresh_upstream(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text,
+        send_request=True,
+    )
+    if retried:
+        if request_state in claimed_terminal_request_states:
+            claimed_terminal_request_states.remove(request_state)
+        return True
+
+    async with session.pending_lock:
+        request_state.previous_response_id = original_previous_response_id
+        request_state.proxy_injected_previous_response_id = original_proxy_injected_previous_response_id
+        if request_state in session.pending_requests:
+            session.pending_requests.remove(request_state)
+            if _http_bridge_request_counts_against_queue(request_state):
+                session.queued_request_count = max(0, session.queued_request_count - 1)
+        request_state.terminal_settlement_phase = "claimed"
+        if request_state not in claimed_terminal_request_states:
+            claimed_terminal_request_states.append(request_state)
+    return False
 
 
 async def _abandon_durable_http_bridge_continuity(
@@ -2012,6 +2286,32 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if claimed_request_state not in claimed_terminal_request_states:
                         claimed_terminal_request_states.append(claimed_request_state)
 
+        if is_previous_response_not_found_event:
+            rejected_anchor_cleared = await _drop_rejected_http_bridge_response_anchor(
+                self,
+                session,
+                request_states=(
+                    matched_request_state,
+                    terminal_request_state,
+                    *grouped_previous_response_request_states,
+                ),
+                previous_response_id_hint=previous_response_id_hint,
+            )
+            retry_request_state = terminal_request_state or matched_request_state
+            if retry_request_state is None and len(grouped_previous_response_request_states) == 1:
+                retry_request_state = grouped_previous_response_request_states[0]
+            if (
+                rejected_anchor_cleared
+                and not has_other_pending_requests
+                and await _retry_http_bridge_after_rejected_anchor_clear(
+                    self,
+                    session,
+                    request_state=retry_request_state,
+                    claimed_terminal_request_states=claimed_terminal_request_states,
+                )
+            ):
+                return
+
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
             grouped_error_reason = (
@@ -2783,6 +3083,41 @@ class _HTTPBridgeUpstreamEventsMixin:
         ):
             await self._clear_http_bridge_retry_circuit(session)
             _clear_http_bridge_quarantine(self, session)
+            if terminal_request_state.quarantine_clear_key is not None:
+                quarantine_advanced = False
+                if response_id is not None:
+                    try:
+                        quarantine_advanced = await _advance_http_bridge_quarantine_clear_key(
+                            self,
+                            key=terminal_request_state.quarantine_clear_key,
+                            api_key_id=session.key.api_key_id,
+                            account_id=session.account.id,
+                            response_id=response_id,
+                            input_item_count=(
+                                terminal_request_state.input_item_count
+                                if terminal_request_state.input_item_count > 0
+                                else None
+                            ),
+                            input_full_fingerprint=(
+                                terminal_request_state.input_full_fingerprint
+                                if terminal_request_state.input_item_count > 0
+                                else None
+                            ),
+                            pending_tool_calls=_durable_pending_tool_call_manifest(terminal_request_state, payload),
+                            quarantine_generation=terminal_request_state.quarantine_clear_generation,
+                            expected_session_id=terminal_request_state.quarantine_clear_session_id,
+                            expected_owner_epoch=terminal_request_state.quarantine_clear_owner_epoch,
+                        )
+                    except Exception:
+                        logger.warning("Failed to advance quarantined HTTP bridge continuity", exc_info=True)
+                if quarantine_advanced:
+                    _clear_http_bridge_quarantine_key(
+                        self,
+                        terminal_request_state.quarantine_clear_key,
+                        account_id=session.account.id,
+                        model=session.request_model,
+                        generation=terminal_request_state.quarantine_clear_generation,
+                    )
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract

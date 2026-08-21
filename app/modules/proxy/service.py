@@ -222,6 +222,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_payload_without_previous_response_id as _http_bridge_payload_without_previous_response_id,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_pending_response_events_seen as _http_bridge_pending_response_events_seen,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_precreated_retry_failure_error as _http_bridge_precreated_retry_failure_error,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -873,6 +876,7 @@ _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE = (
     "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
 )
+_SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE = "duplicate_tool_call_replay_suppressed"
 _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
@@ -2594,19 +2598,11 @@ def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> st
 
 
 def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
-    if isinstance(actual_service_tier, str):
-        return actual_service_tier
-    if isinstance(requested_service_tier, str):
-        return requested_service_tier
-    return None
+    return actual_service_tier if isinstance(actual_service_tier, str) else requested_service_tier
 
 
 def _normalize_service_tier_value(value: JsonValue) -> str | None:
     if not isinstance(value, str):
         return None
     stripped = value.strip()
-    if not stripped:
-        return None
-    if stripped.lower() == "fast":
-        return "priority"
-    return stripped
+    return "priority" if stripped.lower() == "fast" else stripped or None

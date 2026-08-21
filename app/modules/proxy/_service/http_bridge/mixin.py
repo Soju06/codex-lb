@@ -216,6 +216,7 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.continuity import (
     is_http_bridge_account_neutral_replay,
+    resolve_account_neutral_owner_binding,
     resolve_reconnect_preferred_account_id,
     resolve_required_account_id,
     without_http_bridge_session_affinity_headers,
@@ -1986,6 +1987,7 @@ class _HTTPBridgeMixin(
         require_security_work_authorized: bool = False,
         require_same_account: bool = False,
         require_preferred_account: bool = False,
+        allow_account_rebind: bool = False,
         owner_rebind_affinity: _AffinityPolicy | None = None,
         selection_affinity: _AffinityPolicy | None = None,
     ) -> None:
@@ -1994,10 +1996,8 @@ class _HTTPBridgeMixin(
         if selection_affinity is None and goal_restart:
             # Storage drops this bit; its request retains reconnect and account-switch authority.
             selection_affinity = request_state.affinity_policy
-        account_neutral_recovery = is_http_bridge_account_neutral_replay(
-            kind=session.key.affinity_kind, key=session.key.affinity_key
-        )
-        require_same_account = account_neutral_recovery or (require_same_account and not goal_restart)
+        neutral = resolve_account_neutral_owner_binding(session.key, request_state, allow_account_rebind)
+        require_same_account = neutral.owner_bound or (require_same_account and not goal_restart)
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
         session.handoff_in_progress = True
@@ -2039,11 +2039,16 @@ class _HTTPBridgeMixin(
             forced_refresh_account_id = request_state.force_refresh_account_id
             excluded_account_ids: set[str] = set(request_state.excluded_account_ids)
             requested_preferred_account_id = resolve_reconnect_preferred_account_id(
-                request_state, session.account.id, require_preferred_account, account_neutral_recovery
+                # A caller that allowed a rebind keeps its preferred account as a
+                # preference; promoting it to a required owner would re-pin the replay.
+                request_state,
+                session.account.id,
+                require_preferred_account and not neutral.rebind_allowed,
+                neutral.owner_bound,
             )
             required_preferred_account_id = resolve_required_account_id(
                 ("requested reconnect owner", requested_preferred_account_id),
-                ("account-neutral recovery", session.account.id if account_neutral_recovery else None),
+                ("account-neutral recovery", session.account.id if neutral.owner_bound else None),
             )
             close_skips_account = session.last_upstream_close_code in _UPSTREAM_CLOSE_CODES_SKIP_SAME_ACCOUNT_RETRY
             hard_close_account_bound = session.key.strength == "hard" and (close_skips_account or require_same_account)
@@ -2082,12 +2087,9 @@ class _HTTPBridgeMixin(
         selected_account_model_replacement = False
 
         def record_selected_account_takeover(
-            selected_account_id: str | None, preferred_account_id: str | None = session.account.id
+            selected_account_id: str | None, preferred_id: str | None = session.account.id
         ) -> None:
-            _record_same_account_takeover(
-                preferred_account_id=preferred_account_id,
-                selected_account_id=selected_account_id,
-            )
+            _record_same_account_takeover(preferred_account_id=preferred_id, selected_account_id=selected_account_id)
 
         async def release_selected_account_lease() -> None:
             nonlocal selected_account_lease
@@ -2131,14 +2133,11 @@ class _HTTPBridgeMixin(
             _mark_http_bridge_reader_handoff_reconnect_failed(session, old_reader)
             _complete_http_bridge_handoff(session, self._http_bridge_inflight_sessions)
 
-        def require_bound_account() -> None:
+        async def fail_owner_unavailable_after_probe(detail: str = "previous_response_owner_unavailable") -> None:
             try:
-                _require_http_bridge_bound_account_not_excluded(
-                    hard_close_account_bound, session.account.id, excluded_account_ids
-                )
-            except BaseException:
+                await self._release_http_bridge_retry_circuit_half_open(session, detail=detail)
+            finally:
                 complete_failed_handoff()
-                raise
 
         while True:
             reuse_current_account_lease = preferred_candidate_id == session.account.id and bool(session.account_lease)
@@ -2157,7 +2156,7 @@ class _HTTPBridgeMixin(
                     service_tier=session.request_service_tier,
                     exclude_account_ids=excluded_account_ids,
                     preferred_account_id=preferred_candidate_id,
-                    preferred_account_is_continuity_owner=account_neutral_recovery,
+                    preferred_account_is_continuity_owner=neutral.owner_bound,
                     require_security_work_authorized=require_security_work_authorized,
                     lease_kind=None if reuse_current_account_lease else "stream",
                     estimated_lease_tokens=_estimated_lease_tokens_from_request_usage_budget(
@@ -2179,8 +2178,8 @@ class _HTTPBridgeMixin(
                 except BaseException:
                     complete_failed_handoff()
                     raise
-                if account_neutral_recovery and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
-                    complete_failed_handoff()
+                if neutral.owner_bound and selection.error_code == CONTINUITY_OWNER_UNAVAILABLE:
+                    await fail_owner_unavailable_after_probe(CONTINUITY_OWNER_UNAVAILABLE)
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if (
                     reuse_current_account_lease
@@ -2193,7 +2192,7 @@ class _HTTPBridgeMixin(
                 if selection.error_code == USAGE_LIMIT_REACHED and (
                     required_preferred_account_id is not None or hard_close_account_bound
                 ):
-                    complete_failed_handoff()
+                    await fail_owner_unavailable_after_probe()
                     raise _http_bridge_previous_response_owner_unavailable_error()
                 if selection.error_code == USAGE_LIMIT_REACHED:
                     record_selected_account_takeover(None)
@@ -2216,11 +2215,17 @@ class _HTTPBridgeMixin(
                 if should_retry_selection:
                     excluded_account_ids.update(request_state.excluded_account_ids)
                     if required_preferred_account_id in excluded_account_ids:
-                        complete_failed_handoff()
+                        await fail_owner_unavailable_after_probe()
                         raise _http_bridge_previous_response_owner_unavailable_error()
                     if skip_same_account:
                         excluded_account_ids.add(session.account.id)
-                    require_bound_account()
+                    try:
+                        _require_http_bridge_bound_account_not_excluded(
+                            hard_close_account_bound, session.account.id, excluded_account_ids
+                        )
+                    except BaseException:
+                        complete_failed_handoff()
+                        raise
                     retry_same_account_once = not skip_same_account and session.account.id not in excluded_account_ids
                     if skip_same_account:
                         preferred_candidate_id = None
@@ -2245,7 +2250,7 @@ class _HTTPBridgeMixin(
                     selected_account_lease = selection.lease
                     await release_selected_account_lease()
                 record_selected_account_takeover(account.id, required_preferred_account_id)
-                complete_failed_handoff()
+                await fail_owner_unavailable_after_probe()
                 raise _http_bridge_previous_response_owner_unavailable_error()
             selected_account_lease = (
                 session.account_lease

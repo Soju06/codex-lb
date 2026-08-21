@@ -56,6 +56,7 @@ _TOOL_CALL_ITEM_TYPES = frozenset(_COMPACT_TOOL_CALL_TYPE_BY_OUTPUT_TYPE.values(
 _COMPACT_INLINE_IMAGE_DATA_URL_RE = re.compile(r"""data:image/[^,\s]+,[^\s"'<>]+""")
 _GOAL_CONTINUATION_CONTEXT_PREFIX = '<codex_internal_context source="goal">'
 _PLAN_MODE_CONTEXT_PREFIX = "<collaboration_mode># Plan Mode"
+_ACTIVE_SKILL_CONTEXT_PREFIX = "<skill>"
 _EXPLICIT_PROMPT_CACHE_CONTENT_TYPES = frozenset({"input_text", "input_image", "input_file"})
 
 
@@ -1056,6 +1057,13 @@ def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
         if losslessly_trimmed_input is not None:
             payload["input"] = losslessly_trimmed_input
             return
+    lossy_state_trimmed_input = _compact_lossily_trim_historical_state_anchors(
+        input_value,
+        has_continuity_anchor=has_continuity_anchor,
+    )
+    if lossy_state_trimmed_input is not None:
+        payload["input"] = lossy_state_trimmed_input
+        return
     raise ClientPayloadError(
         "Compact input exceeds the upstream size limit and cannot be trimmed without removing required state anchors.",
         param="input",
@@ -1198,6 +1206,102 @@ def _compact_required_indices(
         ):
             required_indices = prospective_required_indices
     return required_indices
+
+
+def _compact_lossily_trim_historical_state_anchors(
+    input_value: list[JsonValue],
+    *,
+    has_continuity_anchor: bool,
+) -> list[JsonValue] | None:
+    token_counts = [_estimated_json_array_item_tokens(item) for item in input_value]
+    state_anchor_indices = _compact_state_anchor_indices(input_value)
+    droppable_indices = _compact_droppable_historical_state_anchor_indices(
+        input_value,
+        token_counts,
+        state_anchor_indices=state_anchor_indices,
+        has_continuity_anchor=has_continuity_anchor,
+    )
+    if not droppable_indices:
+        return None
+
+    preserved_indices = set(state_anchor_indices)
+    for index in droppable_indices:
+        preserved_indices.discard(index)
+        required_indices = _compact_required_indices(
+            input_value,
+            token_counts,
+            preserved_indices=preserved_indices,
+            has_continuity_anchor=has_continuity_anchor,
+        )
+        candidate_input = _compact_trimmed_input_with_markers(input_value, token_counts, required_indices)
+        if _estimated_json_tokens(candidate_input) <= _MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS:
+            return candidate_input
+    return None
+
+
+def _compact_droppable_historical_state_anchor_indices(
+    input_value: list[JsonValue],
+    token_counts: list[int],
+    *,
+    state_anchor_indices: set[int],
+    has_continuity_anchor: bool,
+) -> list[int]:
+    terminal_indices, _, _ = _compact_terminal_required_indices(
+        input_value,
+        token_counts=token_counts,
+        has_continuity_anchor=has_continuity_anchor,
+    )
+    protected_indices = set(terminal_indices)
+    latest_lossy_anchor_by_kind: dict[tuple[str, str], int] = {}
+
+    for index in sorted(state_anchor_indices):
+        item = _json_mapping_or_none(input_value[index])
+        if item is None:
+            continue
+        if _compact_state_anchor_is_structural(item):
+            protected_indices.add(index)
+            continue
+        anchor_kind = _compact_lossy_state_anchor_kind(item)
+        if anchor_kind is not None:
+            latest_lossy_anchor_by_kind[anchor_kind] = index
+
+    protected_indices.update(latest_lossy_anchor_by_kind.values())
+    return [
+        index
+        for index in sorted(state_anchor_indices)
+        if index not in protected_indices
+        and (item := _json_mapping_or_none(input_value[index])) is not None
+        and _compact_lossy_state_anchor_kind(item) is not None
+    ]
+
+
+def _compact_state_anchor_is_structural(item: Mapping[str, JsonValue]) -> bool:
+    item_type = item.get("type")
+    if item_type == "additional_tools":
+        return True
+    if item.get("role") in {"system", "developer"}:
+        return True
+    return _is_preserved_non_message_directive(item)
+
+
+def _compact_lossy_state_anchor_kind(item: Mapping[str, JsonValue]) -> tuple[str, str] | None:
+    item_type = item.get("type")
+    if item_type == "function_call":
+        name = item.get("name")
+        if isinstance(name, str) and name in _COMPACT_STATE_TOOL_NAMES:
+            return ("tool", name)
+        function = item.get("function")
+        if is_json_mapping(function):
+            function_name = function.get("name")
+            if isinstance(function_name, str) and function_name in _COMPACT_STATE_TOOL_NAMES:
+                return ("tool", function_name)
+    for text in _compact_item_texts(item):
+        stripped = text.lstrip()
+        if stripped.startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX):
+            return ("text", "goal")
+        if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
+            return ("text", "plan")
+    return None
 
 
 def _compact_has_continuity_anchor(payload: Mapping[str, JsonValue]) -> bool:
@@ -1659,6 +1763,8 @@ def _compact_item_is_state_anchor(item: Mapping[str, JsonValue]) -> bool:
         if stripped.startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX):
             return True
         if stripped.startswith(_PLAN_MODE_CONTEXT_PREFIX):
+            return True
+        if stripped.startswith(_ACTIVE_SKILL_CONTEXT_PREFIX):
             return True
     return False
 

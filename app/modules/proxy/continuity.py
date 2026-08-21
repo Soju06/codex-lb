@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from hashlib import sha256
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
@@ -65,6 +65,51 @@ def without_http_bridge_session_affinity_headers(headers: Mapping[str, str]) -> 
 class _ReconnectPreferredOwner(Protocol):
     preferred_account_id: str | None
     file_required_preferred_account: bool
+
+
+class _AccountNeutralReplayKey(Protocol):
+    # Read-only members: session keys are frozen dataclasses, and a plain
+    # attribute declaration would demand a writable one.
+    @property
+    def affinity_kind(self) -> str: ...
+
+    @property
+    def affinity_key(self) -> str: ...
+
+
+class AccountNeutralOwnerBinding(NamedTuple):
+    """How a reconnect must treat the account that opened an account-neutral replay."""
+
+    owner_bound: bool
+    rebind_allowed: bool
+
+
+def resolve_account_neutral_owner_binding(
+    key: _AccountNeutralReplayKey,
+    request_state: _ReconnectPreferredOwner,
+    allow_account_rebind: bool,
+) -> AccountNeutralOwnerBinding:
+    """Decide whether an account-neutral replay still binds its opening account.
+
+    A server-namespaced replay key can be continued by any account, but most
+    reconnects also resume account-scoped upstream state, so the opening account
+    stays bound by default. Only a caller that has proven its request carries no
+    such state -- no continuity anchor, no account-scoped file, nothing streamed
+    yet -- passes ``allow_account_rebind``, and only then may the reconnect land
+    on a replacement account. Deriving that here from the key alone would
+    override the caller, which is how a fresh replay stayed pinned to an account
+    that had gone silent.
+
+    ``owner_bound`` and ``rebind_allowed`` are not opposites: a key that was
+    never account-neutral is neither, so a caller that allows a rebind cannot
+    loosen owner requirements on an ordinary account-bound session.
+    """
+
+    if not is_http_bridge_account_neutral_replay(kind=key.affinity_kind, key=key.affinity_key):
+        return AccountNeutralOwnerBinding(owner_bound=False, rebind_allowed=False)
+    if allow_account_rebind and not request_state.file_required_preferred_account:
+        return AccountNeutralOwnerBinding(owner_bound=False, rebind_allowed=True)
+    return AccountNeutralOwnerBinding(owner_bound=True, rebind_allowed=False)
 
 
 def resolve_reconnect_preferred_account_id(

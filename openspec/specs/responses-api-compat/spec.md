@@ -2915,7 +2915,7 @@ top-level `instructions` unchanged.
 
 ### Requirement: Responses Lite follow-up transformations fail closed
 
-After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a complete terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. A latest output anchored by `previous_response_id` or a non-empty `conversation` remains required only when its matching call is absent from supplied input. A supplied call matches an output only when both `call_id` and the function/custom/apply-patch protocol variant are compatible. An unmatched latest tool call and a terminal tool call or matching pair classified as side-effecting by the canonical tool-safety classifier remain required compact context. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
+After a request is classified as Responses Lite shaped, the service MUST preserve required Lite state through compact preparation, MUST validate the final transformed compact input against the upstream JSON wire budget, MUST reject policy rewrites to catalog-confirmed non-Lite models, and MUST suppress replayed code-mode side effects without collapsing distinct call identities. Compact trimming MAY omit a complete terminal non-state, non-side-effecting tool pair only when the pair plus required anchors and trim markers cannot fit the upstream wire budget. Compact trimming MAY also demote older generated goal/plan state anchors when the full required state set cannot fit, but it MUST preserve the newest generated state anchor for each state kind, structural Lite/developer/system state, terminal required items, and side-effecting tails. Omitted generated state-tool anchors MUST omit their matching outputs with them rather than emitting unpaired calls or outputs. If the preserved current or structural state still cannot fit, the service MUST return `responses_compact_input_too_large`. A latest output anchored by `previous_response_id` or a non-empty `conversation` remains required only when its matching call is absent from supplied input. A supplied call matches an output only when both `call_id` and the function/custom/apply-patch protocol variant are compatible. An unmatched latest tool call and a terminal tool call or matching pair classified as side-effecting by the canonical tool-safety classifier remain required compact context. These guards MUST NOT weaken the body-derived Lite signal or trusted previous-response linkage rules.
 
 #### Scenario: Oversized compact input keeps the Lite prelude
 
@@ -2972,6 +2972,23 @@ After a request is classified as Responses Lite shaped, the service MUST preserv
 - **WHEN** an older tool call and a required state-tool call reuse the same call ID
 - **THEN** compact trimming retains the output matched to the required state-call occurrence
 - **AND** it does not retain an oversized historical output solely because its earlier call reused that ID
+
+#### Scenario: Historical generated state anchors are demoted oldest first
+
+- **WHEN** an oversized compact input contains enough historical generated
+  goal/plan state-tool pairs that the required set alone exceeds the compact
+  wire budget
+- **THEN** compact trimming may omit the oldest generated state pairs until the
+  payload fits
+- **AND** the newest generated state pair, latest request, and any retained
+  call/output pairs remain present and reconciled
+
+#### Scenario: Current state remains fail closed
+
+- **WHEN** the current generated state anchor or structural Lite/developer state
+  cannot fit the compact wire budget
+- **THEN** the service returns `responses_compact_input_too_large`
+- **AND** it does not emit a malformed or unpaired transcript
 
 #### Scenario: Exact-budget backtracking drops an optional tool pair together
 

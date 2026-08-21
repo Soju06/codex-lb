@@ -25,6 +25,7 @@ RING_HEARTBEAT_INTERVAL_SECONDS = 10
 RING_STALE_THRESHOLD_SECONDS = 30
 RING_STALE_GRACE_SECONDS = RING_HEARTBEAT_INTERVAL_SECONDS + 5
 RING_MEMBER_RETENTION_SECONDS = 24 * 60 * 60
+DEFAULT_BRIDGE_ENDPOINT_PORT = 2455
 
 
 class RingMembershipService:
@@ -186,11 +187,20 @@ class RingMembershipService:
         from datetime import timedelta
 
         cutoff = utcnow() - timedelta(seconds=stale_threshold_seconds)
-        statement = select(BridgeRingMember.instance_id).where(BridgeRingMember.last_heartbeat_at >= cutoff)
         if require_endpoint:
-            statement = statement.where(BridgeRingMember.metadata_json.is_not(None))
+            statement = select(BridgeRingMember.instance_id, BridgeRingMember.metadata_json).where(
+                BridgeRingMember.last_heartbeat_at >= cutoff
+            )
+        else:
+            statement = select(BridgeRingMember.instance_id).where(BridgeRingMember.last_heartbeat_at >= cutoff)
         async with self._session() as session:
             result = await session.execute(statement.order_by(BridgeRingMember.instance_id))
+            if require_endpoint:
+                return [
+                    instance_id
+                    for instance_id, metadata_json in result.all()
+                    if _bridge_ring_endpoint_from_metadata(metadata_json, instance_id=instance_id) is not None
+                ]
             return list(result.scalars().all())
 
     async def resolve_endpoint(
@@ -204,15 +214,20 @@ class RingMembershipService:
         cutoff = utcnow() - timedelta(seconds=stale_threshold_seconds)
         async with self._session() as session:
             result = await session.execute(
-                select(BridgeRingMember.metadata_json)
+                select(BridgeRingMember.instance_id, BridgeRingMember.metadata_json)
                 .where(
                     BridgeRingMember.instance_id == instance_id,
                     BridgeRingMember.last_heartbeat_at >= cutoff,
                 )
                 .limit(1)
             )
-            metadata_json = result.scalar_one_or_none()
-        return _bridge_ring_endpoint_from_metadata(metadata_json)
+            row = result.one_or_none()
+        if row is None:
+            # No fresh row at all: the member is stale or gone. Deriving a
+            # hostname here would hand callers an endpoint for an instance that
+            # is no longer answering, which is worse than reporting no owner.
+            return None
+        return _bridge_ring_endpoint_from_metadata(row.metadata_json, instance_id=instance_id)
 
     async def ring_fingerprint(self, stale_threshold_seconds: int = RING_STALE_THRESHOLD_SECONDS) -> str:
         """sha256 of sorted active member list. Same for all pods with same membership."""
@@ -235,17 +250,26 @@ def _bridge_ring_metadata_json(endpoint_base_url: str | None) -> str | None:
     return json.dumps({"endpoint_base_url": endpoint_base_url}, ensure_ascii=True, separators=(",", ":"))
 
 
-def _bridge_ring_endpoint_from_metadata(metadata_json: str | None) -> str | None:
+def _bridge_ring_endpoint_from_metadata(metadata_json: str | None, *, instance_id: str | None = None) -> str | None:
     if metadata_json is None:
-        return None
+        return _bridge_ring_endpoint_from_instance_id(instance_id)
     try:
         payload = json.loads(metadata_json)
     except json.JSONDecodeError:
-        return None
+        return _bridge_ring_endpoint_from_instance_id(instance_id)
     if not isinstance(payload, dict):
-        return None
+        return _bridge_ring_endpoint_from_instance_id(instance_id)
     endpoint = payload.get("endpoint_base_url")
     if not isinstance(endpoint, str):
-        return None
+        return _bridge_ring_endpoint_from_instance_id(instance_id)
     stripped = endpoint.strip().rstrip("/")
-    return stripped or None
+    return stripped or _bridge_ring_endpoint_from_instance_id(instance_id)
+
+
+def _bridge_ring_endpoint_from_instance_id(instance_id: str | None) -> str | None:
+    if instance_id is None:
+        return None
+    hostname = instance_id.strip()
+    if not hostname or any(separator in hostname for separator in ("/", "\\", ":", "@")):
+        return None
+    return f"http://{hostname}:{DEFAULT_BRIDGE_ENDPOINT_PORT}"

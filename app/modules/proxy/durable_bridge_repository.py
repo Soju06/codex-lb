@@ -914,6 +914,7 @@ class DurableBridgeRepository:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        expected_latest_response_id: str | None = None,
     ) -> DurableBridgeSessionSnapshot | None:
         """Invalidate a stuck eventless anchor with a single fenced UPDATE.
 
@@ -922,6 +923,11 @@ class DurableBridgeRepository:
         ``latest_turn_state`` and aliases untouched so the durable session
         remains reattachable without the stale anchor. Fenced-out callers
         mutate nothing and receive the current owner snapshot.
+
+        ``expected_latest_response_id`` narrows the fence to one anchor value:
+        a caller that observed a specific response id fail can require the row
+        to still hold that id, so a concurrent turn that already stored a newer
+        anchor keeps it.
         """
 
         values: dict[str, object] = {
@@ -935,6 +941,11 @@ class DurableBridgeRepository:
             instance_id=instance_id,
             owner_epoch=owner_epoch,
             values=values,
+            extra_where=(
+                ()
+                if expected_latest_response_id is None
+                else (HttpBridgeSessionRecord.latest_response_id == expected_latest_response_id,)
+            ),
         )
 
     async def record_recovery_attempt(
@@ -2124,6 +2135,7 @@ class DurableBridgeRepository:
         instance_id: str,
         owner_epoch: int,
         values: dict[str, object],
+        extra_where: Sequence[Any] = (),
     ) -> DurableBridgeSessionSnapshot | None:
         async with sqlite_writer_section():
             result = await self._session.execute(
@@ -2132,6 +2144,7 @@ class DurableBridgeRepository:
                     HttpBridgeSessionRecord.id == session_id,
                     HttpBridgeSessionRecord.owner_instance_id == instance_id,
                     HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    *extra_where,
                 )
                 .values(**values)
                 .returning(*_SNAPSHOT_COLUMNS)

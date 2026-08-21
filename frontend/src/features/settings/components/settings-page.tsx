@@ -1,4 +1,4 @@
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useState } from "react";
 import { Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useLocation } from "react-router-dom";
@@ -47,6 +47,7 @@ export function SettingsPage() {
   const expandAdvanced = shouldExpandAdvancedSettings(location.search, location.hash);
   const advancedScrollToId = location.hash.replace(/^#/, "") || undefined;
   const { settingsQuery, updateSettingsMutation } = useSettings();
+  const [initialRetryError, setInitialRetryError] = useState<string | null>(null);
   const { accountsQuery } = useAccounts();
   const {
     upstreamProxyQuery,
@@ -69,6 +70,7 @@ export function SettingsPage() {
     testEndpointMutation.isPending;
   const controlsDisabled = busy || !canWrite;
   const settingsLoadError = getErrorMessageOrNull(settingsQuery.error);
+  const displayedSettingsLoadError = settingsLoadError || initialRetryError;
   // With no settings loaded the failed-load branch below owns this message, so
   // the page-level alert would otherwise render it a second time.
   const error =
@@ -95,13 +97,13 @@ export function SettingsPage() {
         <p className="mt-1 text-sm text-muted-foreground">{t("settings.page.subtitle")}</p>
       </div>
 
-      {settingsQuery.isPending && !settings ? (
+      {settingsQuery.isPending && !settings && initialRetryError === null ? (
         <SettingsSkeleton />
       ) : !settings ? (
         <div className="space-y-3 rounded-xl border bg-card p-4">
           <div role="alert">
             <AlertMessage variant="error">
-              {settingsLoadError || t("settings.toasts.loadFailed")}
+              {displayedSettingsLoadError || t("settings.toasts.loadFailed")}
             </AlertMessage>
           </div>
           <Button
@@ -109,9 +111,12 @@ export function SettingsPage() {
             variant="outline"
             size="sm"
             onClick={() => {
-              void settingsQuery.refetch();
+              setInitialRetryError(displayedSettingsLoadError || t("settings.toasts.loadFailed"));
+              void settingsQuery.refetch().finally(() => {
+                setInitialRetryError(null);
+              });
             }}
-            disabled={settingsQuery.isFetching}
+            disabled={settingsQuery.isFetching || initialRetryError !== null}
           >
             {t("common.actions.retry")}
           </Button>

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -198,13 +198,20 @@ describe("SettingsPage", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    return render(
+    const renderTree = () => (
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={[initialEntry]}>
           <SettingsPage />
         </MemoryRouter>
-      </QueryClientProvider>,
+      </QueryClientProvider>
     );
+    const rendered = render(renderTree());
+    return {
+      ...rendered,
+      rerenderSettings: () => {
+        rendered.rerender(renderTree());
+      },
+    };
   }
 
   async function expandAdvancedSettings() {
@@ -337,18 +344,51 @@ describe("SettingsPage", () => {
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 
-  it("disables retry while the settings refetch is in flight", () => {
+  it("keeps retry visible and disabled while the settings refetch is in flight", async () => {
+    let finishRefetch: (() => void) | undefined;
+    const refetch = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRefetch = resolve;
+        }),
+    );
     mockSettingsQuery({
       data: undefined,
       error: new Error("load failed"),
       isPending: false,
-      isFetching: true,
-      refetch: vi.fn().mockResolvedValue(undefined),
+      isFetching: false,
+      refetch,
     });
 
-    renderSettings();
+    const rendered = renderSettings();
+    await userEvent.setup({ delay: null }).click(screen.getByRole("button", { name: "Retry" }));
+    mockSettingsQuery({
+      data: undefined,
+      error: null,
+      isPending: true,
+      isFetching: true,
+      refetch,
+    });
+    rendered.rerenderSettings();
 
     expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("load failed");
+    expect(screen.queryByTestId("settings-skeleton")).not.toBeInTheDocument();
+
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch,
+    });
+    expect(finishRefetch).toBeTypeOf("function");
+    await act(async () => {
+      finishRefetch?.();
+    });
+    rendered.rerenderSettings();
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
   });
 
   it("keeps the skeleton while the first settings load is pending", () => {

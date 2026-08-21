@@ -480,8 +480,9 @@ Re-test when upgrading either proxy dependency or Claude Code.
 
 ### Point Claude Code at LiteLLM
 
-Map the Opus, Sonnet, and Haiku aliases to the configured public alias so
-helper requests do not use an unconfigured Claude model name:
+Map the Opus, Sonnet, and Haiku aliases to the configured public alias, and
+force subagents onto it so helper requests do not use an unconfigured Claude
+model name:
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
@@ -489,10 +490,16 @@ export ANTHROPIC_AUTH_TOKEN="$LITELLM_MASTER_KEY"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="codex-lb-gpt-5.6-sol"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="codex-lb-gpt-5.6-sol"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="codex-lb-gpt-5.6-sol"
+export CLAUDE_CODE_SUBAGENT_MODEL="codex-lb-gpt-5.6-sol"
 
 claude --model codex-lb-gpt-5.6-sol
 ```
 
+`CLAUDE_CODE_SUBAGENT_MODEL` overrides per-agent model selection for this
+gateway session, including subagents that request the `fable` alias. This keeps
+agent teams and workflows on the one model LiteLLM exposes in this recipe. It
+does not redirect a main-session `/model fable` selection; keep the main session
+on the public alias shown above.
 `ANTHROPIC_DEFAULT_FABLE_MODEL` is intentionally unset. Claude Code also
 uses that variable to identify a target as Fable 5 for automatic fallback,
 which this non-Claude alias does not implement.
@@ -534,7 +541,7 @@ Common failures:
 | --- | --- |
 | LiteLLM returns `401` | `ANTHROPIC_AUTH_TOKEN` must equal `LITELLM_MASTER_KEY`. |
 | codex-lb returns `401` | Use a valid dashboard `CODEX_LB_API_KEY`. An auth-disabled placeholder works only over loopback; across containers, enable key auth or explicitly allowlist the raw peer. |
-| LiteLLM reports an unknown model | Match `model_name`, the three configured `ANTHROPIC_DEFAULT_*_MODEL` values, and `claude --model`. |
+| LiteLLM reports an unknown model | Match `model_name`, the three configured `ANTHROPIC_DEFAULT_*_MODEL` values, `CLAUDE_CODE_SUBAGENT_MODEL`, and `claude --model`. |
 | LiteLLM cannot reach codex-lb | Keep `/v1` in `CODEX_LB_BASE_URL`; across containers, replace loopback with a private-network host. |
 | Claude Code still contacts Anthropic for model requests | Remove conflicting saved settings or use an explicit settings `env` block, then verify `/status`. |
 

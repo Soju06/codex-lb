@@ -4495,7 +4495,7 @@ async def _source_embeddings_response(
                 release_exc = exc
         if release_exc is not None:
             logger.warning(
-                "Failed to release source embeddings reservation after client disconnect source_id=%s model=%s",
+                "Failed to release source embeddings reservation after request cancellation source_id=%s model=%s",
                 source.id,
                 model,
                 exc_info=release_exc,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 from contextlib import closing
@@ -202,19 +203,25 @@ def test_runstate_write_syncs_the_payload_and_the_directory_entry(
     """A lost run-state transition would let the next startup skip the scan."""
     db_path = tmp_path / "store.db"
     db_path.write_bytes(b"sqlite")
-    synced: list[int] = []
+    payload_syncs: list[int] = []
+    directory_syncs: list[Path] = []
     real_fsync = os.fsync
 
-    def _record(fd: int) -> None:
-        synced.append(fd)
+    def _record_payload(fd: int) -> None:
+        payload_syncs.append(fd)
         real_fsync(fd)
 
-    monkeypatch.setattr(os, "fsync", _record)
+    def _record_directory(directory: Path) -> bool:
+        directory_syncs.append(directory)
+        return True
+
+    monkeypatch.setattr(os, "fsync", _record_payload)
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", _record_directory)
 
     assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN) is True
 
-    # One for the sidecar payload, one for the directory entry the rename created.
-    assert len(synced) == 2
+    assert len(payload_syncs) == 1
+    assert directory_syncs == [sqlite_utils_module.sqlite_runstate_path(db_path).parent]
 
 
 def test_runstate_write_fails_closed_when_the_directory_sync_fails(
@@ -235,24 +242,61 @@ def test_runstate_write_fails_closed_when_the_directory_sync_fails(
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_fsync_directory_reports_success_when_the_platform_refuses_a_handle(
+def test_fsync_directory_reports_success_where_directory_handles_do_not_exist(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Windows cannot open a directory handle; that is not a storage failure."""
+    """Windows has no directory handle to sync, and that is not a failure."""
+    attempts: list[object] = []
 
-    def _refuse(*_args: object, **_kwargs: object) -> int:
-        raise PermissionError("directory handles are not supported here")
+    def _record(*args: object, **_kwargs: object) -> int:
+        attempts.append(args)
+        raise AssertionError("the open must not be attempted on such a platform")
 
-    monkeypatch.setattr(os, "open", _refuse)
+    monkeypatch.setattr(sqlite_utils_module, "_DIRECTORY_FSYNC_SUPPORTED", False)
+    monkeypatch.setattr(os, "open", _record)
 
     assert sqlite_utils_module._fsync_directory(tmp_path) is True
+    assert attempts == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError(errno.EACCES, "permission denied"),
+        FileNotFoundError(errno.ENOENT, "no such directory"),
+        OSError(errno.EMFILE, "too many open files"),
+        OSError(errno.EIO, "input/output error"),
+    ],
+    ids=["eacces", "enoent", "emfile", "eio"],
+)
+def test_fsync_directory_reports_failure_when_the_directory_cannot_be_opened(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: OSError
+) -> None:
+    """A real open failure means the rename is unproven and must fail closed."""
+
+    def _fail(*_args: object, **_kwargs: object) -> int:
+        raise error
+
+    monkeypatch.setattr(sqlite_utils_module, "_DIRECTORY_FSYNC_SUPPORTED", True)
+    monkeypatch.setattr(os, "open", _fail)
+
+    assert sqlite_utils_module._fsync_directory(tmp_path) is False
 
 
 def test_fsync_directory_reports_failure_when_the_sync_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The sync path is exercised on every platform, not only where it runs."""
+    placeholder = tmp_path / "placeholder"
+    placeholder.write_bytes(b"")
+    real_open = os.open
+
+    def _open_placeholder(*_args: object, **_kwargs: object) -> int:
+        return real_open(placeholder, os.O_RDONLY)
 
     def _fail(_fd: int) -> None:
-        raise OSError("I/O error")
+        raise OSError(errno.EIO, "input/output error")
 
+    monkeypatch.setattr(sqlite_utils_module, "_DIRECTORY_FSYNC_SUPPORTED", True)
+    monkeypatch.setattr(os, "open", _open_placeholder)
     monkeypatch.setattr(os, "fsync", _fail)
 
     assert sqlite_utils_module._fsync_directory(tmp_path) is False

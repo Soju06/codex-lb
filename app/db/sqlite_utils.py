@@ -185,22 +185,34 @@ def _sqlite_file_identity(db_path: Path) -> dict[str, int] | None:
     }
 
 
+# Windows cannot obtain a directory handle through ``os.open``: the underlying
+# CreateFileW call refuses a directory and the failure surfaces as EACCES,
+# which errno cannot tell apart from an ordinary permission denial. Decide by
+# platform instead, so that on POSIX every open failure can be treated as the
+# real failure it is.
+_DIRECTORY_FSYNC_SUPPORTED = os.name == "posix"
+
+
 def _fsync_directory(directory: Path) -> bool:
     """Persist a directory entry so a rename survives power loss.
 
-    Returns ``False`` only when a sync was attempted and failed, which means
-    the storage is unhealthy and the record must not be trusted.
+    Returns ``False`` whenever a sync was expected and did not happen, so the
+    caller can refuse to leave behind a record whose durability is unproven.
+    A missing path, a permission denial, descriptor exhaustion, and an I/O
+    error all count.
 
-    A platform that does not allow a directory handle at all reports success.
-    Windows raises on ``os.open`` of a directory, so failing closed there
-    would mean no Windows deployment could ever record a clean shutdown;
-    rename durability on those platforms is the platform's guarantee to make,
-    not something this code can verify.
+    Where a directory handle is not obtainable at all the sync is not
+    attempted and this reports success. There is nothing this code can verify
+    on such a platform, and failing closed would mean no Windows deployment
+    could ever record a clean shutdown; rename durability there is the
+    platform's guarantee to make.
     """
+    if not _DIRECTORY_FSYNC_SUPPORTED:
+        return True
     try:
         directory_fd = os.open(directory, os.O_RDONLY)
     except OSError:
-        return True
+        return False
     try:
         os.fsync(directory_fd)
     except OSError:

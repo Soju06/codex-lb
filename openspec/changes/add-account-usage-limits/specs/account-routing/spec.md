@@ -115,6 +115,15 @@ An enabled maximum-usage policy MUST require current standard quota data. Elapse
 - **THEN** those accounts contribute neither stream capacity nor lease/key counters
 - **AND** an entirely locally capped pool returns `account_usage_limit_reached` rather than a fair-share denial
 
+#### Scenario: Hard-sticky owner policy takes precedence over peer-pool fair share
+
+- **GIVEN** a hard-sticky conversation owner has usage-limit state `reached` or `data_unavailable`
+- **AND** other policy-eligible accounts form a congested pool for the requesting API key
+- **WHEN** the proxy re-evaluates the hard-pinned owner
+- **THEN** selection returns `account_usage_limit_reached`
+- **AND** it does not return `api_key_stream_fair_share` or wait for peer-pool congestion to clear
+- **AND** the sticky mapping remains unchanged
+
 #### Scenario: Opportunistic admission preserves the local policy error
 
 - **GIVEN** all otherwise opportunistic-eligible accounts are excluded by their maximum usage policy

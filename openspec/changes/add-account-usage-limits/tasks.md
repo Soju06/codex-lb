@@ -14,3 +14,4 @@
 - [x] 12. Surface a reached local usage limit on the main dashboard account card without masking non-active upstream status.
 - [x] 13. Gate reset-confirmed and staggered limit-warmup planning and execution with the canonical account usage-limit policy.
 - [x] 14. Gate public `/v1/warmup` planning, force mode, and final per-account dispatch with the canonical standard usage-limit policy.
+- [x] 15. Preserve hard-sticky owner usage-limit errors ahead of peer-pool fair-share admission without mutating affinity.

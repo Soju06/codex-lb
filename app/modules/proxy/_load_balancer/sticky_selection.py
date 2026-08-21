@@ -492,14 +492,26 @@ async def run_sticky_selection_path(
             fair_share_candidate_ids = [
                 state.account_id for state in routing_eligible_states(states, traffic_class=traffic_class)
             ]
-            fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
-                api_key_id=api_key_id,
-                lease_kind=lease_kind,
-                candidate_account_ids=fair_share_candidate_ids,
-                caps=caps,
-                stream_reserve_slots=stream_reserve_slots,
-                threshold_pct=fair_share_threshold_pct,
-                redact_sensitive_details=redact_sensitive_details,
+            # Congestion relief cannot make a hard-pinned owner eligible when
+            # the operator's usage policy blocks it. Let the canonical owner
+            # selector surface that terminal policy result instead of parking
+            # the request in a fair-share capacity wait.
+            hard_owner_usage_limit_blocked = hard_sticky and any(
+                state.account_id == sticky_existing_account_id and account_usage_limit_blocks_selection(state)
+                for state in states
+            )
+            fair_share_denial = (
+                None
+                if hard_owner_usage_limit_blocked
+                else owner._api_key_stream_fair_share_denial_locked(
+                    api_key_id=api_key_id,
+                    lease_kind=lease_kind,
+                    candidate_account_ids=fair_share_candidate_ids,
+                    caps=caps,
+                    stream_reserve_slots=stream_reserve_slots,
+                    threshold_pct=fair_share_threshold_pct,
+                    redact_sensitive_details=redact_sensitive_details,
+                )
             )
             if hard_sticky:
                 # A resolved hard Codex mapping is an ownership

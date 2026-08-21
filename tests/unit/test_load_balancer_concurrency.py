@@ -4508,6 +4508,43 @@ async def test_api_key_fair_share_sticky_path_denies_with_stable_code_and_preser
 
 
 @pytest.mark.asyncio
+async def test_hard_sticky_usage_limit_takes_precedence_over_pool_fair_share() -> None:
+    sticky_repo = _StubStickySessionsRepository()
+    balancer, accounts, _ = _make_fair_share_pool(
+        "acc-fair-share-hard-owner-limit",
+        account_count=3,
+        sticky_repo=sticky_repo,
+    )
+    owner, peer_a, peer_b = accounts
+    owner.usage_limit_enabled = True
+    owner.usage_limit_percent = 10.0
+    sticky_repo.account_id = owner.id
+
+    # Only the two policy-eligible peers contribute fair-share capacity.
+    # Heavy is already at its share and light keeps that peer pool congested.
+    await _grab_stream(balancer, peer_a.id, "heavy")
+    await _grab_stream(balancer, peer_b.id, "heavy")
+    await _grab_stream(balancer, peer_a.id, "light")
+
+    denied = await balancer.select_account(
+        sticky_key="fair-share-hard-owner-limit-session",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        routing_strategy="usage_weighted",
+        lease_kind="stream",
+        concurrency_caps=_FAIR_SHARE_CAPS,
+        api_key_id="heavy",
+        api_key_stream_fair_share_threshold_pct=50,
+    )
+
+    assert denied.account is None
+    assert denied.lease is None
+    assert denied.error_code == "account_usage_limit_reached"
+    assert sticky_repo.account_id == owner.id
+    assert sticky_repo.deleted == []
+    assert sticky_repo.upserts == []
+
+
+@pytest.mark.asyncio
 async def test_api_key_fair_share_sticky_commit_recheck_denies_when_share_fills_during_sticky_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

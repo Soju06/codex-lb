@@ -451,9 +451,12 @@ an unencrypted LiteLLM listener or either key to an untrusted network.
 
 ### Verify the translation path
 
-With LiteLLM running, send a streamed Anthropic-format request:
+With LiteLLM running, open another shell, re-export the same master key, and
+send a streamed Anthropic-format request:
 
 ```bash
+export LITELLM_MASTER_KEY="sk-litellm-..." # same value used to start LiteLLM
+
 curl --fail-with-body --silent --show-error --no-buffer \
   http://127.0.0.1:4000/v1/messages \
   -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
@@ -482,9 +485,11 @@ Re-test when upgrading either proxy dependency or Claude Code.
 
 Map the Opus, Sonnet, and Haiku aliases to the configured public alias, and
 force subagents onto it so helper requests do not use an unconfigured Claude
-model name:
+model name. In the shell that will run Claude Code, re-export the same LiteLLM
+key:
 
 ```bash
+export LITELLM_MASTER_KEY="sk-litellm-..." # same value used to start LiteLLM
 export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
 export ANTHROPIC_AUTH_TOKEN="$LITELLM_MASTER_KEY"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="codex-lb-gpt-5.6-sol"

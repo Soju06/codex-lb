@@ -52,9 +52,13 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["upstreamStreamTransport"] == "default"
     assert payload["prohibitFastMode"] is False
     assert payload["proxyAccountResponseCreateLimit"] == 4
+    assert payload["proxyAccountResponseCreateLimitOverride"] == 4
     assert payload["proxyAccountStreamLimit"] == 8
+    assert payload["proxyAccountStreamLimitOverride"] == 8
     assert payload["proxyAccountStreamRecoveryReserve"] == 1
+    assert payload["proxyAccountStreamRecoveryReserveOverride"] == 1
     assert payload["proxyApiKeyFairShareCongestionThresholdPct"] == 0
+    assert payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 0
     assert payload["upstreamProxyRoutingEnabled"] is False
     assert payload["upstreamProxyDefaultPoolId"] is None
     assert payload["preferEarlierResetAccounts"] is True
@@ -143,9 +147,13 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["upstreamStreamTransport"] == "websocket"
     assert updated["prohibitFastMode"] is True
     assert updated["proxyAccountResponseCreateLimit"] == 12
+    assert updated["proxyAccountResponseCreateLimitOverride"] == 12
     assert updated["proxyAccountStreamLimit"] == 24
+    assert updated["proxyAccountStreamLimitOverride"] == 24
     assert updated["proxyAccountStreamRecoveryReserve"] == 3
+    assert updated["proxyAccountStreamRecoveryReserveOverride"] == 3
     assert updated["proxyApiKeyFairShareCongestionThresholdPct"] == 80
+    assert updated["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 80
     assert updated["upstreamProxyRoutingEnabled"] is True
     assert updated["upstreamProxyDefaultPoolId"] is None
     assert updated["preferEarlierResetAccounts"] is False
@@ -189,9 +197,13 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["upstreamStreamTransport"] == "websocket"
     assert payload["prohibitFastMode"] is True
     assert payload["proxyAccountResponseCreateLimit"] == 12
+    assert payload["proxyAccountResponseCreateLimitOverride"] == 12
     assert payload["proxyAccountStreamLimit"] == 24
+    assert payload["proxyAccountStreamLimitOverride"] == 24
     assert payload["proxyAccountStreamRecoveryReserve"] == 3
+    assert payload["proxyAccountStreamRecoveryReserveOverride"] == 3
     assert payload["proxyApiKeyFairShareCongestionThresholdPct"] == 80
+    assert payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 80
     assert payload["upstreamProxyRoutingEnabled"] is True
     assert payload["upstreamProxyDefaultPoolId"] is None
     assert payload["preferEarlierResetAccounts"] is False
@@ -229,6 +241,57 @@ async def test_settings_api_get_and_update(async_client):
 
 
 @pytest.mark.asyncio
+async def test_settings_api_capacity_overrides_support_absent_null_and_explicit_values(async_client):
+    configured = await async_client.put(
+        "/api/settings",
+        json={
+            "proxyAccountResponseCreateLimit": 12,
+            "proxyAccountStreamLimit": 24,
+            "proxyAccountStreamRecoveryReserve": 3,
+            "proxyApiKeyFairShareCongestionThresholdPct": 80,
+        },
+    )
+    assert configured.status_code == 200
+
+    unchanged = await async_client.put("/api/settings", json={"warmupModel": "gpt-5.6-sol"})
+    assert unchanged.status_code == 200
+    unchanged_payload = unchanged.json()
+    assert unchanged_payload["proxyAccountResponseCreateLimitOverride"] == 12
+    assert unchanged_payload["proxyAccountStreamLimitOverride"] == 24
+    assert unchanged_payload["proxyAccountStreamRecoveryReserveOverride"] == 3
+    assert unchanged_payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 80
+
+    cleared = await async_client.put(
+        "/api/settings",
+        json={
+            "proxyAccountResponseCreateLimit": None,
+            "proxyAccountStreamLimit": None,
+            "proxyAccountStreamRecoveryReserve": None,
+            "proxyApiKeyFairShareCongestionThresholdPct": None,
+        },
+    )
+    assert cleared.status_code == 200
+    cleared_payload = cleared.json()
+    assert cleared_payload["proxyAccountResponseCreateLimit"] == 4
+    assert cleared_payload["proxyAccountResponseCreateLimitOverride"] is None
+    assert cleared_payload["proxyAccountStreamLimit"] == 8
+    assert cleared_payload["proxyAccountStreamLimitOverride"] is None
+    assert cleared_payload["proxyAccountStreamRecoveryReserve"] == 1
+    assert cleared_payload["proxyAccountStreamRecoveryReserveOverride"] is None
+    assert cleared_payload["proxyApiKeyFairShareCongestionThresholdPct"] == 0
+    assert cleared_payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] is None
+
+    pinned_to_effective = await async_client.put(
+        "/api/settings",
+        json={"proxyAccountStreamLimit": 8},
+    )
+    assert pinned_to_effective.status_code == 200
+    pinned_payload = pinned_to_effective.json()
+    assert pinned_payload["proxyAccountStreamLimit"] == 8
+    assert pinned_payload["proxyAccountStreamLimitOverride"] == 8
+
+
+@pytest.mark.asyncio
 async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(async_client, monkeypatch):
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -239,6 +302,7 @@ async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(a
         settings.proxy_account_response_create_limit = None
         settings.proxy_account_stream_limit = None
         settings.proxy_account_stream_recovery_reserve = None
+        settings.proxy_api_key_fair_share_congestion_threshold_pct = None
         await session.commit()
     await get_settings_cache().invalidate()
 
@@ -262,6 +326,7 @@ async def test_unrelated_settings_update_preserves_inherited_account_cap_nulls(a
         assert settings.proxy_account_response_create_limit is None
         assert settings.proxy_account_stream_limit is None
         assert settings.proxy_account_stream_recovery_reserve is None
+        assert settings.proxy_api_key_fair_share_congestion_threshold_pct is None
 
 
 @pytest.mark.asyncio

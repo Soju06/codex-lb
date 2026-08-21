@@ -142,6 +142,20 @@ async def test_settings_audit_changed_fields_empty_on_noop_put(async_client) -> 
 
 
 @pytest.mark.asyncio
+async def test_settings_audit_records_capacity_override_clear_when_effective_is_unchanged(async_client) -> None:
+    pinned = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": 8})
+    assert pinned.status_code == 200
+
+    cleared = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": None})
+    assert cleared.status_code == 200
+
+    audit_log = await _wait_for_settings_changed_audit_log()
+    assert audit_log.details is not None, "settings_changed audit row missing details payload"
+    details = json.loads(audit_log.details)
+    assert "proxy_account_stream_limit" in details["changed_fields"]
+
+
+@pytest.mark.asyncio
 async def test_settings_audit_changed_fields_multi_update(async_client) -> None:
     response = await async_client.put(
         "/api/settings",

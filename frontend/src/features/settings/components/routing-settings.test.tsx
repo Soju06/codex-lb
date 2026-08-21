@@ -46,6 +46,11 @@ describe("RoutingSettings", () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
 
+    expect(screen.getByRole("spinbutton", { name: "Response-create limit" })).toHaveValue(4);
+    expect(screen.getByRole("spinbutton", { name: "Stream limit" })).toHaveValue(8);
+    expect(screen.getByRole("spinbutton", { name: "Stream recovery reserve" })).toHaveValue(1);
+    expect(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" })).toHaveValue(0);
+
     await user.clear(screen.getByRole("spinbutton", { name: "Response-create limit" }));
     await user.type(screen.getByRole("spinbutton", { name: "Response-create limit" }), "0");
     await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
@@ -63,6 +68,67 @@ describe("RoutingSettings", () => {
       proxyAccountStreamRecoveryReserve: 2,
       proxyApiKeyFairShareCongestionThresholdPct: 80,
     });
+  });
+
+  it("renders inherited capacity values as empty inputs with effective hints", () => {
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          proxyAccountResponseCreateLimitOverride: null,
+          proxyAccountStreamLimitOverride: null,
+          proxyAccountStreamRecoveryReserveOverride: null,
+          proxyApiKeyFairShareCongestionThresholdPctOverride: null,
+        }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("spinbutton", { name: "Response-create limit" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "Stream limit" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "Stream recovery reserve" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" })).toHaveValue(null);
+    expect(screen.getAllByText(/Inherited effective value:/)).toHaveLength(4);
+  });
+
+  it("sends only an explicit null when clearing one capacity override", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      proxyAccountStreamLimit: null,
+    });
+  });
+
+  it("does not pin unedited capacity values when clearing an inherited field", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const inheritedSettings = {
+      ...BASE_SETTINGS,
+      proxyAccountResponseCreateLimitOverride: null,
+      proxyAccountStreamLimitOverride: null,
+      proxyAccountStreamRecoveryReserveOverride: null,
+      proxyApiKeyFairShareCongestionThresholdPctOverride: null,
+    };
+    render(<RoutingSettings settings={inheritedSettings} busy={false} onSave={onSave} />);
+
+    await user.type(screen.getByRole("spinbutton", { name: "Stream limit" }), "12");
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...buildSettingsUpdateRequest(inheritedSettings, {}),
+      proxyAccountStreamLimit: 12,
+    });
+    const payload = onSave.mock.calls[0]?.[0];
+    expect(payload).not.toHaveProperty("proxyAccountResponseCreateLimit");
+    expect(payload).not.toHaveProperty("proxyAccountStreamRecoveryReserve");
+    expect(payload).not.toHaveProperty("proxyApiKeyFairShareCongestionThresholdPct");
   });
 
   it("rejects invalid account capacity limits before saving", async () => {

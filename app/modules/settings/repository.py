@@ -99,9 +99,13 @@ class SettingsRepository:
         prohibit_fast_mode: bool | None = None,
         http_downstream_transport_policy: str | None = None,
         proxy_account_response_create_limit: int | None = None,
+        clear_proxy_account_response_create_limit: bool = False,
         proxy_account_stream_limit: int | None = None,
+        clear_proxy_account_stream_limit: bool = False,
         proxy_account_stream_recovery_reserve: int | None = None,
+        clear_proxy_account_stream_recovery_reserve: bool = False,
         proxy_api_key_fair_share_congestion_threshold_pct: int | None = None,
+        clear_proxy_api_key_fair_share_congestion_threshold_pct: bool = False,
         upstream_proxy_routing_enabled: bool | None = None,
         upstream_proxy_default_pool_id: str | None = None,
         prefer_earlier_reset_accounts: bool | None = None,
@@ -165,13 +169,21 @@ class SettingsRepository:
             settings.prohibit_fast_mode = prohibit_fast_mode
         if http_downstream_transport_policy is not None:
             settings.http_downstream_transport_policy = http_downstream_transport_policy
-        if proxy_account_response_create_limit is not None:
+        if clear_proxy_account_response_create_limit:
+            settings.proxy_account_response_create_limit = None
+        elif proxy_account_response_create_limit is not None:
             settings.proxy_account_response_create_limit = proxy_account_response_create_limit
-        if proxy_account_stream_limit is not None:
+        if clear_proxy_account_stream_limit:
+            settings.proxy_account_stream_limit = None
+        elif proxy_account_stream_limit is not None:
             settings.proxy_account_stream_limit = proxy_account_stream_limit
-        if proxy_account_stream_recovery_reserve is not None:
+        if clear_proxy_account_stream_recovery_reserve:
+            settings.proxy_account_stream_recovery_reserve = None
+        elif proxy_account_stream_recovery_reserve is not None:
             settings.proxy_account_stream_recovery_reserve = proxy_account_stream_recovery_reserve
-        if proxy_api_key_fair_share_congestion_threshold_pct is not None:
+        if clear_proxy_api_key_fair_share_congestion_threshold_pct:
+            settings.proxy_api_key_fair_share_congestion_threshold_pct = None
+        elif proxy_api_key_fair_share_congestion_threshold_pct is not None:
             settings.proxy_api_key_fair_share_congestion_threshold_pct = (
                 proxy_api_key_fair_share_congestion_threshold_pct
             )

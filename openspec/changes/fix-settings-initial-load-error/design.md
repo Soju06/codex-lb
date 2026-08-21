@@ -35,16 +35,18 @@ accessibly named Retry action.
 
 ## Decisions
 
-1. **Reuse the `ApisPage` three-branch shape verbatim.** The branch order
-   becomes pending-skeleton, then failed-load error, then the form. Copying the
-   established shape keeps Settings consistent with APIs, Conversations, and the
-   Dashboard request-log section instead of inventing a fourth error layout.
+1. **Reuse the `ApisPage` three-branch shape, with retry-state retention.** The
+   branch order becomes initial pending-skeleton, then failed-load error, then
+   the form. Settings additionally retains the failed-load message while its
+   no-data Retry is in flight, because TanStack Query returns that refetch to
+   `pending`. This keeps the established layout without letting Retry re-enter
+   the original stuck-skeleton state.
 
-2. **Scope the skeleton with `isPending`, not with error absence.** The skeleton
-   condition is `settingsQuery.isPending && !settings`. TanStack Query keeps
-   `isPending` true only while no data and no error exist for the query, so this
-   exits the skeleton on the failure edge without a separate error check, and it
-   still covers a refetch that has no cached data.
+2. **Scope the skeleton to initial pending only.** The skeleton condition is
+   `settingsQuery.isPending && !settings && initialRetryError === null`. An
+   initial request has no retained error and uses the skeleton. Retry captures
+   the displayed failure before refetching, so the same no-data query becoming
+   pending stays on the error branch with its Retry control.
 
 3. **Route the settings error to exactly one place.** The page-level aggregate
    alert drops `settingsQuery.error` when `settings` is absent, because the
@@ -52,9 +54,11 @@ accessibly named Retry action.
    render twice on a failed first load. When `settings` is present the aggregate
    alert keeps owning it, which is what preserves today's cached-data behavior.
 
-4. **Retry uses the query's own `refetch` and `isFetching`.** Disabling Retry
-   while `isFetching` is what makes the control deterministic to drive from a
-   test and prevents a queued burst of refetches on repeated clicks.
+4. **Retry retains its error and uses the query's own `refetch`.** The click
+   stores the displayed error until `refetch` settles. Retry is disabled
+   immediately from that retained state and remains disabled while
+   `isFetching`, which prevents repeated clicks and preserves actionable
+   feedback throughout the request.
 
 5. **`role="alert"` wraps the failure message.** `AlertMessage` is a presentational
    `div` with no ARIA role, so the announcement is added at the call site — the
@@ -73,6 +77,9 @@ accessibly named Retry action.
   skeleton stops appearing — but so does the empty state it covers, because
   `settings` would then always be defined. The two move together, so the branch
   stays correct.
+- The retained error is local presentation state and is cleared when `refetch`
+  settles. Query data and error ownership remain with TanStack Query; the local
+  state exists only to bridge its pending no-data retry transition.
 
 ## Migration Plan
 

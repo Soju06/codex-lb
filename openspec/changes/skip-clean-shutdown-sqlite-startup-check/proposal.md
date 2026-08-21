@@ -28,12 +28,15 @@ case and turns every deploy into a multi-minute outage.
 - Announce the scan before it starts (path, mode, file size) and log its
   duration when it passes, so the stall is attributable when it does happen.
 
-Failure modes resolve toward checking. An unwritable, missing, or
-unrecognized sidecar reads back as unknown, and a failed write removes the
-file rather than leaving a stale `clean` behind. A `clean` record also
-carries the database file's size and mtime and is discarded once either
-changes, so restoring a backup over the store cannot inherit the previous
-file's clean record.
+Failure modes resolve toward checking. A sidecar that is missing,
+unwritable, undecodable, or unrecognized reads back as unknown, and a failed
+write removes the file rather than leaving a stale `clean` behind. A `clean`
+record carries the database file's device, inode, size, mtime, and ctime and
+is discarded once any of them changes, so even a timestamp-preserving restore
+cannot inherit the previous file's clean record. Both the record and its
+directory entry are fsynced, so a power loss cannot keep an earlier `clean`
+while losing the `running` transition. `clean` is recorded only after the
+engines actually finished disposing.
 
 ## Capabilities
 

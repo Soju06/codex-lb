@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -129,18 +130,21 @@ def test_runstate_reads_unrecognized_content_as_unknown(tmp_path: Path) -> None:
 def test_runstate_write_failure_clears_a_stale_clean_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A store left mid-write must never read back as cleanly closed."""
     db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
     sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
 
     def _explode(*_args: object, **_kwargs: object) -> None:
         raise OSError("read-only filesystem")
 
-    monkeypatch.setattr(Path, "write_text", _explode)
+    monkeypatch.setattr(os, "replace", _explode)
 
     assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
 
     monkeypatch.undo()
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
     assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_runstate_clean_is_ignored_after_the_database_file_changes(tmp_path: Path) -> None:
@@ -164,3 +168,50 @@ def test_runstate_running_survives_database_writes(tmp_path: Path) -> None:
     db_path.write_bytes(b"sqlite-after-a-few-writes")
 
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.RUNNING
+
+
+def test_runstate_reads_invalid_utf8_as_unknown(tmp_path: Path) -> None:
+    """A corrupt sidecar must not abort startup before the integrity check."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.sqlite_runstate_path(db_path).write_bytes(b'{"state": "clean", "\xff\xfe": 1}')
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_clean_is_ignored_after_a_timestamp_preserving_restore(tmp_path: Path) -> None:
+    """`tar -x` and `cp -p` reproduce size and mtime; the inode still moves."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"A" * 4096)
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    original = db_path.stat()
+
+    db_path.unlink()
+    db_path.write_bytes(b"B" * 4096)
+    os.utime(db_path, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    restored = db_path.stat()
+    assert restored.st_size == original.st_size
+    assert restored.st_mtime_ns == original.st_mtime_ns
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
+
+
+def test_runstate_write_syncs_the_payload_and_the_directory_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A lost run-state transition would let the next startup skip the scan."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def _record(fd: int) -> None:
+        synced.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _record)
+
+    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN) is True
+
+    # One for the sidecar payload, one for the directory entry the rename created.
+    assert len(synced) == 2

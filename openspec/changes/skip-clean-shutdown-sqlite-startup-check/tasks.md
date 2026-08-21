@@ -5,8 +5,13 @@
 - [x] 1.2 Write the sidecar atomically (temp file + `os.replace`) and remove
   it when the write fails, so a stale `clean` can never survive.
 - [x] 1.3 Read unrecognized or unreadable content as unknown.
-- [x] 1.4 Fence a `clean` record to the database file's size and mtime, so
-  a restored backup cannot inherit the previous file's clean record.
+- [x] 1.4 Fence a `clean` record to the database file's device, inode, size,
+  mtime, and ctime, so a timestamp-preserving restore cannot inherit the
+  previous file's clean record.
+- [x] 1.5 Read content that cannot be decoded as UTF-8 as unknown rather than
+  letting the error abort startup.
+- [x] 1.6 Fsync the record's contents before the rename and the directory
+  entry after it, so a power loss cannot lose a `running` transition.
 
 ## 2. Startup
 
@@ -19,9 +24,11 @@
 
 ## 3. Shutdown
 
-- [x] 3.1 Add `mark_sqlite_shutdown_clean()` and call it from the lifespan
-  teardown after `close_db()`, guarded so it cannot block
-  `mark_lifespan_completed()`.
+- [x] 3.1 Add `mark_sqlite_shutdown_clean()` and record the clean state only
+  after `close_db()` returns, so a cancelled or failed disposal stays unclean.
+- [x] 3.2 Extract `_close_db_and_record_clean_shutdown()` so the ordering is
+  testable, and keep `mark_lifespan_completed()` in the unconditional
+  `finally`.
 
 ## 4. Verification
 
@@ -30,4 +37,8 @@
 - [x] 4.2 Unit-test that `init_db()` skips the scan after a clean shutdown and
   runs it for a missing sidecar, a `running` sidecar, and a disabled check.
 - [x] 4.3 Unit-test that a failed integrity check leaves the state unclean.
-- [x] 4.4 Run Ruff check/format and `ty`.
+- [x] 4.4 Unit-test the invalid-UTF-8 sidecar, the timestamp-preserving
+  restore, and that both syncs happen on a write.
+- [x] 4.5 Unit-test that a raised or cancelled `close_db()` does not record a
+  clean shutdown.
+- [x] 4.6 Run Ruff check/format and `ty`.

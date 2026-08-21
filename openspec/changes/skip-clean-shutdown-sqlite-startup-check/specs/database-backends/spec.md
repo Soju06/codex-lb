@@ -18,8 +18,9 @@ or a failed startup.
 
 Every state other than a recorded `clean` MUST run the check. A missing
 sidecar MUST read as unknown rather than clean, so a first run and an upgrade
-from a build that never wrote one both still scan. Unreadable or unrecognized
-sidecar content MUST also read as unknown. A sidecar write that fails MUST
+from a build that never wrote one both still scan. Sidecar content that cannot be read, cannot be
+decoded, or is not recognized MUST also read as unknown, and MUST NOT
+propagate an error that aborts startup. A sidecar write that fails MUST
 remove the file rather than leave a stale `clean` behind.
 
 The run state MUST be recorded even when the check mode is `off`, so
@@ -27,11 +28,23 @@ re-enabling the check cannot trust a state the disabled build never
 maintained.
 
 A `clean` record MUST be fenced to the database file it describes. The
-recorded state MUST capture the file's size and modification time, and a
-`clean` record MUST read as unknown once either no longer matches, so a
-restored backup or a hand-swapped file cannot inherit the previous file's
-clean record. The fence applies only to `clean`; a `running` record stays
-readable while the process writes to the store.
+recorded state MUST capture enough of the file's identity to detect that it
+was replaced, including its device and inode, not only its size and
+modification time: a restore that preserves timestamps (`tar -x`, `cp -p`,
+`rsync -a`) can reproduce both. A `clean` record MUST read as unknown once
+any captured attribute no longer matches. The fence applies only to `clean`;
+a `running` record stays readable while the process writes to the store.
+
+Run-state transitions MUST be durable. The system MUST sync both the record's
+contents and the directory entry that names it, so a power loss cannot retain
+an earlier `clean` record while losing the `running` transition that replaced
+it. The file fence cannot substitute for this: in WAL mode the main database
+file can keep its size and modification time across a long run, so a lost
+transition would leave a `clean` record that still matches.
+
+Recording `clean` MUST NOT be reachable unless the database engines actually
+finished disposing. A cancelled or failed disposal MUST leave the run state
+unclean.
 
 The configured check mode (`quick`, `full`, `off`) keeps its meaning: this
 requirement governs only whether the selected mode runs on a given startup.
@@ -68,9 +81,25 @@ requirement governs only whether the selected mode runs on a given startup.
 
 - **GIVEN** a SQLite store whose sidecar records a clean shutdown
 - **WHEN** the database file is replaced from a backup, leaving the sidecar
-  in place
+  in place, and the restore reproduces the recorded size and modification
+  time
 - **THEN** the clean record reads as unknown
 - **AND** the configured integrity check runs against the restored file
+
+#### Scenario: Corrupt sidecar content does not abort startup
+
+- **GIVEN** a sidecar whose bytes are not valid UTF-8
+- **WHEN** the application starts
+- **THEN** the run state reads as unknown
+- **AND** the configured integrity check runs instead of startup failing
+
+#### Scenario: A failed disposal is not recorded as clean
+
+- **GIVEN** a shutdown in which disposing the database engines raises or is
+  cancelled
+- **WHEN** the lifespan teardown completes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
 
 #### Scenario: A failed check leaves the state unclean
 

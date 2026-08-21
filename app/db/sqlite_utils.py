@@ -164,12 +164,43 @@ def sqlite_runstate_path(db_path: Path) -> Path:
 
 
 def _sqlite_file_identity(db_path: Path) -> dict[str, int] | None:
-    """Size and mtime of the database file, used to fence a stale sidecar."""
+    """Identify the database file well enough to detect that it was replaced.
+
+    Size and mtime alone are not enough: a restore that preserves timestamps
+    (``tar -x``, ``cp -p``, ``rsync -a``) can reproduce both. The inode and
+    device catch the replacement itself, and ctime catches an in-place
+    metadata change. Any of these shifting for a benign reason only costs an
+    extra scan, which is the safe direction.
+    """
     try:
         stat_result = db_path.stat()
     except OSError:
         return None
-    return {"size": stat_result.st_size, "mtime_ns": stat_result.st_mtime_ns}
+    return {
+        "dev": stat_result.st_dev,
+        "ino": stat_result.st_ino,
+        "size": stat_result.st_size,
+        "mtime_ns": stat_result.st_mtime_ns,
+        "ctime_ns": stat_result.st_ctime_ns,
+    }
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Persist a directory entry so a rename survives power loss.
+
+    Windows and some network filesystems refuse to open or sync a directory;
+    there the rename durability guarantee is the platform's to make.
+    """
+    try:
+        directory_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(directory_fd)
 
 
 def read_sqlite_runstate(db_path: Path) -> SqliteRunState | None:
@@ -187,7 +218,7 @@ def read_sqlite_runstate(db_path: Path) -> SqliteRunState | None:
     """
     try:
         raw = sqlite_runstate_path(db_path).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return None
     try:
         record = json.loads(raw)
@@ -202,6 +233,12 @@ def read_sqlite_runstate(db_path: Path) -> SqliteRunState | None:
 def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     """Record ``state`` atomically. Returns ``False`` if it could not be recorded.
 
+    The payload and the directory entry are both fsynced, so a power loss
+    cannot retain an earlier ``clean`` record while losing the ``running``
+    transition that replaced it. In WAL mode the main database file can keep
+    its size and mtime across a long run, so the sidecar cannot rely on the
+    file identity alone to invalidate a lost transition.
+
     A failed write must never leave a stale ``clean`` sidecar behind, because
     that would tell the next startup to skip the integrity check for a store
     this process may have left mid-write. The fallback is to remove the
@@ -211,8 +248,12 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     payload = json.dumps({"state": state.value, "identity": _sqlite_file_identity(db_path)})
     try:
-        tmp.write_text(payload, encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp, target)
+        _fsync_directory(target.parent)
         return True
     except OSError:
         for cleanup in (tmp, target):

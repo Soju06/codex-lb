@@ -322,6 +322,17 @@ def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
     )
 
 
+async def _close_db_and_record_clean_shutdown() -> None:
+    """Dispose the database engines, then record the shutdown as clean.
+
+    The record is only reached once disposal returns. A cancellation or a
+    failed dispose must leave the run state unclean, because that is exactly
+    the incomplete shutdown the next startup's integrity scan is for.
+    """
+    await close_db()
+    mark_sqlite_shutdown_clean()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import app.core.startup as startup_module
@@ -776,15 +787,9 @@ async def lifespan(app: FastAPI):
             finally:
                 mark_process_dead()
                 try:
-                    await close_db()
+                    await _close_db_and_record_clean_shutdown()
                 finally:
-                    try:
-                        # Only reachable on an orderly teardown. A crash or a
-                        # SIGKILL leaves the sidecar unclean, which is exactly
-                        # what makes the next startup re-scan the store.
-                        mark_sqlite_shutdown_clean()
-                    finally:
-                        shutdown_state.mark_lifespan_completed()
+                    shutdown_state.mark_lifespan_completed()
 
 
 def create_app() -> FastAPI:

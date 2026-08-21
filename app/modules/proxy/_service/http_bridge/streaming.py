@@ -3459,6 +3459,14 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.proxy_injected_previous_response_id = (
                     request_state.proxy_injected_previous_response_id and retry_previous_response_id is not None
                 )
+                # Carried with the flag above, not separately: the anchor's
+                # retirability depends on whether the payload it was injected
+                # onto was full-resend shaped, and a retry that replays the
+                # anchor replays that shape too.
+                retry_request_state.proxy_injected_anchor_had_full_resend_payload = (
+                    request_state.proxy_injected_anchor_had_full_resend_payload
+                    and retry_request_state.proxy_injected_previous_response_id
+                )
                 if recovery_path == "local_previous_response_error":
                     # The prior response.failed/error made the operation
                     # terminal. Re-enter record_operation so its owner fence

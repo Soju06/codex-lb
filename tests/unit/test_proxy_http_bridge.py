@@ -31626,3 +31626,86 @@ async def test_invalidate_denied_bridge_anchor_drops_memory_even_when_the_durabl
     assert cleared is False
     assert session.last_completed_response_id is None
     assert session.last_completed_input_prefix_fingerprint is None
+
+
+def _denied_anchor_request_state(
+    *,
+    previous_response_id: str | None = "resp_denied",
+    proxy_injected: bool = True,
+    full_resend_shaped: bool = True,
+) -> proxy_service._WebSocketRequestState:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-denied-anchor",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    request_state.previous_response_id = previous_response_id
+    request_state.proxy_injected_previous_response_id = proxy_injected
+    request_state.proxy_injected_anchor_had_full_resend_payload = full_resend_shaped
+    return request_state
+
+
+def test_denied_anchor_id_requires_a_full_resend_shaped_payload():
+    """A delta-only request cannot convey prior context once its anchor is gone.
+
+    This mirrors the rule the expired-anchor path already applies before it
+    clears durable continuity.
+    """
+    assert (
+        http_bridge_upstream_events_module._denied_proxy_injected_anchor_id(
+            [_denied_anchor_request_state(full_resend_shaped=False)]
+        )
+        is None
+    )
+
+
+def test_denied_anchor_id_ignores_a_client_supplied_anchor():
+    assert (
+        http_bridge_upstream_events_module._denied_proxy_injected_anchor_id(
+            [_denied_anchor_request_state(proxy_injected=False)]
+        )
+        is None
+    )
+
+
+def test_denied_anchor_id_picks_the_shared_anchor_from_a_fan_out():
+    """A grouped denial settles several requests that shared one anchor."""
+    request_states = [
+        _denied_anchor_request_state(proxy_injected=False),
+        _denied_anchor_request_state(previous_response_id="resp_shared"),
+        _denied_anchor_request_state(previous_response_id="resp_shared"),
+    ]
+
+    assert http_bridge_upstream_events_module._denied_proxy_injected_anchor_id(request_states) == "resp_shared"
+
+
+@pytest.mark.asyncio
+async def test_retire_denied_bridge_anchor_swallows_bookkeeping_failures():
+    """Retirement is cleanup and must never change how the denial is delivered."""
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+    service._unregister_http_bridge_previous_response_ids = AsyncMock(side_effect=RuntimeError("registry down"))
+
+    await http_bridge_upstream_events_module._retire_denied_http_bridge_anchor(
+        service,
+        session,
+        request_states=[_denied_anchor_request_state()],
+    )
+
+
+@pytest.mark.asyncio
+async def test_retire_denied_bridge_anchor_leaves_a_delta_only_anchor_alone():
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+
+    await http_bridge_upstream_events_module._retire_denied_http_bridge_anchor(
+        service,
+        session,
+        request_states=[_denied_anchor_request_state(full_resend_shaped=False)],
+    )
+
+    service._durable_bridge.rebind_session_account.assert_not_awaited()
+    assert session.last_completed_response_id == "resp_denied"

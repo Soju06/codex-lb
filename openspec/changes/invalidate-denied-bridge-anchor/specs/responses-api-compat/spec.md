@@ -4,7 +4,19 @@
 
 ### Requirement: Explicit upstream previous-response denials retire proxy-injected anchors
 
-When upstream answers an HTTP bridge request with a `previous_response_not_found` terminal frame, and the `previous_response_id` on that request was injected by the proxy rather than supplied by the client, the proxy MUST retire that anchor on the first denial rather than waiting for the eventless-failure poison threshold. Retirement MUST clear the durable continuity record under the session's owner epoch and the in-memory session anchor together, so no later turn can re-inject the denied id from either carrier. The proxy MUST NOT retire the anchor when the session's current anchor is no longer the denied id, because a concurrent request may have completed and advanced it. A client-supplied `previous_response_id` MUST NOT be retired by this path.
+When upstream answers an HTTP bridge request with a `previous_response_not_found` terminal frame, and the `previous_response_id` on that request was injected by the proxy onto a full-resend-shaped payload, the proxy MUST retire that anchor on the first denial rather than waiting for the eventless-failure poison threshold. Retirement MUST attempt to clear the durable continuity record under the session's owner epoch, and MUST clear the in-memory session anchor.
+
+The proxy MUST NOT retire the anchor when:
+
+- the anchor was supplied by the client, because removing it changes the meaning of the client's own request;
+- the anchor was injected onto a payload that is not full-resend shaped, because a delta-only request has no other way to convey prior context once its anchor is gone;
+- the session's current anchor is no longer the denied id, because a concurrent request may have completed and advanced it.
+
+When the durable clear cannot be confirmed, the proxy MUST NOT report the anchor as retired, and MUST still clear the in-memory anchor, which strictly removes one carrier that could re-inject the denied id. A durable record that survives re-injects the id on a later turn, which is denied in turn and re-enters this path, so the clear is re-attempted rather than lost.
+
+Retirement is bookkeeping and MUST NOT change how the denial is delivered downstream. A failure while retiring MUST NOT propagate into terminal-event handling.
+
+A denial that settles several requests sharing one anchor MUST retire that anchor once, on the same terms.
 
 The downstream error contract is unchanged: the denial is still reported to the client as `stream_incomplete`, so the client retains its own anchor and is not driven into a full-history resend.
 
@@ -35,6 +47,32 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **GIVEN** an HTTP bridge request carries a `previous_response_id` the client supplied
 - **WHEN** upstream answers it with `previous_response_not_found`
 - **THEN** the proxy MUST NOT retire the anchor on the client's behalf
+
+#### Scenario: A delta-only payload keeps its injected anchor
+
+- **GIVEN** the proxy injected an anchor onto a payload that is not full-resend shaped
+- **WHEN** upstream answers that request with `previous_response_not_found`
+- **THEN** the proxy MUST NOT clear the anchor
+- **AND** the request keeps the only reference it has to its prior context
+
+#### Scenario: A fan-out denial retires the shared anchor once
+
+- **GIVEN** several pending requests on one session share a proxy-injected anchor
+- **WHEN** upstream answers with a single `previous_response_not_found` that settles all of them together
+- **THEN** the proxy retires that anchor before the grouped settlement completes
+
+#### Scenario: An unconfirmed durable clear still drops the in-memory anchor
+
+- **GIVEN** a denied proxy-injected anchor whose durable clear is fenced or fails
+- **WHEN** the denial is handled
+- **THEN** the proxy MUST clear the in-memory session anchor
+- **AND** MUST NOT report the anchor as retired
+
+#### Scenario: A retirement failure cannot change the denial delivered downstream
+
+- **GIVEN** the bookkeeping performed while retiring a denied anchor raises
+- **WHEN** the denial is handled
+- **THEN** the error MUST NOT propagate into terminal-event handling
 
 ### Requirement: Anchored recovery retries retain the provenance of the anchor they replay
 

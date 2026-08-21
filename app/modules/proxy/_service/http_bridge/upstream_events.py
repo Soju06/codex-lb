@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -1032,6 +1032,12 @@ async def _invalidate_denied_http_bridge_anchor(
     dispatches unanchored with the history the client sends, which is the
     client's own replay rather than a server-side one, so no forked child
     response can be created against a parent this proxy cannot see.
+
+    The in-memory clear is unconditional even when the durable write is fenced,
+    because it strictly removes one way for the denied id to come back. A
+    durable row that survives re-injects the id on a later turn, which is denied
+    in turn and re-enters this path, so the clear is re-attempted rather than
+    lost.
     """
     if denied_response_id is None:
         return False
@@ -1051,6 +1057,51 @@ async def _invalidate_denied_http_bridge_anchor(
     session.last_completed_input_prefix_fingerprint = None
     session.last_pending_tool_calls.clear()
     return cleared
+
+
+def _denied_proxy_injected_anchor_id(
+    request_states: Iterable["_WebSocketRequestState"],
+) -> str | None:
+    """Choose the anchor a denial may retire, if any.
+
+    Only an anchor codex-lb injected onto a full-resend-shaped payload can be
+    retired. A delta-only request has no other way to convey prior context once
+    its anchor is gone, which is the same rule the expired-anchor path applies
+    before clearing durable continuity.
+    """
+    for request_state in request_states:
+        if (
+            request_state.proxy_injected_previous_response_id
+            and request_state.proxy_injected_anchor_had_full_resend_payload
+            and request_state.previous_response_id is not None
+        ):
+            return request_state.previous_response_id
+    return None
+
+
+async def _retire_denied_http_bridge_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    request_states: Iterable["_WebSocketRequestState"],
+) -> None:
+    """Best-effort retirement of an anchor upstream denied.
+
+    Retirement is bookkeeping. It must never change how the denial itself is
+    delivered downstream, so a failure here is logged and swallowed rather than
+    escaping into terminal-event handling.
+    """
+    denied_response_id = _denied_proxy_injected_anchor_id(request_states)
+    if denied_response_id is None:
+        return
+    try:
+        await _invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id=denied_response_id,
+        )
+    except Exception:
+        logger.warning("Failed to retire a denied proxy-injected HTTP bridge anchor", exc_info=True)
 
 
 class _HTTPBridgeUpstreamEventsMixin:
@@ -2056,6 +2107,15 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         if len(grouped_previous_response_request_states) > 1:
             session.upstream_control.reconnect_requested = True
+            if is_previous_response_not_found_event:
+                # This branch settles every request that shared the denied
+                # anchor and then returns, so the single-request retirement
+                # below is never reached for a fan-out denial.
+                await _retire_denied_http_bridge_anchor(
+                    self,
+                    session,
+                    request_states=grouped_previous_response_request_states,
+                )
             grouped_error_reason = (
                 "previous_response_not_found"
                 if is_previous_response_not_found_event
@@ -2331,12 +2391,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                 original_text=text,
             )
             event_block = f"data: {rewritten_text}\n\n"
-            if status_request_state.proxy_injected_previous_response_id:
-                await _invalidate_denied_http_bridge_anchor(
-                    self,
-                    session,
-                    denied_response_id=status_request_state.previous_response_id,
-                )
+            await _retire_denied_http_bridge_anchor(
+                self,
+                session,
+                request_states=(status_request_state,),
+            )
 
         retry_error_code = _websocket_precreated_retry_error_code(
             status_request_state,

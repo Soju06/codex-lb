@@ -5208,6 +5208,26 @@ def test_find_sse_separator_accepts_cr_only_blank_line():
     assert result == (10, 2)
 
 
+def test_find_sse_separator_accepts_mixed_lf_cr_blank_line():
+    buffer = b'data: {"type":"response.completed"}\n\r'
+
+    result = proxy_module._find_sse_separator(buffer)
+
+    assert result == (35, 2)
+    event = proxy_module._pop_sse_event(bytearray(buffer))
+    assert event == buffer
+
+
+def test_find_sse_separator_accepts_mixed_lf_crlf_blank_line():
+    buffer = b'data: {"type":"response.completed"}\n\r\n'
+
+    result = proxy_module._find_sse_separator(buffer)
+
+    assert result == (35, 3)
+    event = proxy_module._pop_sse_event(bytearray(buffer))
+    assert event == buffer
+
+
 def test_pop_sse_event_returns_first_event_and_mutates_buffer():
     buffer = bytearray(b"data: one\n\ndata: two\n\n")
 

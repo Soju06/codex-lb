@@ -10,10 +10,13 @@ needs.
 
 - Materialize terminal output items from the durable SSE spool when the terminal
   response output is empty.
+- Persist a bounded, self-contained replay-input snapshot at completion so
+  recovery does not depend on upstream retaining every parent response.
 - Keep malformed, incomplete, or oversized event transcripts fail-closed.
 - Add focused regression coverage for ordered output-item reconstruction.
 
 ## Impact
 
 Only the opt-in complete-transcript recovery path is affected. Normal streaming,
-event replay, and upstream request/response shapes remain unchanged.
+event replay, and upstream request/response shapes remain unchanged. Snapshot
+construction is best effort and never blocks or fails a live terminal response.

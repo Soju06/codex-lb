@@ -1997,6 +1997,11 @@ class HttpBridgeOperationRecord(Base):
     transcript_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     response_output_items_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     response_output_items_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # A bounded, account-neutral input transcript that already includes the
+    # completed turn's output. This survives upstream response retention and
+    # lets recovery start a fresh response.create without a stale anchor.
+    response_replay_input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_replay_input_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )

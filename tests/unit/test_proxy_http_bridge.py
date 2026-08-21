@@ -5548,6 +5548,14 @@ async def test_completed_bridge_operation_materializes_output_items_from_event_s
         operation_persisted_response_id=None,
         response_id="resp-materialize-output-items",
         replay_downstream_response_id=None,
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "input": [{"type": "message", "role": "user", "content": "question"}],
+            }
+        ),
+        operation_parent_response_id=None,
         response_output_items=[],
         response_output_items_complete=False,
     )
@@ -5595,6 +5603,10 @@ async def test_completed_bridge_operation_materializes_output_items_from_event_s
     assert persisted is not None
     assert json.loads(persisted)[0]["type"] == "message"
     assert update_operation.await_args.kwargs["response_output_items_complete"] is True
+    replay_snapshot = update_operation.await_args.kwargs["response_replay_input_json"]
+    assert replay_snapshot is not None
+    assert [item["role"] for item in json.loads(replay_snapshot)] == ["user", "assistant"]
+    assert update_operation.await_args.kwargs["response_replay_input_complete"] is True
 
 
 def test_response_output_capture_reconstructs_empty_completed_output() -> None:

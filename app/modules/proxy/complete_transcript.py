@@ -196,6 +196,74 @@ def build_complete_replay_payload(
     return latest_payload_bytes.decode("utf-8")
 
 
+def build_replay_input_snapshot(
+    turns: Iterable[DurableBridgeTranscriptTurn],
+    *,
+    request_text: str,
+    response_output_items_json: str,
+    max_input_items: int = 4096,
+    max_bytes: int = 8 * 1024 * 1024,
+) -> str | None:
+    """Build a bounded, self-contained input snapshot for a completed turn.
+
+    The snapshot contains the complete replay input *including* the current
+    turn's sanitized output.  It is intentionally stored independently from
+    ``previous_response_id`` so it can survive upstream response retention
+    and let a later continuation start from a fresh response.create body.
+    """
+
+    materialized_turns = list(turns)
+    if materialized_turns:
+        replay_text = build_complete_replay_payload(
+            materialized_turns,
+            continuation_request_text=request_text,
+            max_input_items=max_input_items,
+            max_bytes=max_bytes,
+        )
+    else:
+        try:
+            parsed = json.loads(request_text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        input_items = _normalize_input(parsed.get("input"))
+        if input_items is None:
+            return None
+        input_items = [_strip_item_id(item) for item in input_items]
+        if not _items_are_json_values(input_items):
+            return None
+        fresh_payload = dict(parsed)
+        _drop_bridge_operation_metadata(fresh_payload)
+        fresh_payload.pop("previous_response_id", None)
+        fresh_payload.pop("stream", None)
+        fresh_payload["type"] = "response.create"
+        fresh_payload["input"] = input_items
+        replay_text = json.dumps(fresh_payload, ensure_ascii=True, separators=(",", ":"))
+        if len(replay_text.encode("utf-8")) > max_bytes:
+            return None
+
+    if not replay_text:
+        return None
+    try:
+        replay_payload = json.loads(replay_text)
+        output_items = _sanitize_output_items(response_output_items_json)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(replay_payload, dict) or output_items is None:
+        return None
+    input_items = _normalize_input(replay_payload.get("input"))
+    if input_items is None:
+        return None
+    snapshot_items = input_items + output_items
+    if len(snapshot_items) > max_input_items or not _items_are_json_values(snapshot_items):
+        return None
+    snapshot_text = json.dumps(snapshot_items, ensure_ascii=True, separators=(",", ":"))
+    if len(snapshot_text.encode("utf-8")) > max_bytes:
+        return None
+    return snapshot_text
+
+
 def _normalize_input(value: JsonValue | None) -> list[JsonValue] | None:
     if isinstance(value, list):
         return list(value)

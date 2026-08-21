@@ -197,6 +197,7 @@ from app.modules.proxy.affinity import (
 )
 from app.modules.proxy.complete_transcript import (
     build_complete_replay_payload,
+    build_replay_input_snapshot,
     materialize_output_items_from_events,
 )
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
@@ -307,6 +308,8 @@ async def _update_http_bridge_operation_state(
     try:
         response_output_items_json: str | None = None
         response_output_items_complete = False
+        response_replay_input_json: str | None = None
+        response_replay_input_complete = False
         if (
             state == "completed"
             and bool(
@@ -369,6 +372,82 @@ async def _update_http_bridge_operation_state(
                 )
                 if not response_output_items_complete:
                     response_output_items_json = None
+                else:
+                    # Persist a self-contained bounded input snapshot while
+                    # the parent chain is still available. This is best
+                    # effort: a missing/ambiguous parent must never delay or
+                    # fail the live terminal response.
+                    request_text = getattr(request_state, "request_text", None)
+                    parent_response_id = getattr(request_state, "operation_parent_response_id", None) or getattr(
+                        request_state, "previous_response_id", None
+                    )
+                    parent_turns: list[Any] = []
+                    if request_text:
+                        try:
+                            if parent_response_id:
+                                get_transcript = getattr(
+                                    getattr(service, "_durable_bridge", None),
+                                    "get_complete_transcript",
+                                    None,
+                                )
+                                if callable(get_transcript):
+                                    parent_turns = await get_transcript(
+                                        response_id=parent_response_id,
+                                        max_turns=int(
+                                            getattr(
+                                                _service_get_settings(),
+                                                "http_responses_session_bridge_complete_transcript_max_turns",
+                                                128,
+                                            )
+                                        ),
+                                        max_bytes=int(
+                                            getattr(
+                                                _service_get_settings(),
+                                                "http_responses_session_bridge_complete_transcript_max_bytes",
+                                                8 * 1024 * 1024,
+                                            )
+                                        ),
+                                    ) or []
+                            snapshot = build_replay_input_snapshot(
+                                parent_turns,
+                                request_text=request_text,
+                                response_output_items_json=response_output_items_json,
+                                max_input_items=int(
+                                    getattr(
+                                        _service_get_settings(),
+                                        "http_responses_session_bridge_complete_transcript_max_input_items",
+                                        4096,
+                                    )
+                                ),
+                                max_bytes=int(
+                                    getattr(
+                                        _service_get_settings(),
+                                        "http_responses_session_bridge_complete_transcript_max_bytes",
+                                        8 * 1024 * 1024,
+                                    )
+                                ),
+                            )
+                        except Exception:
+                            snapshot = None
+                            logger.warning(
+                                "Failed to build HTTP bridge replay snapshot operation_id=%s",
+                                operation_id,
+                                exc_info=True,
+                            )
+                        if snapshot is not None:
+                            response_replay_input_json = snapshot
+                            response_replay_input_complete = True
+                            _log_http_bridge_event(
+                                "complete_transcript_replay_snapshot_persisted",
+                                session.key,
+                                account_id=session.account.id,
+                                model=getattr(request_state, "model", None),
+                                detail=f"items={len(json.loads(snapshot))}",
+                                cache_key_family=session.key.affinity_kind,
+                                model_class=_extract_model_class(getattr(request_state, "model", None))
+                                if getattr(request_state, "model", None)
+                                else None,
+                            )
         marked = await update_operation(
             operation_id=operation_id,
             session_id=session_id,
@@ -378,6 +457,8 @@ async def _update_http_bridge_operation_state(
             response_id=response_id,
             response_output_items_json=response_output_items_json,
             response_output_items_complete=response_output_items_complete,
+            response_replay_input_json=response_replay_input_json,
+            response_replay_input_complete=response_replay_input_complete,
         )
         if marked and response_id is not None:
             request_state.operation_persisted_response_id = response_id

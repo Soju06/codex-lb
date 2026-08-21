@@ -718,6 +718,8 @@ class DurableBridgeSessionCoordinator:
         response_id: str | None = None,
         response_output_items_json: str | None = None,
         response_output_items_complete: bool = False,
+        response_replay_input_json: str | None = None,
+        response_replay_input_complete: bool = False,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).update_operation(
@@ -729,6 +731,8 @@ class DurableBridgeSessionCoordinator:
                 response_id=response_id,
                 response_output_items_json=response_output_items_json,
                 response_output_items_complete=response_output_items_complete,
+                response_replay_input_json=response_replay_input_json,
+                response_replay_input_complete=response_replay_input_complete,
             )
 
     async def get_operation(self, *, operation_id: str) -> DurableBridgeOperationSnapshot | None:

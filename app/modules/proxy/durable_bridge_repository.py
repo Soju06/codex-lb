@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
@@ -191,6 +191,8 @@ class DurableBridgeOperationSnapshot:
     transcript_version: int = 0
     response_output_items_json: str | None = None
     response_output_items_complete: bool = False
+    response_replay_input_json: str | None = None
+    response_replay_input_complete: bool = False
     created: bool = False
     rebound: bool = False
     rebound_from_session_id: str | None = None
@@ -1407,6 +1409,8 @@ class DurableBridgeRepository:
                     operation.event_spool_complete = False
                     operation.response_output_items_json = None
                     operation.response_output_items_complete = False
+                    operation.response_replay_input_json = None
+                    operation.response_replay_input_complete = False
                     operation.transcript_version = 0
                     operation.updated_at = utcnow()
                     rebound = True
@@ -1511,6 +1515,8 @@ class DurableBridgeRepository:
             operation.event_spool_complete = False
             operation.response_output_items_json = None
             operation.response_output_items_complete = False
+            operation.response_replay_input_json = None
+            operation.response_replay_input_complete = False
             operation.transcript_version = 0
             operation.updated_at = utcnow()
             await self._session.commit()
@@ -1568,6 +1574,8 @@ class DurableBridgeRepository:
             operation.event_spool_complete = False
             operation.response_output_items_json = None
             operation.response_output_items_complete = False
+            operation.response_replay_input_json = None
+            operation.response_replay_input_complete = False
             operation.transcript_version = 0
             operation.updated_at = utcnow()
             await self._session.commit()
@@ -1796,6 +1804,41 @@ class DurableBridgeRepository:
                 )
             )
             snapshot = _to_operation_snapshot(operation) if operation is not None else None
+            if snapshot is not None and snapshot.response_replay_input_complete and snapshot.response_replay_input_json:
+                # A complete replay snapshot is independent of the parent
+                # response chain. Prefer it so a long-lived session remains
+                # recoverable after upstream purges older response IDs.
+                try:
+                    replay_input = json.loads(snapshot.response_replay_input_json)
+                    original_payload = json.loads(snapshot.request_text or "")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    replay_input = None
+                    original_payload = None
+                if (
+                    isinstance(replay_input, list)
+                    and len(snapshot.response_replay_input_json.encode("utf-8")) <= max_bytes
+                    and isinstance(original_payload, dict)
+                ):
+                    replay_payload = dict(original_payload)
+                    replay_payload.pop("previous_response_id", None)
+                    replay_payload.pop("stream", None)
+                    replay_payload["type"] = "response.create"
+                    replay_payload["input"] = replay_input
+                    synthetic_operation = replace(
+                        snapshot,
+                        parent_response_id=None,
+                        request_text=json.dumps(replay_payload, ensure_ascii=True, separators=(",", ":")),
+                    )
+                    return [
+                        DurableBridgeTranscriptTurn(
+                            operation=synthetic_operation,
+                            events=(),
+                            # The snapshot already includes this turn's
+                            # output. Do not append it a second time during
+                            # continuation replay.
+                            response_output_items_json="[]",
+                        )
+                    ]
             if (
                 snapshot is None
                 or snapshot.request_text is None
@@ -2261,6 +2304,8 @@ class DurableBridgeRepository:
         response_id: str | None = None,
         response_output_items_json: str | None = None,
         response_output_items_complete: bool = False,
+        response_replay_input_json: str | None = None,
+        response_replay_input_complete: bool = False,
     ) -> bool:
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
@@ -2282,6 +2327,9 @@ class DurableBridgeRepository:
                 values["response_output_items_json"] = response_output_items_json
                 values["response_output_items_complete"] = response_output_items_complete
                 values["transcript_version"] = 1
+            if response_replay_input_json is not None:
+                values["response_replay_input_json"] = response_replay_input_json
+                values["response_replay_input_complete"] = response_replay_input_complete
             result = await self._session.execute(
                 update(HttpBridgeOperationRecord)
                 .where(
@@ -3309,6 +3357,8 @@ def _to_operation_snapshot(
         transcript_version=int(row.transcript_version or 0),
         response_output_items_json=row.response_output_items_json,
         response_output_items_complete=bool(row.response_output_items_complete),
+        response_replay_input_json=row.response_replay_input_json,
+        response_replay_input_complete=bool(row.response_replay_input_complete),
         created=created,
         rebound=rebound,
         rebound_from_session_id=rebound_from_session_id,

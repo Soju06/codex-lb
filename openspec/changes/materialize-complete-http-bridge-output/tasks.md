@@ -5,8 +5,13 @@
 - [x] 1.3 Capture output-item completions in the live bridge state before the
   terminal operation-state write, so the event batcher cannot persist an empty
   terminal array first.
+- [x] 1.4 Persist a bounded self-contained replay-input snapshot for completed
+  operations and add the schema migration.
+- [x] 1.5 Prefer a retained replay snapshot when reconstructing a continuation
+  whose upstream parent-response chain is unavailable.
 
 ## 2. Verification
 
 - [x] 2.1 Add focused unit coverage for empty terminal output and missing completion.
-- [ ] 2.2 Run focused tests, lint, and strict OpenSpec validation.
+- [x] 2.2 Add coverage for snapshot bounds and recovery after parent-chain purge.
+- [ ] 2.3 Run focused tests, lint, and strict OpenSpec validation.

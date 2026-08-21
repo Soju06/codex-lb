@@ -4486,6 +4486,21 @@ async def _source_embeddings_response(
     outbound["model"] = model
     try:
         result = await forward_source_embeddings(source, outbound)
+    except asyncio.CancelledError:
+        release_exc: BaseException | None = None
+        if reservation is not None:
+            try:
+                await _release_reservation_deferring_cancellation(reservation)
+            except BaseException as exc:
+                release_exc = exc
+        if release_exc is not None:
+            logger.warning(
+                "Failed to release source embeddings reservation after request cancellation source_id=%s model=%s",
+                source.id,
+                model,
+                exc_info=release_exc,
+            )
+        raise
     except ModelSourceForwardingError as exc:
         await _release_reservation(reservation)
         await _log_source_chat_completion(

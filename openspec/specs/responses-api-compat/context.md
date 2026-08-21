@@ -239,6 +239,10 @@ examples against the existing contract, not separate compatibility surfaces:
 - **Hermes Agent** (Nous Research) — named custom provider with
   `api_mode: codex_responses` against `/v1`; the responses transport carries
   reasoning state across turns like the OpenCode path.
+- **Claude Code** (experimental external composition) — a third-party
+  Anthropic-to-OpenAI translator can map Claude Code's Messages requests onto
+  `/v1/responses`. The translator, not codex-lb, owns the Messages contract;
+  codex-lb does not gain an Anthropic protocol surface or Claude credentials.
 
 New client guides added to `docs/client-setup.md` should stay configuration-only
 examples of this contract; anything needing new proxy behavior requires its own

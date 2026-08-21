@@ -1,6 +1,6 @@
 # Client Setup
 
-Point any OpenAI-compatible client at codex-lb. If [API key auth](api-keys.md) is enabled, pass a key from the dashboard as a Bearer token.
+Point OpenAI-compatible clients directly at codex-lb. If [API key auth](api-keys.md) is enabled, pass a key from the dashboard as a Bearer token. Claude Code is the exception below: it needs an external protocol-translating gateway.
 
 Model availability is discovered from the upstream Codex model catalog and can vary by account plan, workspace, rollout, and upstream deprecation state. Prefer the live `GET /v1/models` or `GET /backend-api/codex/models` response over a copied static table when configuring clients or API-key model allowlists.
 
@@ -12,6 +12,7 @@ The examples below use the current frontier lineup: **`gpt-5.6-sol`** (strongest
 | [OpenCode](#opencode) | `http://127.0.0.1:2455/v1` | `~/.config/opencode/opencode.json` |
 | [OpenClaw](#openclaw) | `http://127.0.0.1:2455/v1` | `~/.openclaw/openclaw.json` |
 | [Hermes Agent](#hermes-agent) | `http://127.0.0.1:2455/v1` | `~/.hermes/config.yaml` |
+| [Claude Code](#claude-code-experimental-external-gateway) | `http://127.0.0.1:4000/v1/messages` | Experimental external gateway |
 | [OpenAI Python SDK](#openai-python-sdk) | `http://127.0.0.1:2455/v1` | Code |
 
 ## Codex CLI / IDE Extension
@@ -368,6 +369,174 @@ Then select the model interactively with `hermes model`, or in a session:
 export CODEX_LB_API_KEY="sk-clb-..."   # key from dashboard
 hermes
 ```
+
+## Claude Code (experimental external gateway)
+
+!!! warning
+    Anthropic does not support routing Claude Code to non-Claude models through
+    a gateway. This is an experimental, community-owned composition; see
+    [Anthropic's gateway policy](https://docs.anthropic.com/en/docs/claude-code/llm-gateway)
+    and the [codex-lb maintainer decision](https://github.com/Soju06/codex-lb/issues/114#issuecomment-4988534309).
+
+codex-lb does not implement Anthropic's Messages API or manage Claude
+credentials. To use Claude Code's interface with a model served by codex-lb,
+run an Anthropic-to-OpenAI translator in front:
+
+```text
+Claude Code -> LiteLLM /v1/messages -> codex-lb /v1/responses
+```
+
+This adds neither Claude models nor Anthropic credentials to codex-lb.
+LiteLLM owns the Messages, streaming, tool, and error translation.
+
+### Configure the translator
+
+Create `litellm.yaml` outside the codex-lb repository:
+
+```yaml
+model_list:
+  - model_name: codex-lb-gpt-5.6-sol
+    litellm_params:
+      model: openai/gpt-5.6-sol
+      api_base: os.environ/CODEX_LB_BASE_URL
+      api_key: os.environ/CODEX_LB_API_KEY
+
+litellm_settings:
+  use_chat_completions_url_for_anthropic_messages: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+```
+
+The public `codex-lb-gpt-5.6-sol` alias maps to `gpt-5.6-sol` through
+codex-lb. The target must support Responses: choose a model from
+`GET /backend-api/codex/models`, or verify that an external source accepts
+`POST /v1/responses`. `GET /v1/models` can also list
+Chat-Completions-only sources, which do not work with this recipe.
+
+Keep the `openai/` provider prefix and the explicit LiteLLM setting. Marking
+the model as natively supporting `/v1/messages` would pass Anthropic
+payloads to codex-lb without translation.
+
+Set separate credentials for the two hops, then bind LiteLLM to loopback:
+
+```bash
+export CODEX_LB_BASE_URL="http://127.0.0.1:2455/v1"
+export CODEX_LB_API_KEY="sk-clb-..."        # dashboard key; see loopback note below
+export LITELLM_MASTER_KEY="sk-litellm-..." # choose a separate random secret
+
+env -u DEBUG uvx --from 'litellm[proxy]==1.97.0' \
+  --with 'fastapi==0.140.0' \
+  litellm \
+  --config ./litellm.yaml \
+  --host 127.0.0.1 \
+  --port 4000
+```
+
+The FastAPI pin avoids a startup incompatibility observed with FastAPI
+`0.141.1`. The scoped `env -u DEBUG` prevents an unrelated shell `DEBUG`
+value from being parsed as LiteLLM's Boolean CLI option. Transitive
+dependencies remain ranged, so repeat the smoke test when the environment is
+recreated.
+
+Do not reuse a Claude.ai OAuth token or Anthropic Console key for either
+value. `CODEX_LB_API_KEY` authenticates LiteLLM to codex-lb;
+`LITELLM_MASTER_KEY` authenticates Claude Code to LiteLLM. A non-empty
+placeholder works only when LiteLLM reaches an auth-disabled codex-lb over
+same-host loopback. Across containers, use their private network and enable
+codex-lb API-key auth with a registered dashboard key. Auth-disabled codex-lb
+rejects non-loopback proxy requests unless the raw peer is explicitly
+allowlisted with `CODEX_LB_PROXY_UNAUTHENTICATED_CLIENT_CIDRS`. Do not expose
+an unencrypted LiteLLM listener or either key to an untrusted network.
+
+### Verify the translation path
+
+With LiteLLM running, send a streamed Anthropic-format request:
+
+```bash
+curl --fail-with-body --silent --show-error --no-buffer \
+  http://127.0.0.1:4000/v1/messages \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "codex-lb-gpt-5.6-sol",
+    "max_tokens": 32,
+    "stream": true,
+    "messages": [{"role": "user", "content": "Reply with OK only."}]
+  }'
+```
+
+A successful stream contains Anthropic SSE events from `message_start`
+through `message_stop`. LiteLLM should log the public alias, and codex-lb
+should record a `POST /v1/responses` request for the serving account. This
+uses real quota.
+
+This recipe was prepared with Claude Code `2.1.220`, LiteLLM proxy
+`1.97.0`, and FastAPI `0.140.0`. Non-streaming, streaming, tool-use, and
+Claude one-shot translation were exercised against a local mock Responses
+endpoint; that does not replace the live-deployment smoke request above.
+Re-test when upgrading either proxy dependency or Claude Code.
+
+### Point Claude Code at LiteLLM
+
+Map the Opus, Sonnet, and Haiku aliases to the configured public alias so
+helper requests do not use an unconfigured Claude model name:
+
+```bash
+export ANTHROPIC_BASE_URL="http://127.0.0.1:4000"
+export ANTHROPIC_AUTH_TOKEN="$LITELLM_MASTER_KEY"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="codex-lb-gpt-5.6-sol"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="codex-lb-gpt-5.6-sol"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="codex-lb-gpt-5.6-sol"
+
+claude --model codex-lb-gpt-5.6-sol
+```
+
+`ANTHROPIC_DEFAULT_FABLE_MODEL` is intentionally unset. Claude Code also
+uses that variable to identify a target as Fable 5 for automatic fallback,
+which this non-Claude alias does not implement.
+
+`ANTHROPIC_AUTH_TOKEN` sends the LiteLLM key as a Bearer credential and
+takes precedence over a saved claude.ai login. Existing Claude Code settings
+can override shell variables; if they do, put the gateway values in an
+explicit settings `env` block. Run `/status` and confirm that a gateway
+credential is active. Follow Anthropic's
+[gateway setup](https://docs.anthropic.com/en/docs/claude-code/llm-gateway-connect)
+for persistent configuration, and unset these values to restore the previous
+login path.
+
+### Compatibility boundaries
+
+- Effective features and limits are the intersection of Claude Code,
+  LiteLLM's translation, codex-lb policy, and the mapped Responses model.
+- These family alias mappings can make Claude Code apply Claude-specific
+  context-window and compaction assumptions to the non-Claude target. If you set
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, derive and test it against the effective
+  deployment limit; this recipe does not prescribe a value.
+- LiteLLM `1.97.0` does not preserve Responses reasoning identity or
+  signatures across Messages turns. Translated thinking can become summary or
+  ordinary text; do not assume encrypted reasoning or prompt-cache continuity.
+- LiteLLM serves `/v1/messages/count_tokens`, but codex-lb does not implement
+  `/v1/responses/input_tokens`. After that request returns `404`, this
+  LiteLLM version estimates locally and can omit separate system prompts or
+  tool definitions, materially undercounting the real input.
+- Anthropic error-envelope fidelity, beta fields, tool references, web search,
+  extended thinking, and prompt caching can degrade across the translation.
+- codex-lb API-key model allowlists, account assignment, and limits still
+  apply. Claude.ai identity features are unavailable with the gateway
+  credential, and optional Claude Code background traffic is not an
+  egress-isolation boundary.
+
+Common failures:
+
+| Symptom | Check |
+| --- | --- |
+| LiteLLM returns `401` | `ANTHROPIC_AUTH_TOKEN` must equal `LITELLM_MASTER_KEY`. |
+| codex-lb returns `401` | Use a valid dashboard `CODEX_LB_API_KEY`. An auth-disabled placeholder works only over loopback; across containers, enable key auth or explicitly allowlist the raw peer. |
+| LiteLLM reports an unknown model | Match `model_name`, the three configured `ANTHROPIC_DEFAULT_*_MODEL` values, and `claude --model`. |
+| LiteLLM cannot reach codex-lb | Keep `/v1` in `CODEX_LB_BASE_URL`; across containers, replace loopback with a private-network host. |
+| Claude Code still contacts Anthropic for model requests | Remove conflicting saved settings or use an explicit settings `env` block, then verify `/status`. |
 
 ## OpenAI Python SDK
 

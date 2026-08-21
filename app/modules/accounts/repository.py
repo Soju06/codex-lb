@@ -96,6 +96,11 @@ _HARD_STICKY_UNAVAILABLE_STATUSES = frozenset(
 _HARD_STICKY_OUTAGE_GRACE_SEEDED_SENTINEL = "hard_sticky_outage_grace_seeded"
 
 
+def _is_missing_hard_sticky_seed_table(exc: OperationalError) -> bool:
+    message = str(exc).lower()
+    return "no such table: runtime_sentinels" in message or "no such table: accounts" in message
+
+
 @dataclass(frozen=True, slots=True)
 class AccountRequestUsageSummary:
     request_count: int
@@ -883,20 +888,26 @@ class AccountsRepository:
             .on_conflict_do_nothing(index_elements=[RuntimeSentinel.name])
             .returning(RuntimeSentinel.name)
         )
-        async with sqlite_writer_section():
-            stamp_result = await self._session.execute(stamp_stmt)
-            stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
-            if not stamped_by_this_boot:
+        try:
+            async with sqlite_writer_section():
+                stamp_result = await self._session.execute(stamp_stmt)
+                stamped_by_this_boot = stamp_result.scalar_one_or_none() is not None
+                if not stamped_by_this_boot:
+                    await self._session.commit()
+                    return 0
+                account_ids = (
+                    await self._session.scalars(
+                        select(Account.id).where(Account.status.in_(_HARD_STICKY_UNAVAILABLE_STATUSES))
+                    )
+                ).all()
+                for account_id in account_ids:
+                    await self._refresh_hard_sticky_outage_grace(account_id)
                 await self._session.commit()
-                return 0
-            account_ids = (
-                await self._session.scalars(
-                    select(Account.id).where(Account.status.in_(_HARD_STICKY_UNAVAILABLE_STATUSES))
-                )
-            ).all()
-            for account_id in account_ids:
-                await self._refresh_hard_sticky_outage_grace(account_id)
-            await self._session.commit()
+        except OperationalError as exc:
+            if not _is_missing_hard_sticky_seed_table(exc):
+                raise
+            await self._session.rollback()
+            return 0
         return len(account_ids)
 
     async def _close_http_bridge_sessions_for_account(self, account_id: str) -> None:

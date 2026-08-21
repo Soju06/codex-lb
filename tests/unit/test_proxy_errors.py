@@ -219,6 +219,120 @@ async def test_indefinite_recovery_converts_retry_reservation_failure_to_sse(mon
 
 
 @pytest.mark.asyncio
+async def test_indefinite_recovery_exhaustion_emits_terminal_response_failed(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        proxy_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    monkeypatch.setattr(proxy_api, "_HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay: _completed_asyncio_sleep())
+    attempts = 0
+
+    def durable_stream_incomplete(message: str) -> ProxyResponseError:
+        exc = ProxyResponseError(
+            502,
+            {"error": {"code": "stream_incomplete", "message": message, "type": "server_error"}},
+            retry_after_seconds=1,
+        )
+        setattr(exc, "http_bridge_durable_recovery_eligible", True)
+        return exc
+
+    async def stream():
+        if False:
+            yield ""
+        raise durable_stream_incomplete("closed before response.created")
+
+    async def recovery_stream():
+        nonlocal attempts
+        attempts += 1
+        raise durable_stream_incomplete(f"still closed attempt {attempts}")
+        yield ""
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+            recovery_stream_factory=lambda: recovery_stream(),
+            require_durable_recovery_fence=True,
+        )
+    ]
+
+    assert attempts == 2
+    assert events.count(": codex-lb recovery in progress\n\n") == 2
+    assert "response.failed" in events[-1]
+    assert "stream_incomplete" in events[-1]
+    assert "still closed attempt 2" in events[-1]
+    payload = proxy_api._parse_sse_payload(events[-1])
+    assert payload is not None
+    response = payload.get("response")
+    assert isinstance(response, dict)
+    assert isinstance(response.get("id"), str)
+    assert response["id"]
+
+
+@pytest.mark.asyncio
+async def test_indefinite_recovery_retries_eventless_bridge_timeouts(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        proxy_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+        ),
+    )
+    monkeypatch.setattr(proxy_api, "_HTTP_BRIDGE_SERVER_RECOVERY_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_api.asyncio, "sleep", lambda _delay: _completed_asyncio_sleep())
+    attempts = 0
+
+    def durable_eventless_timeout(message: str) -> ProxyResponseError:
+        exc = ProxyResponseError(
+            503,
+            {
+                "error": {
+                    "code": proxy_api.HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE,
+                    "message": message,
+                    "type": "server_error",
+                }
+            },
+            retry_after_seconds=1,
+        )
+        setattr(exc, "http_bridge_durable_recovery_eligible", True)
+        return exc
+
+    async def stream():
+        if False:
+            yield ""
+        raise durable_eventless_timeout("eventless before recovery")
+
+    async def recovery_stream():
+        nonlocal attempts
+        attempts += 1
+        raise durable_eventless_timeout(f"eventless retry {attempts}")
+        yield ""
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+            recovery_stream_factory=lambda: recovery_stream(),
+            require_durable_recovery_fence=True,
+        )
+    ]
+
+    assert attempts == 2
+    assert events.count(": codex-lb recovery in progress\n\n") == 2
+    assert "response.failed" in events[-1]
+    assert proxy_api.HTTP_BRIDGE_EVENTLESS_TIMEOUT_CODE in events[-1]
+    assert "eventless retry 2" in events[-1]
+
+
+@pytest.mark.asyncio
 async def test_indefinite_recovery_converts_unexpected_admission_failure_to_sse(
     monkeypatch: pytest.MonkeyPatch,
 ):

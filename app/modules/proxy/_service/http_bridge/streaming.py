@@ -36,6 +36,7 @@ from app.core.clients.proxy import compact_responses as core_compact_responses  
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
 from app.core.clients.proxy_websocket import UpstreamWebSocketTransportError
 from app.core.errors import (
+    PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
     openai_error,
     response_failed_event,
@@ -72,9 +73,15 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
+    _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+    _HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE,
+    _HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
+    _http_bridge_eventless_budget_seconds,
+    _http_bridge_eventless_max_keepalive_count,
     _http_bridge_is_context_overflow_error,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_models_compatible,
@@ -140,6 +147,9 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_event_error_param,
     _websocket_event_error_type,
 )
+from app.modules.proxy._service.http_bridge.upstream_events import (
+    _abandon_durable_http_bridge_continuity,
+)
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -165,6 +175,7 @@ from app.modules.proxy._service.support import (
     _DeferredAccountBackoffTracker,
     _event_type_from_payload,
     _HTTPBridgeOwnerForward,
+    _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
     _HTTPBridgeSessionKey,
     _is_local_account_cap_code,
@@ -482,7 +493,7 @@ def _http_bridge_dead_owner_previous_response_not_found_terminal(
             cast(str, error["message"]),
             error_type=cast(str, error["type"]),
             response_id=response_id,
-            error_param=cast(str, error["param"]),
+            error_param=cast(str | None, error["param"]),
         ),
     )
 
@@ -549,6 +560,10 @@ _HTTP_BRIDGE_AMBIGUOUS_RECOVERY_ERROR_CODES = frozenset(
         "stream_incomplete",
         "stream_idle_timeout",
         "upstream_request_timeout",
+        # Pre-response bridge timeouts replaced the upstream_request_timeout
+        # code that startup cooldown fail-closed used to raise; they leave
+        # upstream acceptance exactly as unknown as it was before.
+        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
     }
 )
 
@@ -1315,7 +1330,8 @@ class _HTTPBridgeStreamingMixin:
             current_instance = _service_get_settings().http_responses_session_bridge_instance_id
             current_process_epoch = http_bridge_owner_process_epoch()
             dead_owner_process_epoch_mismatch = (
-                durable_lookup.owner_process_epoch is not None
+                durable_lookup.owner_instance_id == current_instance
+                and durable_lookup.owner_process_epoch is not None
                 and durable_lookup.owner_process_epoch != current_process_epoch
             )
             dead_owner_anchor = _http_bridge_durable_owner_is_dead(
@@ -3180,7 +3196,7 @@ class _HTTPBridgeStreamingMixin:
                     await self._reset_http_bridge_session_after_local_terminal_error(
                         session,
                         error_code="stream_incomplete",
-                        error_message="Upstream websocket closed before response.completed",
+                        error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
                         # Keep the origin lease fenced while the replacement
                         # session is admitted and the one-shot journal is
                         # either rolled back or settled. Releasing it here
@@ -3250,7 +3266,7 @@ class _HTTPBridgeStreamingMixin:
                 await self._reset_http_bridge_session_after_local_terminal_error(
                     session,
                     error_code="stream_incomplete",
-                    error_message="Upstream websocket closed before response.completed",
+                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
                 )
                 recovery_path = "context_overflow_fresh_turn"
                 retry_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
@@ -3272,7 +3288,7 @@ class _HTTPBridgeStreamingMixin:
                 await self._reset_http_bridge_session_after_local_terminal_error(
                     session,
                     error_code="stream_incomplete",
-                    error_message="Upstream websocket closed before response.completed",
+                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
                 )
                 raise
             else:
@@ -3291,7 +3307,7 @@ class _HTTPBridgeStreamingMixin:
                 await self._reset_http_bridge_session_after_local_terminal_error(
                     session,
                     error_code="stream_incomplete",
-                    error_message="Upstream websocket closed before response.completed",
+                    error_message=_HTTP_BRIDGE_LOCAL_RESET_MESSAGE,
                 )
                 recovery_path = "local_previous_response_error"
                 retry_payload = effective_payload
@@ -3543,6 +3559,7 @@ class _HTTPBridgeStreamingMixin:
             error_message=error_message,
             api_key=None,
             response_create_gate=session.response_create_gate,
+            penalize_account=False,
         )
         await self._close_http_bridge_session(session, release_durable_session=not preserve_durable_lease)
 
@@ -3584,8 +3601,9 @@ class _HTTPBridgeStreamingMixin:
                                 cast(
                                     Mapping[str, JsonValue],
                                     response_failed_event(
-                                        "stream_idle_timeout",
-                                        "Clean-close recovery exceeded the request budget",
+                                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                                        "HTTP responses session bridge clean-close recovery "
+                                        "exceeded the request budget",
                                         response_id=downstream_response_id,
                                     ),
                                 )
@@ -3604,27 +3622,25 @@ class _HTTPBridgeStreamingMixin:
                 )
             except UpstreamWebSocketTransportError as exc:
                 if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
-                    stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                    stream_idle_timeout_total.labels(surface="http_bridge_eventless").inc()
                 logger.info(
-                    "HTTP bridge stream idle recovery retry%s failed with transport error request_id=%s error_code=%s",
+                    "HTTP bridge eventless recovery retry%s failed with transport error request_id=%s error_code=%s",
                     " after circuit cooldown" if after_circuit_cooldown else "",
                     request_state.request_id,
                     exc.error_code,
                 )
+                mark_bridge_eventless_failure()
+                await record_bridge_eventless_timeout_failure()
                 if getattr(
                     _service_get_settings(),
                     "http_responses_session_bridge_ambiguous_continuation_recovery_mode",
                     "fail_closed",
                 ) == "server_indefinite_recovery" and _http_bridge_server_anchored_replay_enabled(request_state):
-                    # Let the outer server-owned recovery loop classify this
-                    # eventless transport failure as retryable. Returning a
-                    # synthetic response.failed event would make the loop
-                    # believe the attempt completed successfully after one try.
                     raise ProxyResponseError(
-                        502,
+                        503,
                         openai_error(
-                            "stream_idle_timeout",
-                            str(exc),
+                            _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                            _HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE,
                             error_type="server_error",
                         ),
                     ) from exc
@@ -3634,8 +3650,8 @@ class _HTTPBridgeStreamingMixin:
                         cast(
                             Mapping[str, JsonValue],
                             response_failed_event(
-                                exc.error_code,
-                                str(exc),
+                                _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                                _HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE,
                                 response_id=downstream_response_id,
                             ),
                         )
@@ -3767,12 +3783,13 @@ class _HTTPBridgeStreamingMixin:
                 return None
             await self._release_websocket_request_state_reservation(request_state)
             request_state.api_key_reservation = None
+            mark_bridge_eventless_failure()
             if propagate_http_errors:
                 raise ProxyResponseError(
                     503,
                     openai_error(
-                        "upstream_request_timeout",
-                        "HTTP responses session bridge recovery exceeded the request budget.",
+                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE,
                         error_type="server_error",
                     ),
                 )
@@ -3780,12 +3797,63 @@ class _HTTPBridgeStreamingMixin:
                 cast(
                     Mapping[str, JsonValue],
                     response_failed_event(
-                        "stream_idle_timeout",
-                        "HTTP responses session bridge recovery exceeded the request budget",
+                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE,
                         response_id=_websocket_downstream_response_id(request_state),
                     ),
                 )
             )
+
+        def mark_bridge_eventless_failure() -> None:
+            """Record the pre-response-start classification on the request log.
+
+            ``stream_idle_timeout`` describes a stream that started and then
+            went quiet for ``stream_idle_timeout_seconds``. Nothing about this
+            phase matches that, and stamping request logs with it hid every
+            eventless bridge handoff wedge behind an upstream-shaped label.
+            """
+
+            if request_state.failure_phase_override is None:
+                request_state.failure_phase_override = "bridge"
+            if request_state.failure_detail_override is None:
+                request_state.failure_detail_override = _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL
+
+        async def record_bridge_eventless_timeout_failure(
+            selection: _HTTPBridgeRetryCircuitAttemptSelection | None = None,
+        ) -> None:
+            if selection is None:
+                consecutive_failures = await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=_HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                )
+            else:
+                consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
+                    session,
+                    detail=_HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                    selection=selection,
+                )
+            observed_response_events = max(
+                request_state.response_event_count,
+                int(
+                    request_state.response_id is not None
+                    or request_state.latency_response_created_ms is not None
+                    or request_state.downstream_visible
+                ),
+            )
+            if (
+                observed_response_events > 0
+                or consecutive_failures is None
+                or consecutive_failures
+                < _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+            ):
+                return
+            if await _abandon_durable_http_bridge_continuity(self, session):
+                await self._retire_stale_pending_http_bridge_session(
+                    session,
+                    detail="repeated_zero_event_idle_timeout",
+                    response_events_seen=0,
+                    retired_request_count=0,
+                )
 
         async def startup_continuity_cooldown_terminal_event() -> str | None:
             if (
@@ -3799,15 +3867,16 @@ class _HTTPBridgeStreamingMixin:
             if retry_cooldown_seconds <= 0:
                 return None
             if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
-                stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                stream_idle_timeout_total.labels(surface="http_bridge_eventless").inc()
             _record_continuity_fail_closed(
                 surface="http_bridge",
                 reason="retry_circuit_cooldown_continuity_bound",
                 previous_response_id=request_state.previous_response_id,
                 session_id=downstream_turn_state or request_state.session_id,
             )
+            mark_bridge_eventless_failure()
             logger.info(
-                "HTTP bridge stream idle timeout fail-closed before submit without safe replay "
+                "HTTP bridge eventless timeout fail-closed before submit without safe replay "
                 "request_id=%s retry_after_seconds=%.1f",
                 request_state.request_id,
                 retry_cooldown_seconds,
@@ -3831,9 +3900,8 @@ class _HTTPBridgeStreamingMixin:
                 raise ProxyResponseError(
                     503,
                     openai_error(
-                        "upstream_request_timeout",
-                        "HTTP responses session bridge is cooling down after repeated upstream "
-                        "timeouts; retry shortly.",
+                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                        _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
                         error_type="server_error",
                     ),
                     retry_after_seconds=max(1, math.ceil(retry_cooldown_seconds)),
@@ -3847,8 +3915,8 @@ class _HTTPBridgeStreamingMixin:
                     )
                     if request_state.durable_owner_dead
                     else response_failed_event(
-                        "stream_idle_timeout",
-                        "Upstream did not respond within the keepalive window",
+                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                        _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
                         response_id=_websocket_downstream_response_id(request_state),
                     ),
                 )
@@ -3962,15 +4030,16 @@ class _HTTPBridgeStreamingMixin:
             and event_queue.empty()
         ):
             if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
-                stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                stream_idle_timeout_total.labels(surface="http_bridge_eventless").inc()
             _record_continuity_fail_closed(
                 surface="http_bridge",
                 reason="retry_circuit_cooldown_continuity_bound",
                 previous_response_id=request_state.previous_response_id,
                 session_id=downstream_turn_state or request_state.session_id,
             )
+            mark_bridge_eventless_failure()
             logger.info(
-                "HTTP bridge stream idle timeout fail-closed at startup without safe replay "
+                "HTTP bridge eventless timeout fail-closed at startup without safe replay "
                 "request_id=%s retry_after_seconds=%.1f",
                 request_state.request_id,
                 initial_retry_cooldown_seconds,
@@ -3984,8 +4053,8 @@ class _HTTPBridgeStreamingMixin:
                     )
                     if request_state.durable_owner_dead
                     else response_failed_event(
-                        "stream_idle_timeout",
-                        "Upstream did not respond within the keepalive window",
+                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                        _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
                         response_id=_websocket_downstream_response_id(request_state),
                     ),
                 )
@@ -4008,9 +4077,8 @@ class _HTTPBridgeStreamingMixin:
                 raise ProxyResponseError(
                     503,
                     openai_error(
-                        "upstream_request_timeout",
-                        "HTTP responses session bridge is cooling down after repeated upstream "
-                        "timeouts; retry shortly.",
+                        _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                        _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
                         error_type="server_error",
                     ),
                     retry_after_seconds=max(1, math.ceil(initial_retry_cooldown_seconds)),
@@ -4106,13 +4174,27 @@ class _HTTPBridgeStreamingMixin:
                         or request_state.response_event_count > 0
                         or request_state.latency_response_created_ms is not None
                     )
+                    # Before response.created the downstream queue is silent by
+                    # design, so stream_idle_timeout_seconds does not describe
+                    # this phase. Use the named settings-derived pre-response
+                    # budget (aligned with the owner-side stuck gate) instead of
+                    # the implicit _STREAM_KEEPALIVE_MAX_COUNT * interval
+                    # product that used to expire at ~60s under any settings.
+                    eventless_budget_seconds = _http_bridge_eventless_budget_seconds(
+                        settings,
+                        fallback_seconds=keepalive_interval * stream_keepalive_max_count,
+                    )
                     max_keepalive_count = (
                         max(
                             stream_keepalive_max_count,
                             math.ceil(max(0.001, stream_idle_timeout_seconds) / keepalive_interval),
                         )
                         if response_started
-                        else stream_keepalive_max_count
+                        else _http_bridge_eventless_max_keepalive_count(
+                            settings,
+                            keepalive_interval_seconds=keepalive_interval,
+                            floor_count=stream_keepalive_max_count,
+                        )
                     )
                     wait_timeout = keepalive_interval
                     if circuit_keepalive_waiting:
@@ -4223,7 +4305,7 @@ class _HTTPBridgeStreamingMixin:
                                             yield keepalive_event
                                         continue
                                     if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
-                                        stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                                        stream_idle_timeout_total.labels(surface="http_bridge_eventless").inc()
                                     _record_continuity_fail_closed(
                                         surface="http_bridge",
                                         reason=(
@@ -4234,8 +4316,9 @@ class _HTTPBridgeStreamingMixin:
                                         previous_response_id=request_state.previous_response_id,
                                         session_id=downstream_turn_state or request_state.session_id,
                                     )
+                                    mark_bridge_eventless_failure()
                                     logger.info(
-                                        "HTTP bridge stream idle timeout fail-closed without safe replay "
+                                        "HTTP bridge eventless timeout fail-closed without safe replay "
                                         "request_id=%s retry_after_seconds=%.1f continuity_bound=%s",
                                         request_state.request_id,
                                         retry_cooldown_seconds,
@@ -4259,8 +4342,8 @@ class _HTTPBridgeStreamingMixin:
                                             )
                                             if request_state.durable_owner_dead
                                             else response_failed_event(
-                                                "stream_idle_timeout",
-                                                "Upstream did not respond within the keepalive window",
+                                                _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                                                _HTTP_BRIDGE_EVENTLESS_COOLDOWN_MESSAGE,
                                                 response_id=downstream_response_id,
                                             ),
                                         )
@@ -4283,9 +4366,10 @@ class _HTTPBridgeStreamingMixin:
                                                 yield keepalive_event
                                             continue
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
-                                            stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                                            stream_idle_timeout_total.labels(surface="http_bridge_eventless").inc()
+                                        mark_bridge_eventless_failure()
                                         logger.info(
-                                            "HTTP bridge stream idle timeout during retry circuit cooldown "
+                                            "HTTP bridge eventless timeout during retry circuit cooldown "
                                             "request_id=%s retry_after_seconds=%.1f remaining_budget_seconds=%.1f",
                                             request_state.request_id,
                                             retry_cooldown_seconds,
@@ -4302,8 +4386,9 @@ class _HTTPBridgeStreamingMixin:
                                             cast(
                                                 Mapping[str, JsonValue],
                                                 response_failed_event(
-                                                    "stream_idle_timeout",
-                                                    "Upstream retry circuit cooldown exceeds the request budget",
+                                                    _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                                                    "HTTP responses session bridge retry cooldown "
+                                                    "exceeds the request budget",
                                                     response_id=downstream_response_id,
                                                 ),
                                             )
@@ -4363,26 +4448,28 @@ class _HTTPBridgeStreamingMixin:
                                             if keepalive_event is not None:
                                                 yield keepalive_event
                                             continue
-                                        await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(
-                                            session,
-                                            detail="stream_idle_timeout",
-                                            selection=timed_out_retry_circuit_attempt_selection,
+                                        await record_bridge_eventless_timeout_failure(
+                                            timed_out_retry_circuit_attempt_selection
                                         )
                                         if PROMETHEUS_AVAILABLE and stream_idle_timeout_total is not None:
-                                            stream_idle_timeout_total.labels(surface="http_bridge").inc()
+                                            stream_idle_timeout_total.labels(surface="http_bridge_eventless").inc()
+                                        mark_bridge_eventless_failure()
                                         logger.info(
-                                            "HTTP bridge stream idle timeout request_id=%s keepalive_count=%s "
-                                            "max_keepalive_count=%s",
+                                            "HTTP bridge eventless timeout request_id=%s keepalive_count=%s "
+                                            "max_keepalive_count=%s eventless_budget_seconds=%.1f "
+                                            "unmatched_upstream_liveness=%s",
                                             request_state.request_id,
                                             keepalive_count,
                                             max_keepalive_count,
+                                            eventless_budget_seconds,
+                                            session.unmatched_upstream_liveness_count,
                                         )
                                         yield format_sse_event(
                                             cast(
                                                 Mapping[str, JsonValue],
                                                 response_failed_event(
-                                                    "stream_idle_timeout",
-                                                    "Upstream did not respond within the keepalive window",
+                                                    _HTTP_BRIDGE_EVENTLESS_TIMEOUT_DETAIL,
+                                                    _HTTP_BRIDGE_EVENTLESS_TIMEOUT_MESSAGE,
                                                     response_id=downstream_response_id,
                                                 ),
                                             )
@@ -4463,7 +4550,10 @@ class _HTTPBridgeStreamingMixin:
                     ) = _build_rewritten_stream_response_failed_event(
                         response_id=_websocket_downstream_response_id(request_state),
                         error_code="stream_incomplete",
-                        error_message="Upstream websocket closed before response.completed",
+                        # Canonical public masking for an upstream
+                        # previous_response_not_found rejection (see
+                        # app.modules.proxy.api._mask_previous_response_not_found_error).
+                        error_message=PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
                     )
                 if (
                     not yielded_any
@@ -4477,7 +4567,7 @@ class _HTTPBridgeStreamingMixin:
                             request_state.error_http_status_override,
                             openai_error(
                                 "bridge_previous_response_not_found",
-                                "Upstream websocket closed before response.completed",
+                                PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
                             ),
                         )
                     raise ProxyResponseError(

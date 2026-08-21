@@ -551,6 +551,14 @@ class _HTTPBridgeSessionRegistryMixin:
                 )
                 if lookup.owner_instance_id == current_instance:
                     break
+                if lookup.owner_instance_id is None and claim_attempt == 0:
+                    # The lookup used to decide ``allow_takeover`` can race a
+                    # concurrent close/release. If the first claim lands after
+                    # ownership has already been cleared, retry once with the
+                    # forced epoch-advance path instead of treating an ownerless
+                    # row as a foreign replica.
+                    await asyncio.sleep(0)
+                    continue
                 if not allow_takeover or claim_attempt > 0:
                     break
                 if not _http_bridge_allow_durable_takeover(lookup):

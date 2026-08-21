@@ -19,11 +19,7 @@ async def _wait_for_settings_changed_audit_log(*, after_id: int | None = None, a
             filters = [AuditLog.action == "settings_changed"]
             if after_id is not None:
                 filters.append(AuditLog.id > after_id)
-            result = await session.execute(
-                select(AuditLog)
-                .where(*filters)
-                .order_by(AuditLog.id.desc())
-            )
+            result = await session.execute(select(AuditLog).where(*filters).order_by(AuditLog.id.desc()))
             row = result.scalars().first()
             if row is not None:
                 return row

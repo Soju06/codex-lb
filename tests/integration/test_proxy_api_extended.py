@@ -2995,6 +2995,19 @@ async def test_iter_source_sse_event_blocks_preserves_crlf_and_cr_terminators():
 
 
 @pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_preserves_mixed_lf_cr_terminators():
+    async def body():
+        yield b'data: {"type":"response.completed","response":{"id":"resp_lf_cr"}}\n\r'
+        yield b'data: {"type":"response.failed"}\n\r\n'
+
+    blocks = [block async for block in proxy_api_module._iter_source_sse_event_blocks(body())]
+    assert blocks == [
+        'data: {"type":"response.completed","response":{"id":"resp_lf_cr"}}\n\r',
+        'data: {"type":"response.failed"}\n\r\n',
+    ]
+
+
+@pytest.mark.asyncio
 async def test_iter_source_sse_event_blocks_dispatches_cr_only_without_waiting():
     release_next = asyncio.Event()
     closed = asyncio.Event()

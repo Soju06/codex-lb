@@ -1150,13 +1150,41 @@ def _remaining_total_timeout(timeout_seconds: float | None, started_at: float, n
     return max(0.001, timeout_seconds - max(0.0, now - started_at))
 
 
-def _find_sse_separator(buffer: bytes | bytearray, start: int = 0) -> tuple[int, int] | None:
-    separators = (b"\r\n\r\n", b"\n\n", b"\r\r")
-    positions = [(buffer.find(separator, start), len(separator)) for separator in separators]
-    valid_positions = [position for position in positions if position[0] >= 0]
-    if not valid_positions:
+def _sse_line_ending_len(buffer: bytes | bytearray, index: int) -> int | None:
+    """Return the length of an SSE line ending at ``index``, or ``None``.
+
+    Only CR, LF, and CRLF count as line boundaries. CRLF is one ending.
+    """
+    if index >= len(buffer):
         return None
-    return min(valid_positions, key=lambda item: item[0])
+    if buffer[index] == 0x0D:
+        if index + 1 < len(buffer) and buffer[index + 1] == 0x0A:
+            return 2
+        return 1
+    if buffer[index] == 0x0A:
+        return 1
+    return None
+
+
+def _find_sse_separator(buffer: bytes | bytearray, start: int = 0) -> tuple[int, int] | None:
+    """Find the earliest SSE blank-line separator in ``buffer``.
+
+    A blank line is two consecutive SSE line endings (CR / LF / CRLF), including
+    mixed pairs such as ``\\n\\r`` and ``\\n\\r\\n``. Returns
+    ``(index, separator_len)`` where ``index`` is the start of the first ending.
+    """
+    index = max(0, start)
+    length = len(buffer)
+    while index < length:
+        first = _sse_line_ending_len(buffer, index)
+        if first is None:
+            index += 1
+            continue
+        second = _sse_line_ending_len(buffer, index + first)
+        if second is not None:
+            return (index, first + second)
+        index += first
+    return None
 
 
 def _pop_sse_event(buffer: bytearray) -> bytes | None:

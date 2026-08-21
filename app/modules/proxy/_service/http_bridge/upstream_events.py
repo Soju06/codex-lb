@@ -382,6 +382,7 @@ async def _update_http_bridge_operation_state(
                         request_state, "previous_response_id", None
                     )
                     parent_turns: list[Any] = []
+                    parent_transcript_available = not bool(parent_response_id)
                     if request_text:
                         try:
                             if parent_response_id:
@@ -391,7 +392,7 @@ async def _update_http_bridge_operation_state(
                                     None,
                                 )
                                 if callable(get_transcript):
-                                    parent_turns = await get_transcript(
+                                    resolved_parent_turns = await get_transcript(
                                         response_id=parent_response_id,
                                         max_turns=int(
                                             getattr(
@@ -407,26 +408,31 @@ async def _update_http_bridge_operation_state(
                                                 8 * 1024 * 1024,
                                             )
                                         ),
-                                    ) or []
-                            snapshot = build_replay_input_snapshot(
-                                parent_turns,
-                                request_text=request_text,
-                                response_output_items_json=response_output_items_json,
-                                max_input_items=int(
-                                    getattr(
-                                        _service_get_settings(),
-                                        "http_responses_session_bridge_complete_transcript_max_input_items",
-                                        4096,
                                     )
-                                ),
-                                max_bytes=int(
-                                    getattr(
-                                        _service_get_settings(),
-                                        "http_responses_session_bridge_complete_transcript_max_bytes",
-                                        8 * 1024 * 1024,
-                                    )
-                                ),
-                            )
+                                    parent_turns = resolved_parent_turns or []
+                                    parent_transcript_available = bool(parent_turns)
+                            if parent_transcript_available:
+                                snapshot = build_replay_input_snapshot(
+                                    parent_turns,
+                                    request_text=request_text,
+                                    response_output_items_json=response_output_items_json,
+                                    max_input_items=int(
+                                        getattr(
+                                            _service_get_settings(),
+                                            "http_responses_session_bridge_complete_transcript_max_input_items",
+                                            4096,
+                                        )
+                                    ),
+                                    max_bytes=int(
+                                        getattr(
+                                            _service_get_settings(),
+                                            "http_responses_session_bridge_complete_transcript_max_bytes",
+                                            8 * 1024 * 1024,
+                                        )
+                                    ),
+                                )
+                            else:
+                                snapshot = None
                         except Exception:
                             snapshot = None
                             logger.warning(

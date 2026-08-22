@@ -32217,13 +32217,16 @@ async def test_direct_websocket_rejects_conflicting_previous_response_and_file_o
 ) -> None:
     settings = _make_proxy_settings()
     settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
-    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    release_reservation = AsyncMock(wraps=service._release_websocket_request_state_reservation)
     previous_owner = _make_account("acc-ws-previous-owner")
     file_owner = _make_account("acc-ws-file-owner")
     connect = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=file_owner.id))
     monkeypatch.setattr(
         service,
@@ -32249,8 +32252,18 @@ async def test_direct_websocket_rejects_conflicting_previous_response_and_file_o
         openai_cache_affinity=False,
         api_key=None,
     )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
     connect.assert_not_awaited()
+    release_reservation.assert_awaited_once()
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "continuity_owner_conflict"
+    assert request_logs.calls[0]["error_message"] == (
+        "Account-owned continuity sources conflict (existing bridge or file, previous response); "
+        "retry the logical turn."
+    )
+    assert request_logs.calls[0]["account_id"] is None
     assert len(downstream.sent_text) == 1
     event = json.loads(downstream.sent_text[0])
     assert event["type"] == "response.failed"
@@ -33198,12 +33211,24 @@ async def test_proxy_responses_websocket_previous_response_owner_lookup_failure_
     request_logs = _RequestLogsRecorder()
     request_logs.lookup_error = RuntimeError("lookup unavailable")
     service = proxy_service.ProxyService(_repo_factory(request_logs))
+    release_reservation = AsyncMock(wraps=service._release_websocket_request_state_reservation)
+    api_key = _make_api_key_data("key_ws_owner_lookup_failure")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_ws_owner_lookup_failure",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_usage_reservation = AsyncMock()
 
     settings = _make_proxy_settings()
     settings.stream_idle_timeout_seconds = 300.0
     settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", AsyncMock(return_value=reservation))
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_usage_reservation)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
 
     class _FakeDownstreamWebSocket:
         def __init__(self, request_text: str) -> None:
@@ -33256,10 +33281,18 @@ async def test_proxy_responses_websocket_previous_response_owner_lookup_failure_
         {"session_id": "sid_owner_lookup_failure"},
         codex_session_affinity=False,
         openai_cache_affinity=False,
-        api_key=None,
+        api_key=api_key,
     )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
-    assert request_logs.lookup_calls == [("resp_prev_lookup_failure", None, "sid_owner_lookup_failure")]
+    assert request_logs.lookup_calls == [("resp_prev_lookup_failure", api_key.id, "sid_owner_lookup_failure")]
+    release_reservation.assert_awaited_once()
+    release_usage_reservation.assert_awaited_once_with(reservation)
+    assert len(request_logs.calls) == 1
+    assert request_logs.calls[0]["status"] == "error"
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["error_message"] == "Previous response owner lookup failed; retry later."
+    assert request_logs.calls[0]["account_id"] is None
     assert len(downstream.sent_text) == 1
     payload = json.loads(downstream.sent_text[0])
     assert payload["type"] == "response.failed"
@@ -33343,7 +33376,27 @@ async def test_proxy_responses_websocket_masks_owner_lookup_previous_response_no
         openai_cache_affinity=False,
         api_key=None,
     )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
+    assert len(request_logs.calls) == 1
+    failure_log = request_logs.calls[0]
+    assert failure_log["status"] == "error"
+    assert failure_log["error_code"] == "stream_incomplete"
+    assert failure_log["error_message"] == "Upstream websocket closed before response.completed"
+    assert failure_log["account_id"] is None
+    assert failure_log["failure_phase"] == "upstream"
+    assert failure_log["failure_detail"] == (
+        "previous_response_not_found "
+        "previous_response_source=client_supplied "
+        "fresh_replay_available=false "
+        "owner_lookup_source=unknown "
+        "owner_lookup_outcome=unknown "
+        "previous_response_age_seconds=unknown "
+        "same_session=unknown"
+    )
+    assert failure_log["upstream_error_code"] == "invalid_request_error"
+    assert "resp_prev_owner_missing" not in str(failure_log["error_message"])
+    assert failure_log["error_code"] != "invalid_request_error"
     assert len(downstream.sent_text) == 1
     assert "invalid_request_error" not in downstream.sent_text[0]
     assert "resp_prev_owner_missing" not in downstream.sent_text[0]
@@ -33360,12 +33413,14 @@ async def test_proxy_responses_websocket_masks_owner_lookup_previous_response_no
 async def test_proxy_responses_websocket_masks_prepare_previous_response_not_found(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
+    release_reservation = AsyncMock(wraps=service._release_websocket_request_state_reservation)
 
     settings = _make_proxy_settings()
     settings.stream_idle_timeout_seconds = 300.0
     settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service, "_release_websocket_request_state_reservation", release_reservation)
 
     class _FakeDownstreamWebSocket:
         def __init__(self, request_text: str) -> None:
@@ -33421,7 +33476,10 @@ async def test_proxy_responses_websocket_masks_prepare_previous_response_not_fou
         openai_cache_affinity=False,
         api_key=None,
     )
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
 
+    release_reservation.assert_not_awaited()
+    assert request_logs.calls == []
     assert len(downstream.sent_text) == 1
     assert "previous_response_not_found" not in downstream.sent_text[0]
     assert "resp_missing_prepare" not in downstream.sent_text[0]

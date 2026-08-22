@@ -14,6 +14,8 @@
 - [x] 2.3 Return canonical `previous_response_not_found` for abandoned
       continuations without recovery dispatch.
 - [x] 2.4 Add structured logs and a low-cardinality abandonment counter.
+- [x] 2.5 Keep protected-operation sweep predicates database-safe and page
+      oversized protection snapshots without truncating them.
 
 ## 3. Verification
 
@@ -25,3 +27,5 @@
 - [x] 3.3 Add heartbeat maintenance coverage and retention coverage for the
       new terminal state.
 - [x] 3.4 Run focused tests, Ruff/type checks, and strict OpenSpec validation.
+- [x] 3.5 Cover oversized protection snapshots while preserving cleanup of
+      unrelated stale operations.

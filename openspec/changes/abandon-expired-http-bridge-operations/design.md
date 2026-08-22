@@ -19,6 +19,13 @@ one replica cannot abandon work that another replica still owns. The sweep is
 therefore conservative: it may leave a stale row until the next pass, but it
 cannot turn a live owner or pending request into a retryable duplicate.
 
+The pending-operation protection snapshot is bounded before it is rendered as
+an expanding database predicate. If the snapshot exceeds the repository's
+database-safe bind limit, the sweep reads bounded candidate pages and filters
+the full protection set in memory rather than truncating it. This preserves
+every protected operation while still allowing unrelated stale rows to
+converge.
+
 ## Goals / Non-Goals
 
 **Goals:**

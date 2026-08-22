@@ -37,6 +37,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay_key
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
+    _PROTECTED_OPERATION_ID_SAFE_LIMIT,
     DurableBridgeAliasRegistration,
     DurableBridgeOperationEventInput,
     DurableBridgeRepository,
@@ -1651,6 +1652,77 @@ async def test_stale_operation_sweep_protects_live_owner_and_local_pending_id(
         assert expired_operation.state == "abandoned"
         assert live_operation.state == "acknowledged"
         assert protected_operation.state == "acknowledged"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_operation_sweep_bounds_oversized_protection_snapshot(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-oversized-protection",
+            lease_ttl_seconds=1.0,
+            session_key_value="sid-operation-oversized-protection",
+        )
+        fingerprint = durable_bridge_hash("operation-oversized-protection")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        unprotected_fingerprint = durable_bridge_hash("operation-oversized-unprotected")
+        unprotected_operation_id = durable_bridge_operation_id(claim.id, unprotected_fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-oversized-protection",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert await repository.record_operation(
+            operation_id=unprotected_operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-oversized-protection",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=unprotected_fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        stale_at = utcnow() - timedelta(hours=3)
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id.in_((operation_id, unprotected_operation_id)))
+            .values(state="acknowledged", updated_at=stale_at)
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(owner_instance_id=None, lease_expires_at=None)
+        )
+        await session.commit()
+
+        protected_ids = {
+            operation_id,
+            *(f"synthetic-protected-{index}" for index in range(_PROTECTED_OPERATION_ID_SAFE_LIMIT)),
+        }
+        assert len(protected_ids) > _PROTECTED_OPERATION_ID_SAFE_LIMIT
+        abandoned = await repository.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+            protected_operation_ids=protected_ids,
+        )
+        assert len(abandoned) == 1
+        assert abandoned[0].source_state == "acknowledged"
+        protected_operation = await repository.get_operation(operation_id=operation_id)
+        unprotected_operation = await repository.get_operation(operation_id=unprotected_operation_id)
+        assert protected_operation is not None
+        assert unprotected_operation is not None
+        assert protected_operation.state == "acknowledged"
+        assert unprotected_operation.state == "abandoned"
     finally:
         await session.close()
 

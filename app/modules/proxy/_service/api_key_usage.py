@@ -413,16 +413,15 @@ class _ApiKeyUsageMixin:
                 ),
                 name=f"proxy-stream-api-key-fallback-{request_id}",
             )
-            cancellation_pending = False
             while not fallback_task.done():
                 try:
                     await asyncio.shield(fallback_task)
                 except asyncio.CancelledError:
-                    cancellation_pending = True
-            settled = fallback_task.result()
-            if cancellation_pending:
-                return False
-            return settled
+                    # Keep waiting for the owned fallback. Cancellation is not
+                    # a failed release; retry only when the fallback itself is
+                    # unconfirmed.
+                    continue
+            return fallback_task.result()
 
         async def _settle_once() -> bool:
             try:
@@ -446,8 +445,7 @@ class _ApiKeyUsageMixin:
                 return True
             except asyncio.CancelledError:
                 if wait_for_settlement:
-                    await _release_ordering_sensitive_fallback()
-                    return False
+                    return await _release_ordering_sensitive_fallback()
                 raise
             except Exception:
                 logger.warning(
@@ -478,7 +476,10 @@ class _ApiKeyUsageMixin:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             request_id=request_id,
-            release_on_failure=not wait_for_settlement,
+            # Ordering-sensitive settlement performs one immediate fallback,
+            # but the tracker must still own retrying release if both attempts
+            # fail after ownership has transferred from the request finalizer.
+            release_on_failure=True,
         )
         if wait_for_settlement:
             # Ordering-sensitive callers (websocket account-health paths) must

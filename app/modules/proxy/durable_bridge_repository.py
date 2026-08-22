@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -65,6 +65,7 @@ _PURGE_CLOSED_BATCH_SIZE = 500
 # same-row claim contention.
 _CLAIM_CAS_ATTEMPTS = 5
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
+_ABANDONMENT_LOG_AGE_CAP_SECONDS = 30 * 24 * 60 * 60
 
 
 # Sentinel: rebind continuity clears without an anchor fence (legacy callers).
@@ -213,6 +214,16 @@ class DurableBridgeOperationSnapshot:
     rebound_from_account_id: str | None = None
     rebound_from_model: str | None = None
     rebound_from_parent_response_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeOperationAbandonment:
+    """Low-cardinality evidence for one operation abandoned by maintenance."""
+
+    source_state: str
+    age_seconds: float
+    owner_lease_outcome: str
+    session_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1715,6 +1726,13 @@ class DurableBridgeRepository:
                 rebound_from_account_id = operation.account_id if operation.state == "failed" else None
                 rebound_from_model = operation.model if operation.state == "failed" else None
                 rebound_from_parent_response_id = operation.parent_response_id if operation.state == "failed" else None
+                if operation.state == "abandoned":
+                    # Abandonment is a terminal duplicate-suppression fence.
+                    # A later continuation must receive the public recovery
+                    # signal rather than rebinding or resetting this row.
+                    snapshot = _to_operation_snapshot(operation)
+                    await self._session.rollback()
+                    return snapshot
                 if recovery_attempt_consumed:
                     # A REPLAYED recovery checkpoint is immutable. Return the
                     # existing row for safe transcript replay or fail-closed
@@ -1877,6 +1895,97 @@ class DurableBridgeRepository:
         )
         return _to_operation_snapshot(operation) if operation is not None else None
 
+    async def abandon_stale_operations(
+        self,
+        *,
+        cutoff: datetime,
+        protected_operation_ids: Collection[str] = (),
+        batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
+    ) -> list[DurableBridgeOperationAbandonment]:
+        """Fence stale ownerless ambiguous operations without replaying them.
+
+        The candidate read and the conditional update run in one writer
+        transaction. PostgreSQL locks the operation and owning session while
+        SQLite is serialized by ``sqlite_writer_section``. The final update
+        still compares every value that can change the abandonment decision,
+        so a recovery claim or owner renewal that wins the race leaves the row
+        untouched.
+        """
+        now = utcnow()
+        protected_ids = tuple(str(operation_id) for operation_id in protected_operation_ids if operation_id)
+        ambiguous_states = ("unknown", "acknowledged")
+        stale_owner = or_(
+            HttpBridgeSessionRecord.owner_instance_id.is_(None),
+            HttpBridgeSessionRecord.lease_expires_at.is_(None),
+            HttpBridgeSessionRecord.lease_expires_at <= now,
+        )
+        candidate_filter = [
+            HttpBridgeOperationRecord.state.in_(ambiguous_states),
+            HttpBridgeOperationRecord.updated_at < cutoff,
+            stale_owner,
+        ]
+        if protected_ids:
+            candidate_filter.append(~HttpBridgeOperationRecord.operation_id.in_(protected_ids))
+
+        abandoned: list[DurableBridgeOperationAbandonment] = []
+        async with sqlite_writer_section():
+            selected = await self._session.execute(
+                select(
+                    HttpBridgeOperationRecord,
+                    HttpBridgeSessionRecord.owner_instance_id,
+                    HttpBridgeSessionRecord.owner_epoch,
+                )
+                .join(
+                    HttpBridgeSessionRecord,
+                    HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                )
+                .where(*candidate_filter)
+                .order_by(HttpBridgeOperationRecord.updated_at.asc())
+                .limit(batch_size)
+                .with_for_update()
+            )
+            candidates = list(selected.all())
+            for operation, owner_instance_id, owner_epoch in candidates:
+                source_state = str(operation.state)
+                candidate_updated_at = operation.updated_at
+                owner_predicates = [
+                    HttpBridgeSessionRecord.id == operation.session_id,
+                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
+                    or_(
+                        HttpBridgeSessionRecord.lease_expires_at.is_(None),
+                        HttpBridgeSessionRecord.lease_expires_at <= now,
+                    ),
+                ]
+                if owner_instance_id is None:
+                    owner_predicates.append(HttpBridgeSessionRecord.owner_instance_id.is_(None))
+                    owner_lease_outcome = "ownerless"
+                else:
+                    owner_predicates.append(HttpBridgeSessionRecord.owner_instance_id == owner_instance_id)
+                    owner_lease_outcome = "expired"
+                compare_and_set = await self._session.execute(
+                    update(HttpBridgeOperationRecord)
+                    .where(
+                        HttpBridgeOperationRecord.operation_id == operation.operation_id,
+                        HttpBridgeOperationRecord.state == source_state,
+                        HttpBridgeOperationRecord.updated_at == candidate_updated_at,
+                        exists(select(HttpBridgeSessionRecord.id).where(*owner_predicates)),
+                    )
+                    .values(state="abandoned", updated_at=now)
+                )
+                if not getattr(compare_and_set, "rowcount", 0):
+                    continue
+                age_seconds = max(0.0, (to_utc_naive(now) - to_utc_naive(candidate_updated_at)).total_seconds())
+                abandoned.append(
+                    DurableBridgeOperationAbandonment(
+                        source_state=source_state,
+                        age_seconds=min(age_seconds, float(_ABANDONMENT_LOG_AGE_CAP_SECONDS)),
+                        owner_lease_outcome=owner_lease_outcome,
+                        session_hash=durable_bridge_hash(operation.session_id)[:16],
+                    )
+                )
+            await self._session.commit()
+        return abandoned
+
     async def reset_operation_event_spool(
         self,
         *,
@@ -1901,11 +2010,11 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
-                    HttpBridgeOperationRecord.state.not_in(("completed", "incomplete")),
+                    HttpBridgeOperationRecord.state.not_in(("completed", "incomplete", "abandoned")),
                 )
                 .with_for_update()
             )
-            if owner_exists is None or operation is None:
+            if owner_exists is None or operation is None or operation.state == "abandoned":
                 await self._session.rollback()
                 return False
             await self._delete_operation_spool_material((operation_id,))
@@ -1952,7 +2061,7 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            if owner_exists is None or operation is None:
+            if owner_exists is None or operation is None or operation.state == "abandoned":
                 await self._session.rollback()
                 return False
             if max_recovery_dispatches is not None and operation.recovery_dispatch_count >= max_recovery_dispatches:
@@ -2003,7 +2112,7 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            if owner_exists is None or operation is None:
+            if owner_exists is None or operation is None or operation.state == "abandoned":
                 await self._session.rollback()
                 return False
             if operation.state == "submitted":
@@ -2231,7 +2340,7 @@ class DurableBridgeRepository:
         delete transaction so an in-flight operation cannot lose its
         duplicate-suppression ledger between selection and deletion.
         """
-        terminal_states = ("completed", "incomplete", "failed")
+        terminal_states = ("completed", "incomplete", "failed", "abandoned")
         # UNKNOWN is an ambiguous, still-live operation while its owner lease
         # is active. Treat it like the other nonterminal states so retention
         # cannot delete the duplicate-suppression fence during a long-running
@@ -2497,7 +2606,7 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            if owner_exists is None or operation is None:
+            if owner_exists is None or operation is None or operation.state == "abandoned":
                 await self._session.rollback()
                 return False
             event_size = len(event_text.encode("utf-8"))
@@ -2559,7 +2668,7 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            if owner_exists is None or operation is None:
+            if owner_exists is None or operation is None or operation.state == "abandoned":
                 await self._session.rollback()
                 return False
             event_size = len(event_text.encode("utf-8"))
@@ -2637,7 +2746,7 @@ class DurableBridgeRepository:
                 )
                 .with_for_update()
             )
-            if owner_exists is None or operation is None:
+            if owner_exists is None or operation is None or operation.state == "abandoned":
                 await self._session.rollback()
                 return False
             next_sequence = await self._session.scalar(
@@ -2819,6 +2928,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state != "abandoned",
                     HttpBridgeOperationRecord.recovery_dispatch_count == expected_recovery_dispatch_count,
                     or_(
                         and_(HttpBridgeOperationRecord.state == "acknowledged", acknowledged_response_matches),
@@ -2864,6 +2974,7 @@ class DurableBridgeRepository:
                 .where(
                     HttpBridgeOperationRecord.operation_id == operation_id,
                     HttpBridgeOperationRecord.session_id == session_id,
+                    HttpBridgeOperationRecord.state != "abandoned",
                 )
                 .values(**values)
             )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +19,7 @@ from app.modules.proxy.durable_bridge_repository import (
     REBIND_ANCHOR_UNFENCED,
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    DurableBridgeOperationAbandonment,
     DurableBridgeOperationEventInput,
     DurableBridgeOperationPurgeBatchResult,
     DurableBridgeOperationSnapshot,
@@ -649,6 +650,20 @@ class DurableBridgeSessionCoordinator:
                         get_settings(), "http_responses_session_bridge_operation_event_spool_max_bytes", 2 * 1024 * 1024
                     )
                 ),
+            )
+
+    async def abandon_stale_operations(
+        self,
+        *,
+        cutoff: datetime,
+        protected_operation_ids: Collection[str] = (),
+        batch_size: int = 500,
+    ) -> list[DurableBridgeOperationAbandonment]:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).abandon_stale_operations(
+                cutoff=cutoff,
+                protected_operation_ids=protected_operation_ids,
+                batch_size=batch_size,
             )
 
     async def get_replayable_transcript(

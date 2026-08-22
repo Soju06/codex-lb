@@ -399,6 +399,76 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
 
 
 @pytest.mark.asyncio
+async def test_submit_abandoned_operation_returns_full_history_recovery_without_upstream_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    send_text = AsyncMock()
+    session = _make_bridge_session(key_value="abandoned-operation")
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    session.durable_session_id = "durable-abandoned-operation"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-abandoned-operation",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        hard_continuity_anchor=True,
+        previous_response_id="resp-abandoned-parent",
+        request_text='{"type":"response.create","input":"retry"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    abandoned = SimpleNamespace(
+        operation_id="operation-abandoned",
+        session_id=session.durable_session_id,
+        state="abandoned",
+        created=False,
+        event_spool_complete=False,
+        response_id=None,
+    )
+    claim_unknown = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=abandoned),
+            get_operation=AsyncMock(return_value=abandoned),
+            record_operation=AsyncMock(return_value=abandoned),
+            claim_unknown_operation_for_recovery=claim_unknown,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_instance_id="instance-abandoned-operation",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-abandoned-operation",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["type"] == "invalid_request_error"
+    assert exc_info.value.payload["error"]["code"] == "previous_response_not_found"
+    assert exc_info.value.payload["error"]["param"] == "previous_response_id"
+    claim_unknown.assert_not_awaited()
+    send_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_submit_hard_turn_walks_race_path_chain_before_recording(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -34852,20 +34922,67 @@ async def test_prune_idle_http_bridge_sessions_is_a_noop_on_an_empty_registry() 
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_maintenance_runs_both_bridge_passes() -> None:
-    """The ring heartbeat is what makes these request-independent. Asserting the
-    sweep only through a direct call would still pass if the wiring were
-    removed, leaving the quiet-replica leak (issue #1354)."""
+async def test_stale_operation_maintenance_protects_canonical_detached_and_batched_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    canonical = _make_bridge_session(
+        key_value="stale-operation-canonical",
+        pending_requests=cast(Any, deque([SimpleNamespace(operation_id="op-canonical")])),
+    )
+    detached = _make_bridge_session(
+        key_value="stale-operation-detached",
+        pending_requests=cast(Any, deque([SimpleNamespace(operation_id="op-detached")])),
+    )
+    service._http_bridge_sessions[canonical.key] = canonical
+    service._http_bridge_detached_sessions[id(detached)] = detached
+    service._http_bridge_operation_event_batcher = cast(
+        Any,
+        SimpleNamespace(pending_operation_ids=AsyncMock(return_value={"op-batched"})),
+    )
+    abandon_stale_operations = AsyncMock(
+        return_value=[
+            SimpleNamespace(
+                source_state="unknown",
+                age_seconds=3600.0,
+                owner_lease_outcome="ownerless",
+                session_hash="sha256:session",
+            )
+        ]
+    )
+    service._durable_bridge = cast(Any, SimpleNamespace(abandon_stale_operations=abandon_stale_operations))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(http_responses_session_bridge_request_budget_seconds=120.0),
+    )
+
+    assert await service.abandon_stale_http_bridge_operations() == 1
+
+    abandon_stale_operations.assert_awaited_once()
+    assert abandon_stale_operations.await_args is not None
+    kwargs = abandon_stale_operations.await_args.kwargs
+    assert kwargs["protected_operation_ids"] == {"op-canonical", "op-detached", "op-batched"}
+    cutoff_age = (proxy_service.utcnow() - kwargs["cutoff"]).total_seconds()
+    assert 1799.0 <= cutoff_age <= 1801.0
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_maintenance_runs_all_bridge_passes() -> None:
+    """The ring heartbeat keeps ownership, operation, and socket cleanup live
+    even when a replica receives no request traffic."""
     from app.main import run_http_bridge_heartbeat_maintenance
 
     proxy_service_double = SimpleNamespace(
         reconcile_durable_http_bridge_ownership=AsyncMock(return_value=0),
+        abandon_stale_http_bridge_operations=AsyncMock(return_value=0),
         prune_idle_http_bridge_sessions=AsyncMock(return_value=0),
     )
 
     await run_http_bridge_heartbeat_maintenance(proxy_service_double)
 
     proxy_service_double.reconcile_durable_http_bridge_ownership.assert_awaited_once()
+    proxy_service_double.abandon_stale_http_bridge_operations.assert_awaited_once()
     proxy_service_double.prune_idle_http_bridge_sessions.assert_awaited_once()
 
 
@@ -34877,11 +34994,13 @@ async def test_heartbeat_maintenance_isolates_a_failing_pass() -> None:
 
     proxy_service_double = SimpleNamespace(
         reconcile_durable_http_bridge_ownership=AsyncMock(side_effect=RuntimeError("durable read failed")),
+        abandon_stale_http_bridge_operations=AsyncMock(return_value=0),
         prune_idle_http_bridge_sessions=AsyncMock(return_value=0),
     )
 
     await run_http_bridge_heartbeat_maintenance(proxy_service_double)
 
+    proxy_service_double.abandon_stale_http_bridge_operations.assert_awaited_once()
     proxy_service_double.prune_idle_http_bridge_sessions.assert_awaited_once()
 
 

@@ -1580,6 +1580,18 @@ class _HTTPBridgeRequestSubmitMixin:
                         "The recovery checkpoint was already consumed; retry the request.",
                     ),
                 )
+            if not operation.created and operation.state == "abandoned":
+                _record_continuity_fail_closed(
+                    surface="http_bridge",
+                    reason="abandoned_operation_full_history_recovery",
+                    previous_response_id=request_state.previous_response_id,
+                    session_id=request_state.session_id,
+                    upstream_error_code="previous_response_not_found",
+                )
+                raise ProxyResponseError(
+                    400,
+                    _http_bridge_client_full_history_recovery_error(),
+                )
             if not operation.created and not getattr(operation, "rebound", False):
                 if operation.state in {"completed", "incomplete"}:
                     if getattr(operation, "event_spool_complete", False):

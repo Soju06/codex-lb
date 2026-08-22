@@ -15,6 +15,12 @@ session owner instance, and owner epoch. A concurrent recovery claim, owner
 renewal/takeover, or status proof MUST win over abandonment. The operation row
 and all event history MUST remain available for normal retention. The proxy
 MUST NOT automatically resend or cancel the ambiguous upstream operation.
+The maintenance sweep MUST render no more than the repository's database-safe
+number of protected operation IDs in one expanding predicate. If the local
+protection snapshot exceeds that bound, the sweep MUST use bounded candidate
+pages and filter the full protection set without truncating it; every protected
+operation MUST remain unchanged while unrelated eligible operations MAY still
+transition.
 
 #### Scenario: stale ownerless operation is abandoned
 

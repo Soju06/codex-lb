@@ -65,6 +65,11 @@ _PURGE_CLOSED_BATCH_SIZE = 500
 # same-row claim contention.
 _CLAIM_CAS_ATTEMPTS = 5
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
+# Keep expanding ``IN`` predicates below the smallest supported SQLite bind
+# budget.  The bridge heartbeat can collect IDs from every pending request and
+# event-spool context, so the caller's protection snapshot is not inherently
+# bounded by this repository's batch size.
+_PROTECTED_OPERATION_ID_SAFE_LIMIT = _SESSION_ID_LOOKUP_CHUNK_SIZE
 _ABANDONMENT_LOG_AGE_CAP_SECONDS = 30 * 24 * 60 * 60
 
 
@@ -1905,14 +1910,22 @@ class DurableBridgeRepository:
         """Fence stale ownerless ambiguous operations without replaying them.
 
         The candidate read and the conditional update run in one writer
-        transaction. PostgreSQL locks the operation and owning session while
-        SQLite is serialized by ``sqlite_writer_section``. The final update
-        still compares every value that can change the abandonment decision,
-        so a recovery claim or owner renewal that wins the race leaves the row
+        transaction. PostgreSQL locks the operation and owning session on the
+        normal bounded-predicate path while SQLite is serialized by
+        ``sqlite_writer_section``. An oversized protection snapshot is read in
+        bounded pages without an expanding predicate; its final updates still
+        compare every value that can change the abandonment decision, so a
+        recovery claim or owner renewal that wins the race leaves the row
         untouched.
         """
         now = utcnow()
-        protected_ids = tuple(str(operation_id) for operation_id in protected_operation_ids if operation_id)
+        protected_ids = tuple(
+            dict.fromkeys(str(operation_id) for operation_id in protected_operation_ids if operation_id)
+        )
+        protected_id_set = frozenset(protected_ids)
+        # A large snapshot cannot be represented by one expanding ``NOT IN``
+        # predicate safely; the bounded-page path below filters it in memory.
+        use_bounded_protection = len(protected_ids) > _PROTECTED_OPERATION_ID_SAFE_LIMIT
         ambiguous_states = ("unknown", "acknowledged")
         stale_owner = or_(
             HttpBridgeSessionRecord.owner_instance_id.is_(None),
@@ -1924,27 +1937,62 @@ class DurableBridgeRepository:
             HttpBridgeOperationRecord.updated_at < cutoff,
             stale_owner,
         ]
-        if protected_ids:
+        if protected_ids and not use_bounded_protection:
             candidate_filter.append(~HttpBridgeOperationRecord.operation_id.in_(protected_ids))
 
         abandoned: list[DurableBridgeOperationAbandonment] = []
         async with sqlite_writer_section():
-            selected = await self._session.execute(
-                select(
-                    HttpBridgeOperationRecord,
-                    HttpBridgeSessionRecord.owner_instance_id,
-                    HttpBridgeSessionRecord.owner_epoch,
+            candidates = []
+            cursor: tuple[datetime, str] | None = None
+            page_size = min(batch_size, _PROTECTED_OPERATION_ID_SAFE_LIMIT) if use_bounded_protection else batch_size
+            while len(candidates) < batch_size:
+                page_filter = list(candidate_filter)
+                if cursor is not None:
+                    cursor_updated_at, cursor_operation_id = cursor
+                    page_filter.append(
+                        or_(
+                            HttpBridgeOperationRecord.updated_at > cursor_updated_at,
+                            and_(
+                                HttpBridgeOperationRecord.updated_at == cursor_updated_at,
+                                HttpBridgeOperationRecord.operation_id > cursor_operation_id,
+                            ),
+                        )
+                    )
+                statement = (
+                    select(
+                        HttpBridgeOperationRecord,
+                        HttpBridgeSessionRecord.owner_instance_id,
+                        HttpBridgeSessionRecord.owner_epoch,
+                    )
+                    .join(
+                        HttpBridgeSessionRecord,
+                        HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
+                    )
+                    .where(*page_filter)
+                    .order_by(
+                        HttpBridgeOperationRecord.updated_at.asc(),
+                        HttpBridgeOperationRecord.operation_id.asc(),
+                    )
+                    .limit(page_size)
                 )
-                .join(
-                    HttpBridgeSessionRecord,
-                    HttpBridgeSessionRecord.id == HttpBridgeOperationRecord.session_id,
-                )
-                .where(*candidate_filter)
-                .order_by(HttpBridgeOperationRecord.updated_at.asc())
-                .limit(batch_size)
-                .with_for_update()
-            )
-            candidates = list(selected.all())
+                if not use_bounded_protection:
+                    statement = statement.with_for_update()
+                selected = await self._session.execute(statement)
+                page = list(selected.all())
+                if not page:
+                    break
+                if use_bounded_protection:
+                    candidates.extend(row for row in page if str(row[0].operation_id) not in protected_id_set)
+                    if len(candidates) >= batch_size:
+                        candidates = candidates[:batch_size]
+                        break
+                    last_operation = page[-1][0]
+                    cursor = (last_operation.updated_at, str(last_operation.operation_id))
+                    if len(page) < page_size:
+                        break
+                else:
+                    candidates = page
+                    break
             for operation, owner_instance_id, owner_epoch in candidates:
                 source_state = str(operation.state)
                 candidate_updated_at = operation.updated_at

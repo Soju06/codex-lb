@@ -1,5 +1,5 @@
 import { Activity } from "lucide-react";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -11,6 +11,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -24,7 +25,6 @@ export type TelemetrySettingsProps = {
 export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
   const { t } = useTranslation();
   const [previewOpen, setPreviewOpen] = useState(false);
-  const previewInvokerRef = useRef<HTMLButtonElement>(null);
   const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent();
   // Building the snapshot is expensive, so the preview is fetched only once
   // the operator opens the dialog.
@@ -71,50 +71,39 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
               {t("settings.telemetry.collectedData.description")}
             </p>
           </div>
-          <Button
-            ref={previewInvokerRef}
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-8 text-xs"
-            disabled={!consent}
-            onClick={() => setPreviewOpen(true)}
-          >
-            {t("settings.telemetry.collectedData.view")}
-          </Button>
+          <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+            <DialogTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs"
+                disabled={!consent}
+              >
+                {t("settings.telemetry.collectedData.view")}
+              </Button>
+            </DialogTrigger>
+            {previewOpen ? (
+              <DialogContent className="sm:max-w-2xl">
+                <DialogHeader>
+                  <DialogTitle>{t("settings.telemetry.previewDialog.title")}</DialogTitle>
+                  <DialogDescription>
+                    {t("settings.telemetry.previewDialog.description")}
+                  </DialogDescription>
+                </DialogHeader>
+                {previewEnvelope ? (
+                  <TelemetryPayloadPreview preview={previewEnvelope} />
+                ) : telemetryPreviewQuery.error ? (
+                  <AlertMessage variant="error">{telemetryPreviewQuery.error.message}</AlertMessage>
+                ) : (
+                  <Skeleton className="h-64 w-full rounded-lg" />
+                )}
+                <DialogFooter showCloseButton />
+              </DialogContent>
+            ) : null}
+          </Dialog>
         </div>
       </div>
-
-      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        {previewOpen ? (
-          <DialogContent
-            className="sm:max-w-2xl"
-            onCloseAutoFocus={(event) => {
-              const invoker = previewInvokerRef.current;
-              if (!invoker?.isConnected) {
-                return;
-              }
-              event.preventDefault();
-              invoker.focus({ preventScroll: true });
-            }}
-          >
-            <DialogHeader>
-              <DialogTitle>{t("settings.telemetry.previewDialog.title")}</DialogTitle>
-              <DialogDescription>
-                {t("settings.telemetry.previewDialog.description")}
-              </DialogDescription>
-            </DialogHeader>
-            {previewEnvelope ? (
-              <TelemetryPayloadPreview preview={previewEnvelope} />
-            ) : telemetryPreviewQuery.error ? (
-              <AlertMessage variant="error">{telemetryPreviewQuery.error.message}</AlertMessage>
-            ) : (
-              <Skeleton className="h-64 w-full rounded-lg" />
-            )}
-            <DialogFooter showCloseButton />
-          </DialogContent>
-        ) : null}
-      </Dialog>
     </section>
   );
 }

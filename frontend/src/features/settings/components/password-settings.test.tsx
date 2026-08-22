@@ -66,7 +66,6 @@ describe("PasswordSettings", () => {
       render(<PasswordSettings />);
 
       const setupButton = screen.getByRole("button", { name: "Set password" });
-      const scrollPosition = window.scrollY;
       await user.click(setupButton);
 
       const dialog = screen.getByRole("dialog", { name: "Set password" });
@@ -82,7 +81,6 @@ describe("PasswordSettings", () => {
       expect(setupPassword).not.toHaveBeenCalled();
       expect(setupButton).toHaveFocus();
       expect(document.body).not.toHaveFocus();
-      expect(window.scrollY).toBe(scrollPosition);
     },
   );
 

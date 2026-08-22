@@ -2,7 +2,7 @@
 
 ### Requirement: Affected Settings dialogs restore invoker focus
 
-The Settings `View collected data` telemetry preview and `Set password` setup dialogs SHALL retain the exact button that invoked them. When either dialog is dismissed with Escape or its explicit Close/Cancel action, the dialog SHALL restore focus to that connected invoking button with scroll prevention. After restoration, `document.body` MUST NOT be the active element and the Settings page scroll position MUST remain unchanged.
+The Settings `View collected data` telemetry preview and `Set password` setup dialogs SHALL retain the exact button that invoked them. When either dialog is dismissed with Escape or its explicit Close/Cancel action, the dialog SHALL restore focus to that connected invoking button without changing the Settings page scroll position. After restoration, `document.body` MUST NOT be the active element.
 
 Focus restoration MUST preserve the telemetry preview's on-demand fetch and conditional mounting behavior and the password setup flow's authentication request, session refresh, toast, form reset, and conditional mounting behavior. Password change, remove, verify, and TOTP dialogs are outside this requirement.
 

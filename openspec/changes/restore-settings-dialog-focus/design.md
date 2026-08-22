@@ -23,16 +23,15 @@ The change is limited to those two Settings paths. Telemetry preview fetching re
 
 ## Decisions
 
-1. **Retain each invoker with a local button ref.** `TelemetrySettings` owns the telemetry button ref. `PasswordSettings` owns the setup button ref and passes it only to `PasswordSetupDialog`, because the parent owns the conditional action button. This records the exact element rather than looking it up later by label or selector.
+1. **Use each dialog's real invoker as a Radix `DialogTrigger`.** Both buttons render through `DialogTrigger asChild`, so the dialog root registers the exact DOM element that opened it and Radix restores that element through its established close-auto-focus lifecycle. This matches the working trigger-backed Language menu instead of adding a second focus mechanism.
 
-2. **Restore during Radix's close-auto-focus lifecycle.** Each affected `DialogContent` uses `onCloseAutoFocus`. When the retained element is still connected, the handler prevents the fallback and calls `focus({ preventScroll: true })`. Restoring in this lifecycle avoids a timer or effect racing the focus scope teardown, and `preventScroll` preserves the operator's Settings position.
+2. **Keep controlled state and conditional content.** The telemetry trigger and conditionally rendered content share the existing `previewOpen` root, so the expensive preview query still starts only after opening. `PasswordSetupDialog` accepts its button as the trigger child at the existing action position; `activeDialog` remains the single controlled state, and dialog content/form cleanup still follows the existing open/close lifecycle.
 
-3. **Fall back when the invoker no longer exists.** The handler only prevents Radix's default when the retained element is connected. If successful password setup changes auth state and unmounts the setup action, the existing close behavior remains instead of focusing a detached node. Mutation, refresh, toast, and close ordering stay unchanged.
+3. **Do not duplicate focus handlers or broaden the shared primitive.** Native trigger registration removes the need for repeated `onCloseAutoFocus` callbacks, timers, DOM queries, or changes to `dialog.tsx` and `useFloatingLayerDismissGuard`. Other controlled dialogs retain their existing behavior.
 
-4. **Keep the fix local instead of changing the shared primitive.** Many dialogs already use real triggers or have different lifecycle needs. A shared default would broaden behavior beyond the two reproduced failures; duplicating the small close handler at these two ownership points is the narrower change.
+4. **Split proof by environment.** Focus identity and dismissal behavior are permanent component regressions. Scroll preservation is exercised in real Chromium on a nonzero Settings scroll position because jsdom has no layout-driven focus scrolling.
 
 ## Risks / Trade-offs
 
-- A future refactor that replaces either invoker must keep the ref attached; focused component tests guard the public focus behavior.
-- The no-scroll guarantee depends on browser support for `HTMLElement.focus({ preventScroll: true })`, which is supported by the dashboard's modern-browser target.
-- Successful password setup may remove the invoking button as auth state refreshes; in that case there is no connected exact target, so the guarded handler deliberately leaves the existing fallback behavior unchanged.
+- The trigger must remain mounted through Escape or explicit dismissal; both affected buttons do. Successful password setup can replace the setup action after session refresh, but that disappearing-trigger path is not one of the proven dismissal flows and keeps its existing auth lifecycle.
+- Radix focuses the registered trigger after teardown. Real-browser proof covers both dismissal methods at nonzero scroll positions so a future layout or focus change cannot be mistaken for jsdom behavior.

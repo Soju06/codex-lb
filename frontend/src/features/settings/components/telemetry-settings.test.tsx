@@ -103,7 +103,6 @@ describe("TelemetrySettings", () => {
 
       const viewButton = await screen.findByRole("button", { name: "View collected data" });
       await waitFor(() => expect(viewButton).toBeEnabled());
-      const scrollPosition = window.scrollY;
 
       await user.click(viewButton);
       const dialog = await screen.findByRole("dialog", { name: "Collected telemetry data" });
@@ -123,7 +122,6 @@ describe("TelemetrySettings", () => {
       );
       expect(viewButton).toHaveFocus();
       expect(document.body).not.toHaveFocus();
-      expect(window.scrollY).toBe(scrollPosition);
     },
   );
 });

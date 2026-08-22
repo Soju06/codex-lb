@@ -1,5 +1,5 @@
 import { KeyRound } from "lucide-react";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -24,11 +24,18 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
   const authenticated = useAuthStore((s) => s.authenticated);
 
   const [activeDialog, setActiveDialog] = useState<PasswordDialog>(null);
-  const setupInvokerRef = useRef<HTMLButtonElement>(null);
 
   const lock = disabled || !passwordManagementEnabled;
   const closeIfMatches = (dialog: PasswordDialog) => (open: boolean) => {
     if (!open && activeDialog === dialog) {
+      setActiveDialog(null);
+    }
+  };
+
+  const handleSetupOpenChange = (open: boolean) => {
+    if (open) {
+      setActiveDialog("setup");
+    } else if (activeDialog === "setup") {
       setActiveDialog(null);
     }
   };
@@ -93,27 +100,20 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
                 {t("settings.password.actions.loginToManage")}
               </Button>
             ) : !passwordRequired ? (
-              <Button
-                ref={setupInvokerRef}
-                type="button"
-                size="sm"
-                className="h-8 text-xs"
-                disabled={lock}
-                onClick={() => setActiveDialog("setup")}
+              <PasswordSetupDialog
+                open={activeDialog === "setup"}
+                onOpenChange={handleSetupOpenChange}
+                disabled={disabled}
               >
-                {t("settings.password.actions.set")}
-              </Button>
+                <Button type="button" size="sm" className="h-8 text-xs" disabled={lock}>
+                  {t("settings.password.actions.set")}
+                </Button>
+              </PasswordSetupDialog>
             ) : null}
           </div>
         </div>
       </div>
 
-      <PasswordSetupDialog
-        open={activeDialog === "setup"}
-        onOpenChange={closeIfMatches("setup")}
-        disabled={disabled}
-        returnFocusRef={setupInvokerRef}
-      />
       <PasswordChangeDialog
         open={activeDialog === "change"}
         onOpenChange={closeIfMatches("change")}

@@ -1201,6 +1201,10 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
+    transport_denial = await _websocket_upstream_transport_denial()
+    if transport_denial is not None:
+        await websocket.send_denial_response(transport_denial)
+        return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
@@ -1532,6 +1536,10 @@ async def v1_responses_websocket(
     )
     if denial is not None:
         await websocket.send_denial_response(denial)
+        return
+    transport_denial = await _websocket_upstream_transport_denial()
+    if transport_denial is not None:
+        await websocket.send_denial_response(transport_denial)
         return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
@@ -7715,6 +7723,34 @@ async def _validate_internal_bridge_api_key(
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),
         )
     return api_key, None
+
+
+async def _websocket_upstream_transport_denial() -> JSONResponse | None:
+    # Local patch (upstream proposal Soju06/codex-lb#1885): Codex clients
+    # only activate their HTTP transport fallback when the websocket
+    # handshake itself is rejected with HTTP 426 (UPGRADE_REQUIRED), so a
+    # recent transient upstream websocket connect failure — or an operator
+    # pin of the upstream transport to "http" — must deny the handshake
+    # instead of accepting and erroring in-band.
+    from app.modules.proxy._service.websocket.mixin import (
+        upstream_websocket_transport_recently_failed,
+    )
+
+    if not upstream_websocket_transport_recently_failed():
+        dashboard_settings = await get_settings_cache().get()
+        configured_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
+        if configured_transport == "default":
+            configured_transport = getattr(get_settings(), "upstream_stream_transport", "auto")
+        if configured_transport != "http":
+            return None
+    return JSONResponse(
+        status_code=426,
+        content=openai_error(
+            "websocket_upstream_transport_unavailable",
+            "Upstream websocket transport is unavailable; retry over HTTP.",
+            error_type="server_error",
+        ),
+    )
 
 
 async def _websocket_firewall_denial_response(websocket: WebSocket) -> JSONResponse | None:

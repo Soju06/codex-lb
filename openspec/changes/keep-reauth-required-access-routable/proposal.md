@@ -1,33 +1,22 @@
 ## Why
 
-A permanent refresh-token failure does not prove that the stored access token is already unusable. Hard-blocking `reauth_required` accounts immediately discards otherwise valid request capacity and breaks existing account-scoped continuity even though ordinary upstream requests may still succeed.
+A failed refresh token does not prove that the stored access token is unusable. Treating `reauth_required` as globally unavailable discards valid request capacity and breaks owner-bound continuity before upstream rejects the access token.
 
 ## What Changes
 
-- Treat `reauth_required` as request-routable while continuing to block proactive and background refresh-token exchange.
-- Preserve sticky and HTTP-bridge ownership for `reauth_required` accounts; only paused, deactivated, deleted, or otherwise hard-unavailable accounts leave routing.
-- On an upstream rejection, exclude the affected account from the current request's retry pool so a movable request can fail over without selecting the same account again.
-- Keep forced refresh fail-closed for unchanged terminal refresh material, while adopting a freshly rotated peer row before exchange when one exists.
-- Include request-routable `reauth_required` accounts in account-scoped usage, reset-credit, warmup, automation, and dashboard pace surfaces.
-- Preserve `deactivated` as the hard authentication/account shutdown state.
+- Define one canonical status policy: `active` and `reauth_required` are request-routable; `paused` and `deactivated` are not.
+- Keep proactive refresh disabled for `reauth_required` while allowing ordinary access-token-authenticated operations.
+- Preserve owner-bound affinity for `reauth_required` accounts.
+- After permanent forced-refresh failure, exclude the account only from the current request's remaining movable retries.
+- Reconcile fresh account state before claimless forced refresh so peer rotations are adopted and unchanged terminal material is not exchanged.
 
 ## Capabilities
 
-### New Capabilities
-
-None.
-
 ### Modified Capabilities
 
-- `account-routing`: Separate request routability from refresh-token eligibility for `reauth_required` accounts.
-- `usage-refresh-policy`: Skip proactive refresh for `reauth_required`, reconcile fresh terminal/rotated rows before forced exchange, and fail over per request after permanent refresh failure.
-- `sticky-session-operations`: Preserve sticky and durable HTTP-bridge ownership when an account becomes `reauth_required`.
-- `rate-limit-reset-credits`: Allow request-routable `reauth_required` accounts to fetch and consume reset credits.
-- `proxy-warmup`: Include request-routable `reauth_required` accounts in warmup target pools.
-- `automations`: Permit automation dispatch to request-routable `reauth_required` accounts.
-- `frontend-architecture`: Include fresh `reauth_required` account data in weekly credit pace calculations.
-- `fleet-summary`: Permit fleet-triggered usage attempts for request-routable `reauth_required` accounts.
+- `account-routing`: Own the canonical request-routability policy and its application to routing, continuity, and adjacent access-token surfaces.
+- `usage-refresh-policy`: Separate refresh eligibility from request eligibility and define safe claimless forced-refresh reconciliation.
 
 ## Impact
 
-This changes account selection, refresh preflight, retry exclusion, affinity lifecycle, usage/reset-credit eligibility, warmup, automations, and dashboard projection calculations. It adds no settings, schema changes, migrations, dependencies, or new setup steps. Existing `reauth_required` rows become routable after cache convergence; `deactivated` rows remain excluded.
+The policy affects selectors, refresh handling, affinity, probes, warmup, automations, usage/reset-credit surfaces, API-key pools, and dashboard capacity projections. It adds no setting, schema change, migration, dependency, or setup step.

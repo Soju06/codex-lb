@@ -1043,14 +1043,18 @@ async def _invalidate_denied_http_bridge_anchor(
     """
     if denied_response_id is None:
         return False
-    # Another request may have completed and advanced the anchor between the
-    # denied dispatch and this frame. Only retire the id that was refused.
-    if session.last_completed_response_id != denied_response_id:
-        return False
-    # Publish the denial before the first await. A request that prepared the
-    # same injected anchor concurrently must revalidate before dispatch rather
-    # than race the durable write and send the denied id again.
-    session.denied_proxy_injected_anchor_ids.add(denied_response_id)
+    async with session.lifecycle_lock:
+        # Serialize publication with the submitter's final tombstone check and
+        # upstream send. A sibling completion can advance the current carrier
+        # while an already-prepared request still holds the denied id; that
+        # request must remain fenced even when there is no current anchor left
+        # to clear.
+        session.denied_proxy_injected_anchor_ids.add(denied_response_id)
+        # Another request may have completed and advanced the anchor between
+        # the denied dispatch and this frame. Only retire the id that was
+        # refused.
+        if session.last_completed_response_id != denied_response_id:
+            return False
     cleared = False
     try:
         if session.durable_session_id is not None and session.durable_owner_epoch is not None:

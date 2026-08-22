@@ -7,6 +7,8 @@
 - [x] 1.4 Add unit coverage for the retirement decision: delta-only payloads and client-supplied anchors are left alone, a shared anchor is selected once from a fan-out, and a bookkeeping failure is swallowed.
 - [x] 1.3 Assert at the product path that no continuity diagnostic reports a proxy-injected anchor as `client_supplied`, which fails before the provenance fix.
 - [x] 1.5 Add a pre-dispatch regression proving a request that already captured a denied proxy-injected anchor is failed closed without sending another upstream frame.
+- [x] 1.6 Cover the sibling-advanced race and prove the denied id is still tombstoned while the newer current anchor is preserved.
+- [x] 1.7 Add a coordinated regression proving denial publication and prepared dispatch are lifecycle-serialized.
 
 ## 2. Anchor Retirement
 
@@ -15,6 +17,8 @@
 - [x] 2.3 Call it from the grouped fan-out branch as well, which settles every request sharing the anchor and returns before the single-request branch.
 - [x] 2.4 Keep retirement best-effort so a bookkeeping failure cannot change how the denial is delivered downstream.
 - [x] 2.5 Publish a session-local denied-anchor tombstone before the first await and reject any prepared proxy-injected request carrying that id immediately before dispatch.
+- [x] 2.6 Publish the tombstone before checking whether a sibling already advanced the current anchor, so that check cannot reopen the dispatch race.
+- [x] 2.7 Serialize tombstone publication with the submitter's final revalidation and send section.
 
 ## 3. Recovery Provenance
 

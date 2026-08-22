@@ -15679,7 +15679,7 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
         json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_two_input},
         headers=headers,
     )
-    assert second.status_code in {200, 502}
+    assert second.status_code == 502
 
     third = await async_client.post(
         "/backend-api/codex/responses",

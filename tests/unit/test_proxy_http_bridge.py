@@ -454,7 +454,7 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
         service_tier=None,
         reasoning_effort=None,
         api_key_reservation=None,
-        started_at=0.0,
+        started_at=time.monotonic(),
         previous_response_id="resp-denied",
         proxy_injected_previous_response_id=True,
         request_text='{"type":"response.create","input":"next"}',
@@ -466,6 +466,7 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
         UpstreamWebSocket,
         SimpleNamespace(send_text=send_text, close=AsyncMock()),
     )
+    service._http_bridge_sessions[session.key] = session
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
 
@@ -483,6 +484,77 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
     assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
     send_text.assert_not_awaited()
     assert not session.pending_requests
+
+
+@pytest.mark.asyncio
+async def test_denied_anchor_publication_serializes_with_prepared_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denial that wins the lifecycle lock must fence the prepared send."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="denied-anchor-publication-race")
+    session.lifecycle_lock = cast(Any, asyncio.Lock())
+    session.durable_session_id = "durable-denied-anchor-publication-race"
+    session.durable_owner_epoch = 4
+    session.last_completed_response_id = "resp-denied"
+    session.previous_response_ids.add("resp-denied")
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            clear_live_session_response_anchor_if_matches=AsyncMock(return_value=SimpleNamespace()),
+        ),
+    )
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-denied-anchor-publication-race",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-denied",
+        proxy_injected_previous_response_id=True,
+        request_text='{"type":"response.create","input":"next"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    async with session.lifecycle_lock:
+        invalidate_task = asyncio.create_task(
+            http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+                service,
+                session,
+                denied_response_id="resp-denied",
+            )
+        )
+        await asyncio.sleep(0)
+        published_while_send_section_active = "resp-denied" in session.denied_proxy_injected_anchor_ids
+        submit_task = asyncio.create_task(
+            service._submit_http_bridge_request_with_handoff(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "{}",
+                queue_limit=8,
+                request_scope_id="scope-denied-anchor-publication-race",
+                owned_unanchored_handoff=False,
+            )
+        )
+        await asyncio.sleep(0)
+
+    assert await invalidate_task is True
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await submit_task
+    assert published_while_send_section_active is False
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    send_text.assert_not_awaited()
 
 
 def test_ambiguous_continuation_recovery_is_opt_in_and_requires_unobserved_anchor(
@@ -31648,6 +31720,7 @@ async def test_invalidate_denied_bridge_anchor_keeps_an_anchor_a_sibling_already
     assert cleared is False
     service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_not_awaited()
     service._unregister_http_bridge_previous_response_id.assert_not_awaited()
+    assert "resp_denied" in session.denied_proxy_injected_anchor_ids
     assert session.last_completed_response_id == "resp_completed_meanwhile"
     assert session.last_completed_input_count == 12
 

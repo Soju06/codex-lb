@@ -1024,10 +1024,10 @@ async def test_permanent_failure_cas_retries_when_same_plaintext_re_encrypted(db
 
     assert exc_info.value.code == "refresh_token_reused"
     status, stored_refresh_token, sticky_present = await _account_snapshot(account_id)
-    # The downgrade landed on retry: same (dead) plaintext, account de-routed.
+    # The downgrade lands on retry while request-routable continuity remains.
     assert status == AccountStatus.REAUTH_REQUIRED
     assert stored_refresh_token == "refresh-old"
-    assert sticky_present is False
+    assert sticky_present is True
 
 
 def _encode_jwt(payload: dict) -> str:

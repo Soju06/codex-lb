@@ -241,9 +241,7 @@ class ApiKeysRepository:
         result = await self._session.execute(
             select(Account)
             .options(load_only(Account.id, Account.plan_type, Account.status))
-            .where(
-                ~Account.status.in_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
-            )
+            .where(~Account.status.in_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
             # Status alone is not enough: an unfenced pre-upgrade replica can
             # briefly replace a marked account's terminal status during a
             # rolling deploy, and a deleted account must never re-enter the

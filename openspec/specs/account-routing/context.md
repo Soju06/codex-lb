@@ -6,6 +6,16 @@ The normative routing contract is in [spec.md](spec.md). This context explains
 why transient health is replica-local and how drained accounts return to normal
 routing without becoming permanently invisible behind healthier accounts.
 
+## Reauthentication warning state
+
+`reauth_required` means refresh-token exchange needs operator repair; it does not
+prove that the stored access token is unusable. Such accounts remain eligible
+for ordinary requests and retain sticky, bridge, file, response, and realtime
+ownership. Proactive refresh is skipped. If upstream later rejects the access
+token and forced refresh fails permanently, only that request excludes the
+account from its remaining movable retries. Paused, deactivated, deleted, and
+security-ineligible accounts retain their hard exclusions.
+
 ## Replica-local soft health
 
 Error counts, backoff, health tiers, and probe streaks are advisory signals.

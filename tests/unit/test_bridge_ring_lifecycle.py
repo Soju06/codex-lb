@@ -1493,63 +1493,84 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
         assert existing is not None
         assert existing.created is False
         assert existing.state == "abandoned"
-        assert await repository.update_operation(
-            operation_id=operation_id,
-            session_id=successor.id,
-            instance_id="inst-operation-abandonment-successor",
-            owner_epoch=successor.owner_epoch,
-            state="completed",
-            response_id="resp-should-not-write",
-        ) is False
-        assert await repository.append_operation_event(
-            operation_id=operation_id,
-            session_id=successor.id,
-            instance_id="inst-operation-abandonment-successor",
-            owner_epoch=successor.owner_epoch,
-            event_text="data: late\n\n",
-            max_bytes=1024,
-        ) is False
-        assert await repository.append_operation_events(
-            events=[
-                DurableBridgeOperationEventInput(
-                    operation_id=operation_id,
-                    session_id=successor.id,
-                    instance_id="inst-operation-abandonment-successor",
-                    owner_epoch=successor.owner_epoch,
-                    event_text="data: late-batch\n\n",
-                )
-            ],
-            max_bytes=1024,
-        ) is False
-        assert await repository.append_terminal_operation_event(
-            operation_id=operation_id,
-            session_id=successor.id,
-            instance_id="inst-operation-abandonment-successor",
-            owner_epoch=successor.owner_epoch,
-            event_text="data: late-terminal\n\n",
-            max_bytes=1024,
-            state="failed",
-        ) is False
-        assert await repository.claim_unknown_operation_for_recovery(
-            operation_id=operation_id,
-            session_id=successor.id,
-            instance_id="inst-operation-abandonment-successor",
-            owner_epoch=successor.owner_epoch,
-        ) is False
-        assert await repository.reset_operation_event_spool(
-            operation_id=operation_id,
-            session_id=successor.id,
-            instance_id="inst-operation-abandonment-successor",
-            owner_epoch=successor.owner_epoch,
-        ) is False
-        assert await repository.settle_terminal_append_failure(
-            operation_id=operation_id,
-            session_id=successor.id,
-            instance_id="inst-operation-abandonment-successor",
-            owner_epoch=successor.owner_epoch,
-            state="failed",
-            expected_response_id=None,
-        ) is False
+        assert (
+            await repository.update_operation(
+                operation_id=operation_id,
+                session_id=successor.id,
+                instance_id="inst-operation-abandonment-successor",
+                owner_epoch=successor.owner_epoch,
+                state="completed",
+                response_id="resp-should-not-write",
+            )
+            is False
+        )
+        assert (
+            await repository.append_operation_event(
+                operation_id=operation_id,
+                session_id=successor.id,
+                instance_id="inst-operation-abandonment-successor",
+                owner_epoch=successor.owner_epoch,
+                event_text="data: late\n\n",
+                max_bytes=1024,
+            )
+            is False
+        )
+        assert (
+            await repository.append_operation_events(
+                events=[
+                    DurableBridgeOperationEventInput(
+                        operation_id=operation_id,
+                        session_id=successor.id,
+                        instance_id="inst-operation-abandonment-successor",
+                        owner_epoch=successor.owner_epoch,
+                        event_text="data: late-batch\n\n",
+                    )
+                ],
+                max_bytes=1024,
+            )
+            is False
+        )
+        assert (
+            await repository.append_terminal_operation_event(
+                operation_id=operation_id,
+                session_id=successor.id,
+                instance_id="inst-operation-abandonment-successor",
+                owner_epoch=successor.owner_epoch,
+                event_text="data: late-terminal\n\n",
+                max_bytes=1024,
+                state="failed",
+            )
+            is False
+        )
+        assert (
+            await repository.claim_unknown_operation_for_recovery(
+                operation_id=operation_id,
+                session_id=successor.id,
+                instance_id="inst-operation-abandonment-successor",
+                owner_epoch=successor.owner_epoch,
+            )
+            is False
+        )
+        assert (
+            await repository.reset_operation_event_spool(
+                operation_id=operation_id,
+                session_id=successor.id,
+                instance_id="inst-operation-abandonment-successor",
+                owner_epoch=successor.owner_epoch,
+            )
+            is False
+        )
+        assert (
+            await repository.settle_terminal_append_failure(
+                operation_id=operation_id,
+                session_id=successor.id,
+                instance_id="inst-operation-abandonment-successor",
+                owner_epoch=successor.owner_epoch,
+                state="failed",
+                expected_response_id=None,
+            )
+            is False
+        )
         persisted = await repository.get_operation(operation_id=operation_id)
         assert persisted is not None
         assert persisted.state == "abandoned"

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { AuthSessionSchema } from "../src/features/auth/schemas";
 import { DashboardProjectionsSchema } from "../src/features/dashboard/schemas";
@@ -12,13 +12,7 @@ const REQUIRED_API_PATHS = [
   "/api/settings/telemetry",
 ] as const;
 
-async function acceptTelemetryConsentIfShown(page: Page): Promise<void> {
-  await page.waitForLoadState("networkidle");
-  const consentDialog = page.getByRole("dialog", { name: "Anonymous telemetry" });
-  if (!(await consentDialog.isVisible())) {
-    return;
-  }
-
+async function acceptTelemetryConsent(page: Page, consentDialog: Locator): Promise<void> {
   const consentDecision = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === "/api/settings/telemetry" && response.request().method() === "PUT",
@@ -26,6 +20,14 @@ async function acceptTelemetryConsentIfShown(page: Page): Promise<void> {
   await consentDialog.getByRole("button", { name: "Keep enabled" }).click();
   expect((await consentDecision).ok()).toBe(true);
   await expect(consentDialog).toBeHidden();
+}
+
+async function acceptTelemetryConsentIfShown(page: Page): Promise<void> {
+  await page.waitForLoadState("networkidle");
+  const consentDialog = page.getByRole("dialog", { name: "Anonymous telemetry" });
+  if (await consentDialog.isVisible()) {
+    await acceptTelemetryConsent(page, consentDialog);
+  }
 }
 
 async function openLongSettingsPage(page: Page, scrollTop: number): Promise<void> {
@@ -101,13 +103,7 @@ test("the built dashboard accepts real backend responses", async ({ page }) => {
   const consentDialog = page.getByRole("dialog", { name: "Anonymous telemetry" });
   await expect(consentDialog).toBeVisible();
   await expect(consentDialog.getByText('"instance_id"').first()).toBeVisible();
-  const consentDecision = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname === "/api/settings/telemetry" && response.request().method() === "PUT",
-  );
-  await consentDialog.getByRole("button", { name: "Keep enabled" }).click();
-  expect((await consentDecision).ok()).toBe(true);
-  await expect(consentDialog).toBeHidden();
+  await acceptTelemetryConsent(page, consentDialog);
 
   await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
   await expect(page.getByText("No accounts connected yet", { exact: true })).toBeVisible();

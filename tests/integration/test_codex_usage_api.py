@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import timedelta, timezone
 
 import pytest
@@ -11,6 +13,7 @@ from app.core.usage.models import UsagePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ApiKeyLimit, LimitType, LimitWindow, UsageHistory
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyCreateData, ApiKeysService, LimitRuleInput
@@ -907,3 +910,89 @@ async def test_codex_usage_reset_consume_rejects_empty_redeem_request_id(async_c
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_cancellation_closes_initial_scope_without_reopening(
+    async_client,
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+    db_setup,
+):
+    del db_setup
+    account_id = "acc_usage_cancel"
+    chatgpt_account_id = "workspace_usage_cancel"
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        await accounts_repo.upsert(
+            _make_account(
+                account_id,
+                "usage-cancel@example.com",
+                chatgpt_account_id=chatgpt_account_id,
+            )
+        )
+        await usage_repo.add_entry(
+            account_id,
+            10.0,
+            window="primary",
+            reset_at=int(utcnow().timestamp()) + 300,
+            window_minutes=300,
+        )
+
+    service = get_proxy_service_for_app(app_instance)
+    original_factory = service._repo_factory
+    scope_depth = 0
+    scope_depths_during_refresh: list[int] = []
+    refresh_started = asyncio.Event()
+    release_owned_refresh = asyncio.Event()
+    owned_tasks: list[asyncio.Task[None]] = []
+
+    @asynccontextmanager
+    async def tracking_factory():
+        nonlocal scope_depth
+        scope_depth += 1
+        try:
+            async with original_factory() as repos:
+                yield repos
+        finally:
+            scope_depth -= 1
+
+    async def fake_refresh_usage(accounts, latest_usage) -> None:
+        del accounts, latest_usage
+        scope_depths_during_refresh.append(scope_depth)
+        refresh_started.set()
+
+        async def owned_refresh() -> None:
+            await release_owned_refresh.wait()
+
+        owned_task = asyncio.create_task(owned_refresh())
+        owned_tasks.append(owned_task)
+        await asyncio.shield(owned_task)
+
+    monkeypatch.setattr(service, "_repo_factory", tracking_factory)
+    monkeypatch.setattr(service, "_refresh_usage", fake_refresh_usage)
+
+    request_task = asyncio.create_task(
+        async_client.get(
+            "/api/codex/usage",
+            headers={
+                "Authorization": "Bearer chatgpt-token",
+                "chatgpt-account-id": chatgpt_account_id,
+            },
+        )
+    )
+    await asyncio.wait_for(refresh_started.wait(), timeout=1)
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    try:
+        assert scope_depths_during_refresh == [0]
+        assert scope_depth == 0
+        assert len(owned_tasks) == 1
+        assert not owned_tasks[0].done()
+    finally:
+        release_owned_refresh.set()
+        for owned_task in owned_tasks:
+            await asyncio.wait_for(owned_task, timeout=1)

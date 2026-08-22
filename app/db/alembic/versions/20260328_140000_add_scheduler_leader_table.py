@@ -20,6 +20,7 @@ def upgrade() -> None:
             sa.Column("acquired_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
             sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint("leader_id", name="uq_scheduler_leader_leader_id"),
         )
 
     index_names = {index["name"] for index in inspector.get_indexes("scheduler_leader")}

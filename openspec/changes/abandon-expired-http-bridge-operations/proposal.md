@@ -20,6 +20,8 @@ already-deployed anchor classification and denied-anchor retirement fixes.
   and whose durable owner/request proof is no longer live.
 - Run a bounded, request-independent sweep from bridge heartbeat maintenance
   while protecting operation IDs that still have an in-process pending request.
+  Oversized protection snapshots are scanned in finite keyset slices whose
+  cursor advances across heartbeats.
 - Make the transition a compare-and-set over the operation state,
   `updated_at`, durable event-spool progress, session owner instance, and owner
   epoch. A concurrent status proof or recovery claim wins; a late writer
@@ -31,6 +33,9 @@ already-deployed anchor classification and denied-anchor retirement fixes.
   without the proxy dispatching the ambiguous operation again.
 - Emit structured abandonment diagnostics and a low-cardinality Prometheus
   counter.
+- Keep the oversized-protection scan from holding the SQLite writer section
+  beyond one finite maintenance slice, without repeatedly rescanning a
+  protected prefix.
 
 ## Capabilities
 

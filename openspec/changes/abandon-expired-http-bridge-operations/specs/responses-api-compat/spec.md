@@ -24,7 +24,11 @@ number of protected operation IDs in one expanding predicate. If the local
 protection snapshot exceeds that bound, the sweep MUST use bounded candidate
 pages and filter the full protection set without truncating it; every protected
 operation MUST remain unchanged while unrelated eligible operations MAY still
-transition.
+transition. Each oversized-protection sweep MUST inspect no more than a finite
+scan budget, return a keyset cursor for the last inspected eligible row, and
+the next maintenance sweep MUST resume after that cursor. Once the eligible
+range is exhausted, the cursor MUST wrap to the beginning so later rows cannot
+be starved by a protected prefix.
 
 #### Scenario: stale ownerless operation is abandoned
 
@@ -36,6 +40,19 @@ transition.
 - **THEN** the operation becomes terminal `abandoned`
 - **AND** its operation row and event history remain intact
 - **AND** no upstream request is dispatched by the sweep
+
+#### Scenario: oversized protected prefix advances across sweeps
+
+- **GIVEN** the local protection snapshot exceeds the database-safe bind limit
+- **AND** more stale eligible rows are protected than one sweep's finite scan
+  budget
+- **AND** a later stale eligible operation is not protected
+- **WHEN** the bridge maintenance sweep runs
+- **THEN** it inspects no more than the finite scan budget in that sweep
+- **AND** it preserves a keyset cursor after the inspected protected prefix
+- **AND** a later sweep resumes after that cursor and may abandon the later
+  unprotected operation
+- **AND** the protected operations remain unchanged
 
 #### Scenario: live owner is not abandoned
 

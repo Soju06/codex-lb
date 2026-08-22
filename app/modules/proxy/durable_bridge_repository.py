@@ -55,6 +55,10 @@ _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
 # event-spool context, so the caller's protection snapshot is not inherently
 # bounded by this repository's batch size.
 _PROTECTED_OPERATION_ID_SAFE_LIMIT = _SESSION_ID_LOOKUP_CHUNK_SIZE
+# An oversized protection snapshot is scanned in small maintenance slices. The
+# coordinator resumes from the returned keyset cursor on the next heartbeat so
+# a large protected prefix cannot hold the SQLite writer section indefinitely.
+_PROTECTED_OPERATION_SCAN_BUDGET = 128
 _ABANDONMENT_LOG_AGE_CAP_SECONDS = 30 * 24 * 60 * 60
 
 
@@ -204,6 +208,22 @@ class DurableBridgeOperationAbandonment:
     age_seconds: float
     owner_lease_outcome: str
     session_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeOperationAbandonmentScanCursor:
+    """Keyset position for the next oversized-protection maintenance slice."""
+
+    updated_at: datetime
+    operation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBridgeOperationAbandonmentSweep:
+    """Abandonments plus the cursor needed to continue a bounded sweep."""
+
+    abandonments: tuple[DurableBridgeOperationAbandonment, ...]
+    next_cursor: DurableBridgeOperationAbandonmentScanCursor | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1412,19 +1432,23 @@ class DurableBridgeRepository:
         cutoff: datetime,
         protected_operation_ids: Collection[str] = (),
         batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
-    ) -> list[DurableBridgeOperationAbandonment]:
+        scan_cursor: DurableBridgeOperationAbandonmentScanCursor | None = None,
+    ) -> DurableBridgeOperationAbandonmentSweep:
         """Fence stale ownerless ambiguous operations without replaying them.
 
         The candidate read and the conditional update run in one writer
         transaction. PostgreSQL locks the operation and owning session on the
         normal bounded-predicate path while SQLite is serialized by
         ``sqlite_writer_section``. An oversized protection snapshot is read in
-        bounded pages without an expanding predicate; its final updates still
-        compare every value that can change the abandonment decision,
-        including durable event-spool progress, so a recovery claim, owner
-        renewal, or status event that wins the race leaves the row untouched.
+        finite pages without an expanding predicate; the caller resumes from
+        the returned keyset cursor on the next sweep. Its final updates still
+        compare every value that can change the abandonment decision, including
+        durable event-spool progress, so a recovery claim, owner renewal, or
+        status event that wins the race leaves the row untouched.
         """
         now = utcnow()
+        if batch_size <= 0:
+            return DurableBridgeOperationAbandonmentSweep(abandonments=(), next_cursor=None)
         protected_ids = tuple(
             dict.fromkeys(str(operation_id) for operation_id in protected_operation_ids if operation_id)
         )
@@ -1447,22 +1471,30 @@ class DurableBridgeRepository:
             candidate_filter.append(~HttpBridgeOperationRecord.operation_id.in_(protected_ids))
 
         abandoned: list[DurableBridgeOperationAbandonment] = []
+        next_cursor: DurableBridgeOperationAbandonmentScanCursor | None = None
         async with sqlite_writer_section():
             candidates = []
-            cursor: tuple[datetime, str] | None = None
-            page_size = min(batch_size, _PROTECTED_OPERATION_ID_SAFE_LIMIT) if use_bounded_protection else batch_size
-            while len(candidates) < batch_size:
+            cursor = scan_cursor if use_bounded_protection else None
+            scanned_rows = 0
+            while len(candidates) < batch_size and (
+                not use_bounded_protection or scanned_rows < _PROTECTED_OPERATION_SCAN_BUDGET
+            ):
                 page_filter = list(candidate_filter)
                 if cursor is not None:
-                    cursor_updated_at, cursor_operation_id = cursor
                     page_filter.append(
                         or_(
-                            HttpBridgeOperationRecord.updated_at > cursor_updated_at,
+                            HttpBridgeOperationRecord.updated_at > cursor.updated_at,
                             and_(
-                                HttpBridgeOperationRecord.updated_at == cursor_updated_at,
-                                HttpBridgeOperationRecord.operation_id > cursor_operation_id,
+                                HttpBridgeOperationRecord.updated_at == cursor.updated_at,
+                                HttpBridgeOperationRecord.operation_id > cursor.operation_id,
                             ),
                         )
+                    )
+                page_size = batch_size
+                if use_bounded_protection:
+                    page_size = min(
+                        _PROTECTED_OPERATION_ID_SAFE_LIMIT,
+                        _PROTECTED_OPERATION_SCAN_BUDGET - scanned_rows,
                     )
                 statement = (
                     select(
@@ -1487,15 +1519,26 @@ class DurableBridgeRepository:
                 selected = await self._session.execute(statement)
                 page = list(selected.all())
                 if not page:
+                    # Reaching the end after a prior cursor wraps the next
+                    # heartbeat to the beginning of the keyset.
+                    next_cursor = None
                     break
                 if use_bounded_protection:
+                    scanned_rows += len(page)
                     candidates.extend(row for row in page if str(row[0].operation_id) not in protected_id_set)
+                    last_operation = page[-1][0]
+                    next_cursor = DurableBridgeOperationAbandonmentScanCursor(
+                        updated_at=last_operation.updated_at,
+                        operation_id=str(last_operation.operation_id),
+                    )
                     if len(candidates) >= batch_size:
                         candidates = candidates[:batch_size]
                         break
-                    last_operation = page[-1][0]
-                    cursor = (last_operation.updated_at, str(last_operation.operation_id))
+                    cursor = next_cursor
                     if len(page) < page_size:
+                        next_cursor = None
+                        break
+                    if scanned_rows >= _PROTECTED_OPERATION_SCAN_BUDGET:
                         break
                 else:
                     candidates = page
@@ -1541,7 +1584,10 @@ class DurableBridgeRepository:
                     )
                 )
             await self._session.commit()
-        return abandoned
+        return DurableBridgeOperationAbandonmentSweep(
+            abandonments=tuple(abandoned),
+            next_cursor=next_cursor if use_bounded_protection else None,
+        )
 
     async def reset_operation_event_spool(
         self,

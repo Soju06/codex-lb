@@ -40,6 +40,7 @@ from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     _PROTECTED_OPERATION_ID_SAFE_LIMIT,
+    _PROTECTED_OPERATION_SCAN_BUDGET,
     DurableBridgeAliasRegistration,
     DurableBridgeOperationEventInput,
     DurableBridgeRepository,
@@ -1470,12 +1471,12 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
         )
         await session.commit()
 
-        abandoned = await repository.abandon_stale_operations(
+        sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
         )
-        assert len(abandoned) == 1
-        assert abandoned[0].source_state == "unknown"
-        assert abandoned[0].owner_lease_outcome == "ownerless"
+        assert len(sweep.abandonments) == 1
+        assert sweep.abandonments[0].source_state == "unknown"
+        assert sweep.abandonments[0].owner_lease_outcome == "ownerless"
 
         successor = await _claim(
             repository,
@@ -1674,13 +1675,13 @@ async def test_durable_event_progress_fences_abandonment_cas(
 
         monkeypatch.setattr(session, "execute", append_status_proof_before_cas)
         protected_ids = {f"synthetic-protected-{index}" for index in range(_PROTECTED_OPERATION_ID_SAFE_LIMIT + 1)}
-        abandoned = await repository.abandon_stale_operations(
+        sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
             protected_operation_ids=protected_ids,
         )
 
         assert injected is True
-        assert abandoned == []
+        assert sweep.abandonments == ()
         persisted = await repository.get_operation(operation_id=operation_id)
         assert persisted is not None
         assert persisted.state == "acknowledged"
@@ -1747,11 +1748,11 @@ async def test_stale_operation_sweep_protects_live_owner_and_local_pending_id(
         )
         await session.commit()
 
-        abandoned = await repository.abandon_stale_operations(
+        sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
             protected_operation_ids={operation_ids["protected"]},
         )
-        assert [item.source_state for item in abandoned] == ["acknowledged"]
+        assert [item.source_state for item in sweep.abandonments] == ["acknowledged"]
         expired_operation = await repository.get_operation(operation_id=operation_ids["expired"])
         live_operation = await repository.get_operation(operation_id=operation_ids["live"])
         protected_operation = await repository.get_operation(operation_id=operation_ids["protected"])
@@ -1820,18 +1821,92 @@ async def test_stale_operation_sweep_bounds_oversized_protection_snapshot(
             *(f"synthetic-protected-{index}" for index in range(_PROTECTED_OPERATION_ID_SAFE_LIMIT)),
         }
         assert len(protected_ids) > _PROTECTED_OPERATION_ID_SAFE_LIMIT
-        abandoned = await repository.abandon_stale_operations(
+        sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
             protected_operation_ids=protected_ids,
         )
-        assert len(abandoned) == 1
-        assert abandoned[0].source_state == "acknowledged"
+        assert len(sweep.abandonments) == 1
+        assert sweep.abandonments[0].source_state == "acknowledged"
         protected_operation = await repository.get_operation(operation_id=operation_id)
         unprotected_operation = await repository.get_operation(operation_id=unprotected_operation_id)
         assert protected_operation is not None
         assert unprotected_operation is not None
         assert protected_operation.state == "acknowledged"
         assert unprotected_operation.state == "abandoned"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_operation_sweep_resumes_after_finite_protected_prefix(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-scan-cursor",
+            lease_ttl_seconds=1.0,
+            session_key_value="sid-operation-scan-cursor",
+        )
+        stale_at = utcnow() - timedelta(hours=3)
+        protected_operation_ids = [f"op-protected-{index:04d}" for index in range(_PROTECTED_OPERATION_SCAN_BUDGET + 1)]
+        unprotected_operation_id = "op-unprotected"
+        session.add_all(
+            [
+                HttpBridgeOperationRecord(
+                    operation_id=operation_id,
+                    session_id=claim.id,
+                    request_fingerprint=durable_bridge_hash(operation_id),
+                    account_id="account-operation",
+                    model="gpt-5.6",
+                    state="acknowledged",
+                    updated_at=stale_at,
+                )
+                for operation_id in [*protected_operation_ids, unprotected_operation_id]
+            ]
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(owner_instance_id=None, lease_expires_at=None)
+        )
+        await session.commit()
+
+        protected_ids = set(protected_operation_ids)
+        protected_ids.update(
+            f"synthetic-protected-{index}"
+            for index in range(_PROTECTED_OPERATION_ID_SAFE_LIMIT - len(protected_ids) + 1)
+        )
+        assert len(protected_ids) > _PROTECTED_OPERATION_ID_SAFE_LIMIT
+
+        await session.close()
+        coordinator = DurableBridgeSessionCoordinator(async_session_factory)
+        first_abandonments = await coordinator.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+            protected_operation_ids=protected_ids,
+        )
+        assert first_abandonments == []
+        assert coordinator._operation_abandonment_scan_cursor is not None
+        assert (
+            coordinator._operation_abandonment_scan_cursor.operation_id
+            == protected_operation_ids[_PROTECTED_OPERATION_SCAN_BUDGET - 1]
+        )
+
+        second_abandonments = await coordinator.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+            protected_operation_ids=protected_ids,
+        )
+        assert [item.source_state for item in second_abandonments] == ["acknowledged"]
+        assert coordinator._operation_abandonment_scan_cursor is None
+
+        verification_session = async_session_factory()
+        verification_repository = DurableBridgeRepository(verification_session)
+        unprotected_operation = await verification_repository.get_operation(operation_id=unprotected_operation_id)
+        assert unprotected_operation is not None
+        assert unprotected_operation.state == "abandoned"
+        await verification_session.close()
     finally:
         await session.close()
 

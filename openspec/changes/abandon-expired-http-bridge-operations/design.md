@@ -21,10 +21,13 @@ cannot turn a live owner or pending request into a retryable duplicate.
 
 The pending-operation protection snapshot is bounded before it is rendered as
 an expanding database predicate. If the snapshot exceeds the repository's
-database-safe bind limit, the sweep reads bounded candidate pages and filters
-the full protection set in memory rather than truncating it. This preserves
-every protected operation while still allowing unrelated stale rows to
-converge.
+database-safe bind limit, the sweep reads a finite candidate slice and filters
+the full protection set in memory rather than truncating it. The coordinator
+keeps the returned `(updated_at, operation_id)` keyset cursor and supplies it
+to the next heartbeat, wrapping back to the beginning after the eligible
+range is exhausted. This preserves every protected operation while allowing
+unrelated stale rows to converge without holding the SQLite writer section for
+an unbounded scan.
 
 ## Goals / Non-Goals
 
@@ -84,6 +87,12 @@ then requires:
 The final update is a single conditional update inside the write transaction.
 The state check prevents a late `update_operation` or recovery claim from
 reviving an already abandoned operation.
+
+When the protection snapshot is oversized, the repository inspects no more
+than its finite scan budget in one sweep and returns a keyset cursor for the
+next slice. The coordinator preserves that cursor across heartbeats and
+resets it only after the eligible range is exhausted or the bounded path is
+no longer needed.
 
 ### 4. Return the standard continuity error
 

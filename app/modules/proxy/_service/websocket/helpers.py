@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from collections import deque
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -39,13 +39,18 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketMessage,
 )
 from app.core.errors import (
+    PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
     PREVIOUS_RESPONSE_NOT_FOUND_CODE,
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
+    coerce_error_param,
+    normalize_public_error_param,
     openai_error,
     previous_response_stream_incomplete_error,
     response_failed_event,
+    sanitize_public_error_detail,
 )
 from app.core.exceptions import AppError
 from app.core.openai.models import OpenAIEvent
@@ -756,15 +761,14 @@ def _websocket_event_error_type(event_type: str | None, payload: dict[str, JsonV
     return stripped or None
 
 
-def _websocket_event_error_param(event_type: str | None, payload: dict[str, JsonValue] | None) -> str | None:
+def _websocket_event_error_param(
+    event_type: str | None,
+    payload: dict[str, JsonValue] | None,
+) -> OpenAIErrorParam | None:
     error = _websocket_event_error_payload(event_type, payload)
     if not isinstance(error, dict):
         return None
-    param_value = error.get("param")
-    if not isinstance(param_value, str):
-        return None
-    stripped = param_value.strip()
-    return stripped or None
+    return OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
 
 
 def _websocket_event_error_message(event_type: str | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -862,8 +866,10 @@ def _websocket_precreated_replay_fallback_error(
     error_message = request_state.error_message_override or "Upstream rejected the requested model for this account"
     error_type = request_state.error_type_override or "invalid_request_error"
     payload = openai_error(error_code, error_message, error_type=error_type)
-    if request_state.error_param_override is not None:
-        payload["error"]["param"] = request_state.error_param_override
+    if request_state.error_param_override is not None and request_state.error_param_override.present:
+        public_param = normalize_public_error_param(request_state.error_param_override)
+        if public_param is not None:
+            payload["error"]["param"] = public_param
     return (
         request_state.error_http_status_override or 400,
         payload,
@@ -958,6 +964,8 @@ def _prepare_websocket_request_state_for_auth_replay(
     *,
     current_account_id: str | None = None,
 ) -> str | None:
+    if request_state.verified_stale_anchor_replay:
+        return None
     if request_state.last_downstream_sequence_number is not None:
         return None
     can_switch_account = _websocket_auth_request_can_switch_account(request_state)
@@ -1100,10 +1108,17 @@ def _websocket_top_level_error_payload(payload: dict[str, JsonValue]) -> dict[st
     if payload.get("type") != "error":
         return None
     error: dict[str, JsonValue] = {}
-    for error_field in ("code", "message", "param"):
+    for error_field in ("code", "message"):
         value = payload.get(error_field)
         if isinstance(value, str) and value.strip():
             error[error_field] = value.strip()
+    if "param" in payload:
+        # Keep field presence and the raw JSON value.  The typed error
+        # classifier trims strings through ``OpenAIErrorParam.normalized``;
+        # replacing malformed values with an empty string would make an
+        # explicitly supplied null/number/object indistinguishable from a
+        # missing parameter and could authorize an unsafe replay.
+        error["param"] = payload["param"]
     error_type = payload.get("error_type")
     if isinstance(error_type, str) and error_type.strip():
         error["type"] = error_type.strip()
@@ -1135,6 +1150,54 @@ def _websocket_event_error_payload(
         error = response.get("error") if isinstance(response, dict) else None
         return error if isinstance(error, dict) else None
     return None
+
+
+def _sanitize_public_websocket_event_payload(
+    payload: dict[str, JsonValue],
+    *,
+    event_type: str | None,
+) -> dict[str, JsonValue]:
+    """Strip malformed error parameters at a client-facing event boundary.
+
+    Upstream parsing and continuity classification happen before this helper,
+    while the original mapping is still available.  Durable settlement keeps
+    that internal state; only the event copied into a downstream WebSocket or
+    HTTP-bridge queue is sanitized.
+    """
+
+    normalized = payload
+
+    def sanitize_mapping(mapping: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        sanitized = sanitize_public_error_detail(mapping)
+        return sanitized
+
+    if event_type == "error":
+        error_value = payload.get("error")
+        if isinstance(error_value, dict):
+            sanitized_error = sanitize_mapping(error_value)
+            if sanitized_error != error_value:
+                normalized = dict(normalized)
+                normalized["error"] = sanitized_error
+        elif "param" in payload:
+            sanitized_top_level = sanitize_mapping({"param": payload["param"]})
+            normalized = dict(normalized)
+            if "param" in sanitized_top_level:
+                normalized["param"] = sanitized_top_level["param"]
+            else:
+                normalized.pop("param", None)
+
+    response_value = payload.get("response")
+    if isinstance(response_value, dict):
+        error_value = response_value.get("error")
+        if isinstance(error_value, dict):
+            sanitized_error = sanitize_mapping(error_value)
+            if sanitized_error != error_value:
+                normalized_response = dict(response_value)
+                normalized_response["error"] = sanitized_error
+                normalized = dict(normalized)
+                normalized["response"] = normalized_response
+
+    return normalized
 
 
 def _websocket_event_incomplete_reason(
@@ -1177,6 +1240,17 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
         message=error_message,
     )
     reason = "previous_response_not_found"
+    if not should_rewrite and _facade()._is_previous_response_not_found_public_shape(
+        code=error_code,
+        param=error_param,
+        message=error_message,
+    ):
+        # Canonical stale-anchor shape carrying a malformed param: the recovery
+        # classifier refused it, so do not replay or reconnect -- but the frame
+        # still must not reach the client with the upstream code and raw param.
+        should_rewrite = True
+        reason = PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
+        request_state.previous_response_not_found_recovery_blocked = True
     if not should_rewrite:
         if request_state.previous_response_id is None:
             return event, payload, event_type, original_text
@@ -1189,7 +1263,9 @@ def _maybe_rewrite_websocket_previous_response_not_found_event(
     if not should_rewrite:
         return event, payload, event_type, original_text
 
-    reconnect_requested = reason == "missing_tool_output" or request_state.preferred_account_id is not None
+    reconnect_requested = reason != PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON and (
+        reason == "missing_tool_output" or request_state.preferred_account_id is not None
+    )
     return _rewrite_websocket_continuity_corruption_event(
         request_state=request_state,
         upstream_control=upstream_control,
@@ -1338,6 +1414,9 @@ def _rewrite_websocket_continuity_corruption_event(
             reason=reason,
             previous_response_id=request_state.previous_response_id,
             session_id=request_state.session_id,
+            upstream_error_code=(
+                "previous_response_not_found" if reason == PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON else None
+            ),
         )
     rewritten_code, rewritten_message = _websocket_continuity_error_fields(
         reason=reason,
@@ -1443,16 +1522,28 @@ def _sanitize_websocket_previous_response_error(
     reason = "previous_response_not_found"
     should_rewrite = _facade()._is_previous_response_not_found_error(
         code=normalized_code,
-        param=parsed_error.param if parsed_error else None,
+        param=parsed_error.param_state if parsed_error else None,
         message=normalized_message,
     )
     if not should_rewrite:
         should_rewrite = _facade()._is_missing_tool_output_error(
             code=normalized_code,
-            param=parsed_error.param if parsed_error else None,
+            param=parsed_error.param_state if parsed_error else None,
             message=normalized_message,
         )
         reason = "missing_tool_output"
+    if not should_rewrite and _facade()._is_previous_response_not_found_public_shape(
+        code=normalized_code,
+        param=parsed_error.param_state if parsed_error else None,
+        message=normalized_message,
+    ):
+        # Mask-only path: the malformed param keeps this out of the recovery
+        # classifier, so record it as fail-closed without the stale-anchor
+        # bookkeeping that drives replay.
+        should_rewrite = True
+        reason = PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
+        if request_state is not None:
+            request_state.previous_response_not_found_recovery_blocked = True
     if not should_rewrite:
         return status_code, payload, error_code, error_message
 
@@ -1492,24 +1583,48 @@ def _sanitize_websocket_terminal_error_fields(
     error_code: str,
     error_message: str,
     error_type: str,
-    error_param: str | None,
-) -> tuple[str, str, str, str | None]:
+    error_param: OpenAIErrorParam | JsonValue | None,
+) -> tuple[str, str, str, OpenAIErrorParam | None]:
+    error_param_state = coerce_error_param(error_param)
+    if request_state.websocket_terminal_error_fields_sanitized:
+        return (
+            error_code,
+            error_message,
+            error_type,
+            error_param_state if error_param_state.present else None,
+        )
     normalized_code = _normalize_error_code(error_code, error_type)
-    if not _facade()._is_previous_response_not_found_error(
+    recoverable = _facade()._is_previous_response_not_found_error(
         code=normalized_code,
-        param=error_param,
+        param=error_param_state,
+        message=error_message,
+    )
+    if not recoverable and not _facade()._is_previous_response_not_found_public_shape(
+        code=normalized_code,
+        param=error_param_state,
         message=error_message,
     ):
-        return error_code, error_message, error_type, error_param
-    _record_websocket_stale_anchor_failure(
-        request_state,
-        surface="websocket_terminal",
-        upstream_error_code=normalized_code,
-    )
+        return error_code, error_message, error_type, error_param_state
+    if recoverable:
+        _record_websocket_stale_anchor_failure(
+            request_state,
+            surface="websocket_terminal",
+            upstream_error_code=normalized_code,
+        )
+    else:
+        request_state.previous_response_not_found_recovery_blocked = True
+        _record_continuity_fail_closed(
+            surface="websocket_terminal",
+            reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+            previous_response_id=request_state.previous_response_id,
+            session_id=request_state.session_id,
+            upstream_error_code=normalized_code,
+        )
     rewritten_code, rewritten_message = _websocket_continuity_error_fields(
-        reason="previous_response_not_found",
+        reason="previous_response_not_found" if recoverable else PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
         expose_stale_previous_response_classifier=request_state.expose_stale_previous_response_classifier,
     )
+    request_state.websocket_terminal_error_fields_sanitized = True
     return (
         rewritten_code,
         rewritten_message,
@@ -1934,9 +2049,9 @@ def _wrapped_websocket_error_event(
         error.get("code"),
         error.get("type"),
     )
-    error_param = error.get("param")
+    error_param = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
     error_message = error.get("message")
-    if _facade()._is_previous_response_not_found_error(
+    if _facade()._is_previous_response_not_found_public_shape(
         code=error_code,
         param=error_param,
         message=error_message,
@@ -1947,9 +2062,24 @@ def _wrapped_websocket_error_event(
         # do not re-mask it back to stream_incomplete. Every other caller
         # (public /v1, or a raw error this function is seeing for the first
         # time) keeps the existing stream_incomplete safety net.
-        if not expose_stale_previous_response_classifier:
+        #
+        # A malformed param never earns the canonical exposure: it fails the
+        # recovery classifier, so the sanitized-caller exemption does not apply
+        # and the payload is masked regardless of the exposure setting.
+        expose = expose_stale_previous_response_classifier and _facade()._is_previous_response_not_found_error(
+            code=error_code,
+            param=error_param,
+            message=error_message,
+        )
+        if not expose:
             payload = previous_response_stream_incomplete_error()
-    error_payload = cast(JsonValue, dict(payload["error"]))
+    # This helper is the final serializer for top-level websocket errors. Keep
+    # the presence-aware raw value in ``payload`` for classification above,
+    # then emit only a non-empty normalized string parameter to clients.
+    error_payload = cast(
+        JsonValue,
+        sanitize_public_error_detail(cast(Mapping[str, JsonValue], payload["error"])),
+    )
     event: dict[str, JsonValue] = {
         "type": "error",
         "status": status_code,

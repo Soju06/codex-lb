@@ -74,6 +74,60 @@ def test_error_event_emits_done_chunk():
     assert chunks[-1].strip() == "data: [DONE]"
 
 
+@pytest.mark.parametrize("param", ["previous_response_id", None, {"raw": "resp_stale_chat"}])
+def test_stale_anchor_error_after_delta_is_masked_at_chat_sse_boundary(param: object):
+    lines = [
+        'data: {"type":"response.output_text.delta","delta":"before failure"}\n\n',
+        "data: "
+        + json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "message": "Previous response with id 'resp_stale_chat' not found.",
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "param": param,
+                },
+            }
+        )
+        + "\n\n",
+    ]
+
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+    delta_payload = json.loads(chunks[0][5:].strip())
+    assert delta_payload["choices"][0]["delta"]["content"] == "before failure"
+    error_payload = json.loads(chunks[-2][5:].strip())
+    error = error_payload["error"]
+    assert error["code"] == "stream_incomplete"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert error["type"] == "server_error"
+    assert "resp_stale_chat" not in json.dumps(error_payload)
+    assert chunks[-1].strip() == "data: [DONE]"
+
+
+@pytest.mark.parametrize("param", [None, 0, False, {}, [], "", "   ", "\t\n"])
+def test_error_event_omits_malformed_or_blank_param_at_chat_boundary(param: object):
+    lines = [
+        "data: "
+        + json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "message": "Invalid request payload.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "param": param,
+                },
+            }
+        )
+        + "\n\n"
+    ]
+
+    chunks = list(iter_chat_chunks(lines, model="gpt-5.2"))
+    error_payload = json.loads(chunks[-2][5:].strip())
+    assert "param" not in error_payload["error"]
+
+
 @pytest.mark.parametrize(
     "event_line",
     [

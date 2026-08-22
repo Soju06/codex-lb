@@ -275,6 +275,10 @@ def _is_previous_response_not_found_error(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_is_previous_response_not_found_error")(*args, **kwargs)
 
 
+def _is_previous_response_not_found_public_shape(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_is_previous_response_not_found_public_shape")(*args, **kwargs)
+
+
 def _websocket_event_error_code(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_websocket_event_error_code")(*args, **kwargs)
 
@@ -478,6 +482,10 @@ def _rewrite_websocket_continuity_corruption_event(*args: Any, **kwargs: Any) ->
 
 def _maybe_rewrite_websocket_previous_response_not_found_event(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_maybe_rewrite_websocket_previous_response_not_found_event")(*args, **kwargs)
+
+
+def _sanitize_public_websocket_event_payload(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_sanitize_public_websocket_event_payload")(*args, **kwargs)
 
 
 def _websocket_precreated_retry_error_code(*args: Any, **kwargs: Any) -> Any:

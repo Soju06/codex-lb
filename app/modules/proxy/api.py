@@ -76,8 +76,11 @@ from app.core.errors import (
     PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
     OpenAIErrorEnvelope,
     is_previous_response_not_found_error,
+    is_previous_response_not_found_public_shape,
+    normalize_public_error_param,
     openai_error,
     response_failed_event,
+    sanitize_public_error_detail,
 )
 from app.core.exceptions import (
     ProxyAuthError,
@@ -234,7 +237,12 @@ from app.modules.proxy._service.support import (
 )
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.api_key_usage import estimate_api_key_request_usage
-from app.modules.proxy.helpers import _rate_limit_details
+from app.modules.proxy.helpers import (
+    _normalize_error_code,
+    _openai_error_param,
+    _parse_openai_error,
+    _rate_limit_details,
+)
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.images_observability import (
     IMAGE_ROUTE_MODEL_STATE,
@@ -4329,7 +4337,11 @@ async def v1_chat_completions(
         except StopAsyncIteration:
             first = None
         except ProxyResponseError as exc:
-            return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
+            # This is still a client-facing chat error boundary.  Route the
+            # upstream envelope through the same stale-anchor masking and
+            # error-param sanitizer used for startup failures instead of
+            # returning a raw ``param`` value from the exception payload.
+            return _stream_startup_error_response(request, exc, headers=rate_limit_headers)
 
         result = await collect_chat_completion(
             _prepend_first(first, stream),
@@ -7485,7 +7497,9 @@ async def _stream_response_error_events(
                 error.code if error and error.code else "upstream_error",
                 error.message if error and error.message else "Upstream error",
                 error.type if error and error.type else "server_error",
-                error_param=error.param if error else None,
+                # ``param_state`` remains raw for classification, but this
+                # event is serialized directly to a client-facing stream.
+                error_param=normalize_public_error_param(error.param_state) if error else None,
             )
         )
 
@@ -7541,10 +7555,7 @@ def _stream_event_error_envelope(event_block: str) -> OpenAIErrorEnvelopeModel |
         return _default_error_envelope()
     error_value = response.get("error")
     if isinstance(error_value, dict):
-        try:
-            return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-        except ValidationError:
-            return _default_error_envelope()
+        return _parse_event_error_envelope({"error": error_value})
     parsed = parse_response_payload(response)
     if parsed is not None and parsed.error is not None:
         return _error_envelope_from_response(parsed.error)
@@ -7568,6 +7579,36 @@ def _logged_error_json_response(
         )
     else:
         public_content = content
+    if isinstance(public_content, Mapping):
+        sanitized_content = dict(cast(Mapping[str, JsonValue], public_content))
+        changed = False
+        error_value = public_content.get("error")
+        if is_json_mapping(error_value):
+            sanitized_error = sanitize_public_error_detail(error_value)
+            if sanitized_error != error_value:
+                sanitized_content["error"] = sanitized_error
+                changed = True
+        response_value = public_content.get("response")
+        if is_json_mapping(response_value):
+            response_error = response_value.get("error")
+            if is_json_mapping(response_error):
+                sanitized_response_error = sanitize_public_error_detail(response_error)
+                if sanitized_response_error != response_error:
+                    sanitized_response = dict(response_value)
+                    sanitized_response["error"] = sanitized_response_error
+                    sanitized_content["response"] = sanitized_response
+                    changed = True
+        if public_content.get("type") == "error" and "param" in public_content:
+            public_param = sanitize_public_error_detail(
+                cast(Mapping[str, JsonValue], {"param": public_content["param"]})
+            ).get("param")
+            if public_param is None:
+                sanitized_content.pop("param", None)
+            else:
+                sanitized_content["param"] = public_param
+            changed = True
+        if changed:
+            public_content = sanitized_content
     code, message = _error_details_from_content(public_content)
     effective_headers = dict(headers or {})
     if status_code == 429 and is_local_overload_error_code(code):
@@ -8066,12 +8107,8 @@ async def _collect_responses_payload(
             if isinstance(response, dict):
                 error_value = response.get("error")
                 if isinstance(error_value, dict):
-                    try:
-                        terminal_result = OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-                        continue
-                    except ValidationError:
-                        terminal_result = _default_error_envelope()
-                        continue
+                    terminal_result = _parse_event_error_envelope({"error": error_value})
+                    continue
                 parsed = parse_response_payload(response)
                 if parsed is not None and parsed.error is not None:
                     terminal_result = _error_envelope_from_response(parsed.error)
@@ -8296,7 +8333,14 @@ async def _normalize_public_responses_stream(
             event_type == "error" or is_json_mapping(normalized_payload.get("error"))
         ):
             terminal_seen = True
-            yield event_block
+            # Codex-native streams keep their native terminal error shape, but
+            # they still cross a client-facing serialization boundary.  Do
+            # not replay the raw block when the boundary sanitizer trimmed or
+            # removed ``error.param``.
+            if normalized_payload is parsed_payload:
+                yield event_block
+            else:
+                yield format_sse_event(normalized_payload)
             continue
 
         if enforce_openai_sdk_contract and not created_emitted and isinstance(event_type, str):
@@ -8451,7 +8495,10 @@ def _public_response_failed_event_blocks_from_error(
             message or "Upstream error",
             error_type or "server_error",
             response_id=f"resp_{error.code or 'upstream_error'}",
-            error_param=error.param,
+            # This helper constructs the terminal public event directly; the
+            # internal raw parameter state has already served classification
+            # and must not cross this serialization boundary.
+            error_param=normalize_public_error_param(error.param_state),
         ),
     )
     failed_payload["sequence_number"] = sequence_number + int(include_created)
@@ -8677,20 +8724,30 @@ def _normalize_public_stream_payload(
     # they continue to forward unchanged.
     if enforce_openai_sdk_contract and isinstance(event_type, str) and event_type.startswith("codex."):
         return None, None
-    if event_type == "error":
-        parsed_error = _parse_event_error_envelope(payload)
+    if event_type == "error" or (enforce_openai_sdk_contract and event_type == "response.failed"):
+        if event_type == "error":
+            parsed_error = _parse_event_error_envelope(payload)
+        else:
+            response = payload.get("response")
+            nested_error = response.get("error") if isinstance(response, dict) else None
+            parsed_error = _parse_event_error_envelope({"error": nested_error})
         if _is_previous_response_not_found_public_error(parsed_error.error):
+            response_id = _response_id_from_event_payload(payload) if event_type == "response.failed" else None
             return (
                 cast(
                     dict[str, JsonValue],
                     response_failed_event(
                         "stream_incomplete",
                         PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
+                        response_id=response_id,
                     ),
                 ),
                 None,
             )
-        return payload, None
+        if event_type == "error":
+            return _sanitize_public_stream_error_payload(payload), None
+    if event_type == "response.failed":
+        return _sanitize_public_stream_error_payload(payload), None
     if event_type in ("response.completed", "response.incomplete"):
         response = payload.get("response")
         if not is_json_mapping(response):
@@ -8735,6 +8792,54 @@ def _normalize_public_stream_payload(
             violation_kind = "invalid_output_item"
         return normalized_payload, violation_kind
     return payload, None
+
+
+def _sanitize_public_stream_error_payload(payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Copy a public error event while normalizing/removing ``error.param``.
+
+    The stream may carry either a top-level ``error`` object or a nested
+    ``response.failed.response.error`` object.  Keep all other fields (in
+    particular the current downstream response id) unchanged; stale-anchor
+    masking is handled by the classifier before this boundary sanitizer runs.
+    """
+
+    event_type = payload.get("type")
+    if event_type == "error":
+        error_value = payload.get("error")
+        if is_json_mapping(error_value):
+            sanitized_error = sanitize_public_error_detail(error_value)
+            if sanitized_error == error_value:
+                return payload
+            normalized = dict(payload)
+            normalized["error"] = sanitized_error
+            return normalized
+        if "param" not in payload:
+            return payload
+        sanitized = dict(payload)
+        raw_param = {"param": payload["param"]}
+        public_param = sanitize_public_error_detail(raw_param).get("param")
+        if public_param is None:
+            sanitized.pop("param", None)
+        else:
+            sanitized["param"] = public_param
+        return sanitized
+
+    if event_type != "response.failed":
+        return payload
+    response_value = payload.get("response")
+    if not is_json_mapping(response_value):
+        return payload
+    error_value = response_value.get("error")
+    if not is_json_mapping(error_value):
+        return payload
+    sanitized_error = sanitize_public_error_detail(error_value)
+    if sanitized_error == error_value:
+        return payload
+    normalized_response = dict(response_value)
+    normalized_response["error"] = sanitized_error
+    normalized = dict(payload)
+    normalized["response"] = normalized_response
+    return normalized
 
 
 def _synthetic_response_created_envelope(
@@ -8868,9 +8973,13 @@ def _normalize_public_response_mapping(
     output_items: dict[int, dict[str, JsonValue]] | None = None,
 ) -> tuple[dict[str, JsonValue] | None, str | None]:
     merged = _merge_collected_output_items(response, output_items or {})
+    normalized = dict(merged)
+    response_error = merged.get("error")
+    if is_json_mapping(response_error):
+        normalized["error"] = sanitize_public_error_detail(response_error)
     output = merged.get("output")
     if not isinstance(output, list):
-        return merged, None
+        return normalized, None
     normalized_output: list[JsonValue] = []
     dropped_items = 0
     for item in output:
@@ -8885,7 +8994,6 @@ def _normalize_public_response_mapping(
     if output and not normalized_output:
         _record_public_contract_violation("invalid_output_item")
         return None, "invalid_output_item"
-    normalized = dict(merged)
     normalized["output"] = normalized_output
     if dropped_items:
         _record_public_contract_violation("invalid_output_item")
@@ -9105,12 +9213,10 @@ def _record_public_contract_violation(kind: str) -> None:
 
 def _parse_event_error_envelope(payload: dict[str, JsonValue]) -> OpenAIErrorEnvelopeModel:
     error_value = payload.get("error")
-    if isinstance(error_value, dict):
-        try:
-            return OpenAIErrorEnvelopeModel.model_validate({"error": error_value})
-        except ValidationError:
-            return _default_error_envelope()
-    return _default_error_envelope()
+    if not isinstance(error_value, dict):
+        return _default_error_envelope()
+    parsed = _parse_openai_error(cast(OpenAIErrorEnvelope, {"error": error_value}))
+    return _error_envelope_from_response(parsed)
 
 
 def _default_error_envelope() -> OpenAIErrorEnvelopeModel:
@@ -9128,10 +9234,11 @@ def _parse_error_envelope(payload: JsonValue | OpenAIErrorEnvelope) -> OpenAIErr
         return _default_error_envelope()
     if payload.get("type") == "error":
         return _parse_event_error_envelope(cast(dict[str, JsonValue], payload))
-    try:
-        return OpenAIErrorEnvelopeModel.model_validate(payload)
-    except ValidationError:
+    error_value = payload.get("error")
+    if not isinstance(error_value, dict):
         return _default_error_envelope()
+    parsed = _parse_openai_error(cast(OpenAIErrorEnvelope, {"error": error_value}))
+    return _error_envelope_from_response(parsed)
 
 
 def _openai_invalid_transcription_model_error(model: str) -> OpenAIErrorEnvelope:
@@ -9154,12 +9261,52 @@ def _error_envelope_from_response(error_value: OpenAIError | None) -> OpenAIErro
     return OpenAIErrorEnvelopeModel(error=error_value)
 
 
+def _sanitize_public_error_model(error_value: OpenAIError | None) -> OpenAIError | None:
+    """Return a client-safe error model without discarding internal state.
+
+    ``OpenAIError.param_state`` remains attached to the copy so a later
+    internal classifier still sees an explicitly supplied malformed value as
+    present.  Only the serialized ``param`` attribute is normalized/omitted.
+    """
+
+    if error_value is None or not error_value.param_state.present:
+        return error_value
+    normalized_param = normalize_public_error_param(error_value.param_state)
+    sanitized = error_value.model_copy(update={"param": normalized_param})
+    sanitized.set_param_state(error_value.param_state)
+    return sanitized
+
+
+def _sanitize_public_error_envelope(envelope: OpenAIErrorEnvelopeModel) -> OpenAIErrorEnvelopeModel:
+    error = envelope.error
+    sanitized = _sanitize_public_error_model(error)
+    if sanitized is error:
+        return envelope
+    return OpenAIErrorEnvelopeModel(error=sanitized)
+
+
 def _is_previous_response_not_found_public_error(error_value: OpenAIError | None) -> bool:
+    """Masking predicate for the public ``/v1`` surface.
+
+    Superset of the recovery classifier on purpose: a canonical
+    ``previous_response_not_found`` whose ``param`` is malformed still must not
+    reach a client with the upstream code and raw param attached.
+    """
+    if error_value is None:
+        return False
+    return is_previous_response_not_found_public_shape(
+        code=_normalize_error_code(error_value.code, error_value.type),
+        param=_openai_error_param(error_value),
+        message=error_value.message,
+    )
+
+
+def _is_previous_response_not_found_recoverable_error(error_value: OpenAIError | None) -> bool:
     if error_value is None:
         return False
     return is_previous_response_not_found_error(
-        code=error_value.code,
-        param=error_value.param,
+        code=_normalize_error_code(error_value.code, error_value.type),
+        param=_openai_error_param(error_value),
         message=error_value.message,
     )
 
@@ -9195,17 +9342,27 @@ def _mask_previous_response_not_found_error(
     allow_client_full_history_once: bool = False,
 ) -> tuple[int, OpenAIErrorEnvelopeModel]:
     if not _is_previous_response_not_found_public_error(envelope.error):
-        return default_status if default_status is not None else _status_for_error(envelope.error), envelope
+        return (
+            default_status if default_status is not None else _status_for_error(envelope.error),
+            _sanitize_public_error_envelope(envelope),
+        )
     # In recovery-first mode, preserve the upstream-shaped 400 so Codex can
     # drop the ambiguous previous_response_id anchor and resend full local
     # history. This is intentionally opt-in because the resend is at-least-once
     # and may duplicate an upstream response that was accepted but not observed.
+    # Only a recovery-classified error qualifies: passing a malformed param
+    # through would both leak it and ask the client to act on metadata the
+    # classifier already refused to trust.
     if (
         allow_client_full_history_once
+        and _is_previous_response_not_found_recoverable_error(envelope.error)
         and get_settings().http_responses_session_bridge_ambiguous_continuation_recovery_mode
         == "client_full_history_once"
     ):
-        return default_status if default_status is not None else 400, envelope
+        return (
+            default_status if default_status is not None else 400,
+            _sanitize_public_error_envelope(envelope),
+        )
     return (
         502,
         OpenAIErrorEnvelopeModel(

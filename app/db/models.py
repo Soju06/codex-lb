@@ -2104,6 +2104,12 @@ class HttpBridgeRetryCircuit(Base):
     )
     last_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
     updated_at_epoch: Mapped[float] = mapped_column(Float, nullable=False)
+    admission_generation: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
 
 
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))

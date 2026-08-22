@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -707,6 +708,96 @@ async def test_normalize_public_responses_stream_masks_initial_previous_response
     assert error["code"] == "stream_incomplete"
     assert error["message"] == "Upstream websocket closed before response.completed"
     assert "param" not in error
+
+
+@pytest.mark.parametrize(
+    ("param_present", "param"),
+    [
+        (False, None),
+        (True, "previous_response_id"),
+        (True, ""),
+        (True, "   "),
+        (True, None),
+        (True, 0),
+        (True, False),
+        (True, {}),
+        (True, []),
+    ],
+    ids=["absent", "valid", "blank", "whitespace", "null", "number", "boolean", "object", "array"],
+)
+def test_public_stream_masks_canonical_response_failed_for_every_param_shape(
+    param_present: bool,
+    param: JsonValue,
+) -> None:
+    raw_response_id = "resp_raw_previous_anchor"
+    raw_error: dict[str, JsonValue] = {
+        "type": "invalid_request_error",
+        "code": "previous_response_not_found",
+        "message": f"Previous response with id '{raw_response_id}' not found.",
+    }
+    if param_present:
+        raw_error["param"] = param
+    payload: dict[str, JsonValue] = {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_current",
+            "status": "failed",
+            "error": raw_error,
+        },
+    }
+
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(payload)
+
+    assert violation_kind is None
+    assert normalized is not None
+    assert normalized["type"] == "response.failed"
+    response = normalized.get("response")
+    assert isinstance(response, dict)
+    error = response.get("error")
+    assert isinstance(error, dict)
+    assert error["code"] == "stream_incomplete"
+    assert error["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in error
+    serialized = json.dumps(normalized)
+    assert "previous_response_not_found" not in serialized
+    assert raw_response_id not in serialized
+
+
+def test_codex_stream_keeps_canonical_response_failed_classifier() -> None:
+    payload = cast(
+        dict[str, JsonValue],
+        {
+            "type": "response.failed",
+            "response": {
+                "id": "resp_current",
+                "status": "failed",
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found",
+                    "message": "Previous response was not found.",
+                    "param": "previous_response_id",
+                },
+            },
+        },
+    )
+
+    normalized, violation_kind = proxy_api_module._normalize_public_stream_payload(
+        payload,
+        enforce_openai_sdk_contract=False,
+    )
+
+    assert violation_kind is None
+    assert normalized is not None
+    assert normalized["type"] == "response.failed"
+    response = normalized.get("response")
+    assert isinstance(response, dict)
+    assert response.get("status") == "failed"
+    error = response.get("error")
+    assert isinstance(error, dict)
+    # The Codex-native route keeps the canonical stale-anchor classifier so
+    # compatible clients can trigger their full-context retry.
+    assert error.get("code") == "previous_response_not_found"
+    assert error.get("param") == "previous_response_id"
 
 
 @pytest.mark.asyncio

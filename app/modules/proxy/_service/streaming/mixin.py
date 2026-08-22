@@ -665,7 +665,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     raw_error_type = error.type if error else None
                     raw_error_message = error.message if error else None
-                    raw_error_param = error.param if error else None
+                    raw_error_param = error.param_state if error else None
                     code = _normalize_error_code(
                         error.code if error else None,
                         raw_error_type,
@@ -848,7 +848,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                             error_code=raw_error_code,
                             error_type=error.type if error else None,
                             error_message=error.message if error else None,
-                            error_param=error.param if error else None,
+                            error_param=error.param_state if error else None,
                         )
                         if rewritten_error is not None:
                             response_id = (
@@ -964,7 +964,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 ),
                 error_type=error.type if error else None,
                 error_message=error.message if error else None,
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
             if rewritten_error is not None:
                 rewritten_code, rewritten_message, upstream_error_code = rewritten_error

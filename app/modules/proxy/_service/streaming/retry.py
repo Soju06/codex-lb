@@ -446,7 +446,7 @@ class _StreamingRetryMixin:
                 error_message,
                 error_type=(error.type if error else None) or "server_error",
                 response_id=request_id,
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
             _apply_error_metadata(event["response"]["error"], error)
             return format_sse_event(event)
@@ -883,7 +883,7 @@ class _StreamingRetryMixin:
                 error_message,
                 error_type=(error.type if error else None) or "invalid_request_error",
                 response_id=request_id,
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
             _apply_error_metadata(event["response"]["error"], error)
             if not any_attempt_logged:
@@ -1981,7 +1981,7 @@ class _StreamingRetryMixin:
                                     )
                                     error_message = error.message if error else "Upstream error"
                                     error_type = error.type if error else None
-                                    error_param = error.param if error else None
+                                    error_param = error.param_state if error else None
                                     event = response_failed_event(
                                         error_code or "upstream_error",
                                         error_message or "Upstream error",
@@ -2661,7 +2661,7 @@ class _StreamingRetryMixin:
                                     error_message or "Upstream error",
                                     error_type=(error.type if error else None) or "server_error",
                                     response_id=failed_response_id,
-                                    error_param=error.param if error else None,
+                                    error_param=error.param_state if error else None,
                                 )
                                 _apply_error_metadata(event["response"]["error"], error)
                                 _facade().logger.warning(
@@ -2846,7 +2846,7 @@ class _StreamingRetryMixin:
                                 error_message or "Upstream error",
                                 error_type=(error.type if error else None) or "server_error",
                                 response_id=request_id,
-                                error_param=error.param if error else None,
+                                error_param=error.param_state if error else None,
                             )
                             _apply_error_metadata(event["response"]["error"], error)
                             yield format_sse_event(event)
@@ -2886,7 +2886,7 @@ class _StreamingRetryMixin:
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                     error_message = error.message if error else None
                     error_type = error.type if error else None
-                    error_param = error.param if error else None
+                    error_param = error.param_state if error else None
                     if _facade()._is_security_work_authorization_required_error(error_code, error_message):
                         if (
                             not account.security_work_authorized
@@ -3009,7 +3009,7 @@ class _StreamingRetryMixin:
                         error_message or "Account response-create concurrency limit reached",
                         error_type=(error.type if error else None) or "server_error",
                         response_id=request_id,
-                        error_param=error.param if error else None,
+                        error_param=error.param_state if error else None,
                     )
                     _apply_error_metadata(event["response"]["error"], error)
                     yield format_sse_event(event)

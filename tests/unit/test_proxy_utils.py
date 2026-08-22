@@ -49,7 +49,12 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
-from app.core.errors import openai_error
+from app.core.errors import (
+    PREVIOUS_RESPONSE_NOT_FOUND_CODE,
+    PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
+    OpenAIErrorParam,
+    openai_error,
+)
 from app.core.exceptions import ProxyReasoningEffortNotAllowed
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
@@ -8579,6 +8584,36 @@ def test_normalize_http_bridge_error_event_preserves_explicit_error_code_from_pa
     assert error["message"] == "explicit"
 
 
+def test_normalize_http_bridge_error_event_preserves_event_param_state_over_payload() -> None:
+    def normalize(event_param_state: OpenAIErrorParam) -> dict[str, Any]:
+        event = SimpleNamespace(
+            error=SimpleNamespace(
+                code="invalid_request_error",
+                type="invalid_request_error",
+                message="Invalid request payload.",
+                param_state=event_param_state,
+            )
+        )
+        _line, payload, _parsed_event, _event_type = proxy_service._normalize_http_bridge_error_event(
+            event=cast(Any, event),
+            payload={
+                "type": "error",
+                "error": {
+                    "code": "invalid_request_error",
+                    "type": "invalid_request_error",
+                    "message": "Invalid request payload.",
+                    "param": "payload_param",
+                },
+            },
+            request_state=None,
+        )
+        assert payload is not None
+        return cast(dict[str, Any], cast(dict[str, Any], payload["response"])["error"])
+
+    assert normalize(OpenAIErrorParam(True, "event_param"))["param"] == "event_param"
+    assert normalize(OpenAIErrorParam.absent())["param"] == "payload_param"
+
+
 def test_normalize_http_bridge_error_event_prefers_selected_replacement_failure_overrides():
     original_error = {
         "type": "invalid_request_error",
@@ -8595,7 +8630,7 @@ def test_normalize_http_bridge_error_event_prefers_selected_replacement_failure_
         error_code_override="replacement_unavailable",
         error_message_override="Selected replacement connection failed",
         error_type_override="server_error",
-        error_param_override="model",
+        error_param_override=OpenAIErrorParam(True, "model"),
         error_http_status_override=503,
     )
 
@@ -23074,6 +23109,53 @@ def test_websocket_client_previous_response_full_resend_retry_rejects_output_bef
     )
 
 
+@pytest.mark.parametrize(
+    ("output_type", "call_type"),
+    [
+        ("function_call_output", "function_call"),
+        ("custom_tool_call_output", "custom_tool_call"),
+        ("apply_patch_call_output", "apply_patch_call"),
+    ],
+)
+def test_websocket_client_previous_response_full_resend_retry_rejects_every_output_only_tool_type(
+    output_type: str,
+    call_type: str,
+) -> None:
+    """Output-only bodies carry no conversation state of their own, so replaying
+    them without the anchor would fabricate a turn out of tool results whose
+    calls upstream never saw. Pairing the call back in makes the body safe."""
+
+    output_only_delta: list[JsonValue] = [
+        {"type": output_type, "call_id": "call_orphan", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=output_only_delta,
+            continuity_state=None,
+        )
+        is False
+    )
+
+    self_contained_history: list[JsonValue] = [
+        {"role": "user", "content": [{"type": "input_text", "text": "do the thing"}]},
+        {"type": call_type, "name": "shell_command", "call_id": "call_orphan", "arguments": "{}"},
+        {"type": output_type, "call_id": "call_orphan", "output": "ok"},
+        {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+    ]
+
+    assert (
+        proxy_service._websocket_client_previous_response_full_resend_is_retry_safe(
+            previous_response_id="resp_client_anchor",
+            input_value=self_contained_history,
+            continuity_state=None,
+        )
+        is True
+    )
+
+
 def test_websocket_client_previous_response_full_resend_retry_allows_self_contained_tool_history() -> None:
     self_contained_tool_history: list[JsonValue] = [
         {"role": "user", "content": [{"type": "input_text", "text": "run a command"}]},
@@ -26232,6 +26314,114 @@ async def test_process_upstream_websocket_text_skips_foreign_prev_nf_for_mismatc
     handle_stream_error.assert_not_awaited()
     assert upstream_control.reconnect_requested is True
     assert list(pending_requests) == [pending_request]
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_records_fail_closed_for_unmatched_malformed_prev_nf(
+    monkeypatch,
+    caplog,
+):
+    """The ungrouped malformed stale-anchor frame must record the fail-closed reason.
+
+    The grouped path already records it; an unmatched frame masked on the same
+    classifier must not stay invisible to continuity observability.
+    """
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_unmatched_malformed_prev_nf")
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Cannot continue conversation because upstream lost resp_anchor_unmatched.",
+            "param": {},
+        },
+    }
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.service"):
+        downstream_text = await service._process_upstream_websocket_text(
+            json.dumps(payload, separators=(",", ":")),
+            account=account,
+            account_id_value=account.id,
+            pending_requests=deque(),
+            pending_lock=anyio.Lock(),
+            api_key=None,
+            upstream_control=upstream_control,
+            response_create_gate=asyncio.Semaphore(1),
+        )
+
+    assert (
+        "continuity_fail_closed surface=websocket_stream reason=previous_response_not_found_malformed_param"
+        in caplog.text
+    )
+    assert "upstream_error_code=previous_response_not_found" in caplog.text
+    assert '"type":"response.failed"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    assert "resp_anchor_unmatched" not in downstream_text
+    # A malformed parameter is never a reconnect or replay signal.
+    assert upstream_control.reconnect_requested is False
+    handle_stream_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_upstream_websocket_text_records_code_for_matched_malformed_prev_nf(
+    monkeypatch,
+    caplog,
+):
+    """The matched in-flight masking path keeps the canonical upstream code in telemetry."""
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    finalize_request_state = AsyncMock()
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize_request_state)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    account = _make_account("acc_ws_matched_malformed_prev_nf")
+    pending_request = proxy_service._WebSocketRequestState(
+        request_id="ws_req_matched_malformed_prev_nf",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id="resp_ws_matched_malformed_prev_nf",
+        previous_response_id="resp_anchor_matched_malformed",
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    payload = {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_anchor_matched_malformed' not found.",
+            "param": {},
+        },
+    }
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    downstream_text = await service._process_upstream_websocket_text(
+        json.dumps(payload, separators=(",", ":")),
+        account=account,
+        account_id_value=account.id,
+        pending_requests=deque([pending_request]),
+        pending_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+    )
+
+    assert '"type":"response.failed"' in downstream_text
+    assert '"code":"stream_incomplete"' in downstream_text
+    assert "previous_response_not_found" not in downstream_text
+    assert "upstream_error_code=previous_response_not_found" in caplog.text
+    finalize_request_state.assert_awaited_once()
+    handle_stream_error.assert_not_awaited()
+    assert upstream_control.reconnect_requested is False
 
 
 @pytest.mark.parametrize(
@@ -33269,6 +33459,153 @@ async def test_proxy_responses_websocket_previous_response_owner_lookup_failure_
 
 
 @pytest.mark.asyncio
+async def test_codex_responses_websocket_owner_lookup_failure_is_not_a_stale_anchor_rejection(
+    monkeypatch,
+):
+    """The Codex-native route exposes the canonical stale-anchor classifier, but
+    upstream never rejected this anchor — ownership just could not be proved. A
+    ``previous_response_not_found`` here would burn the client's one full-context
+    retry on a failure that resending cannot fix."""
+
+    request_logs = _RequestLogsRecorder()
+    request_logs.lookup_error = RuntimeError("lookup unavailable")
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    class _FakeDownstreamWebSocket:
+        def __init__(self, request_text: str) -> None:
+            self._request_text = request_text
+            self._request_sent = False
+            self._disconnect_sent = False
+            self._done = asyncio.Event()
+            self.sent_text: list[str] = []
+
+        async def receive(self) -> dict[str, object]:
+            if not self._request_sent:
+                self._request_sent = True
+                return {"type": "websocket.receive", "text": self._request_text}
+            if not self._disconnect_sent:
+                await self._done.wait()
+                self._disconnect_sent = True
+                return {"type": "websocket.disconnect"}
+            await asyncio.sleep(0)
+            return {"type": "websocket.disconnect"}
+
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            self._done.set()
+
+        async def send_bytes(self, _data: bytes) -> None:
+            return None
+
+        async def close(self, code: int = 1000, reason: str | None = None) -> None:
+            del code, reason
+            self._done.set()
+
+    async def fail_connect_proxy_websocket(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("owner lookup failure must fail before websocket connect")
+
+    monkeypatch.setattr(proxy_service.ProxyService, "_connect_proxy_websocket", fail_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        "previous_response_id": "resp_codex_owner_lookup_failure",
+        "stream": True,
+    }
+    downstream = _FakeDownstreamWebSocket(json.dumps(request_payload, separators=(",", ":")))
+
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"session_id": "sid_codex_owner_lookup_failure"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert len(downstream.sent_text) == 1
+    assert "previous_response_not_found" not in downstream.sent_text[0]
+    assert "resp_codex_owner_lookup_failure" not in downstream.sent_text[0]
+    payload = json.loads(downstream.sent_text[0])
+    assert payload["type"] == "response.failed"
+    assert payload["response"]["status"] == "failed"
+    assert payload["response"]["error"]["code"] == "upstream_unavailable"
+    assert payload["response"]["error"]["message"] == "Previous response owner lookup failed; retry later."
+
+
+@pytest.mark.asyncio
+async def test_codex_responses_websocket_owner_miss_fails_closed_before_unpinned_dispatch(
+    monkeypatch,
+    caplog,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    selection_calls: list[dict[str, object]] = []
+    dispatch_calls: list[str] = []
+    settings = _make_proxy_settings()
+    settings.stream_idle_timeout_seconds = 300.0
+    settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+
+    async def select(*args: object, **kwargs: object):
+        del args
+        selection_calls.append(dict(kwargs))
+        return _make_account("acc_unpinned_websocket")
+
+    async def dispatch(account: Account, *args: object, **kwargs: object):
+        del args, kwargs
+        dispatch_calls.append(account.id)
+        return None
+
+    monkeypatch.setattr(service, "_select_websocket_connect_account", select)
+    monkeypatch.setattr(service, "_try_open_websocket_connect_attempt", dispatch)
+
+    request_payload = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "instructions": "",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        "previous_response_id": "resp_missing_owner_direct_ws",
+        "stream": True,
+    }
+    downstream = _ScriptedDownstreamWebSocket(json.dumps(request_payload, separators=(",", ":")))
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.observability")
+    await service.proxy_responses_websocket(
+        cast(WebSocket, downstream),
+        {"session_id": "sid_missing_owner_direct_ws"},
+        codex_session_affinity=True,
+        openai_cache_affinity=False,
+        api_key=None,
+    )
+
+    assert request_logs.lookup_calls == [("resp_missing_owner_direct_ws", None, "sid_missing_owner_direct_ws")]
+    assert selection_calls == []
+    assert dispatch_calls == []
+    assert len(downstream.sent_text) == 1
+    payload = json.loads(downstream.sent_text[0])
+    assert payload["type"] == "response.failed"
+    assert payload["response"]["error"]["code"] == "previous_response_owner_unavailable"
+    assert payload["response"]["error"]["message"] == "Previous response owner account is unavailable; retry later."
+    assert "previous_response_not_found" not in downstream.sent_text[0]
+    assert "resp_missing_owner_direct_ws" not in downstream.sent_text[0]
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert request_logs.calls[0]["account_id"] is None
+    assert request_logs.calls[0]["error_code"] == "previous_response_owner_unavailable"
+    assert "continuity_fail_closed surface=websocket_connect reason=owner_account_unavailable" in caplog.text
+    assert "upstream_error_code=owner_lookup_miss" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_proxy_responses_websocket_masks_owner_lookup_previous_response_not_found(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -34066,7 +34403,7 @@ async def test_process_upstream_websocket_text_retries_precreated_previous_respo
         error_code_override="upstream_unavailable",
         error_message_override="previous replay failed",
         error_type_override="server_error",
-        error_param_override="previous_response_id",
+        error_param_override=OpenAIErrorParam(True, "previous_response_id"),
         error_http_status_override=502,
         preferred_account_id=account.id,
     )
@@ -34364,7 +34701,7 @@ def test_prepare_websocket_auth_replay_clears_stale_error_overrides():
         error_code_override="upstream_unavailable",
         error_message_override="previous auth replay failed",
         error_type_override="server_error",
-        error_param_override="previous_response_id",
+        error_param_override=OpenAIErrorParam(True, "previous_response_id"),
         error_http_status_override=502,
     )
 
@@ -35236,6 +35573,45 @@ def test_sanitize_websocket_terminal_stale_error_marks_missing_anchor_source_unk
     assert "previous_response_source=none" not in request_state.failure_detail_override
 
 
+def test_sanitize_websocket_terminal_error_is_idempotent(monkeypatch):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_terminal_sanitize_idempotent",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_terminal_sanitize_idempotent",
+        expose_stale_previous_response_classifier=True,
+    )
+    counter = _ObservedCounter()
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    fields = {
+        "error_code": "previous_response_not_found",
+        "error_message": "Previous response with id 'resp_terminal_sanitize_idempotent' not found.",
+        "error_type": "invalid_request_error",
+        "error_param": OpenAIErrorParam(True, "previous_response_id"),
+    }
+
+    first = proxy_service._sanitize_websocket_terminal_error_fields(request_state=request_state, **fields)
+    second = proxy_service._sanitize_websocket_terminal_error_fields(
+        request_state=request_state,
+        error_code=first[0],
+        error_message=first[1],
+        error_type=first[2],
+        error_param=first[3],
+    )
+
+    assert first == second
+    assert counter.samples == [
+        {
+            "labels": {"surface": "websocket_terminal", "reason": "previous_response_not_found"},
+            "value": 1.0,
+        }
+    ]
+
+
 def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_response_not_found():
     request_state = proxy_service._WebSocketRequestState(
         request_id="ws_req_prev_connect_failure_invalid_request",
@@ -35274,6 +35650,45 @@ def test_sanitize_websocket_connect_failure_rewrites_invalid_request_previous_re
     assert rewritten_error_message == "Upstream websocket closed before response.completed"
 
 
+def test_sanitize_websocket_connect_failure_masks_raw_id_with_malformed_param():
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_connect_failure_malformed_param",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_prev_anchor",
+    )
+    original_message = "Previous response with id 'resp_prev_anchor' not found."
+    original_payload = proxy_module.openai_error(
+        "invalid_request_error",
+        original_message,
+        error_type="invalid_request_error",
+    )
+    original_payload["error"]["param"] = {}
+
+    (
+        rewritten_status,
+        rewritten_payload,
+        rewritten_error_code,
+        rewritten_error_message,
+    ) = proxy_service._sanitize_websocket_connect_failure(
+        request_state=request_state,
+        status_code=400,
+        payload=original_payload,
+        error_code="invalid_request_error",
+        error_message=original_message,
+    )
+
+    assert rewritten_status == 502
+    assert rewritten_payload["error"]["code"] == "stream_incomplete"
+    assert rewritten_payload["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert rewritten_error_code == "stream_incomplete"
+    assert rewritten_error_message == "Upstream websocket closed before response.completed"
+    assert "resp_prev_anchor" not in json.dumps(rewritten_payload)
+
+
 def test_wrapped_websocket_error_event_masks_previous_response_not_found():
     payload = proxy_module.openai_error(
         "previous_response_not_found",
@@ -35295,6 +35710,29 @@ def test_wrapped_websocket_error_event_masks_previous_response_not_found():
     assert "resp_prev_anchor" not in json.dumps(event)
 
 
+def test_sanitize_public_websocket_event_payload_uses_classified_type_for_typeless_error():
+    payload: dict[str, JsonValue] = {
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Malformed upstream error",
+            "param": {},
+        },
+    }
+
+    sanitized = websocket_helpers_module._sanitize_public_websocket_event_payload(payload, event_type="error")
+
+    assert sanitized == {
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Malformed upstream error",
+        },
+    }
+
+
 def test_app_error_websocket_event_preserves_error_param():
     event = websocket_helpers_module._app_error_to_websocket_event(
         ProxyReasoningEffortNotAllowed("Reasoning effort is not allowed", param="reasoning.effort")
@@ -35307,6 +35745,33 @@ def test_app_error_websocket_event_preserves_error_param():
         "code": "reasoning_effort_not_allowed",
         "param": "reasoning.effort",
     }
+
+
+@pytest.mark.parametrize("raw_param", [" model ", "", "   ", None, 0, False, {}, []])
+def test_websocket_precreated_replay_fallback_sanitizes_error_param(raw_param: object):
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_precreated_fallback_param",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        precreated_replay_reason="account_model_unsupported",
+        error_code_override="invalid_request_error",
+        error_message_override="The requested model is not supported by this account.",
+        error_type_override="invalid_request_error",
+        error_param_override=OpenAIErrorParam(True, cast(JsonValue, raw_param)),
+    )
+
+    fallback = websocket_helpers_module._websocket_precreated_replay_fallback_error(request_state)
+    assert fallback is not None
+    assert request_state.error_param_override is not None
+    assert request_state.error_param_override.raw == raw_param
+    error = fallback[1]["error"]
+    if isinstance(raw_param, str) and raw_param.strip():
+        assert error["param"] == raw_param.strip()
+    else:
+        assert "param" not in error
 
 
 def test_sanitize_websocket_connect_failure_rewrites_missing_tool_output():
@@ -35470,6 +35935,58 @@ async def test_emit_websocket_terminal_error_masks_previous_response_override():
 
 
 @pytest.mark.asyncio
+async def test_fail_pending_websocket_requests_records_canonical_stale_anchor_once(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    counter = _ObservedCounter()
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", counter, raising=False)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_terminal_stale_anchor_once",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_terminal_stale_anchor_once",
+        expose_stale_previous_response_classifier=True,
+        skip_request_log=True,
+    )
+    request_state.error_code_override = PREVIOUS_RESPONSE_NOT_FOUND_CODE
+    request_state.error_message_override = "Previous response with id 'resp_terminal_stale_anchor_once' not found."
+    request_state.error_type_override = "invalid_request_error"
+    request_state.error_param_override = OpenAIErrorParam(True, "previous_response_id")
+    websocket_send = AsyncMock()
+    websocket = cast(WebSocket, SimpleNamespace(send_text=websocket_send))
+
+    await service._fail_pending_websocket_requests(
+        account_id_value=None,
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        error_code="stream_incomplete",
+        error_message="fallback",
+        api_key=None,
+        websocket=websocket,
+        client_send_lock=anyio.Lock(),
+        penalize_account=False,
+    )
+
+    assert counter.samples == [
+        {
+            "labels": {"surface": "websocket_terminal", "reason": "previous_response_not_found"},
+            "value": 1.0,
+        }
+    ]
+    websocket_send.assert_awaited_once()
+    send_call = websocket_send.await_args
+    assert send_call is not None
+    payload = json.loads(send_call.args[0])
+    assert payload["response"]["error"]["code"] == PREVIOUS_RESPONSE_NOT_FOUND_CODE
+    assert payload["response"]["error"]["message"] == PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE
+    assert "resp_terminal_stale_anchor_once" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
 async def test_fail_pending_websocket_requests_masks_previous_response_override_in_queued_event(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
@@ -35489,7 +36006,7 @@ async def test_fail_pending_websocket_requests_masks_previous_response_override_
     request_state.error_code_override = "invalid_request_error"
     request_state.error_message_override = "Previous response with id 'resp_pending_leak' not found."
     request_state.error_type_override = "invalid_request_error"
-    request_state.error_param_override = "previous_response_id"
+    request_state.error_param_override = OpenAIErrorParam(True, "previous_response_id")
 
     await service._fail_pending_websocket_requests(
         account_id_value=None,

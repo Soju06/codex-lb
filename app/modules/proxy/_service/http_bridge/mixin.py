@@ -543,6 +543,7 @@ class _HTTPBridgeMixin(
             preserve_internal_fork_key = key.affinity_kind in {
                 "internal_unanchored_parallel",
                 "internal_model_parallel",
+                "internal_request_parallel",
             }
             require_preferred_account = preferred_account_id is not None and (
                 previous_response_id is not None

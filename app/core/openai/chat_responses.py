@@ -3,10 +3,16 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app.core.errors import (
+    OpenAIErrorParam,
+    is_previous_response_not_found_public_shape,
+    previous_response_stream_incomplete_error,
+    sanitize_public_error_detail,
+)
 from app.core.openai.models import OpenAIError, OpenAIErrorEnvelope, ResponseUsage
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
@@ -360,7 +366,22 @@ def iter_chat_chunks(
                 if isinstance(maybe_error, dict) and maybe_error:
                     error = maybe_error
             if error is not None:
-                error_payload: dict[str, JsonValue] = {"error": error}
+                # Chat-completions streams are a public serialization
+                # boundary too.  Keep upstream parsing/matching raw, but do
+                # not let malformed/blank ``error.param`` values escape in
+                # the translated OpenAI error envelope.
+                error_mapping = cast(Mapping[str, JsonValue], error)
+                error_code = error_mapping.get("code")
+                error_message = error_mapping.get("message")
+                error_payload: dict[str, JsonValue]
+                if is_previous_response_not_found_public_shape(
+                    code=error_code if isinstance(error_code, str) else None,
+                    param=OpenAIErrorParam.from_mapping(error_mapping),
+                    message=error_message if isinstance(error_message, str) else None,
+                ):
+                    error_payload = {"error": cast(JsonValue, previous_response_stream_incomplete_error()["error"])}
+                else:
+                    error_payload = {"error": sanitize_public_error_detail(error_mapping)}
             else:
                 error_payload = _default_error_envelope().model_dump(mode="json", exclude_none=True)
             yield _dump_sse(error_payload)

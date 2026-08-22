@@ -2811,12 +2811,26 @@ def test_backend_responses_websocket_lite_marker_requires_previous_response_link
         del request_state, api_key, client_send_lock, websocket
         return SimpleNamespace(id="acct_ws_lite_linkage"), fake_upstream
 
+    async def fake_select_websocket_connect_account(self, *args, **kwargs):
+        del self, args, kwargs
+        return SimpleNamespace(id="acct_ws_lite_linkage")
+
     async def fake_write_request_log(self, **kwargs):
         del self, kwargs
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_lite_linkage"),
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fake_select_websocket_connect_account,
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
@@ -5009,6 +5023,11 @@ def test_backend_responses_websocket_forwards_previous_response_id(app_instance,
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_prev"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
@@ -5537,6 +5556,11 @@ def test_backend_responses_websocket_trims_replayed_tool_call_items_with_previou
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_tool_output"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
@@ -5645,6 +5669,11 @@ def test_v1_responses_websocket_forwards_previous_response_id(app_instance, monk
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_v1_prev"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
 
@@ -5993,10 +6022,33 @@ def test_v1_responses_websocket_marks_fresh_turn_as_retry_safe_at_prep_time(
 
 
 @pytest.mark.parametrize("endpoint", ["/v1/responses", "/backend-api/codex/responses"])
-def test_responses_websocket_replays_client_full_resend_previous_response_miss_without_anchor(
+@pytest.mark.parametrize(
+    ("upstream_error", "expect_replay"),
+    [
+        (
+            {
+                "type": "invalid_request_error",
+                "message": "Invalid `previous_response_id`.",
+            },
+            True,
+        ),
+        (
+            {
+                "type": "invalid_request_error",
+                "message": "Invalid `previous_response_id`.",
+                "param": {},
+            },
+            False,
+        ),
+    ],
+    ids=["parameterless-replays", "malformed-param-fails-closed"],
+)
+def test_responses_websocket_handles_client_full_resend_previous_response_miss(
     endpoint,
     app_instance,
     monkeypatch,
+    upstream_error,
+    expect_replay,
 ):
     first_upstream = _SequencedUpstreamWebSocket(
         [],
@@ -6030,10 +6082,7 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
                         {
                             "type": "error",
                             "status": 400,
-                            "error": {
-                                "type": "invalid_request_error",
-                                "message": "Invalid `previous_response_id`.",
-                            },
+                            "error": upstream_error,
                         },
                         separators=(",", ":"),
                     ),
@@ -6159,26 +6208,70 @@ def test_responses_websocket_replays_client_full_resend_previous_response_miss_w
                     }
                 )
             )
-            created_2 = json.loads(websocket.receive_text())
-            completed_2 = json.loads(websocket.receive_text())
+            if expect_replay:
+                created_2 = json.loads(websocket.receive_text())
+                completed_2 = json.loads(websocket.receive_text())
+                assert created_2["type"] == "response.created"
+                assert created_2["response"]["id"] == "resp_ws_prev_retry"
+                assert completed_2["type"] == "response.completed"
+                assert "previous_response_not_found" not in json.dumps(created_2)
+            else:
+                failed_2 = json.loads(websocket.receive_text())
+                assert failed_2["type"] == "response.failed"
+                # A malformed present parameter is not a confirmed stale-anchor
+                # rejection, even on the Codex-native route. It must fail closed
+                # without emitting the client-retryable canonical signal.
+                assert failed_2["response"]["error"]["code"] == "stream_incomplete"
+                assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
 
-    assert created_2["type"] == "response.created"
-    assert created_2["response"]["id"] == "resp_ws_prev_retry"
-    assert completed_2["type"] == "response.completed"
-    assert "previous_response_not_found" not in json.dumps(created_2)
-    assert connect_count == 2
+    assert connect_count == (2 if expect_replay else 1)
     first_payload = json.loads(first_upstream.sent_text[-1])
     assert first_payload["previous_response_id"] == "resp_ws_prev_anchor"
     assert first_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
-    replay_payload = json.loads(recovered_upstream.sent_text[-1])
-    assert "previous_response_id" not in replay_payload
-    assert replay_payload["input"] == full_resend_input
-    assert replay_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
+    if expect_replay:
+        replay_payload = json.loads(recovered_upstream.sent_text[-1])
+        assert "previous_response_id" not in replay_payload
+        assert replay_payload["input"] == full_resend_input
+        assert replay_payload["client_metadata"] == {"x-codex-installation-id": "account-installation"}
+    else:
+        assert recovered_upstream.sent_text == []
 
 
-def test_v1_responses_websocket_masks_invalid_request_previous_response_not_found_without_retry(
+@pytest.mark.parametrize(
+    ("error_code", "param_present", "param"),
+    [
+        ("previous_response_not_found", False, None),
+        ("previous_response_not_found", True, "previous_response_id"),
+        ("previous_response_not_found", True, ""),
+        ("previous_response_not_found", True, "   "),
+        ("previous_response_not_found", True, None),
+        ("previous_response_not_found", True, 0),
+        ("previous_response_not_found", True, False),
+        ("previous_response_not_found", True, {}),
+        ("previous_response_not_found", True, []),
+        ("invalid_request_error", True, "previous_response_id"),
+        ("invalid_request_error", False, None),
+    ],
+    ids=[
+        "canonical-absent",
+        "canonical-valid",
+        "canonical-blank",
+        "canonical-whitespace",
+        "canonical-null",
+        "canonical-number",
+        "canonical-boolean",
+        "canonical-object",
+        "canonical-array",
+        "invalid-request-valid-param",
+        "parameterless-invalid-request",
+    ],
+)
+def test_v1_responses_websocket_masks_previous_response_not_found_shapes_without_retry(
     app_instance,
     monkeypatch,
+    error_code,
+    param_present,
+    param,
 ):
     first_upstream = _SequencedUpstreamWebSocket(
         [],
@@ -6214,7 +6307,13 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
                             "status": 400,
                             "error": {
                                 "type": "invalid_request_error",
-                                "message": "Invalid `previous_response_id`.",
+                                "code": error_code,
+                                "message": (
+                                    "Invalid previous_response_id."
+                                    if error_code == "invalid_request_error"
+                                    else "Previous response was not found."
+                                ),
+                                **({"param": param} if param_present else {}),
                             },
                         },
                         separators=(",", ":"),
@@ -6330,9 +6429,13 @@ def test_v1_responses_websocket_masks_invalid_request_previous_response_not_foun
             )
             failed_2 = json.loads(websocket.receive_text())
 
+    # Every canonical previous_response_not_found is masked on the public /v1
+    # surface, including the malformed-param variants the recovery classifier
+    # fails closed on. Masking and recovery are separate decisions.
     assert failed_2["type"] == "response.failed"
     assert failed_2["response"]["error"]["code"] == "stream_incomplete"
     assert failed_2["response"]["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in failed_2["response"]["error"]
     assert "previous_response_not_found" not in json.dumps(failed_2)
     assert "resp_ws_prev_anchor" not in json.dumps(failed_2)
     assert connect_count == 1
@@ -6425,6 +6528,11 @@ def test_backend_responses_websocket_connect_failure_masks_previous_response_not
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_prev_connect_failure"),
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -6769,7 +6877,7 @@ def test_backend_responses_websocket_masks_anonymous_previous_response_not_found
     ):
         del request_state
         del self, previous_response_id, api_key, session_id, surface
-        return None
+        return "acct_ws_prev_followup"
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -6918,7 +7026,7 @@ def test_backend_responses_websocket_masks_top_level_previous_response_not_found
     ):
         del request_state
         del self, previous_response_id, api_key, session_id, surface
-        return None
+        return "acct_ws_chatgpt_prev_top_level"
 
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
@@ -7028,6 +7136,11 @@ def test_backend_responses_websocket_masks_pretty_previous_response_not_found_fr
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        AsyncMock(return_value="acct_ws_pretty_prev_mask"),
+    )
     monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
 
     with TestClient(app_instance) as client:
@@ -10929,6 +11042,25 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     async def allow_proxy_api_key(_authorization: str | None, *, request: object | None = None):
         return None
 
+    async def fake_resolve_previous_response_owner(
+        self,
+        *,
+        previous_response_id,
+        api_key,
+        session_id=None,
+        surface,
+        request_state=None,
+    ):
+        del self, api_key, surface
+        assert previous_response_id == "resp_ws_prev_anchor_client"
+        assert session_id == "sid-client-stale"
+        assert request_state is not None
+        request_state.previous_response_owner_lookup_source = "request_logs"
+        request_state.previous_response_owner_lookup_outcome = "hit"
+        request_state.previous_response_owner_requested_at = owner_requested_at
+        request_state.previous_response_owner_session_id = session_id
+        return "acct_ws_prev_connect_failure"
+
     async def fake_select_websocket_connect_account(
         self,
         deadline,
@@ -10976,10 +11108,6 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
         assert request_state.previous_response_id == "resp_ws_prev_anchor_client"
         assert request_state.fresh_upstream_request_is_retry_safe is True
         assert request_state.fresh_upstream_request_text is not None
-        request_state.previous_response_owner_lookup_source = "request_logs"
-        request_state.previous_response_owner_lookup_outcome = "hit"
-        request_state.previous_response_owner_requested_at = owner_requested_at
-        request_state.previous_response_owner_session_id = request_state.session_id
         return SimpleNamespace(id="acct_ws_prev_connect_failure")
 
     async def fake_try_open_websocket_connect_attempt(
@@ -11012,6 +11140,11 @@ def test_backend_responses_websocket_connect_failure_logs_client_supplied_stale_
     monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
     monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
     monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        fake_resolve_previous_response_owner,
+    )
     monkeypatch.setattr(
         proxy_module.ProxyService,
         "_select_websocket_connect_account",
@@ -11271,13 +11404,17 @@ def test_backend_responses_websocket_logs_proxy_injected_stale_anchor_metadata(
     assert "resp_ws_proxy_injected_anchor" not in caplog.text
 
 
+@pytest.mark.parametrize("malformed_param", [False, True])
 def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_diagnostics(
     app_instance,
     monkeypatch,
     caplog,
+    malformed_param,
 ):
-    """One anonymous previous_response_not_found matching multiple same-anchor
-    pending requests must record stale-anchor diagnostics for each request.
+    """One anonymous stale-anchor error must settle every same-anchor request.
+
+    The strict shape records stale-anchor diagnostics; a malformed present
+    parameter still claims ownership for masking but remains fail-closed.
     """
     first_upstream = _SequencedUpstreamWebSocket(
         [],
@@ -11337,7 +11474,7 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
                                 "type": "invalid_request_error",
                                 "code": "previous_response_not_found",
                                 "message": "Previous response with id 'resp_ws_grouped_anchor' not found.",
-                                "param": "previous_response_id",
+                                "param": {} if malformed_param else "previous_response_id",
                             },
                         },
                         separators=(",", ":"),
@@ -11464,38 +11601,68 @@ def test_backend_responses_websocket_grouped_anonymous_stale_anchor_persists_dia
     assert created_3["response"]["id"] == "resp_ws_grouped_followup_b"
     assert failed_2["type"] == "response.failed"
     assert failed_3["type"] == "response.failed"
-    _assert_previous_response_not_found_error(failed_2["response"]["error"])
-    _assert_previous_response_not_found_error(failed_3["response"]["error"])
+    assert failed_2["response"]["id"] == "resp_ws_grouped_followup_a"
+    assert failed_3["response"]["id"] == "resp_ws_grouped_followup_b"
     assert "resp_ws_grouped_anchor" not in json.dumps(failed_2)
     assert "resp_ws_grouped_anchor" not in json.dumps(failed_3)
+    if malformed_param:
+        for failed in (failed_2, failed_3):
+            error = failed["response"]["error"]
+            assert error["code"] == "stream_incomplete"
+            assert error["message"] == "Upstream websocket closed before response.completed"
+            assert "param" not in error
+        # The malformed present value may claim ownership for masking, but it
+        # must never authorize reconnect/replay or leak an upstream field.
+        assert len(first_upstream.sent_text) == 3
+    else:
+        _assert_previous_response_not_found_error(failed_2["response"]["error"])
+        _assert_previous_response_not_found_error(failed_3["response"]["error"])
 
     error_logs = [call for call in log_calls if call.get("status") == "error"]
-    assert len(error_logs) == 2
-    for error_log in error_logs:
-        failure_detail = error_log["failure_detail"]
-        assert isinstance(failure_detail, str)
-        assert failure_detail.startswith("previous_response_not_found ")
-        assert "previous_response_source=client_supplied" in failure_detail
-        assert "fresh_replay_available=" in failure_detail
-        assert "owner_lookup_source=" in failure_detail
-        assert "owner_lookup_outcome=" in failure_detail
-        assert "previous_response_age_seconds=" in failure_detail
-        assert "same_session=" in failure_detail
-        assert "resp_ws_grouped_anchor" not in failure_detail
-        assert error_log["upstream_error_code"] == "previous_response_not_found"
-        assert error_log["failure_phase"] == "upstream"
+    if malformed_param:
+        assert len(error_logs) == 2
+        for error_log in error_logs:
+            failure_detail = error_log["failure_detail"]
+            assert failure_detail is None
+            assert error_log["upstream_error_code"] is None
+    else:
+        assert len(error_logs) == 2
+        for error_log in error_logs:
+            failure_detail = error_log["failure_detail"]
+            assert isinstance(failure_detail, str)
+            assert failure_detail.startswith("previous_response_not_found ")
+            assert "previous_response_source=client_supplied" in failure_detail
+            assert "fresh_replay_available=" in failure_detail
+            assert "owner_lookup_source=" in failure_detail
+            assert "owner_lookup_outcome=" in failure_detail
+            assert "previous_response_age_seconds=" in failure_detail
+            assert "same_session=" in failure_detail
+            assert "resp_ws_grouped_anchor" not in failure_detail
+            assert error_log["upstream_error_code"] == "previous_response_not_found"
+            assert error_log["failure_phase"] == "upstream"
 
+    expected_reason = (
+        "previous_response_not_found_malformed_param" if malformed_param else "previous_response_not_found"
+    )
     fail_closed = [
         record.getMessage()
         for record in caplog.records
-        if "continuity_fail_closed" in record.getMessage()
-        and "reason=previous_response_not_found" in record.getMessage()
+        if "continuity_fail_closed" in record.getMessage() and f"reason={expected_reason} " in record.getMessage()
     ]
-    assert len(fail_closed) >= 2
-    for message in fail_closed:
-        assert "surface=websocket_stream" in message
-        assert "previous_response_source=client_supplied" in message or "diagnostics=" in message
-        assert "resp_ws_grouped_anchor" not in message
+    if malformed_param:
+        assert len(fail_closed) >= 2
+        for message in fail_closed:
+            assert "surface=websocket_stream" in message
+            assert "reason=previous_response_not_found_malformed_param" in message
+            assert "previous_response_id=sha256:" in message
+            assert "session_id=sha256:" in message
+            assert "resp_ws_grouped_anchor" not in message
+    else:
+        assert len(fail_closed) >= 2
+        for message in fail_closed:
+            assert "surface=websocket_stream" in message
+            assert "previous_response_source=client_supplied" in message or "diagnostics=" in message
+            assert "resp_ws_grouped_anchor" not in message
 
 
 @pytest.mark.parametrize("capability_carrier", ["handshake", "response_create"])

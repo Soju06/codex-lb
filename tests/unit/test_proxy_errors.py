@@ -3,17 +3,24 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from starlette.requests import Request
 
 from app.core.clients.proxy import ProxyResponseError, _error_event_from_response, _error_payload_from_response
+from app.core.errors import OpenAIErrorDetail
 from app.core.exceptions import ProxyRateLimitError
 from app.core.openai.requests import ResponsesRequest
+from app.core.types import JsonValue
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy.api import _logged_error_json_response, _stream_response_error_events
 
 pytestmark = pytest.mark.unit
+
+# Sentinel for "the upstream error carried no ``param`` key at all", which is a
+# different wire state from an explicitly supplied ``null``.
+_OMITTED_PARAM = object()
 
 
 def test_http_bridge_recovery_eligibility_accepts_turn_state_anchor_without_previous_response(
@@ -91,6 +98,75 @@ def test_logged_error_json_response_preserves_upstream_diagnostic_markers():
     assert json.loads(bytes(response.body))["error"]["message"] == message
 
 
+@pytest.mark.parametrize(
+    ("raw_param", "expected_param"),
+    [
+        (_OMITTED_PARAM, None),
+        (None, None),
+        ("", None),
+        ("   ", None),
+        (0, None),
+        (False, None),
+        ({}, None),
+        ([], None),
+        ("  input  ", "input"),
+    ],
+)
+def test_logged_error_json_response_canonicalizes_param_at_public_boundary(raw_param, expected_param):
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    error: OpenAIErrorDetail = {
+        "code": "invalid_request_error",
+        "message": "Invalid request payload.",
+        "type": "invalid_request_error",
+    }
+    if raw_param is not _OMITTED_PARAM:
+        error["param"] = cast(JsonValue, raw_param)
+
+    response = _logged_error_json_response(request, 400, {"error": error})
+    public_error = json.loads(bytes(response.body))["error"]
+    assert public_error["code"] == "invalid_request_error"
+    assert public_error["message"] == "Invalid request payload."
+    assert public_error["type"] == "invalid_request_error"
+    if expected_param is None:
+        assert "param" not in public_error
+    else:
+        assert public_error["param"] == expected_param
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "type": "error",
+            "code": "invalid_request_error",
+            "message": "Invalid request payload.",
+            "param": {},
+        },
+        {
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "Invalid request payload.",
+                    "type": "invalid_request_error",
+                    "param": None,
+                }
+            },
+        },
+    ],
+)
+def test_logged_error_json_response_sanitizes_error_event_shapes(payload):
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+
+    response = _logged_error_json_response(request, 400, payload)
+
+    body = json.loads(bytes(response.body))
+    if body["type"] == "error":
+        assert "param" not in body
+    else:
+        assert "param" not in body["response"]["error"]
+
+
 @pytest.mark.asyncio
 async def test_stream_proxy_error_preserves_upstream_diagnostic_markers():
     message = "Provider Exception: failed while reading /tmp/upstream-cache"
@@ -114,6 +190,59 @@ async def test_stream_proxy_error_preserves_upstream_diagnostic_markers():
 
     assert len(events) == 1
     assert message in events[0]
+
+
+@pytest.mark.parametrize(
+    ("raw_param", "expected_param"),
+    [
+        (_OMITTED_PARAM, None),
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("\t\n", None),
+        (0, None),
+        (False, None),
+        ({}, None),
+        ([], None),
+        ("previous_response_id", "previous_response_id"),
+        ("  input  ", "input"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_proxy_error_canonicalizes_param_at_public_boundary(raw_param, expected_param):
+    """Only a trimmed non-empty string may reach a client; code/message/type survive."""
+    error: OpenAIErrorDetail = {
+        "code": "invalid_request_error",
+        "message": "Invalid request payload.",
+        "type": "invalid_request_error",
+    }
+    if raw_param is not _OMITTED_PARAM:
+        error["param"] = cast(JsonValue, raw_param)
+
+    async def stream():
+        if False:
+            yield ""
+        raise ProxyResponseError(400, {"error": error})
+
+    events = [
+        event
+        async for event in _stream_response_error_events(
+            stream(),
+            owns_reservation=False,
+            reservation=None,
+        )
+    ]
+
+    assert len(events) == 1
+    payload = json.loads(events[0].split("data: ", 1)[1])
+    public_error = payload["response"]["error"]
+    assert public_error.get("code") == "invalid_request_error"
+    assert public_error.get("message") == "Invalid request payload."
+    assert public_error.get("type") == "invalid_request_error"
+    if expected_param is None:
+        assert '"param"' not in json.dumps(public_error)
+    else:
+        assert public_error["param"] == expected_param
 
 
 @pytest.mark.asyncio

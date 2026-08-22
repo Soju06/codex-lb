@@ -41,9 +41,11 @@ from app.core.config.settings_cache import get_settings_cache
 from app.core.errors import (
     OpenAIErrorDetail,
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
     openai_error,
     previous_response_stream_incomplete_error,
     response_failed_event,
+    sanitize_public_error_detail,
 )
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -64,7 +66,7 @@ from app.core.openai.requests import (
 from app.core.resilience.overload import local_overload_error
 from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id
-from app.core.utils.sse import format_sse_event, parse_sse_data_json
+from app.core.utils.sse import format_sse_event
 from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import (
     AccountStatus,
@@ -85,6 +87,9 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
+)
+from app.modules.proxy._service.http_bridge.error_fields import (
+    _parse_http_bridge_error_fields,
 )
 from app.modules.proxy._service.http_bridge.protocol import _HTTPBridgeServiceProtocol
 from app.modules.proxy._service.observability import (
@@ -569,13 +574,15 @@ def _log_http_bridge_startup_wait_timeout(
     )
 
 
-def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int, str, str, str, str | None]:
+def _http_bridge_precreated_retry_failure_error(
+    exc: BaseException,
+) -> tuple[int, str, str, str, OpenAIErrorParam]:
     if isinstance(exc, ProxyResponseError):
         parsed = _parse_openai_error(exc.payload)
         code = _normalize_error_code(parsed.code if parsed else None, parsed.type if parsed else None)
         message = parsed.message if parsed and parsed.message else "HTTP bridge pre-created retry failed"
         error_type = parsed.type if parsed and parsed.type else "server_error"
-        error_param = parsed.param if parsed else None
+        error_param = parsed.param_state if parsed else OpenAIErrorParam.absent()
         return exc.status_code, code, message, error_type, error_param
     if isinstance(exc, TimeoutError):
         return (
@@ -583,10 +590,10 @@ def _http_bridge_precreated_retry_failure_error(exc: BaseException) -> tuple[int
             "upstream_unavailable",
             "HTTP bridge pre-created retry failed: upstream websocket reconnect timed out",
             "server_error",
-            None,
+            OpenAIErrorParam.absent(),
         )
     message = str(exc).strip() or "HTTP bridge pre-created retry failed"
-    return 502, "upstream_unavailable", message, "server_error", None
+    return 502, "upstream_unavailable", message, "server_error", OpenAIErrorParam.absent()
 
 
 def _trim_http_bridge_previous_response_input_items(input_items: list[JsonValue]) -> list[JsonValue]:
@@ -643,58 +650,60 @@ def _normalize_http_bridge_error_event(
     error_code_value: str | None = None
     error_type_value: str | None = None
     error_message_value: str | None = None
-    error_param_value: str | None = None
+    error_param_state = OpenAIErrorParam.absent()
     explicit_error_code = False
     rate_limit_metadata: OpenAIErrorDetail = {}
+
+    # One derivation for both consumers below: the event still wins over the
+    # payload for code/type/message, but the payload error detail is also the
+    # source of the rate-limit metadata and of the fallback parameter state.
+    payload_error: dict[str, JsonValue] | None = None
+    if isinstance(payload, dict):
+        candidate = payload.get("error")
+        if not isinstance(candidate, dict):
+            candidate = _websocket_top_level_error_payload(payload)
+            if isinstance(candidate, dict) and "param" in payload:
+                candidate = {**candidate, "param": payload["param"]}
+        if isinstance(candidate, dict):
+            payload_error = candidate
 
     if event is not None and event.error is not None:
         error_code_value = event.error.code
         error_type_value = event.error.type
         error_message_value = event.error.message
-        error_param_value = event.error.param
+        error_param_state = event.error.param_state
         if isinstance(error_code_value, str) and error_code_value.strip():
             explicit_error_code = True
-    elif isinstance(payload, dict):
-        payload_error = payload.get("error")
-        if not isinstance(payload_error, dict):
-            payload_error = _websocket_top_level_error_payload(payload)
-        if isinstance(payload_error, dict):
-            code_value = payload_error.get("code")
-            if isinstance(code_value, str):
-                stripped = code_value.strip()
-                if stripped:
-                    error_code_value = stripped
-                    explicit_error_code = True
-            type_value = payload_error.get("type")
-            if isinstance(type_value, str):
-                stripped = type_value.strip()
-                if stripped:
-                    error_type_value = stripped
-            message_value = payload_error.get("message")
-            if isinstance(message_value, str):
-                stripped = message_value.strip()
-                if stripped:
-                    error_message_value = stripped
-            param_value = payload_error.get("param")
-            if isinstance(param_value, str):
-                stripped = param_value.strip()
-                if stripped:
-                    error_param_value = stripped
+    elif payload_error is not None:
+        code_value = payload_error.get("code")
+        if isinstance(code_value, str):
+            stripped = code_value.strip()
+            if stripped:
+                error_code_value = stripped
+                explicit_error_code = True
+        type_value = payload_error.get("type")
+        if isinstance(type_value, str):
+            stripped = type_value.strip()
+            if stripped:
+                error_type_value = stripped
+        message_value = payload_error.get("message")
+        if isinstance(message_value, str):
+            stripped = message_value.strip()
+            if stripped:
+                error_message_value = stripped
 
-    if isinstance(payload, dict):
-        raw_error = payload.get("error")
-        if not isinstance(raw_error, dict):
-            raw_error = _websocket_top_level_error_payload(payload)
-        if isinstance(raw_error, dict):
-            plan_type = raw_error.get("plan_type")
-            if isinstance(plan_type, str):
-                rate_limit_metadata["plan_type"] = plan_type
-            resets_at = raw_error.get("resets_at")
-            if isinstance(resets_at, int | float):
-                rate_limit_metadata["resets_at"] = resets_at
-            resets_in = raw_error.get("resets_in_seconds")
-            if isinstance(resets_in, int | float):
-                rate_limit_metadata["resets_in_seconds"] = resets_in
+    if payload_error is not None:
+        if not error_param_state.present:
+            error_param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], payload_error))
+        plan_type = payload_error.get("plan_type")
+        if isinstance(plan_type, str):
+            rate_limit_metadata["plan_type"] = plan_type
+        resets_at = payload_error.get("resets_at")
+        if isinstance(resets_at, int | float):
+            rate_limit_metadata["resets_at"] = resets_at
+        resets_in = payload_error.get("resets_in_seconds")
+        if isinstance(resets_in, int | float):
+            rate_limit_metadata["resets_in_seconds"] = resets_in
 
     if request_state is not None:
         if request_state.error_code_override is not None:
@@ -705,7 +714,7 @@ def _normalize_http_bridge_error_event(
         if request_state.error_message_override is not None:
             error_message_value = request_state.error_message_override
         if request_state.error_param_override is not None:
-            error_param_value = request_state.error_param_override
+            error_param_state = request_state.error_param_override
 
     normalized_error_code = _normalize_error_code(error_code_value, error_type_value) or "upstream_error"
     if not explicit_error_code and normalized_error_code == "error":
@@ -722,13 +731,32 @@ def _normalize_http_bridge_error_event(
         normalized_error_message,
         error_type=normalized_error_type,
         response_id=normalized_response_id,
-        error_param=error_param_value,
+        error_param=error_param_state,
     )
+    # ``response_failed_event`` is a client-facing serializer, so it strips
+    # malformed parameters.  The bridge still needs the wire-level state for
+    # settlement and replay classification.  Restore that state only in the
+    # internal event/payload returned to the caller; the serialized block below
+    # is copied and sanitized before it can enter a downstream queue.
+    if error_param_state.present:
+        normalized_event["response"]["error"]["param"] = error_param_state.raw
     if rate_limit_metadata:
         normalized_event["response"]["error"].update(rate_limit_metadata)
-    normalized_event_block = format_sse_event(normalized_event)
-    normalized_payload = parse_sse_data_json(normalized_event_block)
+    public_event: dict[str, JsonValue] = dict(cast(Mapping[str, JsonValue], normalized_event))
+    public_response: dict[str, JsonValue] = dict(cast(Mapping[str, JsonValue], normalized_event["response"]))
+    public_response["error"] = sanitize_public_error_detail(
+        cast(Mapping[str, JsonValue], normalized_event["response"]["error"])
+    )
+    public_event["response"] = public_response
+    normalized_event_block = format_sse_event(public_event)
+    normalized_payload = cast(dict[str, JsonValue], cast(object, normalized_event))
     parsed_event = parse_sse_event(normalized_event_block)
+    if parsed_event is not None and parsed_event.response is not None and parsed_event.response.error is not None:
+        # Pydantic cannot represent malformed JSON values in its public
+        # ``param`` field, but its private presence-aware state can.  Keep the
+        # parsed event usable for settlement while retaining the exact wire
+        # value for internal policy decisions.
+        parsed_event.response.error.set_param_state(error_param_state)
     return normalized_event_block, normalized_payload, parsed_event, "response.failed"
 
 
@@ -2764,21 +2792,15 @@ def _http_bridge_reconnect_connect_failure(
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:
-    payload = exc.payload
-    if not isinstance(payload, dict):
+    fields = _parse_http_bridge_error_fields(cast(Mapping[str, JsonValue], exc.payload))
+    if fields is None:
         return False
-    error = payload.get("error")
-    if not isinstance(error, dict):
+    # A present parameter must be a non-empty string before the proxy may
+    # replay a request.  The parser keeps malformed JSON values intact so
+    # this guard cannot be bypassed by a coercion sentinel.
+    if fields.param_malformed:
         return False
-    code_value = error.get("code")
-    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
-    type_value = error.get("type")
-    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
-    # Normalize like the websocket rewrite path (#1818): upstream frames may
-    # carry the classifiable code only in ``type`` (or omit both code and
-    # param on the terse previous-response rejection), and a raw read would
-    # misclassify them into the ambiguous transport class below (issue #1830).
-    code = _normalize_error_code(raw_code, error_type)
+    code = fields.normalized_code
     if code in {
         "bridge_owner_unreachable",
         "bridge_previous_response_not_found",
@@ -2794,11 +2816,19 @@ def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyRespo
             "server_anchored_replay_once",
             "server_indefinite_recovery",
         }
-    param_value = error.get("param")
-    param = param_value.strip() if isinstance(param_value, str) and param_value.strip() else None
-    message_value = error.get("message")
-    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
-    return _is_previous_response_not_found_error(code=code, param=param, message=message)
+    return _is_previous_response_not_found_error(code=code, param=fields.param_state, message=fields.message)
+
+
+def _http_bridge_is_explicit_previous_response_rejection(exc: ProxyResponseError) -> bool:
+    fields = _parse_http_bridge_error_fields(cast(Mapping[str, JsonValue], exc.payload))
+    if fields is None:
+        return False
+    if fields.param_malformed:
+        return False
+    code = fields.normalized_code
+    if code == "bridge_previous_response_not_found":
+        return not fields.param_present or bool(fields.normalized_param)
+    return _is_previous_response_not_found_error(code=code, param=fields.param_state, message=fields.message)
 
 
 def _http_bridge_is_previous_response_owner_unavailable(exc: ProxyResponseError) -> bool:
@@ -2976,6 +3006,18 @@ def _http_bridge_request_budget_seconds(settings: object) -> float:
     )
 
 
+def _http_bridge_request_deadline(
+    request_state: _WebSocketRequestState,
+    settings: object,
+) -> float:
+    # Re-prepared retry states reset started_at but deliberately retain the
+    # original deadline; using started_at alone would extend the budget.
+    deadline = request_state.bridge_request_deadline
+    if deadline is None:
+        deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
+    return deadline
+
+
 def _http_bridge_admission_timeout_seconds(
     request_state: _WebSocketRequestState,
     admission_timeout_seconds: float,
@@ -2983,12 +3025,8 @@ def _http_bridge_admission_timeout_seconds(
 ) -> float:
     # Bridged requests may retry response-create gate acquisition within one
     # bridge request budget, so every wait must be clamped to the remaining
-    # time. Re-prepared retry states reset started_at but deliberately retain
-    # the original deadline; using started_at alone would extend the budget.
-    deadline = request_state.bridge_request_deadline
-    if deadline is None:
-        deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
-    remaining_budget_seconds = deadline - time.monotonic()
+    # time.
+    remaining_budget_seconds = _http_bridge_request_deadline(request_state, settings) - time.monotonic()
     return max(0.0, min(admission_timeout_seconds, remaining_budget_seconds))
 
 
@@ -3131,6 +3169,7 @@ for _helper_name in (
     "_http_bridge_continuity_lost_error_envelope",
     "_http_bridge_owner_lookup_unavailable_error_envelope",
     "_http_bridge_should_attempt_local_previous_response_recovery",
+    "_http_bridge_is_explicit_previous_response_rejection",
     "_http_bridge_is_previous_response_owner_unavailable",
     "_http_bridge_should_attempt_soft_affinity_reroute",
     "_http_bridge_is_context_overflow_error",

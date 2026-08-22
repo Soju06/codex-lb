@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Mapping
+from typing import Iterable, cast
 
 from pydantic import ValidationError
 
 from app.core import usage as usage_core
 from app.core.balancer.types import ClassifiedFailure, FailureClass, FailurePhase, UpstreamError
-from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope
+from app.core.errors import OpenAIErrorDetail, OpenAIErrorEnvelope, OpenAIErrorParam
 from app.core.openai.models import OpenAIError
 from app.core.plan_types import normalize_rate_limit_plan_type
 from app.core.types import JsonValue
@@ -293,20 +294,30 @@ def _parse_openai_error(payload: OpenAIErrorEnvelope) -> OpenAIError | None:
     error = payload.get("error")
     if not error:
         return None
+    if not isinstance(error, dict):
+        return None
+    param_state = OpenAIErrorParam.from_mapping(cast("Mapping[str, JsonValue]", error))
     try:
-        return OpenAIError.model_validate(error)
+        parsed = OpenAIError.model_validate(error)
     except ValidationError:
-        if not isinstance(error, dict):
-            return None
-        return OpenAIError(
+        param = _coerce_str(error.get("param"))
+        parsed = OpenAIError(
             message=_coerce_str(error.get("message")),
             type=_coerce_str(error.get("type")),
             code=_coerce_str(error.get("code")),
-            param=_coerce_str(error.get("param")),
+            param=param,
             plan_type=_coerce_str(error.get("plan_type")),
             resets_at=_coerce_number(error.get("resets_at")),
             resets_in_seconds=_coerce_number(error.get("resets_in_seconds")),
         )
+    parsed.set_param_state(param_state)
+    return parsed
+
+
+def _openai_error_param(error: OpenAIError | None) -> OpenAIErrorParam:
+    """Return presence-aware parameter metadata from a parsed error."""
+
+    return error.param_state if error is not None else OpenAIErrorParam.absent()
 
 
 def _coerce_str(value: JsonValue) -> str | None:

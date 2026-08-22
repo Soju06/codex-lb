@@ -160,6 +160,7 @@ class DurableBridgeRetryCircuitSnapshot:
     cooldown_until_epoch: float
     last_detail: str | None
     updated_at_epoch: float
+    admission_generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +189,11 @@ class DurableBridgeOperationSnapshot:
     request_text: str | None = None
     event_spool_complete: bool = True
     created: bool = False
+    rebound: bool = False
+    rebound_from_session_id: str | None = None
+    rebound_from_account_id: str | None = None
+    rebound_from_model: str | None = None
+    rebound_from_parent_response_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,6 +468,72 @@ class DurableBridgeRepository:
             await self._session.execute(statement)
             await self._session.commit()
 
+    async def claim_retry_circuit_generation(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_scope: str,
+        expected_updated_at_epoch: float | None,
+        expected_admission_generation: int,
+        expected_consecutive_failures: int,
+        expected_cooldown_until_epoch: float,
+    ) -> DurableBridgeRetryCircuitSnapshot | None:
+        """Linearize replay admission against a retry-circuit generation.
+
+        ``admission_generation`` is independent from the failure observation
+        timestamp. A failure committed first makes this claim fail; a delayed
+        failure committed afterward still sees its original ``updated_at``
+        baseline and is merged after the already-admitted dispatch.
+        """
+        values = {
+            "session_key_kind": session_key_kind,
+            "session_key_hash": durable_bridge_hash(session_key_value),
+            "api_key_scope": api_key_scope,
+            "consecutive_failures": 0,
+            "cooldown_until_epoch": 0.0,
+            "last_detail": None,
+            "updated_at_epoch": time.time(),
+            "admission_generation": 1,
+        }
+        dialect = self._session.get_bind().dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            raise RuntimeError(f"DurableBridgeRepository retry circuit claim unsupported for dialect={dialect!r}")
+        async with sqlite_writer_section():
+            if expected_updated_at_epoch is None:
+                if expected_admission_generation != 0:
+                    return None
+                if dialect == "postgresql":
+                    statement = pg_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
+                else:
+                    statement = sqlite_insert(HttpBridgeRetryCircuit).values(**values).on_conflict_do_nothing()
+            else:
+                statement = (
+                    update(HttpBridgeRetryCircuit)
+                    .where(
+                        HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
+                        HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
+                        HttpBridgeRetryCircuit.api_key_scope == api_key_scope,
+                        HttpBridgeRetryCircuit.admission_generation == expected_admission_generation,
+                        HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch,
+                        HttpBridgeRetryCircuit.consecutive_failures == expected_consecutive_failures,
+                        HttpBridgeRetryCircuit.cooldown_until_epoch == expected_cooldown_until_epoch,
+                    )
+                    .values(admission_generation=expected_admission_generation + 1)
+                )
+            # Return the updated row from the compare-and-set statement itself.
+            # Reading it after commit created a cancellation window where the
+            # admission generation was consumed but the caller observed a
+            # timeout and suppressed the replay.  ``RETURNING`` makes the
+            # durable claim receipt part of the same atomic write operation.
+            result = await self._session.execute(statement.returning(HttpBridgeRetryCircuit))
+            row = result.scalar_one_or_none()
+            if row is None:
+                await self._session.rollback()
+                return None
+            await self._session.commit()
+        return _to_retry_circuit_snapshot(row)
+
     async def delete_retry_circuit(
         self,
         *,
@@ -469,7 +541,8 @@ class DurableBridgeRepository:
         session_key_value: str,
         api_key_scope: str,
         expected_updated_at_epoch: float | None = None,
-    ) -> None:
+        expected_admission_generation: int | None = None,
+    ) -> bool:
         conditions = [
             HttpBridgeRetryCircuit.session_key_kind == session_key_kind,
             HttpBridgeRetryCircuit.session_key_hash == durable_bridge_hash(session_key_value),
@@ -477,8 +550,10 @@ class DurableBridgeRepository:
         ]
         if expected_updated_at_epoch is not None:
             conditions.append(HttpBridgeRetryCircuit.updated_at_epoch == expected_updated_at_epoch)
+        if expected_admission_generation is not None:
+            conditions.append(HttpBridgeRetryCircuit.admission_generation == expected_admission_generation)
         async with sqlite_writer_section():
-            await self._session.execute(
+            result = await self._session.execute(
                 update(HttpBridgeRetryCircuit)
                 .where(*conditions)
                 .values(
@@ -489,6 +564,7 @@ class DurableBridgeRepository:
                 )
             )
             await self._session.commit()
+        return int(getattr(result, "rowcount", 0) or 0) > 0
 
     async def purge_retry_circuit(
         self,
@@ -1226,6 +1302,10 @@ class DurableBridgeRepository:
                     ).where(HttpBridgeSessionRecord.api_key_scope == api_key_scope)
                 operation = await self._session.scalar(fingerprint_statement.with_for_update())
             if operation is not None:
+                rebound_from_session_id = operation.session_id if operation.state == "failed" else None
+                rebound_from_account_id = operation.account_id if operation.state == "failed" else None
+                rebound_from_model = operation.model if operation.state == "failed" else None
+                rebound_from_parent_response_id = operation.parent_response_id if operation.state == "failed" else None
                 if recovery_attempt_consumed:
                     # A REPLAYED recovery checkpoint is immutable. Return the
                     # existing row for safe transcript replay or fail-closed
@@ -1330,7 +1410,14 @@ class DurableBridgeRepository:
                 if request_text is not None and operation.request_text is None:
                     operation.request_text = request_text
                     operation.updated_at = utcnow()
-                snapshot = _to_operation_snapshot(operation, created=rebound)
+                snapshot = _to_operation_snapshot(
+                    operation,
+                    rebound=rebound,
+                    rebound_from_session_id=rebound_from_session_id,
+                    rebound_from_account_id=rebound_from_account_id,
+                    rebound_from_model=rebound_from_model,
+                    rebound_from_parent_response_id=rebound_from_parent_response_id,
+                )
                 await self._session.commit()
                 return snapshot
             operation = HttpBridgeOperationRecord(
@@ -1539,8 +1626,13 @@ class DurableBridgeRepository:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        restore_rebound: bool = False,
+        rebound_from_session_id: str | None = None,
+        rebound_from_account_id: str | None = None,
+        rebound_from_model: str | None = None,
+        rebound_from_parent_response_id: str | None = None,
     ) -> bool:
-        """Remove a newly-created operation that never reached upstream."""
+        """Undo an operation transition that never reached upstream."""
         async with sqlite_writer_section():
             owner_exists = await self._session.scalar(
                 select(HttpBridgeSessionRecord.id)
@@ -1573,7 +1665,17 @@ class DurableBridgeRepository:
             if has_events is not None:
                 await self._session.rollback()
                 return False
-            await self._session.delete(operation)
+            if restore_rebound:
+                operation.state = "failed"
+                operation.event_spool_complete = False
+                if rebound_from_session_id is not None:
+                    operation.session_id = rebound_from_session_id
+                    operation.account_id = rebound_from_account_id
+                    operation.model = rebound_from_model
+                    operation.parent_response_id = rebound_from_parent_response_id
+                operation.updated_at = utcnow()
+            else:
+                await self._session.delete(operation)
             await self._session.commit()
         return True
 
@@ -3112,6 +3214,11 @@ def _to_operation_snapshot(
     row: HttpBridgeOperationRecord,
     *,
     created: bool = False,
+    rebound: bool = False,
+    rebound_from_session_id: str | None = None,
+    rebound_from_account_id: str | None = None,
+    rebound_from_model: str | None = None,
+    rebound_from_parent_response_id: str | None = None,
 ) -> DurableBridgeOperationSnapshot:
     return DurableBridgeOperationSnapshot(
         operation_id=row.operation_id,
@@ -3126,6 +3233,11 @@ def _to_operation_snapshot(
         request_text=row.request_text,
         event_spool_complete=bool(row.event_spool_complete),
         created=created,
+        rebound=rebound,
+        rebound_from_session_id=rebound_from_session_id,
+        rebound_from_account_id=rebound_from_account_id,
+        rebound_from_model=rebound_from_model,
+        rebound_from_parent_response_id=rebound_from_parent_response_id,
     )
 
 
@@ -3140,4 +3252,5 @@ def _to_retry_circuit_snapshot(row: HttpBridgeRetryCircuit | None) -> DurableBri
         cooldown_until_epoch=row.cooldown_until_epoch,
         last_detail=row.last_detail,
         updated_at_epoch=row.updated_at_epoch,
+        admission_generation=row.admission_generation,
     )

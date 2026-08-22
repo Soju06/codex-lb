@@ -1281,9 +1281,36 @@ async def test_v1_responses_routes_under_root_path(app_instance):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("param_present", "param"),
+    [
+        (False, None),
+        (True, "previous_response_id"),
+        (True, ""),
+        (True, "   "),
+        (True, None),
+        (True, 0),
+        (True, False),
+        (True, {}),
+        (True, []),
+    ],
+    ids=[
+        "absent",
+        "valid",
+        "blank",
+        "whitespace",
+        "null",
+        "number",
+        "boolean",
+        "object",
+        "array",
+    ],
+)
 async def test_v1_responses_previous_response_not_found_without_http_bridge_returns_stream_incomplete(
     async_client,
     monkeypatch,
+    param_present,
+    param,
 ):
     email = "prev-http-fallback@example.com"
     raw_account_id = "acc_prev_http_fallback"
@@ -1299,7 +1326,8 @@ async def test_v1_responses_previous_response_not_found_without_http_bridge_retu
             "Previous response with id 'resp_prev_http_fallback' not found.",
             error_type="invalid_request_error",
         )
-        error_payload["error"]["param"] = "previous_response_id"
+        if param_present:
+            error_payload["error"]["param"] = param
         raise proxy_module.ProxyResponseError(400, error_payload)
         if False:
             yield ""
@@ -1316,9 +1344,15 @@ async def test_v1_responses_previous_response_not_found_without_http_bridge_retu
         headers={"session_id": "sid_prev_http_fallback"},
     )
 
+    # The public surface masks every canonical previous_response_not_found,
+    # including the malformed-param variants that fail the recovery classifier.
     assert response.status_code == 502
-    assert response.json()["error"]["code"] == "stream_incomplete"
-    assert response.json()["error"]["message"] == "Upstream websocket closed before response.completed"
+    body = response.json()
+    assert body["error"]["code"] == "stream_incomplete"
+    assert body["error"]["message"] == "Upstream websocket closed before response.completed"
+    assert "param" not in body["error"]
+    assert "previous_response_not_found" not in json.dumps(body)
+    assert "resp_prev_http_fallback" not in json.dumps(body)
 
 
 @pytest.mark.asyncio
@@ -2062,6 +2096,81 @@ async def test_proxy_responses_streams_upstream(async_client, monkeypatch):
         assert log.request_id == "resp_1"
         assert log.archive_request_id == request_id
         assert log.transport == "http"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "upstream_error",
+    [
+        {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_http_stale' not found.",
+            "param": {},
+        },
+        {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Invalid `previous_response_id`.",
+        },
+        {
+            "type": "invalid_request_error",
+            "code": "invalid_request_error",
+            "message": "Previous response with id 'resp_http_raw_id' not found.",
+            "param": {},
+        },
+    ],
+    ids=["canonical-malformed-param", "parameterless-invalid-request", "noncanonical-malformed-param"],
+)
+async def test_v1_responses_stream_masks_stale_errors_without_raw_fields(async_client, monkeypatch, upstream_error):
+    if upstream_error.get("message") == "Invalid `previous_response_id`.":
+        normalized_message = " ".join(upstream_error["message"].replace("`", "").split())
+        assert normalized_message == "Invalid previous_response_id."
+
+    auth_json = _make_auth_json("acc_v1_stale_mask", "v1-stale-mask@example.com")
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        yield (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_http_current",
+                        "object": "response",
+                        "status": "failed",
+                        "error": upstream_error,
+                    },
+                },
+                separators=(",", ":"),
+            )
+            + "\n\n"
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={"model": "gpt-5.1", "input": "continue", "stream": True},
+    ) as streamed:
+        assert streamed.status_code == 200
+        lines = [line async for line in streamed.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.failed"
+    error = event["response"]["error"]
+    assert error["code"] == "stream_incomplete"
+    assert "param" not in error
+    assert "previous_response_not_found" not in json.dumps(event)
+    assert "resp_http_stale" not in json.dumps(event)
+    assert "resp_http_raw_id" not in json.dumps(event)
 
 
 @pytest.mark.asyncio

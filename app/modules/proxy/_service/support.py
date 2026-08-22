@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, NoReturn, Protocol
+from typing import Any, Literal, NoReturn, Protocol, cast
 
 import anyio
 
@@ -19,7 +19,7 @@ from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.config.settings import get_settings
-from app.core.errors import OpenAIErrorEnvelope, openai_error
+from app.core.errors import OpenAIErrorEnvelope, OpenAIErrorParam, openai_error
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import classify_event_type
@@ -900,6 +900,19 @@ class _HTTPBridgeRetryCircuitAttemptSelection:
         return len(self.attempts) > 1
 
 
+@dataclass(frozen=True, slots=True)
+class _HTTPBridgeRetryCircuitGeneration:
+    """Immutable retry-circuit snapshot used to fence stale-anchor replay."""
+
+    admission_generation: int
+    persisted_updated_at_epoch: float
+    persisted_consecutive_failures: int
+    durable_cooldown_until_epoch: float
+    local_consecutive_failures: int
+    last_failure_monotonic: float
+    local_cooldown_until: float
+
+
 @dataclass
 class _WebSocketRequestState:
     request_id: str
@@ -1019,6 +1032,18 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Set only on the internally constructed one-shot request that replaces an
+    # explicitly rejected stale anchor with a verified full-history payload.
+    # It may bypass an older hard-key retry circuit without deleting that
+    # circuit or weakening admission for ordinary client retries.
+    verified_stale_anchor_replay: bool = False
+    # Snapshot of the hard-key circuit observed when the stale-anchor replay
+    # was authorized. ``captured=True`` with ``generation=None`` proves that no
+    # circuit existed; a newer local/durable failure must suppress submit.
+    verified_stale_anchor_retry_circuit_generation_captured: bool = False
+    verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
+    verified_stale_anchor_retry_circuit_generation: _HTTPBridgeRetryCircuitGeneration | None = None
+    verified_stale_anchor_quarantine_generation: int | None = None
     # Stable fingerprint used by the durable recovery-attempt journal. It is
     # populated only for a proof-gated fresh replay candidate.
     recovery_attempt_fingerprint: str | None = None
@@ -1049,6 +1074,11 @@ class _WebSocketRequestState:
     # pre-dispatch admission failure may remove that row; an existing row
     # represents an ambiguous upstream attempt and must remain fenced.
     operation_created: bool = False
+    operation_rebound: bool = False
+    operation_rebound_from_session_id: str | None = None
+    operation_rebound_from_account_id: str | None = None
+    operation_rebound_from_model: str | None = None
+    operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
     # Immutable durable attempt generation. Recovery claims increment the
@@ -1076,7 +1106,10 @@ class _WebSocketRequestState:
     error_code_override: str | None = None
     error_message_override: str | None = None
     error_type_override: str | None = None
-    error_param_override: str | None = None
+    # Preserve upstream error-param presence and malformed JSON values across
+    # account/replay handoffs. A raw string (including an empty sentinel) is
+    # not sufficient to distinguish an omitted parameter from a malformed one.
+    error_param_override: OpenAIErrorParam | None = None
     failure_phase_override: str | None = None
     failure_detail_override: str | None = None
     upstream_error_code_override: str | None = None
@@ -1084,7 +1117,15 @@ class _WebSocketRequestState:
     response_event_count: int = 0
     last_upstream_activity_at: float | None = None
     upstream_model_output_seen: bool = False
+    # Terminal WebSocket error sanitization records continuity telemetry once;
+    # later serializers must preserve the already-normalized fields without
+    # recording the same stale-anchor failure again.
+    websocket_terminal_error_fields_sanitized: bool = False
     previous_response_not_found_rewritten: bool = False
+    # A canonical stale-anchor code with a present malformed ``param`` may
+    # still be matched and masked, but it must never authorize any replay
+    # path after the public serializer omits that raw value.
+    previous_response_not_found_recovery_blocked: bool = False
     previous_response_owner_lookup_source: str | None = None
     previous_response_owner_lookup_outcome: str | None = None
     previous_response_owner_requested_at: datetime | None = None
@@ -1170,7 +1211,7 @@ class _HTTPBridgeOwnerForward:
     key: _HTTPBridgeSessionKey
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, weakref_slot=True)
 class _HTTPBridgeSession:
     key: _HTTPBridgeSessionKey
     headers: dict[str, str]
@@ -1726,9 +1767,14 @@ def _openai_error_envelope_from_response_failed_payload(
     error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else "server_error"
 
     envelope = openai_error(code, message, error_type)
-    param_value = error_payload.get("param")
-    if isinstance(param_value, str) and param_value.strip():
-        envelope["error"]["param"] = param_value.strip()
+    param_state = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error_payload))
+    # This envelope is constructed after the queued response.failed event has
+    # crossed the client-facing boundary.  Keep presence-aware raw state in the
+    # upstream parsing/matching paths, but never expose malformed JSON values
+    # through the public error envelope.  A valid string is trimmed once here;
+    # blank, null, and non-string values are omitted.
+    if param_state.normalized:
+        envelope["error"]["param"] = param_state.normalized
     error_detail = envelope["error"]
     plan_type = error_payload.get("plan_type")
     if plan_type is not None:

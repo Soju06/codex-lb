@@ -37,7 +37,7 @@ from app.core.clients.proxy_websocket import (
     UpstreamWebSocketTransportError,
     is_account_neutral_websocket_error_code,
 )
-from app.core.errors import response_failed_event
+from app.core.errors import PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON, response_failed_event
 from app.core.openai.models import OpenAIEvent
 from app.core.openai.parsing import (
     _LIFECYCLE_EVENT_TYPES,
@@ -88,6 +88,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _is_account_neutral_transport_drop,
     _is_missing_tool_output_error,
     _is_previous_response_not_found_error,
+    _is_previous_response_not_found_public_shape,
     _is_security_work_authorization_required_error,
     _match_websocket_request_state_for_anonymous_event,
     _matching_websocket_request_states_for_missing_tool_output_error,
@@ -103,6 +104,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _rewrite_websocket_downstream_response_id,
     _rewrite_websocket_previous_response_owner_unavailable_event,
     _rewrite_websocket_suppressed_duplicate_tool_call_completion_event,
+    _sanitize_public_websocket_event_payload,
     _security_work_advisory_event,
     _service_get_settings,
     _service_tier_from_event_payload,
@@ -127,6 +129,9 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.observability import (
     _interesting_header_keys as _interesting_header_keys,
+)
+from app.modules.proxy._service.observability import (
+    _record_continuity_fail_closed as _record_continuity_fail_closed,
 )
 from app.modules.proxy._service.observability import (
     _tools_hash as _tools_hash,
@@ -1777,6 +1782,17 @@ class _HTTPBridgeUpstreamEventsMixin:
             param=_websocket_event_error_param(event_type, payload),
             message=error_message,
         )
+        is_previous_response_not_found_matching_event = (
+            is_previous_response_not_found_event
+            or _is_previous_response_not_found_public_shape(
+                code=_normalize_error_code(
+                    _websocket_event_error_code(event_type, payload),
+                    _websocket_event_error_type(event_type, payload),
+                ),
+                param=_websocket_event_error_param(event_type, payload),
+                message=error_message,
+            )
+        )
         is_missing_tool_output_event = _is_missing_tool_output_error(
             code=_normalize_error_code(
                 _websocket_event_error_code(event_type, payload),
@@ -1816,11 +1832,11 @@ class _HTTPBridgeUpstreamEventsMixin:
             elif response_id is None:
                 matched_request_state = _match_websocket_request_state_for_anonymous_event(
                     session.pending_requests,
-                    prefer_previous_response_not_found=is_previous_response_not_found_event
+                    prefer_previous_response_not_found=is_previous_response_not_found_matching_event
                     or is_missing_tool_output_event,
                     previous_response_id_hint=previous_response_id_hint,
                     error_message=error_message,
-                    allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                    allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
                     prefer_draining_requests=anonymous_event_prefers_draining,
                 )
                 release_create_gate = False
@@ -1913,11 +1929,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                         session.pending_requests,
                         response_id=response_id,
                         fallback_request_state=matched_request_state,
-                        prefer_previous_response_not_found=is_previous_response_not_found_event
+                        prefer_previous_response_not_found=is_previous_response_not_found_matching_event
                         or is_missing_tool_output_event,
                         previous_response_id_hint=previous_response_id_hint,
                         error_message=error_message,
-                        allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                        allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
                         allow_precreated_terminal_fallback=True,
                         prefer_draining_requests=anonymous_event_prefers_draining,
                     )
@@ -1943,14 +1959,14 @@ class _HTTPBridgeUpstreamEventsMixin:
                     and _http_bridge_request_counts_against_queue(terminal_request_state)
                 ):
                     session.queued_request_count = max(0, session.queued_request_count - 1)
-                elif is_previous_response_not_found_event or is_missing_tool_output_event:
+                elif is_previous_response_not_found_matching_event or is_missing_tool_output_event:
                     grouped_previous_response_request_states = _pop_matching_websocket_request_states(
                         session.pending_requests,
                         _matching_websocket_request_states_for_previous_response_error(
                             session.pending_requests,
                             previous_response_id_hint=previous_response_id_hint,
                             error_message=error_message,
-                            allow_unanchored_previous_response_error=is_previous_response_not_found_event,
+                            allow_unanchored_previous_response_error=is_previous_response_not_found_matching_event,
                         ),
                     )
                     if not grouped_previous_response_request_states and is_missing_tool_output_event:
@@ -2013,17 +2029,31 @@ class _HTTPBridgeUpstreamEventsMixin:
                         claimed_terminal_request_states.append(claimed_request_state)
 
         if len(grouped_previous_response_request_states) > 1:
-            session.upstream_control.reconnect_requested = True
             grouped_error_reason = (
                 "previous_response_not_found"
                 if is_previous_response_not_found_event
+                else PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON
+                if is_previous_response_not_found_matching_event
                 else "missing_tool_output"
                 if is_missing_tool_output_event
                 else "stream_incomplete"
             )
+            if grouped_error_reason != PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON:
+                session.upstream_control.reconnect_requested = True
             grouped_terminal_events = []
             for grouped_request_state in grouped_previous_response_request_states:
                 grouped_request_state.error_http_status_override = 502
+                if grouped_error_reason == PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON:
+                    # Safe anonymous ownership matching must not become a
+                    # replay grant for any request claimed by this frame.
+                    grouped_request_state.previous_response_not_found_recovery_blocked = True
+                    _record_continuity_fail_closed(
+                        surface="http_bridge",
+                        reason=PREVIOUS_RESPONSE_MALFORMED_PARAM_REASON,
+                        previous_response_id=grouped_request_state.previous_response_id,
+                        session_id=grouped_request_state.session_id,
+                        upstream_error_code="previous_response_not_found",
+                    )
                 (
                     _grouped_downstream_text,
                     grouped_event_block,
@@ -2275,10 +2305,10 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             event_block = f"data: {rewritten_text}\n\n"
 
-        if status_request_state is not None and is_previous_response_not_found_event:
+        if status_request_state is not None and is_previous_response_not_found_matching_event:
             status_request_state.error_http_status_override = 502
             status_request_state.previous_response_not_found_rewritten = (
-                response_id is None and not has_other_pending_requests
+                is_previous_response_not_found_event and response_id is None and not has_other_pending_requests
             )
             event, payload, event_type, rewritten_text = _maybe_rewrite_websocket_previous_response_not_found_event(
                 request_state=status_request_state,
@@ -2781,8 +2811,14 @@ class _HTTPBridgeUpstreamEventsMixin:
             and terminal_request_state.request_kind != "prewarm"
             and not terminal_request_state.skip_request_log
         ):
-            await self._clear_http_bridge_retry_circuit(session)
-            _clear_http_bridge_quarantine(self, session)
+            if not terminal_request_state.verified_stale_anchor_replay:
+                await self._clear_http_bridge_retry_circuit(session)
+            _clear_http_bridge_quarantine(
+                self,
+                session,
+                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
+                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+            )
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract
@@ -2942,6 +2978,16 @@ class _HTTPBridgeUpstreamEventsMixin:
                     retried = await self._retry_http_bridge_security_work_request(session, terminal_request_state)
                     if retried:
                         return
+
+        # ``settlement_payload`` and ``settlement_event`` above retain the
+        # upstream representation for internal classification and durable
+        # bookkeeping.  The event block is the client-facing boundary: strip
+        # malformed/non-string ``error.param`` values before putting it in a
+        # downstream queue or operation spool.
+        if event_type in {"response.failed", "response.incomplete", "error"} and isinstance(payload, dict):
+            public_payload = _sanitize_public_websocket_event_payload(payload, event_type=event_type)
+            if public_payload is not payload:
+                event_block = format_sse_event(public_payload)
 
         matched_event_queue = (
             completed_event_queue

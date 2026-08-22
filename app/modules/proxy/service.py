@@ -71,13 +71,18 @@ from app.core.errors import (
 )
 from app.core.errors import (
     OpenAIErrorEnvelope,
+    OpenAIErrorParam,
     ResponseFailedEvent,
+    coerce_error_param,
     is_previous_response_not_found_error,
     is_previous_response_not_found_message,
     openai_error,
     previous_response_id_from_not_found_message,
     previous_response_stream_incomplete_error,
     response_failed_event,
+)
+from app.core.errors import (
+    is_previous_response_not_found_public_shape as _is_previous_response_not_found_public_shape,  # noqa: F401
 )
 from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
@@ -168,6 +173,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_admission_timeout_seconds,
+    _http_bridge_is_explicit_previous_response_rejection,  # noqa: F401
     _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -678,6 +684,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _rewrite_websocket_downstream_response_id,  # noqa: F401
     _rewrite_websocket_previous_response_owner_unavailable_event,  # noqa: F401
     _rewrite_websocket_suppressed_duplicate_tool_call_completion_event,  # noqa: F401
+    _sanitize_public_websocket_event_payload,  # noqa: F401
     _sanitize_websocket_connect_failure,  # noqa: F401
     _sanitize_websocket_previous_response_error,  # noqa: F401
     _sanitize_websocket_terminal_error_fields,  # noqa: F401
@@ -1323,9 +1330,8 @@ class ProxyService(
                 if not should_retire_stuck_session and any(
                     max(0.0, now - state.started_at) >= threshold_seconds for state in pending_states
                 ):
-                    # A gate waiter starved past the stuck threshold without the
-                    # watchdog firing: dump every pending state's verdict inputs
-                    # so the blocking condition is identifiable from prod logs.
+                    # A gate waiter starved past the threshold without the watchdog firing.
+                    # Dump every pending state's verdict inputs so production logs show the blocker.
                     logger.warning(
                         "http_bridge_stuck_watchdog_skipped session_closed=%s candidates=%s states=%s",
                         bridge_session.closed,
@@ -2160,18 +2166,17 @@ def _is_missing_tool_output_message(message: str | None) -> bool:
 def _is_missing_tool_output_error(
     *,
     code: str | None,
-    param: str | None,
+    param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
-    if code != "invalid_request_error" or param != "input":
-        return False
-    return _is_missing_tool_output_message(message)
+    normalized_param = coerce_error_param(param).normalized
+    return code == "invalid_request_error" and normalized_param == "input" and _is_missing_tool_output_message(message)
 
 
 def _is_previous_response_not_found_error(
     *,
     code: str | None,
-    param: str | None,
+    param: OpenAIErrorParam | JsonValue,
     message: str | None,
 ) -> bool:
     return is_previous_response_not_found_error(code=code, param=param, message=message)
@@ -2184,7 +2189,7 @@ def _compact_previous_response_not_found_error(exc: ProxyResponseError) -> Proxy
     code = _normalize_error_code(error.code, error.type)
     if not _is_previous_response_not_found_error(
         code=code,
-        param=error.param,
+        param=error.param_state,
         message=error.message,
     ):
         return None
@@ -2286,7 +2291,7 @@ def _partial_output_proxy_error_event_block(
         error_code=error_code,
         error_type=error.type if error else None,
         error_message=error_message,
-        error_param=error.param if error else None,
+        error_param=error.param_state if error else OpenAIErrorParam.absent(),
     )
     if rewritten_error is not None:
         rewritten_code, rewritten_message, upstream_error_code = rewritten_error
@@ -2303,7 +2308,7 @@ def _partial_output_proxy_error_event_block(
         error_message or default_message,
         error_type=(error.type if error and error.type else "server_error"),
         response_id=response_id,
-        error_param=error.param if error else None,
+        error_param=(error.param_state.normalized or None) if error else None,
     )
     _apply_error_metadata(event["response"]["error"], error)
     return format_sse_event(event)
@@ -2552,7 +2557,7 @@ def _mark_request_state_previous_response_not_found(
     request_state.error_code_override = error.get("code")
     request_state.error_message_override = error.get("message")
     request_state.error_type_override = error.get("type")
-    request_state.error_param_override = error.get("param")
+    request_state.error_param_override = OpenAIErrorParam.from_mapping(cast(Mapping[str, JsonValue], error))
 
 
 def _header_value_case_insensitive(headers: Mapping[str, str], name: str) -> str | None:

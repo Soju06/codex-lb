@@ -2,7 +2,7 @@
 
 ### Requirement: Dashboard route transitions preserve intentional scroll behavior
 
-The dashboard SPA MUST reset the window to the top when a client-side `PUSH` or `REPLACE` navigation changes the pathname and the destination has no hash. The same rule MUST apply to desktop and mobile top-level navigation. The SPA MUST NOT perform that reset for browser-history `POP` navigation, same-path query changes, or destinations with a hash.
+The dashboard SPA MUST reset the window to the top when a client-side `PUSH` or `REPLACE` navigation changes the final destination pathname and the destination has no hash. A compatibility route that immediately replaces itself with a hashed destination MUST be treated as part of that hash-target navigation rather than as an independent destination. The same rule MUST apply to desktop and mobile top-level navigation. The SPA MUST NOT perform that reset for browser-history `POP` navigation, same-path query changes, or destinations with a hash.
 
 #### Scenario: Desktop top-level navigation opens the destination at the top
 

@@ -15,6 +15,10 @@
   release cleanup after the immediate fallback fails.
 - [x] 1.8 Include cancel-safe deferred-health flushes in graceful persistence
   draining.
+- [x] 1.9 Preserve queued stream-health flush when deferred route-backoff
+  draining fails after settlement confirms.
+- [x] 1.10 Transfer later cancelled-flush entries to tracked cleanup even when
+  final deferred route-backoff retry fails.
 
 ## 2. Regression coverage
 
@@ -31,6 +35,10 @@
 - [x] 2.8 Assert failed ordering-sensitive settlement retries reservation
   release after its immediate fallback fails.
 - [x] 2.9 Assert shutdown drain waits for detached deferred-health flush.
+- [x] 2.10 Assert detached cancel cleanup attempts queued stream health after
+  deferred route-backoff persistence fails.
+- [x] 2.11 Assert multiple queued penalties retain later entries when
+  cancellation and a repeated route-backoff failure overlap.
 
 ## 3. Validation
 

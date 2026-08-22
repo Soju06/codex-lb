@@ -2,7 +2,7 @@
 
 ### Requirement: Keyed stream mid-loop failover settles before account-health writes
 
-When an HTTP SSE Responses stream holds an API-key usage reservation, mid-loop failover account-health writes for a failed account MUST NOT run while that reservation remains unsettled. The stream MUST keep the same reservation across the internal failover, MUST defer the failed account's health write until settlement is confirmed, and MUST NOT acquire a second reservation solely for that failover. If primary settlement fails but fail-safe release confirms, the stream MAY flush deferred health after that confirmed release when ordered settle never ran. If neither settlement nor fail-safe release confirms, deferred health MUST stay unapplied. After settlement ownership transfers from the request and both ordered settlement and its immediate fail-safe release fail, tracked persistence cleanup MUST retry reservation release while the request path keeps deferred health unapplied. After settlement commits, the stream MUST record that settled state before awaiting deferred health flush so a cancellation that arrives during the flush cannot skip retained deferred penalties. Deferred health flush MUST consume one queued entry at a time and MUST retain later entries when one write fails or cancellation interrupts an await. Deferred health flush MUST complete each queued entry under cancellation-deferred ownership so a cancel mid-write cannot replay the same health operation and double-count errors. A detached cancel-safe deferred-health flush MUST be tracked as persistence work and graceful shutdown MUST await it within the configured persistence-drain budget. After cancellation, cleanup MUST attempt to settle or release the reservation. Cleanup MUST flush deferred health before it finishes only after settlement or release is confirmed. If neither operation confirms, deferred health MUST remain unapplied.
+When an HTTP SSE Responses stream holds an API-key usage reservation, mid-loop failover account-health writes for a failed account MUST NOT run while that reservation remains unsettled. The stream MUST keep the same reservation across the internal failover, MUST defer the failed account's health write until settlement is confirmed, and MUST NOT acquire a second reservation solely for that failover. If primary settlement fails but fail-safe release confirms, the stream MAY flush deferred health after that confirmed release when ordered settle never ran. If neither settlement nor fail-safe release confirms, deferred health MUST stay unapplied. After settlement ownership transfers from the request and both ordered settlement and its immediate fail-safe release fail, tracked persistence cleanup MUST retry reservation release while the request path keeps deferred health unapplied. After settlement commits, the stream MUST record that settled state before awaiting deferred health flush so a cancellation that arrives during the flush cannot skip retained deferred penalties. Deferred health flush MUST consume one queued entry at a time and MUST retain later entries when one write fails or cancellation interrupts an await. Deferred health flush MUST complete each queued entry under cancellation-deferred ownership so a cancel mid-write cannot replay the same health operation and double-count errors. After settlement or release confirms, a deferred route-backoff failure MUST NOT prevent independent queued stream-health penalties from being attempted. A detached cancel-safe deferred-health flush MUST be tracked as persistence work and graceful shutdown MUST await it within the configured persistence-drain budget. After cancellation, cleanup MUST attempt to settle or release the reservation. Cleanup MUST flush deferred health before it finishes only after settlement or release is confirmed. If neither operation confirms, deferred health MUST remain unapplied.
 
 #### Scenario: Keyed refresh/connect failover defers health until settle
 
@@ -73,3 +73,16 @@ When an HTTP SSE Responses stream holds an API-key usage reservation, mid-loop f
 - **GIVEN** cancellation leaves a post-settlement account-health penalty for cancel-safe background flush
 - **WHEN** graceful shutdown drains persistence tasks
 - **THEN** the drain waits for that deferred health flush within its configured timeout
+
+#### Scenario: Deferred route-backoff failure preserves queued stream health
+
+- **GIVEN** confirmed settlement or release with a deferred route backoff and an independent queued stream-health penalty
+- **WHEN** the deferred route-backoff write fails
+- **THEN** cleanup still attempts the queued stream-health penalty
+
+#### Scenario: Retried backoff failure preserves later cancelled-flush entries
+
+- **GIVEN** confirmed settlement with a retained route backoff and multiple queued stream-health penalties
+- **AND** cancellation interrupts the flush after its current queued penalty completes
+- **WHEN** final cleanup retries the route backoff and that write fails again
+- **THEN** cleanup tracks and flushes the later queued stream-health penalties

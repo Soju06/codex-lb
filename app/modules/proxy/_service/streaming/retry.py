@@ -501,6 +501,20 @@ class _StreamingRetryMixin:
                 if cancellation is not None:
                     raise cancellation
 
+        async def _flush_or_schedule_pending_post_refresh_penalties() -> None:
+            if not pending_post_refresh_transient_penalties:
+                return
+            flush_coro = _flush_pending_post_refresh_penalties()
+            current_task = asyncio.current_task()
+            if current_task is not None and current_task.cancelling():
+                proxy._schedule_cancel_safe_cleanup(
+                    flush_coro,
+                    action="flush_deferred_keyed_stream_health",
+                    request_id=request_id,
+                )
+                return
+            await flush_coro
+
         async def _settle_stream_usage_before_pending_penalty(
             current_settlement: _StreamSettlement,
         ) -> bool:
@@ -524,9 +538,14 @@ class _StreamingRetryMixin:
             # ``usage_settlement_transferred`` is already true — that combination
             # skips both reservation cleanup and retained-queue flush.
             settled = True
-            await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
-            if apply_pending_penalty:
-                await _flush_pending_post_refresh_penalties()
+            try:
+                await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
+            finally:
+                # Route backoffs and queued stream penalties have independent
+                # ownership after settlement. A failed backoff write must not
+                # orphan the penalty queue in detached cancellation cleanup.
+                if apply_pending_penalty:
+                    await _flush_pending_post_refresh_penalties()
             return settled_result
 
         async def _record_or_defer_confirmed_route_backoff(account: Account) -> None:
@@ -3165,12 +3184,10 @@ class _StreamingRetryMixin:
 
                 async def _release_reservation_then_drain_backoffs() -> None:
                     nonlocal settled
-                    attempted_ordered_settle = False
                     if pending_post_refresh_transient_penalties:
                         # Mid-loop keyed health may already be queued. Prefer
                         # settle-then-flush so cancel cleanup still applies the
                         # deferred account penalty after the reservation closes.
-                        attempted_ordered_settle = True
                         settled = await _drain_pending_post_refresh_penalty_on_terminal(settlement)
                         if settled:
                             return
@@ -3180,13 +3197,12 @@ class _StreamingRetryMixin:
                         request_id=request_id,
                     )
                     if released:
-                        await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
-                        # If ordered settle already ran and returned False, keep
-                        # the deferred penalties withheld (unconfirmed settlement
-                        # must not write account health). Cancel before any
-                        # ordered settle still flushes after release.
-                        if pending_post_refresh_transient_penalties and not attempted_ordered_settle:
-                            await _flush_pending_post_refresh_penalties()
+                        try:
+                            await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
+                        finally:
+                            # Confirmed release owns the same independent
+                            # post-settlement health lanes as confirmed settle.
+                            await _flush_or_schedule_pending_post_refresh_penalties()
 
                 release_coro = _release_reservation_then_drain_backoffs()
                 current_task = asyncio.current_task()
@@ -3199,17 +3215,13 @@ class _StreamingRetryMixin:
                 else:
                     await release_coro
             elif settled and deferred_account_error_backoffs:
-                await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
-            if pending_post_refresh_transient_penalties and settled:
-                # Finish any penalties left behind if a prior flush was cancelled
+                try:
+                    await proxy._drain_deferred_account_error_backoffs(deferred_account_error_backoffs)
+                finally:
+                    # A retained backoff failure must not block ownership of
+                    # later penalties left by a cancelled flush.
+                    await _flush_or_schedule_pending_post_refresh_penalties()
+            elif settled:
+                # Finish penalties left behind if a prior flush was cancelled
                 # mid-loop after settlement already closed the reservation.
-                flush_coro = _flush_pending_post_refresh_penalties()
-                current_task = asyncio.current_task()
-                if current_task is not None and current_task.cancelling():
-                    proxy._schedule_cancel_safe_cleanup(
-                        flush_coro,
-                        action="flush_deferred_keyed_stream_health",
-                        request_id=request_id,
-                    )
-                else:
-                    await flush_coro
+                await _flush_or_schedule_pending_post_refresh_penalties()

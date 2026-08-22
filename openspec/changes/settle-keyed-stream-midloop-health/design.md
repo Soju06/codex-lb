@@ -38,6 +38,12 @@ order.
    ownership transfer.
 6. Name cancel-safe deferred-health flushes as persistence work so
    `drain_persistence_tasks` waits for them during graceful shutdown.
+7. Flush queued stream-health penalties from a `finally` around deferred
+   route-backoff draining so those independent health lanes cannot orphan one
+   another after settlement confirms.
+8. Route final retained-penalty work through one flush-or-schedule helper so an
+   already-cancelling request transfers later queue entries to tracked cleanup
+   even when a retained backoff retry fails.
 
 ## Risks / Trade-offs
 

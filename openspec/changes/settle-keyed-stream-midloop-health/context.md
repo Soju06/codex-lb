@@ -36,3 +36,9 @@ the tracked retrying release cleanup. Deferred health remains unapplied for
 that unconfirmed request path. If cancellation leaves later post-settlement
 health entries for a detached flush, the flush is persistence work and the
 graceful shutdown drain waits for it.
+
+Deferred route backoffs and queued stream-health penalties are independent
+post-settlement work. If persisting a route backoff fails, cleanup still
+attempts queued stream-health penalties before surfacing that backoff failure.
+When cancellation has already completed one queue entry, later entries transfer
+to the tracked cancel-safe flush even if final backoff retry also fails.

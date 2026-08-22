@@ -36,6 +36,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsage,
     SourceUsageHolder,
 )
+from app.modules.request_logs.repository import RequestLogsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -1986,19 +1987,32 @@ async def test_backend_codex_responses_file_pinned_payload_skips_model_source(as
 
 
 @pytest.mark.asyncio
-async def test_backend_codex_responses_previous_response_id_skips_model_source(async_client, monkeypatch):
+async def test_backend_codex_responses_recorded_previous_response_owner_skips_model_source(async_client, monkeypatch):
     model = "external-codex-responses-prev-id"
+    previous_response_id = "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e"
     await _create_model_source(
         async_client,
         name="codex-responses-prev-id",
         model=model,
         supports_responses=True,
     )
+    account_id = await _import_account(async_client, "acct-prev-owner-codex", "prev-owner-codex@example.com")
+    async with SessionLocal() as session:
+        await RequestLogsRepository(session).add_log(
+            account_id=account_id,
+            request_id=previous_response_id,
+            model=model,
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=None,
+            status="success",
+            error_code=None,
+        )
     observed: dict[str, object] = {}
 
     async def fail_source(*args, **kwargs):
         del args, kwargs
-        pytest.fail("previous_response_id responses must use subscription routing")
+        pytest.fail("recorded subscription-owned previous_response_id must not use source routing")
 
     async def fake_stream_responses(request, payload, context, api_key, **kwargs):
         del request, context, api_key
@@ -2016,7 +2030,7 @@ async def test_backend_codex_responses_previous_response_id_skips_model_source(a
             "model": model,
             "instructions": "continue",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}],
-            "previous_response_id": "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e",
+            "previous_response_id": previous_response_id,
             "stream": True,
         },
     )
@@ -2025,7 +2039,7 @@ async def test_backend_codex_responses_previous_response_id_skips_model_source(a
     assert response.json() == {"ok": True}
     assert observed == {
         "model": model,
-        "previous_response_id": "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e",
+        "previous_response_id": previous_response_id,
         "codex_session_affinity": True,
     }
 
@@ -2073,19 +2087,32 @@ async def test_v1_responses_file_pinned_payload_skips_model_source(async_client,
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_previous_response_id_skips_model_source(async_client, monkeypatch):
+async def test_v1_responses_recorded_previous_response_owner_skips_model_source(async_client, monkeypatch):
     model = "external-v1-responses-prev-id"
+    previous_response_id = "resp_03ac4d75eac7c5d1016a0a619e8a688191b5267ba7ffac3111"
     await _create_model_source(
         async_client,
         name="v1-responses-prev-id",
         model=model,
         supports_responses=True,
     )
+    account_id = await _import_account(async_client, "acct-prev-owner-v1", "prev-owner-v1@example.com")
+    async with SessionLocal() as session:
+        await RequestLogsRepository(session).add_log(
+            account_id=account_id,
+            request_id=previous_response_id,
+            model=model,
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=None,
+            status="success",
+            error_code=None,
+        )
     observed: dict[str, object] = {}
 
     async def fail_source(*args, **kwargs):
         del args, kwargs
-        pytest.fail("previous_response_id /v1/responses must use subscription routing")
+        pytest.fail("recorded subscription-owned previous_response_id must not use /v1 source routing")
 
     async def fake_stream_responses(request, payload, context, api_key, **kwargs):
         del request, context, api_key, kwargs
@@ -2101,7 +2128,7 @@ async def test_v1_responses_previous_response_id_skips_model_source(async_client
         json={
             "model": model,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
-            "previous_response_id": "resp_03ac4d75eac7c5d1016a0a619e8a688191b5267ba7ffac3111",
+            "previous_response_id": previous_response_id,
             "stream": True,
         },
     )
@@ -2109,12 +2136,13 @@ async def test_v1_responses_previous_response_id_skips_model_source(async_client
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert observed["model"] == model
-    assert observed["previous_response_id"] == "resp_03ac4d75eac7c5d1016a0a619e8a688191b5267ba7ffac3111"
+    assert observed["previous_response_id"] == previous_response_id
 
 
 @pytest.mark.asyncio
 async def test_v1_responses_source_owned_previous_response_id_keeps_model_source(async_client, monkeypatch):
     model = "external-v1-responses-source-prev"
+    previous_response_id = "resp_a3a82ffdf2f04456a7ca120deedc78dc47e172e56ed5338760"
     source_id = await _create_model_source(
         async_client,
         name="v1-responses-source-prev",
@@ -2151,7 +2179,7 @@ async def test_v1_responses_source_owned_previous_response_id_keeps_model_source
         json={
             "model": model,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
-            "previous_response_id": "resp_source_owned_continuation",
+            "previous_response_id": previous_response_id,
             "stream": True,
         },
     ) as response:
@@ -2159,7 +2187,7 @@ async def test_v1_responses_source_owned_previous_response_id_keeps_model_source
         lines = [line async for line in response.aiter_lines() if line]
 
     assert observed["source_id"] == source_id
-    assert observed["previous_response_id"] == "resp_source_owned_continuation"
+    assert observed["previous_response_id"] == previous_response_id
     assert observed["model"] == model
     assert any("resp_v1_source_prev" in line for line in lines)
 
@@ -2167,6 +2195,7 @@ async def test_v1_responses_source_owned_previous_response_id_keeps_model_source
 @pytest.mark.asyncio
 async def test_backend_codex_responses_source_owned_previous_response_id_keeps_model_source(async_client, monkeypatch):
     model = "external-codex-responses-source-prev"
+    previous_response_id = "resp_b4b93aaef3f15567b8db231effed89ed58f283f67fe6449871"
     source_id = await _create_model_source(
         async_client,
         name="codex-responses-source-prev",
@@ -2204,7 +2233,7 @@ async def test_backend_codex_responses_source_owned_previous_response_id_keeps_m
             "model": model,
             "instructions": "continue",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}],
-            "previous_response_id": "resp_source_owned_continuation",
+            "previous_response_id": previous_response_id,
             "stream": True,
         },
     ) as response:
@@ -2212,7 +2241,7 @@ async def test_backend_codex_responses_source_owned_previous_response_id_keeps_m
         lines = [line async for line in response.aiter_lines() if line]
 
     assert observed["source_id"] == source_id
-    assert observed["previous_response_id"] == "resp_source_owned_continuation"
+    assert observed["previous_response_id"] == previous_response_id
     assert observed["model"] == model
     assert any("resp_codex_source_prev" in line for line in lines)
 

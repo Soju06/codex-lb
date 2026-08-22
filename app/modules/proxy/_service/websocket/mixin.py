@@ -1740,6 +1740,27 @@ class _WebSocketMixin:
                                 request_state = prepared_request.request_state
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
+                                if request_state.previous_response_id is not None:
+                                    try:
+                                        request_state.previous_response_owner_account_id = (
+                                            await proxy._resolve_websocket_previous_response_owner(
+                                                previous_response_id=request_state.previous_response_id,
+                                                api_key=request_state.api_key or api_key,
+                                                session_id=request_state.session_id,
+                                                surface="websocket_source_route",
+                                                request_state=request_state,
+                                            )
+                                        )
+                                        request_state.preferred_account_id = resolve_required_account_id(
+                                            ("existing bridge or file", request_state.preferred_account_id),
+                                            (
+                                                "previous response",
+                                                request_state.previous_response_owner_account_id,
+                                            ),
+                                        )
+                                    except ProxyResponseError:
+                                        await proxy._release_websocket_request_state_reservation(request_state)
+                                        raise
                                 if (
                                     upstream is not None
                                     and account is not None
@@ -1759,6 +1780,11 @@ class _WebSocketMixin:
                                     # to the pinned account instead of this
                                     # guard failing the turn.
                                     and not request_state.source_route_excluded
+                                    # A model source may emit the same canonical
+                                    # response-id shape as the subscription
+                                    # backend. Only recorded account ownership,
+                                    # resolved above, may bypass this guard.
+                                    and request_state.previous_response_owner_account_id is None
                                     and await responses_model_is_source_owned(
                                         request_state.model,
                                         request_state.api_key or api_key,
@@ -1947,13 +1973,19 @@ class _WebSocketMixin:
                             if turn_state is not None
                             else None
                         )
-                        previous_response_owner_account_id = await proxy._resolve_websocket_previous_response_owner(
-                            previous_response_id=request_state.previous_response_id,
-                            api_key=request_state.api_key or api_key,
-                            session_id=request_state.session_id,
-                            surface="websocket",
-                            request_state=request_state,
-                        )
+                        previous_response_owner_account_id = request_state.previous_response_owner_account_id
+                        if (
+                            request_state.previous_response_id is not None
+                            and request_state.previous_response_owner_lookup_outcome is None
+                        ):
+                            previous_response_owner_account_id = await proxy._resolve_websocket_previous_response_owner(
+                                previous_response_id=request_state.previous_response_id,
+                                api_key=request_state.api_key or api_key,
+                                session_id=request_state.session_id,
+                                surface="websocket",
+                                request_state=request_state,
+                            )
+                            request_state.previous_response_owner_account_id = previous_response_owner_account_id
                         request_state.preferred_account_id = resolve_required_account_id(
                             ("existing bridge or file", request_state.preferred_account_id),
                             ("turn state", turn_state_owner_account_id),
@@ -3404,18 +3436,21 @@ class _WebSocketMixin:
         # refresh mid-session cannot make this disagree with the equivalent
         # check on the prepared-request path.
         #
-        # Requests the HTTP route excludes from source routing (a terminal
-        # compaction trigger, ``input_file`` references pinned to the
-        # uploading account) skip the guard: they must land on a subscription
-        # account either way, and the owner-required selection below routes
-        # them there instead of bouncing the turn to HTTP.
-        if not request_state.source_route_excluded and await responses_model_is_source_owned(
-            model,
-            request_state.api_key or api_key,
-            # ``model`` is the session loop's post-enforcement
-            # ``request_state.model``; the raw client alias captured at
-            # preparation is what an alias-only source is registered under.
-            raw_model=request_state.raw_source_model,
+        # Structural HTTP exclusions and a recorded previous-response account
+        # owner skip the guard. Response-id syntax is provider-opaque, so a
+        # configured source with no recorded subscription owner still falls
+        # back to the HTTP source path.
+        if (
+            not request_state.source_route_excluded
+            and request_state.previous_response_owner_account_id is None
+            and await responses_model_is_source_owned(
+                model,
+                request_state.api_key or api_key,
+                # ``model`` is the session loop's post-enforcement
+                # ``request_state.model``; the raw client alias captured at
+                # preparation is what an alias-only source is registered under.
+                raw_model=request_state.raw_source_model,
+            )
         ):
             source_model = request_state.raw_source_model or model
             message = (

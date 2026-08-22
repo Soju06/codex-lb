@@ -13,6 +13,7 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
+    routing_eligible_states,
 )
 from app.db.models import Account, AccountStatus
 from app.modules.proxy._load_balancer.sticky_selection import (
@@ -22,7 +23,7 @@ from app.modules.proxy._load_balancer.sticky_selection import (
     _account_cap_error_message,
     _clone_account,
     _filter_recovery_probe_candidates,
-    _filter_states_for_account_caps,
+    _filter_states_for_usage_limit_and_account_caps,
     _probing_result_requires_recovery_reservation,
     _select_account_preferring_budget_safe,
 )
@@ -163,17 +164,20 @@ async def run_unbound_selection_path(
             fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
                 api_key_id=api_key_id,
                 lease_kind=lease_kind,
-                candidate_account_ids=[state.account_id for state in states],
+                candidate_account_ids=[
+                    state.account_id for state in routing_eligible_states(states, traffic_class=traffic_class)
+                ],
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
                 threshold_pct=fair_share_threshold_pct,
                 redact_sensitive_details=redact_sensitive_details,
             )
-            selection_states = _filter_states_for_account_caps(
+            selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
                 states,
                 lease_kind=lease_kind,
                 caps=caps,
                 stream_reserve_slots=stream_reserve_slots,
+                traffic_class=traffic_class,
             )
             if suppress_recovery_probe_candidates:
                 selection_states = _filter_recovery_probe_candidates(
@@ -186,7 +190,7 @@ async def run_unbound_selection_path(
                 selection_error_code = API_KEY_STREAM_FAIR_SHARE_ERROR_CODE
                 error_message = fair_share_denial_message(fair_share_denial)
                 result = SelectionResult(None, error_message)
-            elif not selection_states and states:
+            elif account_caps_exhausted:
                 selection_error_code = _account_cap_error_code(lease_kind)
                 selection_resets_at = None
                 error_message = _account_cap_error_message(lease_kind, caps)
@@ -216,6 +220,7 @@ async def run_unbound_selection_path(
                     allow_usage_exhaustion_error=allow_usage_exhaustion_error,
                     usage_exhaustion_states=states,
                 )
+                selection_error_code = result.error_code
                 if (
                     result.account is None
                     and result.error_code is None

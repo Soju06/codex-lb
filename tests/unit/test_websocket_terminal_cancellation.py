@@ -15,13 +15,23 @@ from fastapi import WebSocket
 
 from app.core import shutdown as shutdown_state
 from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.time import utcnow
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
+from app.modules.proxy.load_balancer import LoadBalancer
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def check_account_usage_limit(_self: object, _account_id: str) -> AccountUsageLimitState:
+        return AccountUsageLimitState.DISABLED
+
+    monkeypatch.setattr(LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
 
 
 class _RequestLogsRecorder:

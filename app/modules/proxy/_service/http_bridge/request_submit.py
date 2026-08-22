@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import anyio
 
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401
@@ -82,6 +83,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
     _http_bridge_precreated_retry_failure_error,
+    _http_bridge_previous_response_owner_unavailable_error,
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
@@ -218,7 +220,8 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     _parse_openai_error,
 )
-from app.modules.proxy.load_balancer import effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
+from app.modules.proxy.selection_errors import selection_failure_response
 from app.modules.proxy.tool_call_dedupe import (
     dedupe_replayed_side_effect_input_items,
 )
@@ -1550,7 +1553,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 # before the turn is counted into the session queue.
                 session.admission_waiter_count += 1
                 admission_waiter_registered = True
-        except BaseException:
+        except BaseException as exc:
             # Recovery claims are made before admission. If reacquiring an
             # idle session's stream lease fails, no upstream frame can have
             # been sent; restore that claim before propagating the admission
@@ -1568,6 +1571,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             )
             await _await_task_deferring_cancellation(cleanup_task)
+            if isinstance(exc, ProxyResponseError) and not owned_unanchored_handoff:
+                if session.upstream_control.retire_after_drain and not session.upstream_close_attempted:
+                    await self._retire_http_bridge_after_drain_if_ready(session)
             raise
         try:
             await self._maybe_prewarm_http_bridge_session(
@@ -1575,22 +1581,6 @@ class _HTTPBridgeRequestSubmitMixin:
                 request_state=request_state,
                 text_data=text_data,
             )
-        except BaseException:
-            if getattr(session, "unanchored_reservation_id", None) == request_scope_id:
-                session.unanchored_reservation_id = None
-            cleanup_task = asyncio.create_task(
-                self._cleanup_http_bridge_submit_interruption(
-                    session,
-                    request_state=request_state,
-                    gate_acquired=False,
-                    request_enqueued=False,
-                    counted_in_queue=False,
-                    admission_waiter_registered=admission_waiter_registered,
-                )
-            )
-            await _await_task_deferring_cancellation(cleanup_task)
-            raise
-        try:
             async with session.pending_lock:
                 if session.queued_request_count >= queue_limit:
                     _log_http_bridge_event(
@@ -1628,6 +1618,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 )
             )
             await _await_task_deferring_cancellation(cleanup_task)
+            if (
+                not owned_unanchored_handoff
+                and session.upstream_control.retire_after_drain
+                and not session.upstream_close_attempted
+            ):
+                await self._retire_http_bridge_after_drain_if_ready(session)
             raise
         try:
             text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
@@ -2482,6 +2478,11 @@ class _HTTPBridgeRequestSubmitMixin:
         admission again. Denial raises the standard local-cap envelope so the
         existing recoverable capacity wait applies.
 
+        Every admission check first revalidates the continuity-pinned account's
+        local usage policy, including sessions that still hold their lease. The
+        submit path calls this before prewarm and again immediately before queue
+        admission so a policy change during that gap cannot dispatch the turn.
+
         The lease stays per-session (one upstream stream): a session that
         already holds a lease admits further queued turns without acquiring
         another, because those turns multiplex over the session's single
@@ -2494,10 +2495,26 @@ class _HTTPBridgeRequestSubmitMixin:
         fair-share denial raises the standard local-cap envelope with the
         fair-share code so the recoverable capacity wait applies.
         """
-        if session.account_lease is not None or session.closed:
-            return
         load_balancer = getattr(self, "_load_balancer", None)
         if load_balancer is None:
+            return
+        usage_limit_state = await load_balancer.check_account_usage_limit(session.account.id)
+        if usage_limit_state is None:
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+            raise _http_bridge_previous_response_owner_unavailable_error()
+        if usage_limit_state.blocks_account_use:
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+            status_code, error_payload = selection_failure_response(
+                AccountSelection(
+                    account=None,
+                    error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                    error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                )
+            )
+            raise ProxyResponseError(status_code, error_payload)
+        if session.account_lease is not None or session.closed:
             return
         api_key_id = session.key.api_key_id
         fair_share_threshold_pct = 0
@@ -2779,6 +2796,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 not has_visible_pending
                 and session.queued_request_count == 0
                 and session.unanchored_reservation_id is None
+                and session.admission_waiter_count == 0
                 and not session.upstream_close_attempted
             )
             if should_reconnect:

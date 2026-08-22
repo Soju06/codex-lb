@@ -21,6 +21,8 @@ from app.core.balancer import (
     RoutingStrategy,
     SelectionResult,
     TrafficClass,
+    account_usage_limit_blocks_selection,
+    routing_eligible_states,
     select_account,
 )
 from app.core.utils.time import utcnow
@@ -68,6 +70,8 @@ class SelectionInputsProtocol(Protocol):
     latest_primary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_secondary: dict[str, UsageHistory | AdditionalUsageHistory]
     latest_monthly: dict[str, UsageHistory]
+    standard_latest_primary: dict[str, UsageHistory]
+    standard_latest_secondary: dict[str, UsageHistory]
     quota_planner_settings: PlannerSettings
     runtime_accounts: list[Account] | None
     error_message: str | None
@@ -482,17 +486,31 @@ async def run_sticky_selection_path(
                     error_message=_AMBIGUOUS_CONVERSATION_OWNER_MESSAGE,
                     error_code=_AMBIGUOUS_CONVERSATION_OWNER_CODE,
                 )
-            # Fair share is measured against the full candidate pool, before
-            # hard-sticky narrows selection to the owner account.
-            fair_share_candidate_ids = [state.account_id for state in states]
-            fair_share_denial = owner._api_key_stream_fair_share_denial_locked(
-                api_key_id=api_key_id,
-                lease_kind=lease_kind,
-                candidate_account_ids=fair_share_candidate_ids,
-                caps=caps,
-                stream_reserve_slots=stream_reserve_slots,
-                threshold_pct=fair_share_threshold_pct,
-                redact_sensitive_details=redact_sensitive_details,
+            # Fair share is measured against the routable pool,
+            # before hard-sticky narrows selection to the owner account.
+            fair_share_candidate_ids = [
+                state.account_id for state in routing_eligible_states(states, traffic_class=traffic_class)
+            ]
+            # Congestion relief cannot make a hard-pinned owner eligible when
+            # the operator's usage policy blocks it. Let the canonical owner
+            # selector surface that terminal policy result instead of parking
+            # the request in a fair-share capacity wait.
+            hard_owner_usage_limit_blocked = hard_sticky and any(
+                state.account_id == sticky_existing_account_id and account_usage_limit_blocks_selection(state)
+                for state in states
+            )
+            fair_share_denial = (
+                None
+                if hard_owner_usage_limit_blocked
+                else owner._api_key_stream_fair_share_denial_locked(
+                    api_key_id=api_key_id,
+                    lease_kind=lease_kind,
+                    candidate_account_ids=fair_share_candidate_ids,
+                    caps=caps,
+                    stream_reserve_slots=stream_reserve_slots,
+                    threshold_pct=fair_share_threshold_pct,
+                    redact_sensitive_details=redact_sensitive_details,
+                )
             )
             if hard_sticky:
                 # A resolved hard Codex mapping is an ownership
@@ -500,29 +518,33 @@ async def run_sticky_selection_path(
                 # health, and caps may make it unavailable, but must
                 # never delete or rebind it.
                 selection_states = [state for state in states if state.account_id == sticky_existing_account_id]
+                account_caps_exhausted = False
             elif bare_session_key and isinstance(sticky_existing_account_id, str) and not cap_spillover_allowed:
                 # Mobility was revoked by owner-bearing payload or
                 # recovery stage. Keep the old cap exception for this
                 # soft hint; the authoritative preferred-owner path
                 # normally bypasses it.
                 selection_states = states
+                account_caps_exhausted = False
             else:
-                selection_states = _filter_states_for_account_caps(
+                selection_states, account_caps_exhausted = _filter_states_for_usage_limit_and_account_caps(
                     states,
                     lease_kind=lease_kind,
                     caps=caps,
                     stream_reserve_slots=stream_reserve_slots,
+                    traffic_class=traffic_class,
                 )
             if cap_spillover_allowed and lease_kind == "stream":
                 # Stream selection immediately precedes response-create
                 # admission. Prefer an account that can satisfy both,
                 # while preserving the later create-cap error when all
                 # are full.
-                response_create_states = _filter_states_for_account_caps(
+                response_create_states, _ = _filter_states_for_usage_limit_and_account_caps(
                     selection_states,
                     lease_kind="response_create",
                     caps=caps,
                     stream_reserve_slots=0,
+                    traffic_class=traffic_class,
                 )
                 selection_states = response_create_states or selection_states
             preserve_existing_mapping = (
@@ -615,7 +637,7 @@ async def run_sticky_selection_path(
             selection_error_code = "hard_affinity_saturated"
             selection_resets_at = None
             result = SelectionResult(None, "Hard affinity owner account is unavailable")
-        elif not selection_states and states:
+        elif account_caps_exhausted:
             selection_error_code = _account_cap_error_code(lease_kind)
             selection_resets_at = None
             result = SelectionResult(None, _account_cap_error_message(lease_kind, caps))
@@ -646,11 +668,12 @@ async def run_sticky_selection_path(
                 usage_exhaustion_states=states,
             )
             if result.account is None:
-                selection_error_code = "hard_affinity_saturated"
+                selection_error_code = result.error_code or "hard_affinity_saturated"
                 selection_resets_at = None
                 result = SelectionResult(
                     None,
                     result.error_message or "Hard affinity owner account is unavailable",
+                    selection_error_code,
                 )
             else:
                 selection_error_code = None
@@ -690,6 +713,7 @@ async def run_sticky_selection_path(
                         sticky_refresh_skip_deadline=sticky_refresh_skip_deadline,
                     )
                     result = sticky_outcome.selection
+                    selection_error_code = result.error_code
                     if (
                         result.account is None
                         and result.error_code is None
@@ -1562,6 +1586,55 @@ def _filter_states_for_account_caps(
     return filtered
 
 
+def _filter_states_for_usage_limit_and_account_caps(
+    states: Iterable[AccountState],
+    *,
+    lease_kind: AccountLeaseKind | None,
+    caps: AccountConcurrencyCaps,
+    stream_reserve_slots: int = 0,
+    traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+) -> tuple[list[AccountState], bool]:
+    state_list = list(states)
+    usage_limit_blocked = [state for state in state_list if account_usage_limit_blocks_selection(state)]
+    usage_limit_eligible = [state for state in state_list if not account_usage_limit_blocks_selection(state)]
+    if not usage_limit_eligible:
+        # Preserve blocked states so the canonical selector returns the stable
+        # local-policy error instead of misclassifying the pool as cap-bound.
+        return state_list, False
+    routing_eligible = routing_eligible_states(
+        usage_limit_eligible,
+        traffic_class=traffic_class,
+    )
+    if not routing_eligible:
+        fallback_eligible = _filter_states_for_account_caps(
+            usage_limit_eligible,
+            lease_kind=lease_kind,
+            caps=caps,
+            stream_reserve_slots=stream_reserve_slots,
+        )
+        if not fallback_eligible:
+            if usage_limit_blocked:
+                return usage_limit_blocked, False
+            return [], True
+        return [*fallback_eligible, *usage_limit_blocked], False
+    cap_eligible = routing_eligible_states(
+        usage_limit_eligible,
+        traffic_class=traffic_class,
+        include_error_backoff=True,
+    )
+    filtered = _filter_states_for_account_caps(
+        cap_eligible,
+        lease_kind=lease_kind,
+        caps=caps,
+        stream_reserve_slots=stream_reserve_slots,
+    )
+    if not filtered:
+        return filtered, True
+    # The canonical selector excludes policy-blocked states before selection,
+    # but retaining them preserves terminal error precedence on fallback paths.
+    return [*filtered, *usage_limit_blocked], False
+
+
 def _probing_result_requires_recovery_reservation(
     states: Collection[AccountState],
     result_account: AccountState | None,
@@ -1607,14 +1680,7 @@ def _pool_has_available_account_without_backoff(
     # classify on copies so cap-error reporting cannot mutate the real
     # selection snapshot before sticky persistence. Keep the pool intact:
     # opportunistic admission compares candidates with one another.
-    result = select_account(
-        [replace(state) for state in states],
-        now=time.time(),
-        routing_strategy="single_account",
-        allow_backoff_fallback=False,
-        traffic_class=traffic_class,
-    )
-    return result.account is not None
+    return bool(routing_eligible_states(states, now=time.time(), traffic_class=traffic_class))
 
 
 def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
@@ -1697,12 +1763,28 @@ def _select_account_preferring_budget_safe(
     allow_usage_exhaustion_error: bool = True,
     usage_exhaustion_states: Iterable[AccountState] | None = None,
 ) -> SelectionResult:
-    state_list = list(states)
+    all_states = list(states)
+    usage_limit_blocked = [state for state in all_states if account_usage_limit_blocks_selection(state)]
+    state_list = [state for state in all_states if not account_usage_limit_blocks_selection(state)]
+    if not state_list:
+        return select_account(
+            all_states,
+            prefer_earlier_reset=prefer_earlier_reset,
+            prefer_earlier_reset_window=prefer_earlier_reset_window,
+            routing_strategy=routing_strategy,
+            allow_backoff_fallback=allow_backoff_fallback,
+            deterministic_probe=deterministic_probe,
+            relative_availability_power=relative_availability_power,
+            relative_availability_top_k=relative_availability_top_k,
+            traffic_class=traffic_class,
+            ignore_standard_quota=ignore_standard_quota,
+            routing_costs=routing_costs_by_account_id,
+        )
     if routing_strategy not in ("sequential_drain", "reset_drain", "single_account"):
         # This pass must precede budget-safe and routing-policy shortcuts below;
         # otherwise a healthy preferred account can starve PROBING indefinitely.
         recovery_probe = select_account(
-            state_list,
+            [*state_list, *usage_limit_blocked],
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1736,7 +1818,7 @@ def _select_account_preferring_budget_safe(
             if state.routing_policy != ROUTING_POLICY_PRESERVE and not state_budget_threshold(state)
         ]
         return select_account(
-            budget_safe_states or state_list,
+            [*(budget_safe_states or state_list), *usage_limit_blocked],
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1779,8 +1861,11 @@ def _select_account_preferring_budget_safe(
     ]
     if preferred_states:
         selection_pool = preferred_states if len(preferred_states) != len(state_list) else state_list
+        terminal_pool = (
+            [*selection_pool, *usage_limit_blocked] if len(preferred_states) == len(state_list) else selection_pool
+        )
         preferred = select_account(
-            selection_pool,
+            terminal_pool,
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1800,7 +1885,7 @@ def _select_account_preferring_budget_safe(
             return preferred
     if routing_strategy == "usage_weighted" and state_list:
         return select_account(
-            state_list,
+            [*state_list, *usage_limit_blocked],
             prefer_earlier_reset=prefer_earlier_reset,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=routing_strategy,
@@ -1814,7 +1899,7 @@ def _select_account_preferring_budget_safe(
             usage_exhaustion_states=usage_exhaustion_states,
         )
     return select_account(
-        state_list,
+        [*state_list, *usage_limit_blocked],
         prefer_earlier_reset=prefer_earlier_reset,
         prefer_earlier_reset_window=prefer_earlier_reset_window,
         routing_strategy=routing_strategy,

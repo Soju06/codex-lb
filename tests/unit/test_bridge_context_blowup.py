@@ -32,10 +32,20 @@ import pytest
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import openai_error
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import AccountStatus
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy.load_balancer import LoadBalancer
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio(loop_scope="session")]
+
+
+@pytest.fixture(autouse=True)
+def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def check_account_usage_limit(_self: object, _account_id: str) -> AccountUsageLimitState:
+        return AccountUsageLimitState.DISABLED
+
+    monkeypatch.setattr(LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
 
 
 def _without_installation_metadata(text: str) -> dict[str, Any]:

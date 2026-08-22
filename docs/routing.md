@@ -47,6 +47,23 @@ When enabled and several accounts are otherwise eligible, selection is restricte
 
 Limit warm-up sends **one small real request** (using the configured warm-up model and prompt) to an opted-in account when one of its quota windows is confirmed to have newly reset, verifying that the account responds. It consumes a small amount of quota. The optional staggered idle mode additionally pre-starts the 5h window of idle opted-in accounts before traffic arrives; the configured cooldown applies to these staggered idle probes, while ordinary reset-confirmed probes fire once per confirmed reset. Accounts opt in individually (`Enable warm-up` in account actions); the last attempt's result, model, and time are shown on the account list entry.
 
+## Reserve quota on individual accounts
+
+On the **Accounts** page, an account can have an optional maximum-used
+percentage. For example, a limit of `10%` reserves roughly 90% of that
+account's standard quota for direct use.
+
+When enabled, the limit is a hard routing gate for every strategy, including
+sticky and single-account routing. Codex LB stops selecting the account once a
+current standard quota window reports usage at or above the configured
+percentage. It also preserves the account when current usage data is missing or
+stale. The account's upstream status is not changed.
+
+You can disable a configured limit without forgetting its percentage, or remove
+it to clear the value. Because upstream usage is observed after requests finish,
+delayed reporting and requests already in flight can move actual usage past the
+displayed limit before the gate sees it.
+
 ---
 
 *Specs: [account-routing](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/account-routing) · [frontend-architecture](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/frontend-architecture) · [usage-refresh-policy](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/usage-refresh-policy)*

@@ -37,6 +37,7 @@ from app.core.clients.proxy_websocket import (
 )
 from app.core.config.settings import Settings
 from app.core.errors import openai_error
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.utils.request_id import get_request_id, reset_request_scope_id, set_request_scope_id
 from app.db.models import AccountStatus, Base, HttpBridgeSessionState
 from app.modules.proxy import affinity as proxy_affinity
@@ -63,7 +64,7 @@ from app.modules.proxy.durable_bridge_repository import (
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
 from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
-from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission
+from app.modules.proxy.load_balancer import CONTINUITY_OWNER_UNAVAILABLE, CatalogOmissionQuotaAdmission, LoadBalancer
 
 pytestmark = pytest.mark.unit
 
@@ -150,6 +151,14 @@ def _stub_recovery_attempt_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
         "lookup_recovery_attempt",
         AsyncMock(return_value=None),
     )
+
+
+@pytest.fixture(autouse=True)
+def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def check_account_usage_limit(_self: object, _account_id: str) -> AccountUsageLimitState:
+        return AccountUsageLimitState.DISABLED
+
+    monkeypatch.setattr(LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
 
 
 def _without_installation_metadata(text: str) -> dict[str, Any]:
@@ -21208,6 +21217,14 @@ async def test_http_bridge_retire_after_drain_waits_for_queued_submission(
 
     async with session.pending_lock:
         session.queued_request_count = 0
+        session.admission_waiter_count = 1
+
+    assert await service._retire_http_bridge_after_drain_if_ready(session) is False
+    assert session.closed is False
+    close.assert_not_awaited()
+
+    async with session.pending_lock:
+        session.admission_waiter_count = 0
 
     assert await service._retire_http_bridge_after_drain_if_ready(session) is True
     assert session.closed is True

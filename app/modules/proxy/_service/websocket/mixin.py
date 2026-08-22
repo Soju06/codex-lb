@@ -27,6 +27,7 @@ from app.core.balancer import (
     RoutingStrategy,
     failover_decision,
 )
+from app.core.balancer.logic import ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE, ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
@@ -196,6 +197,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_previous_response_error_envelope as _http_bridge_previous_response_error_envelope,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_previous_response_owner_unavailable_error as _http_bridge_previous_response_owner_unavailable_error,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
@@ -476,7 +480,7 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, effective_account_concurrency_caps
+from app.modules.proxy.load_balancer import AccountLease, AccountSelection, effective_account_concurrency_caps
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     apply_enforced_service_tier_model_fallback,
@@ -2454,12 +2458,30 @@ class _WebSocketMixin:
                     )
 
                 try:
-                    if (
+                    is_response_create = (
                         text_data is not None
                         and request_state is not None
                         and payload is not None
                         and account is not None
                         and _is_websocket_response_create(payload)
+                    )
+                    if is_response_create:
+                        usage_limit_state = await proxy._load_balancer.check_account_usage_limit(account.id)
+                        if usage_limit_state is None:
+                            raise _http_bridge_previous_response_owner_unavailable_error()
+                        if usage_limit_state.blocks_account_use:
+                            status_code, error_payload = selection_failure_response(
+                                AccountSelection(
+                                    account=None,
+                                    error_message=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_MESSAGE,
+                                    error_code=ACCOUNT_USAGE_LIMIT_REACHED_ERROR_CODE,
+                                )
+                            )
+                            raise ProxyResponseError(status_code, error_payload)
+                    if (
+                        is_response_create
+                        and request_state is not None
+                        and account is not None
                         and request_state.account_response_create_lease is None
                     ):
                         # Account-cap spillover belongs to connect selection.
@@ -2477,11 +2499,10 @@ class _WebSocketMixin:
                         )
                         request_state.account_response_create_release = proxy._load_balancer.release_account_lease
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and account is not None
-                        and _is_websocket_response_create(payload)
                     ):
                         text_data = _websocket_text_with_account_installation_id(text_data, account)
                         if request_state.fresh_upstream_request_text is not None:
@@ -2494,12 +2515,11 @@ class _WebSocketMixin:
                         request_state.request_text = text_data
                         _facade()._enforce_response_create_size_limit(request_state)
                     if (
-                        text_data is not None
+                        is_response_create
+                        and text_data is not None
                         and request_state is not None
-                        and payload is not None
                         and upstream_control is not None
                         and upstream_control.reconnect_requested
-                        and _is_websocket_response_create(payload)
                     ):
                         # Admission and account-cap waits can outlive a clean
                         # close observed by the upstream reader. Re-check at

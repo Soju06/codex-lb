@@ -79,6 +79,16 @@ class FileAccountPin(Base):
 
 class Account(Base):
     __tablename__ = "accounts"
+    __table_args__ = (
+        CheckConstraint(
+            "usage_limit_percent IS NULL OR (usage_limit_percent > 0 AND usage_limit_percent <= 100)",
+            name="ck_accounts_usage_limit_percent_range",
+        ),
+        CheckConstraint(
+            "NOT usage_limit_enabled OR usage_limit_percent IS NOT NULL",
+            name="ck_accounts_usage_limit_enabled_requires_percent",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -105,6 +115,13 @@ class Account(Base):
         server_default=text("'normal'"),
         nullable=False,
     )
+    usage_limit_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    usage_limit_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     access_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     refresh_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

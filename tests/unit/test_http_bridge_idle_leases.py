@@ -16,6 +16,7 @@ import pytest
 from app.core.clients.proxy import ProxyResponseError
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.errors import openai_error
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.db.models import AccountStatus
 from app.modules.api_keys.service import ApiKeyRequestUsageBudget
 from app.modules.proxy import service as proxy_service
@@ -23,6 +24,14 @@ from app.modules.proxy._service.http_bridge import request_submit as http_bridge
 from app.modules.proxy.load_balancer import LoadBalancer
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _usage_policy_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def check_account_usage_limit(_self: object, _account_id: str) -> AccountUsageLimitState:
+        return AccountUsageLimitState.DISABLED
+
+    monkeypatch.setattr(LoadBalancer, "check_account_usage_limit", check_account_usage_limit)
 
 
 def _make_bridge_session(
@@ -51,6 +60,13 @@ def _make_bridge_session(
 
 def _make_lease(lease_id: str) -> proxy_service.AccountLease:
     return proxy_service.AccountLease(lease_id=lease_id, account_id="acc-bridge", kind="stream", acquired_at=0.0)
+
+
+def _lease_balancer(**methods: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        check_account_usage_limit=AsyncMock(return_value=AccountUsageLimitState.DISABLED),
+        **methods,
+    )
 
 
 @pytest.mark.asyncio
@@ -125,7 +141,7 @@ async def test_next_turn_reacquires_stream_lease() -> None:
     session = _make_bridge_session()
     assert session.account_lease is None
     lease = _make_lease("l3")
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock(return_value=lease)))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=AsyncMock(return_value=lease)))
 
     async with session.pending_lock:
         await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
@@ -151,7 +167,7 @@ async def test_reacquire_carries_turn_usage_budget_estimate() -> None:
     mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
     session = _make_bridge_session()
     lease = _make_lease("l10")
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock(return_value=lease)))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=AsyncMock(return_value=lease)))
     budget = ApiKeyRequestUsageBudget(input_tokens=1200, output_tokens=300)
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-budget-estimate",
@@ -212,6 +228,11 @@ async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
             "acc-bridge", kind="stream", estimated_tokens=0.0, api_key_id="key-other"
         )
     fake_self = SimpleNamespace(_load_balancer=balancer)
+    monkeypatch.setattr(
+        balancer,
+        "check_account_usage_limit",
+        AsyncMock(return_value=AccountUsageLimitState.DISABLED),
+    )
 
     hot_session = _make_bridge_session(api_key_id="key-hot")
     with pytest.raises(ProxyResponseError) as exc_info:
@@ -242,7 +263,7 @@ async def test_keyed_warm_session_reacquire_is_fair_share_gated_and_counted(
 async def test_reacquire_denial_raises_local_cap_envelope() -> None:
     mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
     session = _make_bridge_session()
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock(return_value=None)))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=AsyncMock(return_value=None)))
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async with session.pending_lock:
@@ -273,7 +294,7 @@ async def test_reacquire_racing_close_releases_fresh_lease() -> None:
 
     release_account_lease = AsyncMock()
     fake_self = SimpleNamespace(
-        _load_balancer=SimpleNamespace(
+        _load_balancer=_lease_balancer(
             acquire_account_lease=AsyncMock(side_effect=acquire_and_close),
             release_account_lease=release_account_lease,
         )
@@ -307,7 +328,7 @@ async def test_reacquire_racing_close_defers_cancellation_until_release() -> Non
         await finish_release.wait()
 
     fake_self = SimpleNamespace(
-        _load_balancer=SimpleNamespace(
+        _load_balancer=_lease_balancer(
             acquire_account_lease=AsyncMock(side_effect=acquire_and_close),
             release_account_lease=AsyncMock(side_effect=release_account_lease),
         )
@@ -338,7 +359,7 @@ async def test_reacquire_noop_when_lease_already_held() -> None:
     session = _make_bridge_session()
     lease = _make_lease("l4")
     session.account_lease = lease
-    fake_self = SimpleNamespace(_load_balancer=SimpleNamespace(acquire_account_lease=AsyncMock()))
+    fake_self = SimpleNamespace(_load_balancer=_lease_balancer(acquire_account_lease=AsyncMock()))
 
     async with session.pending_lock:
         await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
@@ -418,6 +439,80 @@ async def test_response_create_admission_failure_releases_reacquired_stream_leas
     assert session.account_lease is None
     assert session.queued_request_count == 0
     assert session.admission_waiter_count == 0
+
+
+@pytest.mark.asyncio
+async def test_turn_rechecks_usage_policy_after_prewarm_before_queue_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session()
+    lease = _make_lease("l-policy-race")
+    usage_gate = AsyncMock(side_effect=[AccountUsageLimitState.AVAILABLE, AccountUsageLimitState.REACHED])
+    acquire_account_lease = AsyncMock(return_value=lease)
+    release_account_lease = AsyncMock()
+    retire = AsyncMock(return_value=True)
+    monkeypatch.setattr(service._load_balancer, "check_account_usage_limit", usage_gate)
+    monkeypatch.setattr(service._load_balancer, "acquire_account_lease", acquire_account_lease)
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-policy-race",
+        model="gpt-5.2",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.2","input":"hi"}',
+        transport="http",
+        skip_request_log=True,
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.payload["error"]["code"] == "account_usage_limit_reached"
+    assert usage_gate.await_count == 2
+    acquire_account_lease.assert_awaited_once()
+    release_account_lease.assert_awaited_once_with(lease)
+    assert session.account_lease is None
+    assert session.admission_waiter_count == 0
+    assert session.queued_request_count == 0
+    assert session.upstream_control.retire_after_drain is True
+    retire.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_turn_fails_closed_when_pinned_owner_is_missing() -> None:
+    mixin = http_bridge_request_submit_module._HTTPBridgeRequestSubmitMixin
+    session = _make_bridge_session()
+    acquire_account_lease = AsyncMock()
+    fake_self = SimpleNamespace(
+        _load_balancer=SimpleNamespace(
+            check_account_usage_limit=AsyncMock(return_value=None),
+            acquire_account_lease=acquire_account_lease,
+        )
+    )
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async with session.pending_lock:
+            await mixin._ensure_http_bridge_session_stream_lease_locked(fake_self, session)
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    acquire_account_lease.assert_not_awaited()
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    assert session.account_lease is None
 
 
 @pytest.mark.asyncio

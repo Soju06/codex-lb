@@ -11,6 +11,7 @@ from typing import AsyncContextManager, Callable, Protocol
 from app.core import usage as usage_core
 from app.core.auth.refresh import RefreshError
 from app.core.clients.proxy import UpstreamProxyRouteTrace, override_stream_timeouts, stream_responses
+from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import OpenAIError, ResponseUsage
@@ -18,12 +19,14 @@ from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesRequest
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
+from app.core.usage.account_limits import AccountUsageLimitState
 from app.core.usage.pricing import get_pricing_for_model
 from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
-from app.modules.usage.mappers import usage_history_to_window_row
+from app.modules.usage.mappers import evaluate_account_usage_limit, usage_history_to_window_row
+from app.modules.usage.repository import UsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,12 @@ class LimitWarmupSendOutcome:
     model: str
     result: LimitWarmupSendResult | None
     error_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _LimitWarmupAuthorization:
+    account: Account | None
+    limit_state: AccountUsageLimitState
 
 
 class LimitWarmupSender(Protocol):
@@ -181,8 +190,6 @@ class StreamingLimitWarmupSender:
                         error_code="account_not_active",
                         error_message=error_message,
                     )
-                access_token = self._encryptor.decrypt(fresh_account.access_token_encrypted)
-                chatgpt_account_id = fresh_account.chatgpt_account_id
         except RefreshError as exc:
             return LimitWarmupSendResult(
                 request_id=request_id,
@@ -204,6 +211,51 @@ class StreamingLimitWarmupSender:
                 upstream_proxy_fail_closed_reason=exc.reason,
             )
 
+        try:
+            authorization = await self._load_fresh_usage_authorization(fresh_account.id)
+        except Exception:
+            logger.warning(
+                "Final limit warm-up usage authorization failed closed",
+                extra={"account_id": fresh_account.id},
+                exc_info=True,
+            )
+            return LimitWarmupSendResult(
+                request_id=request_id,
+                success=False,
+                latency_ms=_elapsed_ms(started),
+                error_code="account_usage_limit_authorization_failed",
+                error_message="Account usage-limit authorization failed",
+            )
+        fresh_account = authorization.account
+        if (
+            fresh_account is None
+            or not _account_is_safe_candidate(fresh_account)
+            or not fresh_account.limit_warmup_enabled
+        ):
+            if fresh_account is None:
+                error_message = "Account no longer exists"
+            elif not fresh_account.limit_warmup_enabled:
+                error_message = "Limit warm-up is disabled for this account"
+            else:
+                error_message = f"Account status is {fresh_account.status.value}"
+            return LimitWarmupSendResult(
+                request_id=request_id,
+                success=False,
+                latency_ms=_elapsed_ms(started),
+                error_code="account_not_active",
+                error_message=error_message,
+            )
+        if authorization.limit_state.blocks_account_use:
+            return LimitWarmupSendResult(
+                request_id=request_id,
+                success=False,
+                latency_ms=_elapsed_ms(started),
+                error_code="account_usage_limit_reached",
+                error_message="Account usage limit reached or usage data unavailable",
+            )
+
+        access_token = self._encryptor.decrypt(fresh_account.access_token_encrypted)
+        chatgpt_account_id = fresh_account.chatgpt_account_id
         payload = ResponsesRequest.model_validate(
             {
                 "model": model,
@@ -301,6 +353,43 @@ class StreamingLimitWarmupSender:
         async with self._accounts_repo_factory() as accounts_repo:
             return await accounts_repo.get_by_id_fresh(account.id)
 
+    async def _load_fresh_usage_authorization(self, account_id: str) -> _LimitWarmupAuthorization:
+        if self._accounts_repo_factory is None:
+            return await self._load_usage_authorization(self._accounts_repo, account_id)
+        async with self._accounts_repo_factory() as accounts_repo:
+            return await self._load_usage_authorization(accounts_repo, account_id)
+
+    @staticmethod
+    async def _load_usage_authorization(
+        accounts_repo: AccountsRepository,
+        account_id: str,
+    ) -> _LimitWarmupAuthorization:
+        account = await accounts_repo.get_by_id_fresh(account_id)
+        if account is None:
+            return _LimitWarmupAuthorization(
+                account=None,
+                limit_state=AccountUsageLimitState.DATA_UNAVAILABLE,
+            )
+        if not account.usage_limit_enabled:
+            return _LimitWarmupAuthorization(
+                account=account,
+                limit_state=AccountUsageLimitState.DISABLED,
+            )
+
+        account_ids = [account_id]
+        usage_repo = UsageRepository(accounts_repo.session)
+        primary = (await usage_repo.latest_by_account(window="primary", account_ids=account_ids)).get(account_id)
+        secondary = (await usage_repo.latest_by_account(window="secondary", account_ids=account_ids)).get(account_id)
+        monthly = (await usage_repo.latest_by_account(window="monthly", account_ids=account_ids)).get(account_id)
+        limit_state = evaluate_account_usage_limit(
+            account,
+            primary=primary,
+            secondary=secondary,
+            monthly=monthly,
+            refresh_interval_seconds=get_settings().usage_refresh_interval_seconds,
+        )
+        return _LimitWarmupAuthorization(account=account, limit_state=limit_state)
+
     async def _resolve_upstream_route(self, account: Account) -> ResolvedUpstreamRoute | None:
         if self._accounts_repo_factory is not None:
             async with self._accounts_repo_factory() as accounts_repo:
@@ -342,6 +431,8 @@ class LimitWarmupService:
         before_secondary: dict[str, UsageHistory],
         after_primary: dict[str, UsageHistory],
         after_secondary: dict[str, UsageHistory],
+        usage_limit_secondary: dict[str, UsageHistory] | None = None,
+        usage_limit_monthly: dict[str, UsageHistory] | None = None,
         previous_plan_types: dict[str, str | None] | None = None,
         refresh_started_at: datetime | None = None,
         usage_refresh_interval_seconds: int = _STAGGER_SLOT_GRACE_SECONDS,
@@ -366,11 +457,23 @@ class LimitWarmupService:
             if _account_is_safe_candidate(account) and account.limit_warmup_enabled
         ]
         now = utcnow()
+        current_usage_limit_secondary = after_secondary if usage_limit_secondary is None else usage_limit_secondary
+        current_usage_limit_monthly = {} if usage_limit_monthly is None else usage_limit_monthly
 
         for account in accounts:
             if not _account_is_safe_candidate(account):
                 continue
             if not account.limit_warmup_enabled:
+                continue
+            limit_state = evaluate_account_usage_limit(
+                account,
+                primary=after_primary.get(account.id),
+                secondary=current_usage_limit_secondary.get(account.id),
+                monthly=current_usage_limit_monthly.get(account.id),
+                now=now,
+                refresh_interval_seconds=usage_refresh_interval_seconds,
+            )
+            if limit_state.blocks_account_use:
                 continue
             latest_attempt = latest_attempts.get(account.id)
 

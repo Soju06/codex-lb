@@ -80,6 +80,11 @@ class _HTTPBridgeServiceProtocol(Protocol):
     ) -> tuple[list[_HTTPBridgeSession], list[asyncio.Future[_HTTPBridgeSession]]]: ...
     def _unregister_http_bridge_turn_states_locked(self, session: _HTTPBridgeSession) -> None: ...
     def _unregister_http_bridge_previous_response_ids_locked(self, session: _HTTPBridgeSession) -> None: ...
+    def _unregister_http_bridge_previous_response_id_locked(
+        self,
+        session: _HTTPBridgeSession,
+        response_id: str,
+    ) -> None: ...
     async def _register_http_bridge_turn_state_impl(
         self,
         session: _HTTPBridgeSession,
@@ -101,6 +106,11 @@ class _HTTPBridgeServiceProtocol(Protocol):
         input_full_fingerprint: str | None = None,
         pending_tool_calls: Mapping[str, str] | None = None,
     ) -> bool: ...
+    async def _unregister_http_bridge_previous_response_id(
+        self,
+        session: _HTTPBridgeSession,
+        response_id: str,
+    ) -> None: ...
     def _schedule_http_bridge_session_closes(
         self,
         sessions: list[_HTTPBridgeSession],

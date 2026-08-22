@@ -1033,7 +1033,9 @@ async def _invalidate_denied_http_bridge_anchor(
     client's own replay rather than a server-side one, so no forked child
     response can be created against a parent this proxy cannot see.
 
-    The in-memory clear is unconditional even when the durable write is fenced,
+    The durable clear is conditional on the denied id still being the durable
+    latest response, and removes only that response alias. The in-memory clear
+    is unconditional for the same id even when the durable write is fenced,
     because it strictly removes one way for the denied id to come back. A
     durable row that survives re-injects the id on a later turn, which is denied
     in turn and re-enters this path, so the clear is re-attempted rather than
@@ -1045,17 +1047,35 @@ async def _invalidate_denied_http_bridge_anchor(
     # denied dispatch and this frame. Only retire the id that was refused.
     if session.last_completed_response_id != denied_response_id:
         return False
-    cleared = await _abandon_durable_http_bridge_continuity(
-        service,
-        session,
-        detail="upstream_denied_proxy_injected_anchor",
-    )
-    await service._unregister_http_bridge_previous_response_ids(session)
-    session.last_completed_response_id = None
-    session.last_completed_response_account_id = None
-    session.last_completed_input_count = 0
-    session.last_completed_input_prefix_fingerprint = None
-    session.last_pending_tool_calls.clear()
+    # Publish the denial before the first await. A request that prepared the
+    # same injected anchor concurrently must revalidate before dispatch rather
+    # than race the durable write and send the denied id again.
+    session.denied_proxy_injected_anchor_ids.add(denied_response_id)
+    cleared = False
+    try:
+        if session.durable_session_id is not None and session.durable_owner_epoch is not None:
+            lookup = await service._durable_bridge.clear_live_session_response_anchor_if_matches(
+                session_id=session.durable_session_id,
+                api_key_id=session.key.api_key_id,
+                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                owner_epoch=session.durable_owner_epoch,
+                response_id=denied_response_id,
+            )
+            cleared = lookup is not None
+    except Exception:
+        logger.warning("Failed to clear denied HTTP bridge response anchor", exc_info=True)
+    finally:
+        try:
+            await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
+        finally:
+            # Do not erase a newer response that completed while the fenced
+            # durable write was in flight.
+            if session.last_completed_response_id == denied_response_id:
+                session.last_completed_response_id = None
+                session.last_completed_response_account_id = None
+                session.last_completed_input_count = 0
+                session.last_completed_input_prefix_fingerprint = None
+                session.last_pending_tool_calls.clear()
     return cleared
 
 

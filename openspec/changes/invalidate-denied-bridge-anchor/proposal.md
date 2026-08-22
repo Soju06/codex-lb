@@ -16,7 +16,8 @@ The second half of this change is why the first half currently could not fire ev
 
 ## What Changes
 
-- Retire a `previous_response_id` on the first explicit upstream denial when the proxy injected it, clearing the durable continuity row and the in-memory anchor together, instead of waiting for a counter that this failure class never increments. The retirement is skipped when a concurrent request has already advanced the anchor past the denied id.
+- Retire only the denied `previous_response_id` on the first explicit upstream denial when the proxy injected it, instead of waiting for a counter that this failure class never increments. The fenced durable write clears the four anchor-bound columns only while that id is still the durable latest response, deletes only that response alias, and preserves turn-state plus other response aliases. The in-memory carrier is cleared in a `finally` path even when alias unregistering fails. The retirement is skipped when a concurrent request has already advanced the anchor past the denied id.
+- Mark the denied id before the durable await and revalidate prepared requests immediately before dispatch. A request that already captured the denied proxy-injected id is failed closed without another upstream send, closing the retirement/dispatch race.
 - Carry `proxy_injected_previous_response_id` onto the anchored recovery retry state, so a denial of the replayed anchor is attributable, diagnostics report the real provenance, and the wedge classifier sees the reattach. Anchor-free recovery paths keep the flag false because they send no anchor.
 
 ## Capabilities
@@ -33,6 +34,7 @@ None.
 
 - HTTP bridge terminal-event handling (`app/modules/proxy/_service/http_bridge/upstream_events.py`) and anchored recovery retry state (`app/modules/proxy/_service/http_bridge/streaming.py`).
 - No API, schema, migration, dependency, configuration, or dashboard changes. The poison threshold setting and its default of seven are untouched, and the downstream error contract is unchanged: the denial is still masked to `stream_incomplete` and still surfaces as 502, so clients keep their anchor and do not resend full history (the invariant from #397).
+- The session's turn-state and unrelated response-id aliases remain routable after retirement; only the denied response-id alias is removed.
 
 ## Non-Goals
 

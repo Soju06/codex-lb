@@ -53,12 +53,16 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["upstreamStreamTransport"] == "default"
     assert payload["prohibitFastMode"] is False
     assert payload["proxyAccountResponseCreateLimit"] == 4
+    assert payload["proxyAccountResponseCreateLimitEnvironmentValue"] == 4
     assert payload["proxyAccountResponseCreateLimitOverride"] == 4
     assert payload["proxyAccountStreamLimit"] == 8
+    assert payload["proxyAccountStreamLimitEnvironmentValue"] == 8
     assert payload["proxyAccountStreamLimitOverride"] == 8
     assert payload["proxyAccountStreamRecoveryReserve"] == 1
+    assert payload["proxyAccountStreamRecoveryReserveEnvironmentValue"] == 1
     assert payload["proxyAccountStreamRecoveryReserveOverride"] == 1
     assert payload["proxyApiKeyFairShareCongestionThresholdPct"] == 0
+    assert payload["proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue"] == 0
     assert payload["proxyApiKeyFairShareCongestionThresholdPctOverride"] == 0
     assert payload["upstreamProxyRoutingEnabled"] is False
     assert payload["upstreamProxyDefaultPoolId"] is None

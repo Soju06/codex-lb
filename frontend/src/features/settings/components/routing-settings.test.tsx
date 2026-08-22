@@ -136,6 +136,30 @@ describe("RoutingSettings", () => {
     expect(payload).not.toHaveProperty("proxyApiKeyFairShareCongestionThresholdPct");
   });
 
+  it("validates a cleared stream limit against its inherited environment value", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          proxyAccountStreamLimit: 24,
+          proxyAccountStreamLimitEnvironmentValue: 2,
+          proxyAccountStreamLimitOverride: 24,
+          proxyAccountStreamRecoveryReserve: 3,
+          proxyAccountStreamRecoveryReserveOverride: 3,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
+
+    expect(screen.getByRole("button", { name: "Save capacity limits" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid account capacity limits before saving", async () => {
     const user = userEvent.setup();
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);

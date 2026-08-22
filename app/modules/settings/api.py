@@ -111,6 +111,7 @@ router = APIRouter(
 
 
 def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
+    environment_settings = get_app_settings()
     additional_quota_policies = [
         AdditionalQuotaPolicy(
             quota_key=definition.quota_key,
@@ -129,12 +130,38 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         prohibit_fast_mode=settings.prohibit_fast_mode,
         http_downstream_transport_policy=settings.http_downstream_transport_policy,
         proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
+        proxy_account_response_create_limit_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_account_response_create_limit",
+                settings.proxy_account_response_create_limit,
+            )
+        ),
         proxy_account_response_create_limit_override=(settings.proxy_account_response_create_limit_override),
         proxy_account_stream_limit=settings.proxy_account_stream_limit,
+        proxy_account_stream_limit_environment_value=getattr(
+            environment_settings,
+            "proxy_account_stream_limit",
+            settings.proxy_account_stream_limit,
+        ),
         proxy_account_stream_limit_override=settings.proxy_account_stream_limit_override,
         proxy_account_stream_recovery_reserve=settings.proxy_account_stream_recovery_reserve,
+        proxy_account_stream_recovery_reserve_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_account_stream_recovery_reserve",
+                settings.proxy_account_stream_recovery_reserve,
+            )
+        ),
         proxy_account_stream_recovery_reserve_override=(settings.proxy_account_stream_recovery_reserve_override),
         proxy_api_key_fair_share_congestion_threshold_pct=(settings.proxy_api_key_fair_share_congestion_threshold_pct),
+        proxy_api_key_fair_share_congestion_threshold_pct_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_api_key_fair_share_congestion_threshold_pct",
+                settings.proxy_api_key_fair_share_congestion_threshold_pct,
+            )
+        ),
         proxy_api_key_fair_share_congestion_threshold_pct_override=(
             settings.proxy_api_key_fair_share_congestion_threshold_pct_override
         ),

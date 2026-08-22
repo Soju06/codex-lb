@@ -13,7 +13,8 @@ This resolves issue #1538 without changing the runtime admission model.
 
 ## What Changes
 
-- Preserve the existing effective settings fields and add nullable raw
+- Preserve the existing effective settings fields, expose environment baseline
+  values for prospective validation, and add nullable raw
   override fields for the four dashboard-managed capacity values:
   `proxy_account_response_create_limit`, `proxy_account_stream_limit`,
   `proxy_account_stream_recovery_reserve`, and

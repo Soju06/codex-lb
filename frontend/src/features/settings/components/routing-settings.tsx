@@ -224,9 +224,9 @@ export function RoutingSettings({
     100,
   );
   const effectiveProxyAccountStreamLimit =
-    parsedProxyAccountStreamLimit.value ?? settings.proxyAccountStreamLimit;
+    parsedProxyAccountStreamLimit.value ?? settings.proxyAccountStreamLimitEnvironmentValue;
   const effectiveProxyAccountStreamRecoveryReserve =
-    parsedProxyAccountStreamRecoveryReserve.value ?? settings.proxyAccountStreamRecoveryReserve;
+    parsedProxyAccountStreamRecoveryReserve.value ?? settings.proxyAccountStreamRecoveryReserveEnvironmentValue;
   const accountCapacityLimitsValid =
     parsedProxyAccountResponseCreateLimit.valid &&
     parsedProxyAccountStreamLimit.valid &&
@@ -780,7 +780,7 @@ export function RoutingSettings({
                 {draft.proxyAccountResponseCreateLimit.trim() === "" ? (
                   <span className="block text-[11px] text-muted-foreground">
                     {t("settings.routing.accountCapacity.inheritHint", {
-                      value: settings.proxyAccountResponseCreateLimit,
+                      value: settings.proxyAccountResponseCreateLimitEnvironmentValue,
                     })}
                   </span>
                 ) : null}
@@ -807,7 +807,7 @@ export function RoutingSettings({
                 {draft.proxyAccountStreamLimit.trim() === "" ? (
                   <span className="block text-[11px] text-muted-foreground">
                     {t("settings.routing.accountCapacity.inheritHint", {
-                      value: settings.proxyAccountStreamLimit,
+                      value: settings.proxyAccountStreamLimitEnvironmentValue,
                     })}
                   </span>
                 ) : null}
@@ -834,7 +834,7 @@ export function RoutingSettings({
                 {draft.proxyAccountStreamRecoveryReserve.trim() === "" ? (
                   <span className="block text-[11px] text-muted-foreground">
                     {t("settings.routing.accountCapacity.inheritHint", {
-                      value: settings.proxyAccountStreamRecoveryReserve,
+                      value: settings.proxyAccountStreamRecoveryReserveEnvironmentValue,
                     })}
                   </span>
                 ) : null}
@@ -864,7 +864,7 @@ export function RoutingSettings({
                 {draft.proxyApiKeyFairShareCongestionThresholdPct.trim() === "" ? (
                   <span className="block text-[11px] text-muted-foreground">
                     {t("settings.routing.accountCapacity.inheritHint", {
-                      value: settings.proxyApiKeyFairShareCongestionThresholdPct,
+                      value: settings.proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue,
                     })}
                   </span>
                 ) : null}

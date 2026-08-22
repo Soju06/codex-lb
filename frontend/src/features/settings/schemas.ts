@@ -77,12 +77,22 @@ export const DashboardSettingsSchema = z
       .default(5),
     singleAccountId: z.string().nullable().optional().default(null),
     proxyAccountResponseCreateLimit: z.number().int().min(0).optional().default(4),
+    proxyAccountResponseCreateLimitEnvironmentValue: z.number().int().min(0).optional().default(4),
     proxyAccountResponseCreateLimitOverride: z.number().int().min(0).nullable().optional().default(null),
     proxyAccountStreamLimit: z.number().int().min(0).optional().default(8),
+    proxyAccountStreamLimitEnvironmentValue: z.number().int().min(0).optional().default(8),
     proxyAccountStreamLimitOverride: z.number().int().min(0).nullable().optional().default(null),
     proxyAccountStreamRecoveryReserve: z.number().int().min(0).optional().default(1),
+    proxyAccountStreamRecoveryReserveEnvironmentValue: z.number().int().min(0).optional().default(1),
     proxyAccountStreamRecoveryReserveOverride: z.number().int().min(0).nullable().optional().default(null),
     proxyApiKeyFairShareCongestionThresholdPct: z.number().int().min(0).max(100).optional().default(0),
+    proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue: z
+      .number()
+      .int()
+      .min(0)
+      .max(100)
+      .optional()
+      .default(0),
     proxyApiKeyFairShareCongestionThresholdPctOverride: z
       .number()
       .int()

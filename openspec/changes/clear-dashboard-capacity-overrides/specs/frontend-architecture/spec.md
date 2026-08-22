@@ -11,6 +11,8 @@ shown as a hint. Clearing that input MUST submit explicit `null`; entering a
 nonnegative integer, or an integer from 0 to 100 for the fair-share threshold,
 MUST submit an override value. The dashboard MUST prevent invalid values from
 being saved and MUST retain the existing stream-recovery-reserve validation.
+When validating a clear of a stored override, the dashboard MUST use the
+environment baseline value rather than the currently effective override value.
 
 #### Scenario: Inherited capacity is visible
 
@@ -36,4 +38,11 @@ being saved and MUST retain the existing stream-recovery-reserve validation.
 
 - **WHEN** the operator enters a negative value, a non-integer, a fair-share
   value outside 0-100, or a recovery reserve above the effective stream cap
+- **THEN** the dashboard prevents the save
+
+#### Scenario: Clearing a stream limit validates against environment capacity
+
+- **GIVEN** a stored stream-limit override of 24, a stored recovery reserve of
+  3, and an environment stream limit of 2
+- **WHEN** the operator clears only the stream-limit input
 - **THEN** the dashboard prevents the save

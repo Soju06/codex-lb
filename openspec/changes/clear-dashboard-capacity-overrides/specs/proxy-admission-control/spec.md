@@ -13,8 +13,8 @@ environment values for these settings. Existing settings rows MUST use
 nullable stored overrides so a `NULL` value continues to inherit the
 corresponding process environment value.
 
-The settings response MUST expose both each effective value and its nullable
-stored override. Updates MUST use tri-state semantics for these four override
+The settings response MUST expose each effective value, its environment
+baseline value, and its nullable stored override. Updates MUST use tri-state semantics for these four override
 fields: an absent field MUST leave the stored override unchanged, a field with
 a numeric value MUST store that value as an override, and a field explicitly
 set to `null` MUST clear the stored override so the effective value inherits
@@ -84,3 +84,11 @@ from the process environment.
   greater than its effective stream limit
 - **THEN** the settings API rejects the update
 - **AND** all four stored capacity overrides remain unchanged
+
+#### Scenario: Clear validation uses the environment baseline
+
+- **GIVEN** a stored stream-limit override of 24, a stored recovery reserve of
+  3, and an environment stream limit of 2
+- **WHEN** only the stream-limit override is explicitly cleared
+- **THEN** the settings API rejects the update before persistence
+- **AND** the stored stream-limit override remains 24

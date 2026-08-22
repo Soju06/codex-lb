@@ -2,8 +2,9 @@
 
 ## Backend Contract
 
-Keep the current effective fields in `DashboardSettingsResponse` and add four
-nullable `...Override` fields. The effective values continue to be resolved by
+Keep the current effective fields in `DashboardSettingsResponse`, add four
+nullable `...Override` fields, and expose four environment baseline fields for
+prospective clear validation. The effective values continue to be resolved by
 `SettingsService` from the stored nullable columns and process settings.
 
 `DashboardSettingsUpdateRequest` already preserves explicit-null intent through
@@ -18,7 +19,9 @@ The repository will apply each field in this order:
 2. otherwise store a supplied numeric override;
 3. otherwise leave the column untouched.
 
-The existing row-version CAS and settings cache invalidation remain unchanged.
+The API validates a clear against the corresponding environment baseline before
+persistence, while the existing row-version CAS and settings cache invalidation
+remain unchanged.
 
 ## Frontend Contract
 

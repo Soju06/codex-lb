@@ -143,7 +143,15 @@ def run() -> int:
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     if len(arguments) == 2 and arguments[0] == "--backend-fd":
-        _run_backend(int(arguments[1]))
+        try:
+            listener_fd = int(arguments[1])
+        except ValueError:
+            print("Invalid --backend-fd value.", file=sys.stderr)
+            return 2
+        if listener_fd < 0:
+            print("Invalid --backend-fd value.", file=sys.stderr)
+            return 2
+        _run_backend(listener_fd)
         return 0
     if arguments != ["--frontend-built"]:
         print(

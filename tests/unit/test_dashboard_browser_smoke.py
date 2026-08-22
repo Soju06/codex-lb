@@ -85,3 +85,20 @@ def test_smoke_main_dispatches_backend_without_frontend_build_acknowledgement(
 
     assert smoke_harness.main(["--backend-fd", "123"]) == 0
     assert captured == [123]
+
+
+@pytest.mark.parametrize("listener_fd", ["not-an-integer", "-1"])
+def test_smoke_main_rejects_invalid_backend_fd(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    listener_fd: str,
+) -> None:
+    smoke_harness = _load_smoke_harness()
+
+    def fail_if_run(_listener_fd: int) -> None:
+        pytest.fail("backend started with an invalid listener descriptor")
+
+    monkeypatch.setattr(smoke_harness, "_run_backend", fail_if_run)
+
+    assert smoke_harness.main(["--backend-fd", listener_fd]) == 2
+    assert capsys.readouterr().err == "Invalid --backend-fd value.\n"

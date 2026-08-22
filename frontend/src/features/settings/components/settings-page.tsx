@@ -166,10 +166,14 @@ export function SettingsPage() {
                   settings.limitWarmupIdleThresholdPercent,
                   settings.limitWarmupCooldownSeconds,
                   settings.limitWarmupStaggeredIdleEnabled,
-                  settings.proxyAccountResponseCreateLimit,
-                  settings.proxyAccountStreamLimit,
-                  settings.proxyAccountStreamRecoveryReserve,
-                  settings.proxyApiKeyFairShareCongestionThresholdPct,
+                   settings.proxyAccountResponseCreateLimit,
+                   settings.proxyAccountResponseCreateLimitOverride,
+                   settings.proxyAccountStreamLimit,
+                   settings.proxyAccountStreamLimitOverride,
+                   settings.proxyAccountStreamRecoveryReserve,
+                   settings.proxyAccountStreamRecoveryReserveOverride,
+                   settings.proxyApiKeyFairShareCongestionThresholdPct,
+                   settings.proxyApiKeyFairShareCongestionThresholdPctOverride,
                 ].join(":")}
                 settings={settings}
                 accounts={accountsQuery.data ?? []}

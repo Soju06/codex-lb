@@ -1161,6 +1161,8 @@
   "settings.routing.accountCapacity.streamRecoveryReserveDescription": "Keep stream slots for recovery and reattach work. 0 disables the reserve; it cannot exceed a nonzero stream limit.",
   "settings.routing.accountCapacity.fairShareThresholdLabel": "API key fair-share threshold (%)",
   "settings.routing.accountCapacity.fairShareThresholdDescription": "When in-flight streams reach this percentage of pool stream capacity, keys holding more than their fair share are throttled until the pool decongests. 0 disables.",
+  "settings.routing.accountCapacity.inheritPlaceholder": "Inherit environment",
+  "settings.routing.accountCapacity.inheritHint": "Inherited effective value: {{value}}",
   "settings.routing.accountCapacity.save": "Save capacity limits",
   "settings.routing.stickyThresholds.primaryLabel": "Sticky primary threshold",
   "settings.routing.stickyThresholds.primaryDescription": "Move sticky sessions off an account once more than this percent of its 5-hour (primary) window has been used.",

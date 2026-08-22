@@ -111,6 +111,7 @@ router = APIRouter(
 
 
 def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
+    environment_settings = get_app_settings()
     additional_quota_policies = [
         AdditionalQuotaPolicy(
             quota_key=definition.quota_key,
@@ -129,9 +130,41 @@ def _dashboard_settings_response(settings) -> DashboardSettingsResponse:
         prohibit_fast_mode=settings.prohibit_fast_mode,
         http_downstream_transport_policy=settings.http_downstream_transport_policy,
         proxy_account_response_create_limit=settings.proxy_account_response_create_limit,
+        proxy_account_response_create_limit_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_account_response_create_limit",
+                settings.proxy_account_response_create_limit,
+            )
+        ),
+        proxy_account_response_create_limit_override=(settings.proxy_account_response_create_limit_override),
         proxy_account_stream_limit=settings.proxy_account_stream_limit,
+        proxy_account_stream_limit_environment_value=getattr(
+            environment_settings,
+            "proxy_account_stream_limit",
+            settings.proxy_account_stream_limit,
+        ),
+        proxy_account_stream_limit_override=settings.proxy_account_stream_limit_override,
         proxy_account_stream_recovery_reserve=settings.proxy_account_stream_recovery_reserve,
+        proxy_account_stream_recovery_reserve_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_account_stream_recovery_reserve",
+                settings.proxy_account_stream_recovery_reserve,
+            )
+        ),
+        proxy_account_stream_recovery_reserve_override=(settings.proxy_account_stream_recovery_reserve_override),
         proxy_api_key_fair_share_congestion_threshold_pct=(settings.proxy_api_key_fair_share_congestion_threshold_pct),
+        proxy_api_key_fair_share_congestion_threshold_pct_environment_value=(
+            getattr(
+                environment_settings,
+                "proxy_api_key_fair_share_congestion_threshold_pct",
+                settings.proxy_api_key_fair_share_congestion_threshold_pct,
+            )
+        ),
+        proxy_api_key_fair_share_congestion_threshold_pct_override=(
+            settings.proxy_api_key_fair_share_congestion_threshold_pct_override
+        ),
         upstream_proxy_routing_enabled=settings.upstream_proxy_routing_enabled,
         upstream_proxy_default_pool_id=settings.upstream_proxy_default_pool_id,
         prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
@@ -617,14 +650,19 @@ async def update_settings(
         single_account_id = (
             payload.single_account_id if "single_account_id" in payload.model_fields_set else current.single_account_id
         )
+        startup_settings = get_app_settings()
         stream_limit = (
             payload.proxy_account_stream_limit
             if payload.proxy_account_stream_limit is not None
+            else startup_settings.proxy_account_stream_limit
+            if "proxy_account_stream_limit" in payload.model_fields_set
             else current.proxy_account_stream_limit
         )
         stream_recovery_reserve = (
             payload.proxy_account_stream_recovery_reserve
             if payload.proxy_account_stream_recovery_reserve is not None
+            else startup_settings.proxy_account_stream_recovery_reserve
+            if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
             else current.proxy_account_stream_recovery_reserve
         )
         cap_fields_changed = bool(
@@ -658,20 +696,36 @@ async def update_settings(
                     if "proxy_account_response_create_limit" in payload.model_fields_set
                     else None
                 ),
+                clear_proxy_account_response_create_limit=(
+                    "proxy_account_response_create_limit" in payload.model_fields_set
+                    and payload.proxy_account_response_create_limit is None
+                ),
                 proxy_account_stream_limit=(
                     payload.proxy_account_stream_limit
                     if "proxy_account_stream_limit" in payload.model_fields_set
                     else None
+                ),
+                clear_proxy_account_stream_limit=(
+                    "proxy_account_stream_limit" in payload.model_fields_set
+                    and payload.proxy_account_stream_limit is None
                 ),
                 proxy_account_stream_recovery_reserve=(
                     payload.proxy_account_stream_recovery_reserve
                     if "proxy_account_stream_recovery_reserve" in payload.model_fields_set
                     else None
                 ),
+                clear_proxy_account_stream_recovery_reserve=(
+                    "proxy_account_stream_recovery_reserve" in payload.model_fields_set
+                    and payload.proxy_account_stream_recovery_reserve is None
+                ),
                 proxy_api_key_fair_share_congestion_threshold_pct=(
                     payload.proxy_api_key_fair_share_congestion_threshold_pct
                     if "proxy_api_key_fair_share_congestion_threshold_pct" in payload.model_fields_set
                     else None
+                ),
+                clear_proxy_api_key_fair_share_congestion_threshold_pct=(
+                    "proxy_api_key_fair_share_congestion_threshold_pct" in payload.model_fields_set
+                    and payload.proxy_api_key_fair_share_congestion_threshold_pct is None
                 ),
                 upstream_proxy_routing_enabled=(
                     payload.upstream_proxy_routing_enabled
@@ -907,6 +961,20 @@ async def update_settings(
         )
         if getattr(current, field_name) != getattr(updated, field_name)
     ]
+    capacity_override_fields = (
+        "proxy_account_response_create_limit",
+        "proxy_account_stream_limit",
+        "proxy_account_stream_recovery_reserve",
+        "proxy_api_key_fair_share_congestion_threshold_pct",
+    )
+    for field_name in capacity_override_fields:
+        override_field_name = f"{field_name}_override"
+        if (
+            getattr(current, field_name) == getattr(updated, field_name)
+            and getattr(current, override_field_name) != getattr(updated, override_field_name)
+            and field_name not in changed_fields
+        ):
+            changed_fields.append(field_name)
     if upstream_route_inputs_changed:
         # Durably bump ``upstream_route`` (with the coalesced retry fallback)
         # rather than relying solely on the ``settings`` bump issued above:

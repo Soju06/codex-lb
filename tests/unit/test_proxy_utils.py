@@ -26888,7 +26888,7 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
     assert health_writes_while_fallback_pending == 0
     assert reconnect_while_fallback_pending is True
     assert retire_while_fallback_pending is True
-    retry_release_expected = fallback_fails or cancel_during in {"primary", "fallback"}
+    retry_release_expected = fallback_fails
     assert release_calls == (1 if cancel_during == "pre_start" else 2 + int(retry_release_expected))
     assert upstream_control.reconnect_requested is True
     assert upstream_control.retire_after_drain is True
@@ -26896,11 +26896,11 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
         assert order == ["fallback_started", "fallback_committed"]
         handle_stream_error.assert_not_awaited()
     elif cancel_during == "primary":
-        assert order == ["primary_started", "fallback_started", "fallback_committed", "retry_committed"]
-        handle_stream_error.assert_not_awaited()
+        assert order == ["primary_started", "fallback_started", "fallback_committed", "health"]
+        handle_stream_error.assert_awaited_once()
     elif cancel_during == "fallback":
-        assert order == ["primary_failed", "fallback_started", "fallback_committed", "retry_committed"]
-        handle_stream_error.assert_not_awaited()
+        assert order == ["primary_failed", "fallback_started", "fallback_committed", "health"]
+        handle_stream_error.assert_awaited_once()
     elif fallback_fails:
         assert order == ["primary_failed", "fallback_started", "fallback_failed", "retry_committed"]
         handle_stream_error.assert_not_awaited()

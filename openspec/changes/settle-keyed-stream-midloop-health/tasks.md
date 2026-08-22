@@ -19,6 +19,8 @@
   draining fails after settlement confirms.
 - [x] 1.10 Transfer later cancelled-flush entries to tracked cleanup even when
   final deferred route-backoff retry fails.
+- [x] 1.11 Report confirmed fail-safe release after cancel instead of starting
+  a retrying release for an already-released reservation.
 
 ## 2. Regression coverage
 
@@ -39,6 +41,8 @@
   deferred route-backoff persistence fails.
 - [x] 2.11 Assert multiple queued penalties retain later entries when
   cancellation and a repeated route-backoff failure overlap.
+- [x] 2.12 Assert cancel during primary or fallback settlement does not retry a
+  confirmed fail-safe release and still flushes deferred health.
 
 ## 3. Validation
 

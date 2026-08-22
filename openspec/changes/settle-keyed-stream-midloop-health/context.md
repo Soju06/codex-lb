@@ -33,7 +33,11 @@ through `_handle_stream_error` / `record_errors`.
 Once ordering-sensitive settlement transfers from the request, a failed
 primary attempt plus failed immediate release leaves reservation recovery with
 the tracked retrying release cleanup. Deferred health remains unapplied for
-that unconfirmed request path. If cancellation leaves later post-settlement
+that unconfirmed request path. If cancellation arrives while the immediate
+fallback is still running and that fallback confirms, the settlement task
+reports the confirmed release instead of treating cancel as failure. That
+avoids a second unbounded retry after the reservation is already released and
+lets deferred health flush. If cancellation leaves later post-settlement
 health entries for a detached flush, the flush is persistence work and the
 graceful shutdown drain waits for it.
 

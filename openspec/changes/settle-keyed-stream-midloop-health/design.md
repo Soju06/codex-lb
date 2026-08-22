@@ -35,7 +35,9 @@ order.
    (success or logged failure); let `CancelledError` keep later entries queued.
 5. Keep the settlement tracker responsible for retrying release when an
    ordering-sensitive settlement and its immediate fallback both fail after
-   ownership transfer.
+   ownership transfer. A confirmed fallback must report success even if
+   cancellation was observed while it ran, so the tracker does not start an
+   unbounded retry after the reservation is already released.
 6. Name cancel-safe deferred-health flushes as persistence work so
    `drain_persistence_tasks` waits for them during graceful shutdown.
 7. Flush queued stream-health penalties from a `finally` around deferred

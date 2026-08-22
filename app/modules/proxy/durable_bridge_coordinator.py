@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,6 +16,8 @@ from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    DurableBridgeOperationAbandonment,
+    DurableBridgeOperationAbandonmentScanCursor,
     DurableBridgeOperationEventInput,
     DurableBridgeOperationSnapshot,
     DurableBridgeRecoveryAttemptSnapshot,
@@ -65,6 +67,7 @@ class DurableBridgeLookup:
 class DurableBridgeSessionCoordinator:
     def __init__(self, session_factory: Callable[[], AsyncSession]) -> None:
         self._session_factory = session_factory
+        self._operation_abandonment_scan_cursor: DurableBridgeOperationAbandonmentScanCursor | None = None
 
     async def lookup_request_targets(
         self,
@@ -549,6 +552,23 @@ class DurableBridgeSessionCoordinator:
     async def get_operation_events(self, *, operation_id: str) -> list[str]:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_operation_events(operation_id=operation_id)
+
+    async def abandon_stale_operations(
+        self,
+        *,
+        cutoff: datetime,
+        protected_operation_ids: Collection[str] = (),
+        batch_size: int = 500,
+    ) -> list[DurableBridgeOperationAbandonment]:
+        async with self._session() as session:
+            sweep = await DurableBridgeRepository(session).abandon_stale_operations(
+                cutoff=cutoff,
+                protected_operation_ids=protected_operation_ids,
+                batch_size=batch_size,
+                scan_cursor=self._operation_abandonment_scan_cursor,
+            )
+        self._operation_abandonment_scan_cursor = sweep.next_cursor
+        return list(sweep.abandonments)
 
     async def get_replayable_transcript(
         self,

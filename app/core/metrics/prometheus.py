@@ -302,6 +302,12 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+    http_bridge_operation_abandonment_total = Counter(
+        "codex_lb_http_bridge_operation_abandonment_total",
+        "Total ambiguous HTTP bridge operations fenced as abandoned",
+        ["source_state"],
+        registry=REGISTRY,
+    )
     event_loop_lag_seconds = Gauge(
         "codex_lb_event_loop_lag_seconds",
         "Sampled event-loop scheduling lag (asyncio.sleep drift) in seconds",
@@ -396,6 +402,7 @@ else:
     http_bridge_prewarm_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
     http_bridge_retry_circuit_total: CounterLike | None = None
+    http_bridge_operation_abandonment_total: CounterLike | None = None
     event_loop_lag_seconds: GaugeLike | None = None
     event_loop_lag_warnings_total: CounterLike | None = None
     stream_keepalive_sent_total: CounterLike | None = None
@@ -447,6 +454,7 @@ __all__ = [
     "continuity_owner_resolution_total",
     "http_bridge_prewarm_total",
     "http_bridge_retry_circuit_total",
+    "http_bridge_operation_abandonment_total",
     "http_bridge_stuck_retire_total",
     "stream_keepalive_sent_total",
     "stream_idle_timeout_total",

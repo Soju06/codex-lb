@@ -28,6 +28,9 @@ function NavigationHarness() {
       <button type="button" onClick={() => void navigate("/firewall")}>
         Open legacy hash redirect
       </button>
+      <button type="button" onClick={() => void navigate("/firewall/")}>
+        Open trailing-slash legacy hash redirect
+      </button>
       <button type="button" onClick={() => void navigate(-1)}>
         Go back
       </button>
@@ -91,12 +94,15 @@ describe("RouteScrollRestoration", () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
-  it("preserves the hash intent of the in-app Firewall compatibility redirect", async () => {
+  it.each([
+    ["canonical", "Open legacy hash redirect"],
+    ["trailing-slash", "Open trailing-slash legacy hash redirect"],
+  ])("preserves the hash intent of the %s in-app Firewall compatibility redirect", async (_path, action) => {
     const user = userEvent.setup({ delay: null });
     const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
     renderHarness();
 
-    await user.click(screen.getByRole("button", { name: "Open legacy hash redirect" }));
+    await user.click(screen.getByRole("button", { name: action }));
 
     expect(await screen.findByRole("status", { name: "location" })).toHaveTextContent(
       "/settings?advanced=1#firewall",

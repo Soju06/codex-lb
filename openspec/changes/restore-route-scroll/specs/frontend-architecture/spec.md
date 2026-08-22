@@ -32,6 +32,6 @@ The dashboard SPA MUST reset the window to the top when a client-side `PUSH` or 
 
 #### Scenario: Settings and Firewall hashes retain target scrolling
 
-- **WHEN** navigation targets `/settings?advanced=1#firewall` directly or through the `/firewall` compatibility redirect
+- **WHEN** navigation targets `/settings?advanced=1#firewall` directly or through the `/firewall` or `/firewall/` compatibility redirect
 - **THEN** the route shell does not reset the window to the top
 - **AND** the existing Settings hash behavior brings the Firewall target into view

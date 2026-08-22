@@ -5,7 +5,7 @@ export function RouteScrollRestoration() {
   const { hash, pathname } = useLocation();
   const navigationType = useNavigationType();
   const previousPathname = useRef(pathname);
-  const redirectsToHashTarget = pathname === "/firewall";
+  const redirectsToHashTarget = pathname === "/firewall" || pathname === "/firewall/";
 
   useLayoutEffect(() => {
     const pathnameChanged = previousPathname.current !== pathname;

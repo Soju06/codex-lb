@@ -75,7 +75,6 @@ _AUTOMATION_ALWAYS_SKIPPED_ACCOUNT_STATUSES = frozenset(
         AccountStatus.DEACTIVATED,
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
-        AccountStatus.REAUTH_REQUIRED,
     }
 )
 
@@ -2094,7 +2093,8 @@ class AutomationsService:
         account.deactivation_reason = reason
         account.reset_at = None
         account.blocked_at = None
-        mark_account_routing_unavailable(account.id)
+        if status == AccountStatus.DEACTIVATED:
+            mark_account_routing_unavailable(account.id)
         get_account_selection_cache().invalidate()
 
 

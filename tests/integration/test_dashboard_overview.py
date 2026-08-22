@@ -662,13 +662,13 @@ async def test_dashboard_projections_weekly_credit_pace_excludes_inactive_and_st
     payload = response.json()
 
     pace = payload["weeklyCreditPace"]
-    assert pace["accountCount"] == 2
+    assert pace["accountCount"] == 3
     assert pace["staleAccountCount"] == 1
-    assert pace["inactiveAccountCount"] == 2
-    assert pace["totalFullCredits"] == pytest.approx(100_800.0)
-    assert pace["actualUsedPercent"] == pytest.approx(60.0)
+    assert pace["inactiveAccountCount"] == 1
+    assert pace["totalFullCredits"] == pytest.approx(151_200.0)
+    assert pace["actualUsedPercent"] == pytest.approx(73.333, abs=0.01)
     assert pace["scheduledUsedPercent"] == pytest.approx(42.857, abs=0.01)
-    assert pace["scheduleGapCredits"] == pytest.approx(17_280.0, abs=1.0)
+    assert pace["scheduleGapCredits"] == pytest.approx(46_080.0, abs=1.0)
     assert pace["status"] == "ahead"
 
 

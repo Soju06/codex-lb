@@ -772,7 +772,10 @@ class _HTTPBridgeMixin(
                     existing = None
                 if existing is not None and (
                     force_goal_restart_account_reselection
-                    or (not existing.closed and existing.account.status == AccountStatus.ACTIVE)
+                    or (
+                        not existing.closed
+                        and existing.account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+                    )
                 ):
                     old_account_id = existing.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(existing)
@@ -1478,7 +1481,8 @@ class _HTTPBridgeMixin(
                         session.last_used_at = _service_time().monotonic()
                         return session
                 if force_goal_restart_account_reselection or (
-                    not session.closed and session.account.status == AccountStatus.ACTIVE
+                    not session.closed
+                    and session.account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
                 ):
                     old_account_id = session.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(session)

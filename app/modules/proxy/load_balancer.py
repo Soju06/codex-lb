@@ -1187,7 +1187,7 @@ class LoadBalancer:
             else:
                 # Administrative/runtime status affects routability, not who
                 # may own account-scoped upstream state. Capture this pool
-                # before PAUSED/REAUTH_REQUIRED/etc. can manufacture uniqueness.
+                # before PAUSED/DEACTIVATED/etc. can manufacture uniqueness.
                 continuity_owner_candidates = scoped_accounts
             if model and not accounts:
                 if not all_accounts:
@@ -1723,18 +1723,15 @@ class LoadBalancer:
             self._selection_inputs_cache.invalidate()
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> bool:
-        """Downgrade *account* to its permanent-failure status and, when that
-        downgrade actually lands, exclude it from local routing.
+        """Downgrade *account* to its permanent-failure status.
 
         Returns whether the permanent downgrade applied (or was already in
         effect). When the guarded status write MISSES because a peer replica
         concurrently re-authed/imported and rotated ``refresh_token_encrypted``
-        (the DB row was repaired and left ACTIVE), the account is NOT marked
-        routing-unavailable in this replica's local overlay -- excluding a
-        freshly repaired healthy account would be a self-inflicted routing loss
-        that undermines the CAS guard. Only a real downgrade (CAS applied, or no
-        write needed because the primary refresh authority already CAS-wrote it)
-        both persists the failure status and applies the local exclusion.
+        (the DB row was repaired and left ACTIVE), the account keeps its
+        repaired state. A landed DEACTIVATED downgrade is excluded from local
+        routing; REAUTH_REQUIRED remains request-routable with its stored access
+        token while still blocking future refresh-token exchange.
         """
         lock = await self._get_account_lock(account.id)
         async with lock:
@@ -1764,11 +1761,7 @@ class LoadBalancer:
                     state,
                     expected_refresh_token_encrypted=account.refresh_token_encrypted,
                 )
-            # Honor the guarded-CAS result: only exclude the account from local
-            # routing when the permanent downgrade actually applied. A CAS miss
-            # means a peer replica repaired/rotated the row (still ACTIVE), so
-            # keep the healthy account selectable here.
-            if downgraded:
+            if downgraded and state.status == AccountStatus.DEACTIVATED:
                 mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
             return downgraded
@@ -1883,7 +1876,7 @@ class LoadBalancer:
                 runtime=replace(runtime),
             )
             account_status = normalized_state.status
-            if account_status != AccountStatus.ACTIVE:
+            if account_status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
                 return
 
             settings = get_settings()
@@ -2963,7 +2956,7 @@ def _selectable_accounts(accounts: list[Account]) -> list[Account]:
     return [
         account
         for account in accounts
-        if account.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+        if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
     ]
 
 

@@ -478,7 +478,10 @@ class _ApiKeyUsageMixin:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             request_id=request_id,
-            release_on_failure=not wait_for_settlement,
+            # Ordering-sensitive settlement performs one immediate fallback,
+            # but the tracker must still own retrying release if both attempts
+            # fail after ownership has transferred from the request finalizer.
+            release_on_failure=True,
         )
         if wait_for_settlement:
             # Ordering-sensitive callers (websocket account-health paths) must

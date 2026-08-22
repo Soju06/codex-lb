@@ -11,6 +11,10 @@
   cancelling task.
 - [x] 1.6 Complete each deferred health entry under cancellation-deferred
   ownership so cancel mid-write cannot replay and double-count errors.
+- [x] 1.7 Transfer failed ordering-sensitive settlement to retrying reservation
+  release cleanup after the immediate fallback fails.
+- [x] 1.8 Include cancel-safe deferred-health flushes in graceful persistence
+  draining.
 
 ## 2. Regression coverage
 
@@ -24,6 +28,9 @@
   settle-before-health for keyed mid-loop failover.
 - [x] 2.7 Assert cancel mid deferred health flush does not double-count
   `_handle_stream_error` / `record_errors`.
+- [x] 2.8 Assert failed ordering-sensitive settlement retries reservation
+  release after its immediate fallback fails.
+- [x] 2.9 Assert shutdown drain waits for detached deferred-health flush.
 
 ## 3. Validation
 

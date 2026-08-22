@@ -33,10 +33,15 @@ order.
    from cleanup; use cancel-safe scheduling when the task is already cancelling.
 4. Pop each queued entry only after that entry's health write attempt finishes
    (success or logged failure); let `CancelledError` keep later entries queued.
+5. Keep the settlement tracker responsible for retrying release when an
+   ordering-sensitive settlement and its immediate fallback both fail after
+   ownership transfer.
+6. Name cancel-safe deferred-health flushes as persistence work so
+   `drain_persistence_tasks` waits for them during graceful shutdown.
 
 ## Risks / Trade-offs
 
-- Cancel-safe background flush can outlive the request task; tracked cleanup
-  tasks must remain drained by existing shutdown ownership.
+- Cancel-safe background flush and retrying release can outlive the request
+  task; tracked cleanup tasks must remain drained by shutdown ownership.
 - Unconfirmed settlement MUST withhold deferred health (already required for
   retry settlement).

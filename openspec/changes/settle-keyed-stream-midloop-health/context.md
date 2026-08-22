@@ -27,3 +27,12 @@ Each queued deferred health entry is applied in an owned task awaited via
 finish (or log failure), then pops it, then re-raises. That prevents cleanup
 from replaying a half-applied tuple and double-incrementing `error_count`
 through `_handle_stream_error` / `record_errors`.
+
+## Persistence ownership
+
+Once ordering-sensitive settlement transfers from the request, a failed
+primary attempt plus failed immediate release leaves reservation recovery with
+the tracked retrying release cleanup. Deferred health remains unapplied for
+that unconfirmed request path. If cancellation leaves later post-settlement
+health entries for a detached flush, the flush is persistence work and the
+graceful shutdown drain waits for it.

@@ -38,6 +38,7 @@ from app.modules.proxy.continuity import make_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
+    DurableBridgeOperationEventInput,
     DurableBridgeRepository,
     durable_bridge_hash,
     durable_bridge_operation_id,
@@ -1424,6 +1425,248 @@ async def test_operation_spool_purge_expires_stale_nonterminal_rows(
         )
         await session.commit()
         assert await repository.purge_operation_spool(cutoff=datetime.now(timezone.utc).replace(tzinfo=None)) == 1
+        assert await repository.get_operation(operation_id=operation_id) is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fenced(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-abandonment",
+            session_key_value="sid-operation-abandonment",
+        )
+        fingerprint = durable_bridge_hash("operation-abandonment")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-abandonment",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        stale_at = utcnow() - timedelta(hours=3)
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(state="unknown", updated_at=stale_at)
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(owner_instance_id=None, lease_expires_at=None)
+        )
+        await session.commit()
+
+        abandoned = await repository.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+        )
+        assert len(abandoned) == 1
+        assert abandoned[0].source_state == "unknown"
+        assert abandoned[0].owner_lease_outcome == "ownerless"
+
+        successor = await _claim(
+            repository,
+            instance_id="inst-operation-abandonment-successor",
+            session_key_value="sid-operation-abandonment",
+            allow_takeover=True,
+        )
+        existing = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=successor.id,
+            instance_id="inst-operation-abandonment-successor",
+            owner_epoch=successor.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert existing is not None
+        assert existing.created is False
+        assert existing.state == "abandoned"
+        assert await repository.update_operation(
+            operation_id=operation_id,
+            session_id=successor.id,
+            instance_id="inst-operation-abandonment-successor",
+            owner_epoch=successor.owner_epoch,
+            state="completed",
+            response_id="resp-should-not-write",
+        ) is False
+        assert await repository.append_operation_event(
+            operation_id=operation_id,
+            session_id=successor.id,
+            instance_id="inst-operation-abandonment-successor",
+            owner_epoch=successor.owner_epoch,
+            event_text="data: late\n\n",
+            max_bytes=1024,
+        ) is False
+        assert await repository.append_operation_events(
+            events=[
+                DurableBridgeOperationEventInput(
+                    operation_id=operation_id,
+                    session_id=successor.id,
+                    instance_id="inst-operation-abandonment-successor",
+                    owner_epoch=successor.owner_epoch,
+                    event_text="data: late-batch\n\n",
+                )
+            ],
+            max_bytes=1024,
+        ) is False
+        assert await repository.append_terminal_operation_event(
+            operation_id=operation_id,
+            session_id=successor.id,
+            instance_id="inst-operation-abandonment-successor",
+            owner_epoch=successor.owner_epoch,
+            event_text="data: late-terminal\n\n",
+            max_bytes=1024,
+            state="failed",
+        ) is False
+        assert await repository.claim_unknown_operation_for_recovery(
+            operation_id=operation_id,
+            session_id=successor.id,
+            instance_id="inst-operation-abandonment-successor",
+            owner_epoch=successor.owner_epoch,
+        ) is False
+        assert await repository.reset_operation_event_spool(
+            operation_id=operation_id,
+            session_id=successor.id,
+            instance_id="inst-operation-abandonment-successor",
+            owner_epoch=successor.owner_epoch,
+        ) is False
+        assert await repository.settle_terminal_append_failure(
+            operation_id=operation_id,
+            session_id=successor.id,
+            instance_id="inst-operation-abandonment-successor",
+            owner_epoch=successor.owner_epoch,
+            state="failed",
+            expected_response_id=None,
+        ) is False
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.state == "abandoned"
+        assert persisted.response_id is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_operation_sweep_protects_live_owner_and_local_pending_id(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        live = await _claim(
+            repository,
+            instance_id="inst-operation-live",
+            lease_ttl_seconds=3600.0,
+            session_key_value="sid-operation-live",
+        )
+        expired = await _claim(
+            repository,
+            instance_id="inst-operation-expired",
+            lease_ttl_seconds=1.0,
+            session_key_value="sid-operation-expired",
+        )
+        protected = await _claim(
+            repository,
+            instance_id="inst-operation-protected",
+            lease_ttl_seconds=1.0,
+            session_key_value="sid-operation-protected",
+        )
+        operation_ids: dict[str, str] = {}
+        for label, claim, instance_id in (
+            ("live", live, "inst-operation-live"),
+            ("expired", expired, "inst-operation-expired"),
+            ("protected", protected, "inst-operation-protected"),
+        ):
+            fingerprint = durable_bridge_hash(f"operation-{label}")
+            operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+            operation_ids[label] = operation_id
+            assert await repository.record_operation(
+                operation_id=operation_id,
+                session_id=claim.id,
+                instance_id=instance_id,
+                owner_epoch=claim.owner_epoch,
+                request_fingerprint=fingerprint,
+                account_id="account-operation",
+                model="gpt-5.6",
+                parent_response_id="resp-parent",
+            )
+
+        stale_at = utcnow() - timedelta(hours=3)
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id.in_(operation_ids.values()))
+            .values(state="acknowledged", updated_at=stale_at)
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id.in_([expired.id, protected.id]))
+            .values(lease_expires_at=utcnow() - timedelta(minutes=5))
+        )
+        await session.commit()
+
+        abandoned = await repository.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+            protected_operation_ids={operation_ids["protected"]},
+        )
+        assert [item.source_state for item in abandoned] == ["acknowledged"]
+        expired_operation = await repository.get_operation(operation_id=operation_ids["expired"])
+        live_operation = await repository.get_operation(operation_id=operation_ids["live"])
+        protected_operation = await repository.get_operation(operation_id=operation_ids["protected"])
+        assert expired_operation is not None
+        assert live_operation is not None
+        assert protected_operation is not None
+        assert expired_operation.state == "abandoned"
+        assert live_operation.state == "acknowledged"
+        assert protected_operation.state == "acknowledged"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_operation_spool_retains_abandoned_row_until_retention_cutoff(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-abandoned-retention",
+            session_key_value="sid-abandoned-retention",
+        )
+        fingerprint = durable_bridge_hash("abandoned-retention")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-abandoned-retention",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id=None,
+        )
+        stale_at = utcnow() - timedelta(days=8)
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(state="abandoned", updated_at=stale_at)
+        )
+        await session.commit()
+
+        assert await repository.purge_operation_spool(cutoff=utcnow()) == 1
         assert await repository.get_operation(operation_id=operation_id) is None
     finally:
         await session.close()

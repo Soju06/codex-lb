@@ -21,8 +21,9 @@ already-deployed anchor classification and denied-anchor retirement fixes.
 - Run a bounded, request-independent sweep from bridge heartbeat maintenance
   while protecting operation IDs that still have an in-process pending request.
 - Make the transition a compare-and-set over the operation state,
-  `updated_at`, session owner instance, and owner epoch. A concurrent status
-  proof or recovery claim wins; a late writer cannot revive an abandoned row.
+  `updated_at`, durable event-spool progress, session owner instance, and owner
+  epoch. A concurrent status proof or recovery claim wins; a late writer
+  cannot revive an abandoned row.
 - Retain the operation row and event spool for normal operation-ledger
   retention. Do not resend or delete an ambiguous upstream operation.
 - Make a continuation that encounters `abandoned` return the canonical

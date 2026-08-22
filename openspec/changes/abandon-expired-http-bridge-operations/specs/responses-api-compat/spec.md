@@ -11,10 +11,14 @@ detached bridge request is pending for that operation, and the durable owning
 session has no owner or an expired owner lease.
 
 The transition MUST atomically compare the operation state, `updated_at`,
-session owner instance, and owner epoch. A concurrent recovery claim, owner
-renewal/takeover, or status proof MUST win over abandonment. The operation row
-and all event history MUST remain available for normal retention. The proxy
-MUST NOT automatically resend or cancel the ambiguous upstream operation.
+durable event-spool progress, session owner instance, and owner epoch. A
+concurrent recovery claim, owner renewal/takeover, or status proof MUST win
+over abandonment. A persisted nonterminal event MUST advance durable
+event-spool progress; if that event commits after candidate selection but
+before the abandonment compare-and-set, the compare-and-set MUST affect zero
+rows. The operation row and all event history MUST remain available for normal
+retention. The proxy MUST NOT automatically resend or cancel the ambiguous
+upstream operation.
 The maintenance sweep MUST render no more than the repository's database-safe
 number of protected operation IDs in one expanding predicate. If the local
 protection snapshot exceeds that bound, the sweep MUST use bounded candidate
@@ -54,6 +58,15 @@ transition.
 - **WHEN** a recovery claim changes it to `submitted` before the CAS commits
 - **THEN** the abandonment affects zero rows
 - **AND** the operation remains `submitted`
+
+#### Scenario: concurrent status proof wins
+
+- **GIVEN** a stale `acknowledged` operation is selected for abandonment
+- **WHEN** a nonterminal status event is durably appended before the
+  abandonment compare-and-set commits
+- **THEN** the abandonment affects zero rows
+- **AND** the operation remains `acknowledged`
+- **AND** the appended event remains available in the operation history
 
 #### Scenario: late status proof cannot revive abandonment
 

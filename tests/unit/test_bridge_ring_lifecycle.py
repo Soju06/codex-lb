@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
@@ -14,6 +14,7 @@ import anyio
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.sql.dml import Update
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import Settings
@@ -28,6 +29,7 @@ from app.db.models import (
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
 )
+from app.modules.proxy import durable_bridge_repository as durable_bridge_repository_module
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_allow_durable_takeover,
@@ -1576,6 +1578,113 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
         assert persisted is not None
         assert persisted.state == "abandoned"
         assert persisted.response_id is None
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("append_mode", ("single", "batch"))
+async def test_durable_event_progress_fences_abandonment_cas(
+    async_session_factory: Callable[[], AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    append_mode: str,
+) -> None:
+    session = async_session_factory()
+    try:
+
+        @asynccontextmanager
+        async def no_writer_lock() -> AsyncIterator[None]:
+            yield
+
+        monkeypatch.setattr(durable_bridge_repository_module, "sqlite_writer_section", no_writer_lock)
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(
+            repository,
+            instance_id="inst-operation-event-race",
+            lease_ttl_seconds=1.0,
+            session_key_value="sid-operation-event-race",
+        )
+        fingerprint = durable_bridge_hash("operation-event-race")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-operation-event-race",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        stale_at = utcnow() - timedelta(hours=3)
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(state="acknowledged", updated_at=stale_at)
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == claim.id)
+            .values(lease_expires_at=utcnow() - timedelta(minutes=5))
+        )
+        await session.commit()
+
+        original_execute = session.execute
+        injected = False
+
+        async def append_status_proof_before_cas(statement: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal injected
+            if not injected and isinstance(statement, Update) and statement.table.name == "http_bridge_operations":
+                injected = True
+                if append_mode == "single":
+                    persisted_event = await repository.append_operation_event(
+                        operation_id=operation_id,
+                        session_id=claim.id,
+                        instance_id="inst-operation-event-race",
+                        owner_epoch=claim.owner_epoch,
+                        event_text="data: response.in_progress\n\n",
+                        max_bytes=1024,
+                    )
+                else:
+                    persisted_event = await repository.append_operation_events(
+                        events=[
+                            DurableBridgeOperationEventInput(
+                                operation_id=operation_id,
+                                session_id=claim.id,
+                                instance_id="inst-operation-event-race",
+                                owner_epoch=claim.owner_epoch,
+                                event_text="data: response.in_progress\n\n",
+                            )
+                        ],
+                        max_bytes=1024,
+                    )
+                assert persisted_event is True
+                # Keep the inactivity clock stale so this test isolates the
+                # durable event-progress fence rather than relying on the
+                # current ORM writer's on-update timestamp. This models a
+                # competing durable writer that commits event progress while
+                # retaining the old inactivity clock.
+                await original_execute(
+                    update(HttpBridgeOperationRecord)
+                    .where(HttpBridgeOperationRecord.operation_id == operation_id)
+                    .values(updated_at=stale_at)
+                )
+                await session.commit()
+            return await original_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(session, "execute", append_status_proof_before_cas)
+        protected_ids = {f"synthetic-protected-{index}" for index in range(_PROTECTED_OPERATION_ID_SAFE_LIMIT + 1)}
+        abandoned = await repository.abandon_stale_operations(
+            cutoff=utcnow() - timedelta(minutes=30),
+            protected_operation_ids=protected_ids,
+        )
+
+        assert injected is True
+        assert abandoned == []
+        persisted = await repository.get_operation(operation_id=operation_id)
+        assert persisted is not None
+        assert persisted.state == "acknowledged"
+        assert await repository.get_operation_events(operation_id=operation_id) == ["data: response.in_progress\n\n"]
     finally:
         await session.close()
 

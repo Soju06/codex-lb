@@ -2,38 +2,47 @@
 
 ### Requirement: Re-authentication-required accounts are not selectable
 
-When an account's refresh credential or session is invalidated but the upstream account is not known to be disabled, the system MUST mark the account `reauth_required`. The selector MUST continue treating `reauth_required` as request-routable with the stored access token while suppressing proactive refresh-token exchange. Paused and deactivated accounts MUST remain excluded from every routing strategy and hard-affinity fallback. Operator pickers that configure single-account or account-scoped routing MUST offer request-routable `reauth_required` accounts and MUST exclude paused or deactivated accounts.
+The system MUST distinguish request routability from refresh-token eligibility. `active` and `reauth_required` accounts MUST be request-routable; paused and deactivated accounts MUST remain excluded.
 
-A permanent refresh failure encountered while serving one request MUST exclude that account from the remainder of that request's movable retry loop. The exclusion MUST NOT become a process-wide routing block solely because the account remains `reauth_required`.
+This status matrix is canonical for proxy selection, owner-bound affinity, warmup, automations, API-key account pools and scopes, probes, access-token-authenticated usage and reset-credit operations, and dashboard projections of routable capacity. Capability-specific references to active, eligible, or hard-unavailable accounts MUST apply this matrix unless a stricter security, ownership, model, quota, cooldown, or operator-policy gate is explicitly required.
+
+Selecting a `reauth_required` account MUST use its stored access token without proactive refresh-token exchange. Its sticky, bridge, file, response, and realtime ownership MUST remain bound until a hard-unavailable transition or another existing ownership rule ends that binding.
+
+A permanent forced-refresh failure while serving a movable request MUST release the account's lease and exclude it from that request's remaining attempts. The failure MUST NOT create a process-wide routing block solely because the account remains `reauth_required`.
 
 #### Scenario: Token invalidated account leaves the pool
 
-- **GIVEN** account A is `reauth_required` and still has a usable stored access token
-- **AND** account B is active
-- **WHEN** a proxy request selects an account
-- **THEN** account A remains an eligible candidate under the configured routing strategy
-- **AND** selecting account A does not proactively exchange its known-bad refresh token
+- **GIVEN** account A is `reauth_required` with a usable stored access token
+- **WHEN** an ordinary proxy or supporting access-token operation selects an account
+- **THEN** account A remains eligible after all other applicable gates
+- **AND** its refresh token is not proactively exchanged
 
-#### Scenario: Current request does not reselect a rejected warning account
+#### Scenario: Warning state preserves ownership
+
+- **GIVEN** account A owns sticky or hard continuity
+- **WHEN** account A becomes `reauth_required`
+- **THEN** the ownership remains bound to account A
+- **AND** the transition alone does not delete or rebind continuity
+
+#### Scenario: Current request excludes a rejected warning account
 
 - **GIVEN** a movable request selected account A
-- **AND** account A's forced refresh fails permanently after upstream rejects its access token
-- **WHEN** the request retries account selection
+- **AND** forced refresh fails permanently after upstream rejects A's access token
+- **WHEN** the request retries selection
 - **THEN** account A is excluded from that request's remaining attempts
-- **AND** another eligible account may be selected
-- **AND** account A remains `reauth_required` and may be considered by a later independent request
+- **AND** account A may still be considered by a later independent request
 
 #### Scenario: Request-routable account can be selected for scoped routing
 
 - **GIVEN** account A is `reauth_required`
 - **WHEN** an operator opens a scoped account-routing picker
-- **THEN** account A is offered as a selectable account
+- **THEN** account A is offered as selectable
 
 #### Scenario: Hard-blocked account cannot be newly selected for scoped routing
 
 - **GIVEN** account A is paused or deactivated
-- **WHEN** an operator opens a scoped account-routing picker
-- **THEN** account A is not offered as a new selectable account
+- **WHEN** any routing strategy or account-scoped picker evaluates account A
+- **THEN** account A is not selectable
 
 #### Scenario: Re-authentication-required account cannot be paused into resumable state
 

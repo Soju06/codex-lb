@@ -159,6 +159,35 @@ async def test_sub_5xx_transient_failure_keeps_penalized_failover_path() -> None
     assert transport_health.upstream_websocket_transport_recently_failed() is False
 
 
+def test_connect_transport_failure_classifier_provenance() -> None:
+    # Both the failover decision and the forced-surface replacement branch
+    # share this classifier, so its provenance gates decide where the
+    # handshake-denial marker can arm.
+    qualifies = ws_mixin._websocket_connect_transport_failure_code(
+        _proxy_error(502, "upstream_unavailable", "Request to upstream timed out", failure_phase="connect"),
+        confirmed_pre_dispatch=False,
+    )
+    assert qualifies == "upstream_unavailable"
+
+    no_connect_phase = ws_mixin._websocket_connect_transport_failure_code(
+        _proxy_error(502, "upstream_unavailable", "token refresh transport error"),
+        confirmed_pre_dispatch=False,
+    )
+    assert no_connect_phase is None
+
+    pre_dispatch = ws_mixin._websocket_connect_transport_failure_code(
+        _proxy_error(502, "upstream_unavailable", "proxy route connect failed", failure_phase="connect"),
+        confirmed_pre_dispatch=True,
+    )
+    assert pre_dispatch is None
+
+    sub_5xx = ws_mixin._websocket_connect_transport_failure_code(
+        _proxy_error(429, "upstream_unavailable", "slow down", failure_phase="connect"),
+        confirmed_pre_dispatch=False,
+    )
+    assert sub_5xx is None
+
+
 def test_transport_failure_marker_expires_and_clears() -> None:
     transport_health.mark_upstream_websocket_transport_failure()
     assert transport_health.upstream_websocket_transport_recently_failed() is True

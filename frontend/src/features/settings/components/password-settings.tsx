@@ -1,5 +1,5 @@
 import { KeyRound } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
   const authenticated = useAuthStore((s) => s.authenticated);
 
   const [activeDialog, setActiveDialog] = useState<PasswordDialog>(null);
+  const setupInvokerRef = useRef<HTMLButtonElement>(null);
 
   const lock = disabled || !passwordManagementEnabled;
   const closeIfMatches = (dialog: PasswordDialog) => (open: boolean) => {
@@ -93,6 +94,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
               </Button>
             ) : !passwordRequired ? (
               <Button
+                ref={setupInvokerRef}
                 type="button"
                 size="sm"
                 className="h-8 text-xs"
@@ -110,6 +112,7 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
         open={activeDialog === "setup"}
         onOpenChange={closeIfMatches("setup")}
         disabled={disabled}
+        returnFocusRef={setupInvokerRef}
       />
       <PasswordChangeDialog
         open={activeDialog === "change"}

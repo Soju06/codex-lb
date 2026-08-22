@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect } from "react";
+import { type RefObject, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -25,9 +25,15 @@ export type PasswordSetupDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   disabled?: boolean;
+  returnFocusRef: RefObject<HTMLButtonElement | null>;
 };
 
-export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: PasswordSetupDialogProps) {
+export function PasswordSetupDialog({
+  open,
+  onOpenChange,
+  disabled = false,
+  returnFocusRef,
+}: PasswordSetupDialogProps) {
   const { t } = useTranslation();
   const bootstrapRequired = useAuthStore((s) => s.bootstrapRequired);
   const bootstrapTokenConfigured = useAuthStore((s) => s.bootstrapTokenConfigured);
@@ -75,7 +81,17 @@ export function PasswordSetupDialog({ open, onOpenChange, disabled = false }: Pa
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className="sm:max-w-md"
+        onCloseAutoFocus={(event) => {
+          const returnFocus = returnFocusRef.current;
+          if (!returnFocus?.isConnected) {
+            return;
+          }
+          event.preventDefault();
+          returnFocus.focus({ preventScroll: true });
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{t("settings.password.setupDialog.title")}</DialogTitle>
           <DialogDescription>{t("settings.password.setupDialog.description")}</DialogDescription>

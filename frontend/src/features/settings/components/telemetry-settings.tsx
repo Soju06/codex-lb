@@ -1,5 +1,5 @@
 import { Activity } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { AlertMessage } from "@/components/alert-message";
@@ -24,6 +24,7 @@ export type TelemetrySettingsProps = {
 export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
   const { t } = useTranslation();
   const [previewOpen, setPreviewOpen] = useState(false);
+  const previewInvokerRef = useRef<HTMLButtonElement>(null);
   const { telemetryConsentQuery, updateTelemetryConsentMutation } = useTelemetryConsent();
   // Building the snapshot is expensive, so the preview is fetched only once
   // the operator opens the dialog.
@@ -71,6 +72,7 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
             </p>
           </div>
           <Button
+            ref={previewInvokerRef}
             type="button"
             size="sm"
             variant="outline"
@@ -85,7 +87,17 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
 
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
         {previewOpen ? (
-          <DialogContent className="sm:max-w-2xl">
+          <DialogContent
+            className="sm:max-w-2xl"
+            onCloseAutoFocus={(event) => {
+              const invoker = previewInvokerRef.current;
+              if (!invoker?.isConnected) {
+                return;
+              }
+              event.preventDefault();
+              invoker.focus({ preventScroll: true });
+            }}
+          >
             <DialogHeader>
               <DialogTitle>{t("settings.telemetry.previewDialog.title")}</DialogTitle>
               <DialogDescription>

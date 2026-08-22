@@ -457,14 +457,13 @@ def _prepare_routing_candidates(
     ignore_standard_quota: bool,
     bypass_quota_exceeded: bool,
     bypass_account_ids: Collection[str] | None,
-) -> tuple[list[AccountState], list[AccountState], list[AccountState]]:
-    all_states = list(states)
+) -> tuple[list[AccountState], list[AccountState], bool]:
     available: list[AccountState] = []
     in_error_backoff: list[AccountState] = []
-    usage_limit_blocked: list[AccountState] = []
+    has_usage_limit_blocked = False
     bypass_ids = set(bypass_account_ids or ())
 
-    for state in all_states:
+    for state in states:
         bypass_standard_quota = (
             ignore_standard_quota
             or state.ignore_standard_quota
@@ -498,7 +497,7 @@ def _prepare_routing_candidates(
         if state.cooldown_until and current < state.cooldown_until:
             continue
         if account_usage_limit_blocks_selection(state):
-            usage_limit_blocked.append(state)
+            has_usage_limit_blocked = True
             continue
         if state.error_count >= ERROR_BACKOFF_THRESHOLD:
             backoff = min(300, 30 * (2 ** (state.error_count - ERROR_BACKOFF_THRESHOLD)))
@@ -515,7 +514,7 @@ def _prepare_routing_candidates(
             state.last_error_at = None
         available.append(state)
 
-    return available, in_error_backoff, usage_limit_blocked
+    return available, in_error_backoff, has_usage_limit_blocked
 
 
 def routing_eligible_states(
@@ -635,7 +634,7 @@ def select_account(
     current = now or time.time()
     bypass_account_ids = None if bypass_quota_exceeded_account_ids is None else set(bypass_quota_exceeded_account_ids)
     all_states = list(states)
-    available, in_error_backoff, usage_limit_blocked = _prepare_routing_candidates(
+    available, in_error_backoff, routing_limit_blocked = _prepare_routing_candidates(
         all_states,
         current=current,
         ignore_standard_quota=ignore_standard_quota,
@@ -652,10 +651,6 @@ def select_account(
 
     if not available:
         in_error_backoff_ids = {state.account_id for state in in_error_backoff}
-        routing_limit_blocked = any(
-            state.status not in {AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED}
-            for state in usage_limit_blocked
-        )
         hard_blocked_exists = routing_limit_blocked or any(
             state.status
             in (

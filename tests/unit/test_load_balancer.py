@@ -4518,6 +4518,8 @@ async def test_load_selection_inputs_serializes_usage_queries_on_shared_session(
     assert result.latest_primary["a"].window == "primary"
     assert result.latest_secondary["a"].window == "secondary"
     assert result.latest_monthly["a"].window == "monthly"
+    assert result.standard_latest_primary == {}
+    assert result.standard_latest_secondary == {}
 
 
 @pytest.mark.asyncio

@@ -465,14 +465,15 @@ class LimitWarmupService:
                 continue
             if not account.limit_warmup_enabled:
                 continue
-            if _usage_limit_blocks_warmup(
+            limit_state = evaluate_account_usage_limit(
                 account,
                 primary=after_primary.get(account.id),
                 secondary=current_usage_limit_secondary.get(account.id),
                 monthly=current_usage_limit_monthly.get(account.id),
                 now=now,
                 refresh_interval_seconds=usage_refresh_interval_seconds,
-            ):
+            )
+            if limit_state.blocks_account_use:
                 continue
             latest_attempt = latest_attempts.get(account.id)
 
@@ -785,26 +786,6 @@ def _selected_windows(value: str) -> tuple[str, ...]:
 
 def _account_is_safe_candidate(account: Account) -> bool:
     return account.status == AccountStatus.ACTIVE
-
-
-def _usage_limit_blocks_warmup(
-    account: Account,
-    *,
-    primary: UsageHistory | None,
-    secondary: UsageHistory | None,
-    monthly: UsageHistory | None,
-    now: datetime,
-    refresh_interval_seconds: int,
-) -> bool:
-    limit_state = evaluate_account_usage_limit(
-        account,
-        primary=primary,
-        secondary=secondary,
-        monthly=monthly,
-        now=now,
-        refresh_interval_seconds=refresh_interval_seconds,
-    )
-    return limit_state.blocks_account_use
 
 
 def _in_cooldown(attempt: AccountLimitWarmup | None, *, cooldown_seconds: int) -> bool:

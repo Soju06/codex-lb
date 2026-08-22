@@ -379,8 +379,12 @@ class LoadBalancer:
             return None
         return evaluate_account_usage_limit(
             account,
-            primary=selection_inputs.standard_latest_primary.get(account_id),
-            secondary=selection_inputs.standard_latest_secondary.get(account_id),
+            primary=_standard_usage_entry(
+                selection_inputs.latest_primary, selection_inputs.standard_latest_primary, account_id
+            ),
+            secondary=_standard_usage_entry(
+                selection_inputs.latest_secondary, selection_inputs.standard_latest_secondary, account_id
+            ),
             monthly=selection_inputs.latest_monthly.get(account_id),
             refresh_interval_seconds=_usage_refresh_interval_seconds(),
         )
@@ -1317,8 +1321,6 @@ class LoadBalancer:
             latest_monthly = await repos.usage.latest_by_account(window="monthly")
             if effective_limit_name:
                 model_allowed_plans = get_model_registry().plan_types_for_model(model) if model else None
-                latest_primary = additional_filter.latest_primary
-                latest_secondary = additional_filter.latest_secondary
                 quota_scoped_account_ids = frozenset(
                     account.id
                     for account in accounts
@@ -1365,10 +1367,12 @@ class LoadBalancer:
                 standard_latest_primary={
                     account_id: _clone_standard_usage_history(entry)
                     for account_id, entry in standard_latest_primary.items()
+                    if account_id in ignore_standard_quota_account_ids
                 },
                 standard_latest_secondary={
                     account_id: _clone_standard_usage_history(entry)
                     for account_id, entry in standard_latest_secondary.items()
+                    if account_id in ignore_standard_quota_account_ids
                 },
                 quota_planner_settings=quota_planner_settings,
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
@@ -2101,6 +2105,17 @@ class LoadBalancer:
         await self._persist_state(accounts_repo, account, state)
 
 
+def _standard_usage_entry(
+    request_priority: Mapping[str, UsageHistory | AdditionalUsageHistory],
+    retained_standard: Mapping[str, UsageHistory] | None,
+    account_id: str,
+) -> UsageHistory | None:
+    priority_entry = request_priority.get(account_id)
+    if isinstance(priority_entry, UsageHistory):
+        return priority_entry
+    return retained_standard.get(account_id) if retained_standard is not None else None
+
+
 def _build_states(
     *,
     accounts: Iterable[Account],
@@ -2115,12 +2130,6 @@ def _build_states(
 ) -> tuple[list[AccountState], dict[str, Account]]:
     states: list[AccountState] = []
     account_map: dict[str, Account] = {}
-    effective_standard_primary = standard_latest_primary or {
-        account_id: entry for account_id, entry in latest_primary.items() if isinstance(entry, UsageHistory)
-    }
-    effective_standard_secondary = standard_latest_secondary or {
-        account_id: entry for account_id, entry in latest_secondary.items() if isinstance(entry, UsageHistory)
-    }
 
     for account in accounts:
         secondary_entry: UsageHistory | AdditionalUsageHistory | None = latest_secondary.get(account.id)
@@ -2138,8 +2147,8 @@ def _build_states(
         )
         state.usage_limit_state = evaluate_account_usage_limit(
             account,
-            primary=effective_standard_primary.get(account.id),
-            secondary=effective_standard_secondary.get(account.id),
+            primary=_standard_usage_entry(latest_primary, standard_latest_primary, account.id),
+            secondary=_standard_usage_entry(latest_secondary, standard_latest_secondary, account.id),
             monthly=latest_monthly.get(account.id),
             refresh_interval_seconds=_usage_refresh_interval_seconds(),
         )

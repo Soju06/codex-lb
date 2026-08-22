@@ -1312,6 +1312,15 @@
         "code",
         "test"
       ]
+    },
+    {
+      "login": "dpearson2699",
+      "name": "Derek Pearson",
+      "avatar_url": "https://avatars.githubusercontent.com/u/32114370?v=4",
+      "profile": "https://github.com/dpearson2699",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

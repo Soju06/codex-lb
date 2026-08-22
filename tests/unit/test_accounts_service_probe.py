@@ -105,8 +105,10 @@ async def test_probe_account_rejects_deactivated_account():
 async def test_probe_account_allows_reauth_required_account(monkeypatch):
     account = _make_account(status=AccountStatus.REAUTH_REQUIRED)
     service = _build_service(account=account)
+    captured_kwargs: dict[str, object] = {}
 
-    async def _fake_probe(**_kwargs: object) -> int:
+    async def _fake_probe(**kwargs: object) -> int:
+        captured_kwargs.update(kwargs)
         return 200
 
     monkeypatch.setattr(service, "_send_probe_request", _fake_probe)
@@ -116,6 +118,8 @@ async def test_probe_account_allows_reauth_required_account(monkeypatch):
     assert result is not None
     assert result.probe_status_code == 200
     assert result.account_status_before == AccountStatus.REAUTH_REQUIRED.value
+    assert result.account_status_after == AccountStatus.REAUTH_REQUIRED.value
+    assert captured_kwargs["access_token"] == _PROBE_TOKEN_PLAINTEXT
 
 
 @pytest.mark.asyncio

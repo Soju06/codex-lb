@@ -1,6 +1,14 @@
-## MODIFIED Requirements
+## REMOVED Requirements
 
 ### Requirement: Re-authentication-required accounts are not selectable
+
+**Reason**: Refresh-token failure no longer proves that the stored access token is unusable.
+
+**Migration**: Use the canonical request-routability requirement below.
+
+## ADDED Requirements
+
+### Requirement: Re-authentication-required accounts remain request-routable
 
 The system MUST distinguish request routability from refresh-token eligibility. `active` and `reauth_required` accounts MUST be request-routable; paused and deactivated accounts MUST remain excluded.
 
@@ -10,7 +18,7 @@ Selecting a `reauth_required` account MUST use its stored access token without p
 
 A permanent forced-refresh failure while serving a movable request MUST release the account's lease and exclude it from that request's remaining attempts. The failure MUST NOT create a process-wide routing block solely because the account remains `reauth_required`.
 
-#### Scenario: Token invalidated account leaves the pool
+#### Scenario: Token-invalidated account remains in the pool
 
 - **GIVEN** account A is `reauth_required` with a usable stored access token
 - **WHEN** an ordinary proxy or supporting access-token operation selects an account

@@ -7731,7 +7731,7 @@ async def _websocket_upstream_transport_denial() -> JSONResponse | None:
     # so a recent upstream websocket connect transport failure — or an
     # operator pin of the upstream transport to "http" — must deny the
     # handshake instead of accepting and erroring in-band.
-    from app.modules.proxy._service.streaming.transport_health import (
+    from app.modules.proxy._service.support import (
         upstream_websocket_transport_recently_failed,
     )
 

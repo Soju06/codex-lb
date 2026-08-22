@@ -31,11 +31,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 import app.modules.proxy._service.http_bridge.streaming as http_bridge_streaming_module
-import app.modules.proxy._service.streaming.transport_health as transport_health
+import app.modules.proxy._service.support as transport_health
 import app.modules.proxy._service.websocket.mixin as ws_mixin
 import app.modules.proxy.api as proxy_api_module
+from app.core.balancer.types import ClassifiedFailure
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+from app.db.models import Account
 from app.modules.proxy import service as proxy_service
 
 pytestmark = pytest.mark.unit
@@ -59,9 +61,9 @@ class _DecisionHarness(ws_mixin._WebSocketMixin):
     def __init__(self) -> None:
         self.penalty_calls: list[tuple[str, ProxyResponseError]] = []
 
-    async def _handle_websocket_connect_error(self, account: Any, exc: ProxyResponseError) -> dict[str, str]:
+    async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
         self.penalty_calls.append((account.id, exc))
-        return {"failure_class": "retryable_transient"}
+        return cast(ClassifiedFailure, {"failure_class": "retryable_transient"})
 
 
 def _request_state() -> Any:

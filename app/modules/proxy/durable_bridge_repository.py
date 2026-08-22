@@ -1914,9 +1914,9 @@ class DurableBridgeRepository:
         normal bounded-predicate path while SQLite is serialized by
         ``sqlite_writer_section``. An oversized protection snapshot is read in
         bounded pages without an expanding predicate; its final updates still
-        compare every value that can change the abandonment decision, so a
-        recovery claim or owner renewal that wins the race leaves the row
-        untouched.
+        compare every value that can change the abandonment decision,
+        including durable event-spool progress, so a recovery claim, owner
+        renewal, or status event that wins the race leaves the row untouched.
         """
         now = utcnow()
         protected_ids = tuple(
@@ -1963,6 +1963,7 @@ class DurableBridgeRepository:
                         HttpBridgeOperationRecord,
                         HttpBridgeSessionRecord.owner_instance_id,
                         HttpBridgeSessionRecord.owner_epoch,
+                        HttpBridgeOperationRecord.event_bytes,
                     )
                     .join(
                         HttpBridgeSessionRecord,
@@ -1993,9 +1994,10 @@ class DurableBridgeRepository:
                 else:
                     candidates = page
                     break
-            for operation, owner_instance_id, owner_epoch in candidates:
+            for operation, owner_instance_id, owner_epoch, candidate_event_bytes in candidates:
                 source_state = str(operation.state)
                 candidate_updated_at = operation.updated_at
+                candidate_event_bytes = int(candidate_event_bytes or 0)
                 owner_predicates = [
                     HttpBridgeSessionRecord.id == operation.session_id,
                     HttpBridgeSessionRecord.owner_epoch == owner_epoch,
@@ -2016,6 +2018,7 @@ class DurableBridgeRepository:
                         HttpBridgeOperationRecord.operation_id == operation.operation_id,
                         HttpBridgeOperationRecord.state == source_state,
                         HttpBridgeOperationRecord.updated_at == candidate_updated_at,
+                        HttpBridgeOperationRecord.event_bytes == candidate_event_bytes,
                         exists(select(HttpBridgeSessionRecord.id).where(*owner_predicates)),
                     )
                     .values(state="abandoned", updated_at=now)

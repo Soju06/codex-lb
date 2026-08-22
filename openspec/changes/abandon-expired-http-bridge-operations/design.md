@@ -104,6 +104,11 @@ request text, response IDs, API keys, and account emails are not included.
 
 - A current owner renewing or claiming a row changes the session epoch or
   operation `updated_at`; the compare-and-set then affects zero rows.
+- A nonterminal status event that commits after candidate selection advances
+  the operation's durable `event_bytes` progress; the compare-and-set also
+  compares that progress. The current ORM append paths refresh `updated_at`,
+  while the independent progress comparison remains a second fence for any
+  competing writer whose timestamp update is coalesced or omitted.
 - A concurrent recovery claim changes `unknown` to `submitted`; the
   `unknown`/`acknowledged` predicate rejects abandonment.
 - A late upstream event after abandonment cannot update the row because all

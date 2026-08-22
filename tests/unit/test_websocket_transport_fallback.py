@@ -195,6 +195,31 @@ async def test_budget_exhaustion_during_websocket_open_arms_marker() -> None:
     assert transport_health.upstream_websocket_transport_recently_failed() is True
 
 
+@pytest.mark.asyncio
+async def test_process_network_recovery_exhaustion_during_open_arms_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A process-network-classified open failure that waits for recovery
+    # until the budget runs out reaches the same budget-exhausted emit and
+    # must arm the marker like the stalled-open branch.
+    class _NetworkFailingOpenHarness(ws_mixin._WebSocketMixin):
+        async def _open_upstream_websocket(self, account: Any, headers: Any, *, request_state: Any = None) -> Any:
+            del account, headers, request_state
+            raise _proxy_error(502, "proxy_network_unavailable", "local network unavailable")
+
+    monkeypatch.setattr(ws_mixin, "_wait_for_process_network_recovery", AsyncMock(return_value="exhausted"))
+    harness = _NetworkFailingOpenHarness()
+
+    with pytest.raises(ProxyResponseError):
+        await harness._open_upstream_websocket_with_budget(
+            _account(),
+            {},
+            timeout_seconds=0.5,
+        )
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is True
+
+
 def _patch_transport_settings(
     monkeypatch: pytest.MonkeyPatch,
     *,

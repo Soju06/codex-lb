@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -58,6 +58,31 @@ describe("PasswordSettings", () => {
     await user.click(screen.getAllByRole("button", { name: "Set password" }).find((btn) => btn.getAttribute("type") === "submit")!);
     expect(setupPassword).toHaveBeenCalledWith({ password: "new-password-1" });
   });
+
+  it.each(["Escape", "Cancel"] as const)(
+    "returns focus to the exact setup invoker after %s dismissal",
+    async (dismissal) => {
+      const user = userEvent.setup();
+      render(<PasswordSettings />);
+
+      const setupButton = screen.getByRole("button", { name: "Set password" });
+      await user.click(setupButton);
+
+      const dialog = screen.getByRole("dialog", { name: "Set password" });
+      if (dismissal === "Escape") {
+        await user.keyboard("{Escape}");
+      } else {
+        await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      }
+
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog", { name: "Set password" })).not.toBeInTheDocument(),
+      );
+      expect(setupPassword).not.toHaveBeenCalled();
+      expect(setupButton).toHaveFocus();
+      expect(document.body).not.toHaveFocus();
+    },
+  );
 
   it("requires bootstrap token in remote setup flow", async () => {
     const user = userEvent.setup();

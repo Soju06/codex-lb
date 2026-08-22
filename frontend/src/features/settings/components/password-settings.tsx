@@ -32,6 +32,14 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
     }
   };
 
+  const handleSetupOpenChange = (open: boolean) => {
+    if (open) {
+      setActiveDialog("setup");
+    } else if (activeDialog === "setup") {
+      setActiveDialog(null);
+    }
+  };
+
   const statusMessage = !passwordManagementEnabled
     ? t("settings.password.status.disabled")
     : authMode === "trusted_header"
@@ -92,25 +100,20 @@ export function PasswordSettings({ disabled = false }: PasswordSettingsProps) {
                 {t("settings.password.actions.loginToManage")}
               </Button>
             ) : !passwordRequired ? (
-              <Button
-                type="button"
-                size="sm"
-                className="h-8 text-xs"
-                disabled={lock}
-                onClick={() => setActiveDialog("setup")}
+              <PasswordSetupDialog
+                open={activeDialog === "setup"}
+                onOpenChange={handleSetupOpenChange}
+                disabled={disabled}
               >
-                {t("settings.password.actions.set")}
-              </Button>
+                <Button type="button" size="sm" className="h-8 text-xs" disabled={lock}>
+                  {t("settings.password.actions.set")}
+                </Button>
+              </PasswordSetupDialog>
             ) : null}
           </div>
         </div>
       </div>
 
-      <PasswordSetupDialog
-        open={activeDialog === "setup"}
-        onOpenChange={closeIfMatches("setup")}
-        disabled={disabled}
-      />
       <PasswordChangeDialog
         open={activeDialog === "change"}
         onOpenChange={closeIfMatches("change")}

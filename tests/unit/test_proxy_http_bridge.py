@@ -3215,6 +3215,29 @@ async def test_http_bridge_activity_snapshot_does_not_expire_live_inflight_sessi
     service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
     key = proxy_service._HTTPBridgeSessionKey("session_header", "live-stale-inflight-drain-status", None)
     inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
+    setattr(inflight_future, "_codex_lb_started_at", time.monotonic())
+    service._http_bridge_inflight_sessions[key] = inflight_future
+
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda settings=None: 0.001)
+
+    snapshot = service.http_bridge_activity_snapshot_nowait()
+
+    assert key in service._http_bridge_inflight_sessions
+    assert not inflight_future.done()
+    assert snapshot["http_bridge_inflight_session_creates"] == 1
+    assert snapshot["http_bridge_stale_inflight_session_creates"] == 0
+    assert snapshot["http_bridge_cleaned_inflight_session_creates"] == 0
+    assert snapshot["http_bridge_active"] is True
+    assert snapshot["http_bridge_restart_blocking"] is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_activity_snapshot_keeps_stale_live_inflight_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    key = proxy_service._HTTPBridgeSessionKey("session_header", "pending-stale-inflight-drain-status", None)
+    inflight_future: asyncio.Future[proxy_service._HTTPBridgeSession] = asyncio.get_running_loop().create_future()
     setattr(inflight_future, "_codex_lb_started_at", -1000.0)
     service._http_bridge_inflight_sessions[key] = inflight_future
 
@@ -3253,6 +3276,40 @@ async def test_http_bridge_activity_snapshot_skips_inflight_cleanup_when_registr
     assert snapshot["http_bridge_cleaned_inflight_session_creates"] == 0
     assert snapshot["http_bridge_active"] is True
     assert snapshot["http_bridge_restart_blocking"] is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_inflight_creation_count_ignores_done_and_handoff_but_counts_stale_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, SimpleNamespace()))
+    loop = asyncio.get_running_loop()
+    live_future: asyncio.Future[proxy_service._HTTPBridgeSession] = loop.create_future()
+    stale_future: asyncio.Future[proxy_service._HTTPBridgeSession] = loop.create_future()
+    done_future: asyncio.Future[proxy_service._HTTPBridgeSession] = loop.create_future()
+    handoff_future: asyncio.Future[proxy_service._HTTPBridgeSession] = loop.create_future()
+    setattr(live_future, "_codex_lb_started_at", time.monotonic())
+    setattr(stale_future, "_codex_lb_started_at", -1000.0)
+    setattr(done_future, "_codex_lb_started_at", -1000.0)
+    setattr(handoff_future, "_codex_lb_started_at", time.monotonic())
+    setattr(handoff_future, "_http_bridge_handoff", True)
+    done_future.set_result(_make_bridge_session())
+    service._http_bridge_inflight_sessions[
+        proxy_service._HTTPBridgeSessionKey("session_header", "live-inflight-count", None)
+    ] = live_future
+    service._http_bridge_inflight_sessions[
+        proxy_service._HTTPBridgeSessionKey("session_header", "stale-inflight-count", None)
+    ] = stale_future
+    service._http_bridge_inflight_sessions[
+        proxy_service._HTTPBridgeSessionKey("session_header", "done-inflight-count", None)
+    ] = done_future
+    service._http_bridge_inflight_sessions[
+        proxy_service._HTTPBridgeSessionKey("session_header", "handoff-inflight-count", None)
+    ] = handoff_future
+
+    monkeypatch.setattr(proxy_service, "_proxy_admission_wait_timeout_seconds", lambda settings=None: 0.001)
+
+    assert http_bridge_helpers_module._http_bridge_inflight_creation_count(service) == 2
 
 
 async def _wait_for_close_await(close_session: AsyncMock, session: proxy_service._HTTPBridgeSession) -> None:

@@ -73,6 +73,8 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
+    _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
@@ -245,11 +247,6 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
-# Provenance marker for bridge session-creation failures. Creation happens
-# strictly before the turn is submitted upstream, so only exceptions carrying
-# this attribute are safe for the wrapper's raw-HTTP replay.
-_HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR = "http_bridge_pre_submit_failure"
-_HTTP_BRIDGE_PREPARED_ANCHOR_ATTR = "http_bridge_prepared_continuity_anchor"
 
 
 def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
@@ -1086,21 +1083,30 @@ class _HTTPBridgeStreamingMixin:
                     exc,
                     confirmed_pre_dispatch=is_confirmed_pre_dispatch_transport_error(exc),
                 )
+                # The bridge retry circuit's own cooldown suppression is
+                # generated locally, so it carries no connect provenance. It
+                # is admitted on the replay-safety proof the pre-dispatch
+                # submission gate already attached, and it is bridge-scoped
+                # rather than websocket transport evidence.
+                fallback_error_code, _fallback_error_message = _proxy_error_code_message(exc)
+                cooldown_suppression = fallback_error_code == "upstream_request_timeout"
                 if (
                     bridge_yielded_any
                     or api_key_reservation is not None
                     or not getattr(exc, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, False)
                     or getattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, False)
-                    or transport_failure_code is None
+                    or (transport_failure_code is None and not cooldown_suppression)
                 ):
                     raise
-                # Bridge session creation runs its own pre-dispatch failover,
-                # which never reaches the websocket failover decision, so this
-                # is the only place bridge-only traffic can arm the marker.
-                # Without it every later HTTP request re-attempts the dead
-                # websocket bridge before falling back, and the next
-                # downstream handshake is accepted instead of denied with 426.
-                mark_upstream_websocket_transport_failure()
+                if transport_failure_code is not None:
+                    # Bridge session creation runs its own pre-dispatch
+                    # failover, which never reaches the websocket failover
+                    # decision, so this is the only place bridge-only traffic
+                    # can arm the marker. Without it every later HTTP request
+                    # re-attempts the dead websocket bridge before falling
+                    # back, and the next downstream handshake is accepted
+                    # instead of denied with 426.
+                    mark_upstream_websocket_transport_failure()
                 bridge_transport_unavailable = True
         finally:
             with anyio.CancelScope(shield=True):

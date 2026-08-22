@@ -181,6 +181,18 @@ have dispatched upstream), MUST NOT run after any line reached the client,
 MUST NOT run while an API-key usage reservation is unsettled (reservation
 settlement owns that path), and MUST NOT absorb non-transient failures.
 
+When the bridge retry circuit's pre-dispatch submission gate suppresses a
+request whose state is provably undispatched — no client or proxy-injected
+continuation identity, no file account pin, no send attempt recorded for the
+request, and none of the unambiguous-boundary markers (`response_id`,
+response events, downstream visibility, or a prior replay) — the resulting
+cooldown failure MUST carry the same pre-submit provenance and degrade to the
+raw-HTTP fallback instead of a bounded 503. That undispatched proof MUST come
+from state that is false before an actual send; a marker set optimistically
+at request construction proves nothing and would make the fallback
+unreachable. A cooldown suppression of an ambiguous continuation MUST keep
+the bounded 503 with its retry hint.
+
 #### Scenario: pinned HTTP upstream transport bypasses the bridge
 
 - **GIVEN** the HTTP responses bridge is enabled and `upstream_stream_transport` is pinned to `"http"`
@@ -229,6 +241,18 @@ settlement owns that path), and MUST NOT absorb non-transient failures.
 - **GIVEN** bridge session creation exhausts token refresh for the selected account and surfaces a pre-submit 502 `upstream_unavailable` without connect provenance
 - **WHEN** the failure reaches the bridge wrapper
 - **THEN** the failure propagates without an HTTP replay
+
+#### Scenario: replay-safe cooldown suppression falls back to raw HTTP
+
+- **GIVEN** the bridge retry circuit is cooling down and a fresh turn with no continuation identity and no dispatch markers is suppressed at the pre-dispatch submission gate
+- **WHEN** the cooldown failure reaches the bridge wrapper before any line reached the client
+- **THEN** the turn is retried over raw HTTP with the upstream transport pinned to `"http"`
+
+#### Scenario: ambiguous cooldown suppression keeps the bounded 503
+
+- **GIVEN** the bridge retry circuit is cooling down and a continuation whose delivery is ambiguous is suppressed
+- **WHEN** the cooldown failure reaches the bridge wrapper
+- **THEN** the bounded 503 with its retry hint propagates without an HTTP replay
 
 #### Scenario: post-submit transient failures are not replayed
 

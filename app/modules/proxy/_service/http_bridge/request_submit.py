@@ -76,6 +76,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
     _http_bridge_durable_lease_ttl_seconds,
@@ -246,6 +247,39 @@ class _HTTPBridgeStaleGateSnapshot:
     stale_request_states: list[_WebSocketRequestState]
     should_retire: bool
     retry_circuit_attempt_selection: _HTTPBridgeRetryCircuitAttemptSelection
+
+
+def _http_bridge_cooldown_suppression_is_replay_safe(request_state: _WebSocketRequestState) -> bool:
+    """Return whether a cooldown-suppressed submission is provably undispatched.
+
+    The retry-circuit gate runs before any reconnect or send for the current
+    submission, so a request that carries no continuation identity (client or
+    proxy-injected), no file account pin, and has seen zero send attempts,
+    zero upstream response events and zero replays cannot have executed
+    upstream. Only those requests may degrade to the raw-HTTP fallback;
+    ambiguous continuations keep the bounded 503 because a replay could
+    execute the turn twice.
+
+    ``response_create_attempt_count`` is the send marker rather than
+    ``awaiting_response_created``: the latter is set optimistically when the
+    request state is built and is only cleared after a submission is torn
+    down, so it is true for every fresh turn and would make this predicate —
+    and the fallback it gates — unreachable. The attempt count increments at
+    the ``response.create`` send itself and is never reset, so zero proves no
+    frame left for upstream.
+    """
+    return (
+        request_state.previous_response_id is None
+        and not request_state.hard_continuity_anchor
+        and not request_state.proxy_injected_previous_response_id
+        and not request_state.file_required_preferred_account
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and request_state.replay_count == 0
+        and request_state.last_downstream_sequence_number is None
+        and not request_state.downstream_visible
+        and request_state.response_create_attempt_count == 0
+    )
 
 
 def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:
@@ -958,7 +992,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 cache_key_family=session.key.affinity_kind,
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
-            raise ProxyResponseError(
+            cooldown_error = ProxyResponseError(
                 503,
                 openai_error(
                     "upstream_request_timeout",
@@ -966,6 +1000,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 ),
                 retry_after_seconds=retry_after_seconds,
             )
+            if _http_bridge_cooldown_suppression_is_replay_safe(request_state):
+                setattr(cooldown_error, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+            raise cooldown_error
         # Persist the recovery checkpoint only after the retry circuit has
         # admitted this request. A client reconnect suppressed by the
         # cooldown must not create or refresh a journal entry for a request

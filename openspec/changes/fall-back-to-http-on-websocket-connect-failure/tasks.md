@@ -25,6 +25,10 @@
       while an API-key usage reservation is unsettled
 - [x] 1.6 Arm the transport-failure marker from the bridge fallback, whose
       pre-dispatch failover never reaches the websocket failover decision
+- [x] 1.7 Tag replay-safe cooldown suppressions at the bridge retry
+      circuit's pre-dispatch submission gate with the same pre-submit
+      provenance and accept them in the wrapper's raw-HTTP fallback;
+      ambiguous continuations keep the bounded 503
 
 ## 2. Regression coverage
 
@@ -45,6 +49,9 @@
       cases (prepared anchor, routed connect, partial stream, API-key
       reservation, refresh provenance, non-transient failure) at
       `_stream_http_bridge_or_retry`
+- [x] 2.6 Cooldown gate: replay-safety predicate covers every
+      unambiguous-boundary marker; tagged suppressions fall back and
+      untagged suppressions propagate at `_stream_http_bridge_or_retry`
 
 ## 3. Verification
 

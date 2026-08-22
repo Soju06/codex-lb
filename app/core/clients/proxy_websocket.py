@@ -947,6 +947,7 @@ async def _connect_upstream_websocket(
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", "Request to upstream timed out"),
+            failure_phase="connect",
         ) from exc
     except InvalidStatus as exc:
         response = exc.response
@@ -985,6 +986,7 @@ async def _connect_upstream_websocket(
         raise ProxyResponseError(
             502,
             openai_error("upstream_unavailable", message),
+            failure_phase="connect",
         ) from exc
     except OSError as exc:
         error_code = process_network_error_code(

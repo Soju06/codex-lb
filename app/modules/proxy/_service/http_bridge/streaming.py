@@ -155,6 +155,9 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.transport_health import (
+    upstream_websocket_transport_recently_failed,
+)
 from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -241,6 +244,10 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
+# Provenance marker for bridge session-creation failures. Creation happens
+# strictly before the turn is submitted upstream, so only exceptions carrying
+# this attribute are safe for the wrapper's raw-HTTP replay.
+_HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR = "http_bridge_pre_submit_failure"
 
 
 def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
@@ -962,10 +969,9 @@ class _HTTPBridgeStreamingMixin:
                 request_id,
             )
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
-        # Local patch (upstream proposal Soju06/codex-lb#1885): the bridge
-        # exists to hold upstream websocket sessions, so a pinned "http"
-        # upstream transport must bypass it; without this gate the dashboard
-        # pin is silently ignored for bridged follow-up turns.
+        # The bridge exists to hold upstream websocket sessions, so a pinned
+        # "http" upstream transport must bypass it; without this gate the
+        # dashboard pin is silently ignored for bridged follow-up turns.
         configured_upstream_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
         if configured_upstream_transport == "default":
             configured_upstream_transport = getattr(_service_get_settings(), "upstream_stream_transport", "auto")
@@ -976,6 +982,20 @@ class _HTTPBridgeStreamingMixin:
             )
             force_upstream_stream_transport = "http"
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
+        # While the websocket transport-failure marker is armed, every
+        # responses path must degrade to the HTTP upstream: the bridge would
+        # stall on its websocket session creation, and the raw path's "smart"
+        # policy can resolve a sticky follow-up straight back to the
+        # unavailable websocket upstream.
+        if force_upstream_stream_transport is None and upstream_websocket_transport_recently_failed():
+            if runtime_config.enabled:
+                logger.info(
+                    "stream_responses bypassing http bridge for recent upstream websocket transport failure "
+                    "request_id=%s",
+                    request_id,
+                )
+                runtime_config = dataclasses.replace(runtime_config, enabled=False)
+            force_upstream_stream_transport = "http"
         if not runtime_config.enabled:
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
@@ -1034,18 +1054,22 @@ class _HTTPBridgeStreamingMixin:
                     bridge_yielded_any = True
                     yield line
             except ProxyResponseError as exc:
-                # Local patch (upstream proposal Soju06/codex-lb#1885): a
-                # transient failure to establish the bridge's upstream
+                # A transient failure to establish the bridge's upstream
                 # websocket session must not fail the turn while the plain
-                # HTTP upstream path is healthy. Fall back only before any
-                # line reached the client, and only for the subscription
-                # path: API-key reservations are settled by the finally
-                # block below, so re-entering streaming with the same
-                # reservation would double-settle it.
+                # HTTP upstream path is healthy. The replay is safe only for
+                # failures carrying pre-submit session-creation provenance —
+                # a post-dispatch ``upstream_unavailable`` (for example a
+                # submit whose request already holds upstream response
+                # events) must propagate, or the raw-HTTP retry dispatches
+                # the same turn twice. It is also confined to the
+                # subscription path: API-key reservations are settled by the
+                # finally block below, so re-entering streaming with the
+                # same reservation would double-settle it.
                 fallback_error_code, _fallback_error_message = _proxy_error_code_message(exc)
                 if (
                     bridge_yielded_any
                     or api_key_reservation is not None
+                    or not getattr(exc, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, False)
                     or fallback_error_code != "upstream_unavailable"
                     or (exc.status_code is not None and exc.status_code < 500)
                 ):
@@ -2159,6 +2183,10 @@ class _HTTPBridgeStreamingMixin:
                     defer_account_health_writes=request_state.api_key_reservation is not None,
                 )
             except ProxyResponseError as exc:
+                # Session creation failed before the turn was submitted
+                # upstream; record that provenance so the outer wrapper knows
+                # a raw-HTTP replay cannot dispatch the turn twice.
+                setattr(exc, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
                 if not owner_unavailable_allows_account_neutral_replay(exc):
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(

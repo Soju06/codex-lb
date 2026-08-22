@@ -317,6 +317,10 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.transport_health import (
+    clear_upstream_websocket_transport_failure,
+    mark_upstream_websocket_transport_failure,
+)
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -501,32 +505,6 @@ from app.modules.proxy.tool_call_dedupe import (
 
 def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
-
-
-# Local patch (upstream proposal Soju06/codex-lb#1885): Codex clients only
-# switch to the HTTP transport when the websocket *handshake* is rejected
-# with HTTP 426 (codex-rs checks StatusCode::UPGRADE_REQUIRED on connect;
-# in-band error events never trigger the transport fallback). This marker
-# remembers a recent transient upstream websocket connect failure so the
-# websocket routes can deny the next handshake with 426 and steer clients
-# onto HTTP until the websocket upstream proves healthy again.
-_UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS = 60.0
-_upstream_ws_transport_failure_at: float | None = None
-
-
-def _mark_upstream_websocket_transport_failure() -> None:
-    global _upstream_ws_transport_failure_at
-    _upstream_ws_transport_failure_at = time.monotonic()
-
-
-def _clear_upstream_websocket_transport_failure() -> None:
-    global _upstream_ws_transport_failure_at
-    _upstream_ws_transport_failure_at = None
-
-
-def upstream_websocket_transport_recently_failed() -> bool:
-    marked_at = _upstream_ws_transport_failure_at
-    return marked_at is not None and time.monotonic() - marked_at < _UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS
 
 
 logger = logging.getLogger(__name__)
@@ -4382,15 +4360,20 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
-        if not confirmed_pre_dispatch:
-            # Local patch (upstream proposal Soju06/codex-lb#1885): a
-            # server-level websocket connect failure is transport evidence,
-            # not account evidence. Codex clients retry the turn over the
-            # HTTP transport when a websocket connect fails with a 5xx, so
-            # surface the original failure immediately and skip the account
-            # error penalty: penalizing here drives the owner account into
-            # transient backoff and fails the HTTP retry closed on hard
-            # session affinity even though the HTTP upstream path is healthy.
+        if not confirmed_pre_dispatch and exc.failure_phase == "connect":
+            # A server-level failure of the websocket open itself is transport
+            # evidence, not account evidence. Codex clients only activate
+            # their HTTP transport fallback on a handshake-level HTTP 426, so
+            # surface the failure immediately (the routes deny the next
+            # handshake with 426 while the transport-failure marker is armed)
+            # and skip the account error penalty: penalizing here drives the
+            # owner account into transient backoff and fails the HTTP retry
+            # closed on hard session affinity even though the HTTP upstream
+            # path is healthy. The ``failure_phase == "connect"`` provenance
+            # confines this to the websocket open — account-scoped failures
+            # that share the ``upstream_unavailable`` envelope, such as OAuth
+            # refresh transport errors, keep the classify-penalize-failover
+            # path below.
             connect_error = _parse_openai_error(exc.payload)
             connect_error_code = _normalize_error_code(
                 connect_error.code if connect_error else None,
@@ -4400,7 +4383,7 @@ class _WebSocketMixin:
                 "upstream_unavailable",
                 "upstream_websocket_handshake_failed",
             ) and (exc.status_code is None or exc.status_code >= 500):
-                _mark_upstream_websocket_transport_failure()
+                mark_upstream_websocket_transport_failure()
                 _facade().logger.info(
                     "Websocket connect transient transport failure surfaced for HTTP fallback "
                     "request_id=%s account_id=%s status=%s code=%s",
@@ -4502,6 +4485,12 @@ class _WebSocketMixin:
             except TimeoutError:
                 if time.monotonic() - started_at < timeout_seconds:
                     raise
+                # The websocket open itself consumed the connect budget, which
+                # is the same transport evidence as a classified connect
+                # timeout: the budget-exhausted emit below bypasses the
+                # failover decision, so arm the handshake-denial marker here
+                # or short-budget deployments never steer clients to HTTP.
+                mark_upstream_websocket_transport_failure()
                 _raise_proxy_budget_exhausted()
 
     async def _open_upstream_websocket(
@@ -4543,7 +4532,7 @@ class _WebSocketMixin:
             )
             if request_state is not None:
                 _record_websocket_route_metadata(request_state, upstream=upstream, route=route)
-            _clear_upstream_websocket_transport_failure()
+            clear_upstream_websocket_transport_failure()
             return upstream
         finally:
             connect_lease.release()

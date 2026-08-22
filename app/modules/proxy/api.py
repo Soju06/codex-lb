@@ -7726,13 +7726,12 @@ async def _validate_internal_bridge_api_key(
 
 
 async def _websocket_upstream_transport_denial() -> JSONResponse | None:
-    # Local patch (upstream proposal Soju06/codex-lb#1885): Codex clients
-    # only activate their HTTP transport fallback when the websocket
-    # handshake itself is rejected with HTTP 426 (UPGRADE_REQUIRED), so a
-    # recent transient upstream websocket connect failure — or an operator
-    # pin of the upstream transport to "http" — must deny the handshake
-    # instead of accepting and erroring in-band.
-    from app.modules.proxy._service.websocket.mixin import (
+    # Codex clients only activate their HTTP transport fallback when the
+    # websocket handshake itself is rejected with HTTP 426 (UPGRADE_REQUIRED),
+    # so a recent upstream websocket connect transport failure — or an
+    # operator pin of the upstream transport to "http" — must deny the
+    # handshake instead of accepting and erroring in-band.
+    from app.modules.proxy._service.streaming.transport_health import (
         upstream_websocket_transport_recently_failed,
     )
 

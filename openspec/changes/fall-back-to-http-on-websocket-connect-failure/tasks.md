@@ -4,16 +4,22 @@
 
 - [x] 1.1 Surface server-level transient websocket connect failures
       (`upstream_unavailable` / `upstream_websocket_handshake_failed`, 5xx)
-      without recording account failure health or rotating accounts
+      carrying `failure_phase = "connect"` provenance without recording
+      account failure health or rotating accounts; failures without connect
+      provenance (OAuth refresh transport errors) keep the penalized
+      failover path
 - [x] 1.2 Arm a bounded per-instance transport-failure marker on that surface
-      path and clear it on the next successful upstream websocket connect
+      path and when a websocket open exhausts the request budget, and clear
+      it on the next successful upstream websocket connect
 - [x] 1.3 Deny responses websocket handshakes with HTTP 426 while the marker
       is armed or `upstream_stream_transport` is pinned to `"http"`
-- [x] 1.4 Bypass the HTTP responses bridge when the upstream transport is
-      pinned to `"http"`
-- [x] 1.5 Fall back from a transient pre-stream bridge session-creation
-      failure to raw HTTP streaming, skipping the fallback while an API-key
-      usage reservation is unsettled
+- [x] 1.4 Bypass the HTTP responses bridge and pin the raw path's upstream
+      transport to `"http"` while the marker is armed or the upstream
+      transport is pinned to `"http"`
+- [x] 1.5 Fall back from a bridge session-creation failure carrying
+      pre-submit provenance to raw HTTP streaming, never replaying
+      post-submit failures and skipping the fallback while an API-key usage
+      reservation is unsettled
 
 ## 2. Regression coverage
 

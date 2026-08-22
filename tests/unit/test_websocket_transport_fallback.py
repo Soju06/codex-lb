@@ -228,16 +228,16 @@ async def test_budget_exhaustion_during_websocket_open_arms_marker() -> None:
 async def test_process_network_recovery_exhaustion_during_open_arms_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A process-network-classified open failure that waits for recovery
-    # until the budget runs out reaches the same budget-exhausted emit and
-    # must arm the marker like the stalled-open branch.
-    class _NetworkFailingOpenHarness(ws_mixin._WebSocketMixin):
+    # A connect-phase transport failure that waits for recovery until the
+    # budget runs out reaches the same budget-exhausted emit and must arm
+    # the marker like the stalled-open branch.
+    class _ConnectFailingOpenHarness(ws_mixin._WebSocketMixin):
         async def _open_upstream_websocket(self, account: Any, headers: Any, *, request_state: Any = None) -> Any:
             del account, headers, request_state
-            raise _proxy_error(502, "proxy_network_unavailable", "local network unavailable")
+            raise _proxy_error(502, "upstream_unavailable", "Request to upstream timed out", failure_phase="connect")
 
     monkeypatch.setattr(ws_mixin, "_wait_for_process_network_recovery", AsyncMock(return_value="exhausted"))
-    harness = _NetworkFailingOpenHarness()
+    harness = _ConnectFailingOpenHarness()
 
     with pytest.raises(ProxyResponseError):
         await harness._open_upstream_websocket_with_budget(
@@ -247,6 +247,35 @@ async def test_process_network_recovery_exhaustion_during_open_arms_marker(
         )
 
     assert transport_health.upstream_websocket_transport_recently_failed() is True
+
+
+@pytest.mark.asyncio
+async def test_exhausted_route_resolution_failure_does_not_arm_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The budgeted opener also runs route resolution; its
+    # ``upstream_proxy_unavailable`` failures are pre-dispatch route
+    # evidence without connect provenance and must not deny handshakes.
+    class _RouteFailingOpenHarness(ws_mixin._WebSocketMixin):
+        async def _open_upstream_websocket(self, account: Any, headers: Any, *, request_state: Any = None) -> Any:
+            del account, headers, request_state
+            raise _proxy_error(
+                502,
+                "upstream_proxy_unavailable",
+                "Unable to resolve upstream proxy route for websocket request",
+            )
+
+    monkeypatch.setattr(ws_mixin, "_wait_for_process_network_recovery", AsyncMock(return_value="exhausted"))
+    harness = _RouteFailingOpenHarness()
+
+    with pytest.raises(ProxyResponseError):
+        await harness._open_upstream_websocket_with_budget(
+            _account(),
+            {},
+            timeout_seconds=0.5,
+        )
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is False
 
 
 def _patch_transport_settings(

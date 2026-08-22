@@ -1741,26 +1741,22 @@ class _WebSocketMixin:
                                 request_affinity = prepared_request.affinity_policy
                                 text_data = prepared_request.text_data
                                 if request_state.previous_response_id is not None:
-                                    try:
-                                        request_state.previous_response_owner_account_id = (
-                                            await proxy._resolve_websocket_previous_response_owner(
-                                                previous_response_id=request_state.previous_response_id,
-                                                api_key=request_state.api_key or api_key,
-                                                session_id=request_state.session_id,
-                                                surface="websocket_source_route",
-                                                request_state=request_state,
-                                            )
+                                    request_state.previous_response_owner_account_id = (
+                                        await proxy._resolve_websocket_previous_response_owner(
+                                            previous_response_id=request_state.previous_response_id,
+                                            api_key=request_state.api_key or api_key,
+                                            session_id=request_state.session_id,
+                                            surface="websocket_source_route",
+                                            request_state=request_state,
                                         )
-                                        request_state.preferred_account_id = resolve_required_account_id(
-                                            ("existing bridge or file", request_state.preferred_account_id),
-                                            (
-                                                "previous response",
-                                                request_state.previous_response_owner_account_id,
-                                            ),
-                                        )
-                                    except ProxyResponseError:
-                                        await proxy._release_websocket_request_state_reservation(request_state)
-                                        raise
+                                    )
+                                    request_state.preferred_account_id = resolve_required_account_id(
+                                        ("existing bridge or file", request_state.preferred_account_id),
+                                        (
+                                            "previous response",
+                                            request_state.previous_response_owner_account_id,
+                                        ),
+                                    )
                                 if (
                                     upstream is not None
                                     and account is not None
@@ -1842,11 +1838,17 @@ class _WebSocketMixin:
                                     )
                                     continue
                             except ProxyResponseError as exc:
+                                error = _parse_openai_error(exc.payload)
+                                error_code = _normalize_error_code(
+                                    error.code if error else None,
+                                    error.type if error else None,
+                                )
+                                error_message = error.message if error and error.message else "Upstream error"
                                 (
                                     status_code,
                                     error_payload,
-                                    _error_code,
-                                    _error_message,
+                                    error_code,
+                                    error_message,
                                 ) = _sanitize_websocket_previous_response_error(
                                     previous_response_id=_facade()._previous_response_id_from_payload(payload),
                                     session_id=_owner_lookup_session_id_from_headers(
@@ -1855,11 +1857,39 @@ class _WebSocketMixin:
                                     ),
                                     status_code=exc.status_code,
                                     payload=exc.payload,
-                                    error_code="upstream_error",
-                                    error_message="Upstream error",
+                                    error_code=error_code or "upstream_error",
+                                    error_message=error_message,
                                     surface="websocket_connect",
                                     expose_stale_previous_response_classifier=codex_session_affinity,
+                                    request_state=request_state,
                                 )
+                                if request_state is not None:
+                                    sanitized_error = _parse_openai_error(error_payload)
+                                    error_type = (
+                                        sanitized_error.type
+                                        if sanitized_error and sanitized_error.type
+                                        else "server_error"
+                                    )
+                                    error_param = sanitized_error.param if sanitized_error else None
+                                    await proxy._release_websocket_request_state_reservation(request_state)
+                                    await proxy._write_websocket_connect_failure(
+                                        account_id=None,
+                                        api_key=request_state.api_key or api_key,
+                                        request_state=request_state,
+                                        error_code=error_code,
+                                        error_message=error_message,
+                                    )
+                                    await proxy._emit_websocket_terminal_error(
+                                        websocket,
+                                        client_send_lock=client_send_lock,
+                                        request_state=request_state,
+                                        error_code=error_code,
+                                        error_message=error_message,
+                                        error_type=error_type,
+                                        error_param=error_param,
+                                        downstream_activity=downstream_activity,
+                                    )
+                                    continue
                                 async with client_send_lock:
                                     await websocket.send_text(
                                         _serialize_websocket_error_event(

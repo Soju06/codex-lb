@@ -2125,7 +2125,10 @@ def _http_bridge_session_account_active(session: "_HTTPBridgeSession") -> bool:
     # per-request database reads). Cross-replica freshness comes from the
     # `account_routing` cache-invalidation namespace refreshing the routing
     # availability snapshot behind is_account_routing_unavailable().
-    return session.account.status == AccountStatus.ACTIVE and not is_account_routing_unavailable(session.account.id)
+    return session.account.status in (
+        AccountStatus.ACTIVE,
+        AccountStatus.REAUTH_REQUIRED,
+    ) and not is_account_routing_unavailable(session.account.id)
 
 
 def _http_bridge_session_reusable_for_request(

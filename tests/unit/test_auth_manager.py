@@ -278,6 +278,75 @@ async def test_ensure_fresh_preserves_paused_status_on_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ensure_fresh_uses_stored_access_token_when_reauth_is_required(monkeypatch):
+    refresh_called = False
+
+    async def _unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal refresh_called
+        refresh_called = True
+        raise AssertionError("reauth-required request preflight must not refresh")
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _unexpected_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_reauth_request",
+        chatgpt_account_id="chatgpt-account",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-still-usable"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-invalid"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=datetime(2020, 1, 1),
+        status=AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason="re-login required",
+    )
+    manager = AuthManager(cast(AccountsRepositoryPort, _DummyRepo()))
+
+    result = await manager.ensure_fresh(account)
+
+    assert result is account
+    assert result.status is AccountStatus.REAUTH_REQUIRED
+    assert refresh_called is False
+
+
+@pytest.mark.asyncio
+async def test_forced_refresh_still_fails_closed_when_reauth_is_required(monkeypatch):
+    refresh_called = False
+
+    async def _unexpected_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal refresh_called
+        refresh_called = True
+        raise AssertionError("terminal refresh material must not be re-exchanged")
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _unexpected_refresh)
+    monkeypatch.setattr(auth_manager_module, "get_refresh_claim_coordinator", lambda: None)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_reauth_forced",
+        chatgpt_account_id="chatgpt-account",
+        email="user@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("access-rejected"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-invalid"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=datetime(2020, 1, 1),
+        status=AccountStatus.REAUTH_REQUIRED,
+        deactivation_reason="re-login required",
+    )
+    repo = _DummyRepo()
+    repo.accounts_by_id[account.id] = account
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    with pytest.raises(RefreshError) as exc_info:
+        await manager.ensure_fresh(account, force=True)
+
+    assert exc_info.value.is_permanent is True
+    assert refresh_called is False
+
+
+@pytest.mark.asyncio
 async def test_refresh_account_preserves_plan_type_when_missing(monkeypatch):
     async def _fake_refresh(_: str, **_kwargs: object) -> TokenRefreshResult:
         return TokenRefreshResult(

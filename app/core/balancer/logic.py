@@ -23,8 +23,8 @@ PERMANENT_FAILURE_CODES = {
     # ``token_expired`` from the OAuth refresh endpoint means the refresh
     # request itself failed because the refresh token (or the session it
     # belonged to) is no longer usable -- access-token-only expiry would have
-    # returned a fresh token pair instead. Treat it as a permanent failure so
-    # the account stops being routed to until it is re-authenticated.
+    # returned a fresh token pair instead. Treat it as a permanent refresh
+    # failure while ordinary requests may continue with the stored access token.
     "token_expired": "Authentication token expired - re-login required",
     "app_session_terminated": "ChatGPT session ended - re-login required",
     "account_session_expired": "ChatGPT session ended - re-login required",
@@ -214,7 +214,6 @@ def pool_usage_exhaustion(
         and state.status
         not in (
             AccountStatus.PAUSED,
-            AccountStatus.REAUTH_REQUIRED,
             AccountStatus.DEACTIVATED,
         )
     ]
@@ -364,7 +363,7 @@ def _has_other_usable_foreground_capacity(
     for other in available:
         if other.account_id == candidate.account_id:
             continue
-        if other.status != AccountStatus.ACTIVE:
+        if other.status not in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED):
             continue
         if _routing_policy(other) == ROUTING_POLICY_PRESERVE:
             if _preserve_allows_opportunistic_burn(other, current, preserve_count=preserve_count):
@@ -548,7 +547,7 @@ def select_account(
             or bypass_quota_exceeded
             or (bypass_account_ids is not None and state.account_id in bypass_account_ids)
         )
-        if state.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+        if state.status == AccountStatus.DEACTIVATED:
             continue
         if state.status == AccountStatus.PAUSED:
             continue
@@ -601,7 +600,6 @@ def select_account(
             state.status
             in (
                 AccountStatus.PAUSED,
-                AccountStatus.REAUTH_REQUIRED,
                 AccountStatus.DEACTIVATED,
                 AccountStatus.RATE_LIMITED,
                 AccountStatus.QUOTA_EXCEEDED,
@@ -631,25 +629,16 @@ def select_account(
                 )
                 if usage_exhaustion is not None:
                     return usage_exhaustion
-            reauth_required = [s for s in all_states if s.status == AccountStatus.REAUTH_REQUIRED]
             deactivated = [s for s in all_states if s.status == AccountStatus.DEACTIVATED]
             paused = [s for s in all_states if s.status == AccountStatus.PAUSED]
             rate_limited = [s for s in all_states if s.status == AccountStatus.RATE_LIMITED]
             quota_exceeded = [s for s in all_states if s.status == AccountStatus.QUOTA_EXCEEDED]
 
             if not rate_limited and not quota_exceeded:
-                if paused and reauth_required and deactivated:
-                    return SelectionResult(None, "All accounts are paused, deactivated, or require re-authentication")
-                if paused and reauth_required:
-                    return SelectionResult(None, "All accounts are paused or require re-authentication")
                 if paused and deactivated:
                     return SelectionResult(None, "All accounts are paused or deactivated")
-                if reauth_required and deactivated:
-                    return SelectionResult(None, "All accounts are deactivated or require re-authentication")
                 if paused:
                     return SelectionResult(None, "All accounts are paused")
-                if reauth_required:
-                    return SelectionResult(None, "All accounts require re-authentication")
                 if deactivated:
                     return SelectionResult(None, "All accounts are deactivated")
             if quota_exceeded:
@@ -1373,7 +1362,6 @@ def evaluate_health_tier(
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
         AccountStatus.PAUSED,
-        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.DEACTIVATED,
     ):
         return state.health_tier

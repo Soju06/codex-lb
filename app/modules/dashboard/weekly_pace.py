@@ -18,6 +18,7 @@ FRESHNESS_MISSED_REFRESH_CYCLES = 3.0
 PACE_ELIGIBLE_ACCOUNT_STATUSES = frozenset(
     (
         AccountStatus.ACTIVE,
+        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.RATE_LIMITED,
         AccountStatus.QUOTA_EXCEEDED,
     )

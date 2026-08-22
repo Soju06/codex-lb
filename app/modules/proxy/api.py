@@ -1701,7 +1701,6 @@ async def v1_usage(
 
 def _is_reset_credit_selectable_account(account: Account) -> bool:
     return bool(account.chatgpt_account_id) and account.status not in (
-        AccountStatus.REAUTH_REQUIRED,
         AccountStatus.DEACTIVATED,
         AccountStatus.PAUSED,
     )
@@ -2423,7 +2422,7 @@ async def _load_accounts_by_id(session: AsyncSession, account_ids: set[str]) -> 
     result = await session.execute(
         select(Account).where(
             Account.id.in_(account_ids),
-            Account.status.notin_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)),
+            Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)),
         )
     )
     return list(result.scalars().all())

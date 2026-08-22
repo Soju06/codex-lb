@@ -1750,16 +1750,14 @@ class _StreamingRetryMixin:
                         if isinstance(exc, RefreshError):
                             if exc.is_permanent:
                                 await proxy._load_balancer.mark_permanent_failure(account, exc.code)
-                                # The account is now removed from selection, but its
-                                # stream-concurrency slot is still occupied by the
-                                # lease appended at selection. Release it before the
-                                # failover ``continue`` (matching the transient
-                                # branches) so the dead account's slot is freed
-                                # immediately instead of being held for the entire
-                                # duration of the replacement stream.
+                                # Keep the warning account routable for later
+                                # requests, but do not immediately reselect it in
+                                # this request after its refresh material failed.
+                                # Release its stream slot before failover too.
                                 await _release_tracked_stream_lease(current_account_lease)
                                 current_account_lease = None
                                 if not selected_account_model_replacement:
+                                    excluded_account_ids.add(account.id)
                                     continue
                             if is_transient_refresh_contention(exc):
                                 # Transient CROSS-REPLICA refresh contention: benign
@@ -2546,13 +2544,12 @@ class _StreamingRetryMixin:
                             if isinstance(refresh_exc, RefreshError):
                                 if refresh_exc.is_permanent:
                                     await proxy._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                                    # The account is now removed from selection, but
-                                    # its stream-concurrency slot is still occupied
-                                    # by the lease appended at selection. Release it
-                                    # before the failover ``continue`` so the dead
-                                    # account's slot is freed immediately.
+                                    # Keep the warning account routable for later
+                                    # requests, but exclude it from this request's
+                                    # retry pool after upstream rejected its token.
                                     await _release_tracked_stream_lease(current_account_lease)
                                     current_account_lease = None
+                                    excluded_account_ids.add(account.id)
                                     continue
                                 if is_transient_refresh_contention(refresh_exc):
                                     # Transient CROSS-REPLICA refresh contention on
@@ -3054,6 +3051,7 @@ class _StreamingRetryMixin:
                 except RefreshError as exc:
                     if exc.is_permanent:
                         await proxy._load_balancer.mark_permanent_failure(account, exc.code)
+                        excluded_account_ids.add(account.id)
                     continue
                 except Exception:
                     await _drain_pending_post_refresh_penalty_on_terminal(settlement)

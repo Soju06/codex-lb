@@ -563,8 +563,10 @@ async def test_record_error_backoff_enters_floor_without_adding_full_threshold()
 
 
 @pytest.mark.asyncio
-async def test_successful_force_probes_promote_probing_account_to_healthy() -> None:
+@pytest.mark.parametrize("status", [AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED])
+async def test_successful_force_probes_promote_routable_account_to_healthy(status: AccountStatus) -> None:
     account = _make_account("acc-force-probe-success")
+    account.status = status
     balancer = LoadBalancer(lambda: _repo_factory(_StubAccountsRepository([account]), _StubUsageRepository({}, {})))
     balancer._runtime[account.id] = RuntimeState(
         health_tier=HEALTH_TIER_PROBING,

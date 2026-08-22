@@ -595,7 +595,7 @@ def _assert_bridge_session_closed_without_continuity(record: HttpBridgeSessionRe
 
 
 @pytest.mark.asyncio
-async def test_accounts_update_status_closes_bridge_without_durable_aliases(db_setup):
+async def test_accounts_update_status_preserves_bridge_for_reauth_required(db_setup):
     async with SessionLocal() as session:
         repo = AccountsRepository(session)
         account = _make_account("acc_bridge_close", "bridge-close@example.com")
@@ -615,19 +615,20 @@ async def test_accounts_update_status_closes_bridge_without_durable_aliases(db_s
         )
 
         assert updated is True
-        assert await _get_bridge_aliases(session, bridge.id) == []
-        _assert_bridge_session_closed_without_continuity(await _get_bridge_session(session, bridge.id))
-        assert (
-            await DurableBridgeSessionCoordinator(SessionLocal).lookup_request_targets(
-                session_key_kind="request",
-                session_key_value="req-after-close",
-                api_key_id=None,
-                turn_state=f"http_turn_{session_id}",
-                session_header=f"sid-{session_id}",
-                previous_response_id=f"resp_{session_id}",
-            )
-            is None
+        preserved = await _get_bridge_session(session, bridge.id)
+        assert preserved.account_id == account.id
+        assert preserved.state == HttpBridgeSessionState.ACTIVE
+        assert len(await _get_bridge_aliases(session, bridge.id)) == 3
+        lookup = await DurableBridgeSessionCoordinator(SessionLocal).lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-after-reauth-warning",
+            api_key_id=None,
+            turn_state=f"http_turn_{session_id}",
+            session_header=f"sid-{session_id}",
+            previous_response_id=f"resp_{session_id}",
         )
+        assert lookup is not None
+        assert lookup.account_id == account.id
 
 
 @pytest.mark.asyncio

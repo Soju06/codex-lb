@@ -629,9 +629,10 @@ class _CompactMixin:
         only for owner loss the owner's quota state caused. At selection time
         that evidence is the owner's own persisted status: ``RATE_LIMITED`` or
         ``QUOTA_EXCEEDED`` is the same upstream usage-exhaustion state the
-        selector consulted. Authentication loss (``REAUTH_REQUIRED``,
-        ``DEACTIVATED``), operator pauses, local capacity caps on an ``ACTIVE``
-        account, and a failed lookup all stay owner-bound.
+        selector consulted. Hard authentication loss (``DEACTIVATED``),
+        operator pauses, local capacity caps on a request-routable account, and
+        a failed lookup all stay owner-bound. ``REAUTH_REQUIRED`` remains
+        selectable and therefore does not itself cause owner loss.
         """
 
         proxy = cast(_CompactServiceProtocol, self)

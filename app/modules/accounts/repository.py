@@ -306,9 +306,7 @@ class AccountsRepository:
         result = await self._session.execute(
             select(Account)
             .where(Account.chatgpt_account_id == chatgpt_account_id)
-            .where(
-                Account.status.notin_((AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED))
-            )
+            .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
             .limit(1)
         )
         return result.scalar_one_or_none()
@@ -758,7 +756,7 @@ class AccountsRepository:
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(previous_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            if updated_id is not None and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()
@@ -833,7 +831,7 @@ class AccountsRepository:
             updated_id = result.scalar_one_or_none()
             if updated_id is not None and self._hard_sticky_outage_started(expected_status, status):
                 await self._refresh_hard_sticky_outage_grace(account_id)
-            if updated_id is not None and status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            if updated_id is not None and status == AccountStatus.DEACTIVATED:
                 await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
                 await self._close_http_bridge_sessions_for_account(account_id)
             await self._session.commit()

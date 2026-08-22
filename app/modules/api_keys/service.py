@@ -395,7 +395,7 @@ def _compute_pooled_credits(
         a.id: a
         for a in all_accounts
         if a.id in requested_account_ids
-        and a.status not in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+        and a.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
     }
     account_ids = set(account_map)
 

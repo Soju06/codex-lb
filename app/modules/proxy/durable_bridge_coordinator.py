@@ -20,6 +20,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
     DurableBridgeOperationAbandonment,
+    DurableBridgeOperationAbandonmentScanCursor,
     DurableBridgeOperationEventInput,
     DurableBridgeOperationPurgeBatchResult,
     DurableBridgeOperationSnapshot,
@@ -70,6 +71,7 @@ class DurableBridgeLookup:
 class DurableBridgeSessionCoordinator:
     def __init__(self, session_factory: Callable[[], AsyncSession]) -> None:
         self._session_factory = session_factory
+        self._operation_abandonment_scan_cursor: DurableBridgeOperationAbandonmentScanCursor | None = None
 
     async def lookup_request_targets(
         self,
@@ -660,11 +662,14 @@ class DurableBridgeSessionCoordinator:
         batch_size: int = 500,
     ) -> list[DurableBridgeOperationAbandonment]:
         async with self._session() as session:
-            return await DurableBridgeRepository(session).abandon_stale_operations(
+            sweep = await DurableBridgeRepository(session).abandon_stale_operations(
                 cutoff=cutoff,
                 protected_operation_ids=protected_operation_ids,
                 batch_size=batch_size,
+                scan_cursor=self._operation_abandonment_scan_cursor,
             )
+        self._operation_abandonment_scan_cursor = sweep.next_cursor
+        return list(sweep.abandonments)
 
     async def get_replayable_transcript(
         self,

@@ -294,10 +294,11 @@ def _http_bridge_operation_fingerprint(
     api_key_scope: str,
     request_state: _WebSocketRequestState,
     text_data: str,
+    scope_root_to_session: bool = False,
 ) -> str:
     fingerprint_text = _text_without_account_installation_id(text_data)
-    if request_state.previous_response_id is None and _http_bridge_operation_fence_for_hard_continuity_enabled(
-        request_state
+    if request_state.previous_response_id is None and (
+        scope_root_to_session or _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
     ):
         # Hard turn-state requests do not carry previous_response_id. Scope
         # their operation identity to the durable session so identical prompts
@@ -1073,6 +1074,17 @@ class _HTTPBridgeRequestSubmitMixin:
             getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
         )
         operation_ledger_for_hard_continuity = _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+        persist_root_replay_operation = bool(
+            getattr(
+                _service_get_settings(),
+                "http_responses_session_bridge_complete_transcript_recovery_enabled",
+                False,
+            )
+            and session.codex_session
+            and request_state.previous_response_id is None
+            and not request_state.operation_rebind_required
+            and not recovery_attempt_consumed
+        )
         record_operation = getattr(self._durable_bridge, "record_operation", None)
         if (
             operation_ledger_enabled
@@ -1080,6 +1092,7 @@ class _HTTPBridgeRequestSubmitMixin:
             and (
                 request_state.previous_response_id is not None
                 or operation_ledger_for_hard_continuity
+                or persist_root_replay_operation
                 or request_state.operation_rebind_required
                 or recovery_attempt_consumed
             )
@@ -1097,6 +1110,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     api_key_scope=api_key_scope,
                     request_state=request_state,
                     text_data=text_data,
+                    scope_root_to_session=persist_root_replay_operation,
                 )
             )
             operation_id = (

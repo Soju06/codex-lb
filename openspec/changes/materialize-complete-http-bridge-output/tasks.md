@@ -9,9 +9,12 @@
   operations and add the schema migration.
 - [x] 1.5 Prefer a retained replay snapshot when reconstructing a continuation
   whose upstream parent-response chain is unavailable.
+- [x] 1.6 Persist the first/root Codex operation with a session-scoped
+  fingerprint when complete-transcript recovery is enabled.
 
 ## 2. Verification
 
 - [x] 2.1 Add focused unit coverage for empty terminal output and missing completion.
 - [x] 2.2 Add coverage for snapshot bounds and recovery after parent-chain purge.
-- [ ] 2.3 Run focused tests, lint, and strict OpenSpec validation.
+- [x] 2.3 Add coverage for root-operation registration and fingerprint scoping.
+- [ ] 2.4 Run focused tests, lint, and strict OpenSpec validation.

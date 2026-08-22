@@ -12,6 +12,8 @@ needs.
   response output is empty.
 - Persist a bounded, self-contained replay-input snapshot at completion so
   recovery does not depend on upstream retaining every parent response.
+- Record the first/root Codex turn in the durable operation ledger so the
+  replay chain has an anchor even when the client sends only deltas afterward.
 - Keep malformed, incomplete, or oversized event transcripts fail-closed.
 - Add focused regression coverage for ordered output-item reconstruction.
 

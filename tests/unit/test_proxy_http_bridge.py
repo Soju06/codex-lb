@@ -274,6 +274,40 @@ def test_http_bridge_operation_fingerprint_strips_account_installation_metadata(
     }
 
 
+def test_http_bridge_root_operation_fingerprint_is_session_scoped() -> None:
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-fingerprint",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+    )
+    request_text = '{"type":"response.create","input":"first turn"}'
+    unscoped = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="session-root",
+        api_key_scope="api-key-scope",
+        request_state=request_state,
+        text_data=request_text,
+    )
+    scoped = http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="session-root",
+        api_key_scope="api-key-scope",
+        request_state=request_state,
+        text_data=request_text,
+        scope_root_to_session=True,
+    )
+
+    assert scoped != unscoped
+    assert scoped == http_bridge_request_submit_module._http_bridge_operation_fingerprint(
+        session_id="session-root",
+        api_key_scope="api-key-scope",
+        request_state=request_state,
+        text_data=request_text,
+        scope_root_to_session=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_submit_hard_turn_walks_completed_operation_chain_before_recording(
     monkeypatch: pytest.MonkeyPatch,
@@ -354,6 +388,67 @@ async def test_submit_hard_turn_walks_completed_operation_chain_before_recording
     assert recorded["parent_response_id"] == "resp-3"
     assert recorded["request_fingerprint"] != initial_fingerprint
     assert json.loads(request_state.request_text or "{}")["previous_response_id"] == "resp-3"
+
+
+@pytest.mark.asyncio
+async def test_submit_root_turn_records_operation_for_complete_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="root-transcript-operation")
+    session.codex_session = True
+    session.durable_session_id = "durable-root-transcript-operation"
+    session.durable_owner_epoch = 4
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-root-transcript-operation",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        request_text='{"type":"response.create","input":"first turn"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    recorded: dict[str, Any] = {}
+
+    async def record_operation(**kwargs: Any) -> Any:
+        recorded.update(kwargs)
+        raise RuntimeError("stop after root operation identity assertion")
+
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_operation_by_fingerprint=AsyncMock(return_value=None),
+            get_operation=AsyncMock(return_value=None),
+            record_operation=record_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: _make_app_settings(
+            http_responses_session_bridge_ambiguous_continuation_recovery_mode="server_indefinite_recovery",
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_instance_id="instance-root-transcript-operation",
+        ),
+    )
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_cooldown_seconds", AsyncMock(return_value=0.0))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-root-transcript-operation",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    assert recorded["parent_response_id"] is None
+    assert json.loads(recorded["request_text"])["input"] == "first turn"
 
 
 @pytest.mark.asyncio

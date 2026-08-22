@@ -19,6 +19,11 @@ When a complete replay-input snapshot is available, recovery SHOULD use it as
 the fresh request input even if an upstream parent response is no longer
 available.
 
+When complete-transcript recovery is enabled, the proxy MUST durably record a
+root Codex turn with a session-scoped operation identity even when its request
+has no `previous_response_id`. This root record MUST include the request body
+and terminal output needed to seed later bounded snapshots.
+
 #### Scenario: Empty terminal output uses durable output-item events
 
 - **WHEN** a completed operation has `response.output=[]` and ordered

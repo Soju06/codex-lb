@@ -2902,11 +2902,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:
-    return [
-        account
-        for account in accounts
-        if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
-    ]
+    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
 
 
 def _mapped_model_has_registry_entry(model: str | None) -> bool:

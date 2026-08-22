@@ -5674,8 +5674,10 @@ class _RepoContext:
         capability_lineage = AsyncMock(spec=CapabilityLineageRepository)
         capability_lineage.is_required.return_value = False
         capability_lineage.require.return_value = ("test-marker",)
+        accounts = AsyncMock()
+        accounts.get_by_id_fresh.return_value = None
         self._repos = ProxyRepositories(
-            accounts=cast(AccountsRepository, AsyncMock()),
+            accounts=cast(AccountsRepository, accounts),
             usage=cast(UsageRepository, AsyncMock()),
             request_logs=cast(RequestLogsRepository, request_logs),
             sticky_sessions=cast(StickySessionsRepository, AsyncMock()),

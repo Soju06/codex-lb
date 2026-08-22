@@ -287,10 +287,7 @@ class AuthManager:
         self._refresh_claims = refresh_claims
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
-        if force or (
-            account.status != AccountStatus.REAUTH_REQUIRED
-            and should_refresh(account.last_refresh)
-        ):
+        if force or (account.status != AccountStatus.REAUTH_REQUIRED and should_refresh(account.last_refresh)):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
                 lambda: self._run_refresh(account),

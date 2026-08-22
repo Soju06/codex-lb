@@ -503,6 +503,32 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
+# Local patch (upstream proposal Soju06/codex-lb#1885): Codex clients only
+# switch to the HTTP transport when the websocket *handshake* is rejected
+# with HTTP 426 (codex-rs checks StatusCode::UPGRADE_REQUIRED on connect;
+# in-band error events never trigger the transport fallback). This marker
+# remembers a recent transient upstream websocket connect failure so the
+# websocket routes can deny the next handshake with 426 and steer clients
+# onto HTTP until the websocket upstream proves healthy again.
+_UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS = 60.0
+_upstream_ws_transport_failure_at: float | None = None
+
+
+def _mark_upstream_websocket_transport_failure() -> None:
+    global _upstream_ws_transport_failure_at
+    _upstream_ws_transport_failure_at = time.monotonic()
+
+
+def _clear_upstream_websocket_transport_failure() -> None:
+    global _upstream_ws_transport_failure_at
+    _upstream_ws_transport_failure_at = None
+
+
+def upstream_websocket_transport_recently_failed() -> bool:
+    marked_at = _upstream_ws_transport_failure_at
+    return marked_at is not None and time.monotonic() - marked_at < _UPSTREAM_WS_TRANSPORT_FAILURE_TTL_SECONDS
+
+
 logger = logging.getLogger(__name__)
 
 _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
@@ -4356,6 +4382,34 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
+        if not confirmed_pre_dispatch:
+            # Local patch (upstream proposal Soju06/codex-lb#1885): a
+            # server-level websocket connect failure is transport evidence,
+            # not account evidence. Codex clients retry the turn over the
+            # HTTP transport when a websocket connect fails with a 5xx, so
+            # surface the original failure immediately and skip the account
+            # error penalty: penalizing here drives the owner account into
+            # transient backoff and fails the HTTP retry closed on hard
+            # session affinity even though the HTTP upstream path is healthy.
+            connect_error = _parse_openai_error(exc.payload)
+            connect_error_code = _normalize_error_code(
+                connect_error.code if connect_error else None,
+                connect_error.type if connect_error else None,
+            )
+            if connect_error_code in (
+                "upstream_unavailable",
+                "upstream_websocket_handshake_failed",
+            ) and (exc.status_code is None or exc.status_code >= 500):
+                _mark_upstream_websocket_transport_failure()
+                _facade().logger.info(
+                    "Websocket connect transient transport failure surfaced for HTTP fallback "
+                    "request_id=%s account_id=%s status=%s code=%s",
+                    request_state.request_log_id or request_state.request_id,
+                    account.id,
+                    exc.status_code,
+                    connect_error_code,
+                )
+                return "surface"
         if confirmed_pre_dispatch:
             # A proven pre-dispatch proxy connect failure is account-local
             # transient evidence. The caller applies the bounded transient
@@ -4489,6 +4543,7 @@ class _WebSocketMixin:
             )
             if request_state is not None:
                 _record_websocket_route_metadata(request_state, upstream=upstream, route=route)
+            _clear_upstream_websocket_transport_failure()
             return upstream
         finally:
             connect_lease.release()

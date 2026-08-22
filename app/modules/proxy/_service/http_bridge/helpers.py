@@ -208,6 +208,14 @@ _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL = "missing_response_created
 T = TypeVar("T")
 
 _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR = "_codex_lb_started_at"
+# Provenance marker for bridge failures raised strictly before the current
+# request dispatched upstream. Only exceptions carrying this attribute are
+# safe for the streaming wrapper's raw-HTTP replay.
+_HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR = "http_bridge_pre_submit_failure"
+# Provenance for a bridge failure whose prepared payload carried a continuity
+# anchor the incoming payload does not, making a raw-HTTP replay of the
+# incoming payload continuity-incomplete.
+_HTTP_BRIDGE_PREPARED_ANCHOR_ATTR = "http_bridge_prepared_continuity_anchor"
 _HTTP_BRIDGE_STALE_INFLIGHT_MIN_SECONDS = 120.0
 _HTTP_BRIDGE_STALE_INFLIGHT_TIMEOUT_MULTIPLIER = 6.0
 

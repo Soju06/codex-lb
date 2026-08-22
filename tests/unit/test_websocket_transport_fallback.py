@@ -1203,3 +1203,132 @@ async def test_routed_open_success_does_not_clear_transport_failure_marker(
     await service._open_upstream_websocket(_stalling_account(service), {})
 
     assert transport_health.upstream_websocket_transport_recently_failed() is True
+
+
+def _cooldown_request_state(**overrides: Any) -> Any:
+    state = SimpleNamespace(
+        previous_response_id=None,
+        hard_continuity_anchor=False,
+        proxy_injected_previous_response_id=False,
+        file_required_preferred_account=False,
+        response_id=None,
+        response_event_count=0,
+        replay_count=0,
+        last_downstream_sequence_number=None,
+        downstream_visible=False,
+        response_create_attempt_count=0,
+    )
+    for name, value in overrides.items():
+        setattr(state, name, value)
+    return state
+
+
+def test_cooldown_suppression_replay_safety_predicate() -> None:
+    from app.modules.proxy._service.http_bridge.request_submit import (
+        _http_bridge_cooldown_suppression_is_replay_safe,
+    )
+
+    assert _http_bridge_cooldown_suppression_is_replay_safe(_cooldown_request_state()) is True
+
+    ambiguous_states = [
+        _cooldown_request_state(previous_response_id="resp_1"),
+        _cooldown_request_state(hard_continuity_anchor=True),
+        _cooldown_request_state(proxy_injected_previous_response_id=True),
+        _cooldown_request_state(file_required_preferred_account=True),
+        _cooldown_request_state(response_id="resp_2"),
+        _cooldown_request_state(response_event_count=1),
+        _cooldown_request_state(replay_count=1),
+        _cooldown_request_state(last_downstream_sequence_number=3),
+        _cooldown_request_state(downstream_visible=True),
+        _cooldown_request_state(response_create_attempt_count=1),
+    ]
+    for state in ambiguous_states:
+        assert _http_bridge_cooldown_suppression_is_replay_safe(state) is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_falls_back_on_replay_safe_cooldown_suppression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A cooldown-suppressed submission tagged replay-safe (fresh turn,
+    # provably undispatched) degrades to raw HTTP instead of a bounded 503.
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+    retry_calls: list[dict[str, Any]] = []
+
+    async def cooling_bridge(*_args: object, **_kwargs: object):
+        exc = _proxy_error(
+            503,
+            "upstream_request_timeout",
+            "HTTP responses session bridge is cooling down after repeated upstream timeouts; retry shortly.",
+        )
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+        raise exc
+        yield ""
+
+    async def record_stream_with_retry(*_args: object, **kwargs: object):
+        retry_calls.append(cast(dict[str, Any], kwargs))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", cooling_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", record_stream_with_retry)
+
+    chunks = await _collect_bridge_stream(service)
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert len(retry_calls) == 1
+    assert retry_calls[0]["upstream_stream_transport_override"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_untagged_cooldown_suppression_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A cooldown 503 for an ambiguous continuation carries no replay-safe
+    # provenance and keeps the bounded 503.
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+
+    async def cooling_bridge(*_args: object, **_kwargs: object):
+        raise _proxy_error(
+            503,
+            "upstream_request_timeout",
+            "HTTP responses session bridge is cooling down after repeated upstream timeouts; retry shortly.",
+        )
+        yield ""
+
+    async def fallback_must_not_run(*_args: object, **_kwargs: object):
+        raise AssertionError("fallback must not replay an ambiguous cooldown suppression")
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", cooling_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", fallback_must_not_run)
+
+    with pytest.raises(ProxyResponseError):
+        await _collect_bridge_stream(service)
+
+
+@pytest.mark.asyncio
+async def test_real_bridge_request_state_is_replay_safe_before_any_send() -> None:
+    # The predicate gates the cooldown fallback, so it must hold for a state
+    # built by the real bridge request-preparation path. An optimistic marker
+    # set at construction would make it false for every fresh turn and leave
+    # the fallback unreachable.
+    from app.modules.proxy._service.http_bridge.request_submit import (
+        _http_bridge_cooldown_suppression_is_replay_safe,
+    )
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state, _text = service._prepare_response_bridge_request_state(
+        _bridge_payload(),
+        api_key=None,
+        api_key_reservation=None,
+        include_type_field=True,
+        attach_event_queue=True,
+        transport="http",
+        client_metadata=None,
+        headers={},
+        request_id="req-cooldown-replay-safe",
+    )
+
+    assert request_state.awaiting_response_created is True
+    assert request_state.response_create_attempt_count == 0
+    assert _http_bridge_cooldown_suppression_is_replay_safe(request_state) is True

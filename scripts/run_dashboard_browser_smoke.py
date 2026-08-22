@@ -140,8 +140,19 @@ def run() -> int:
             _stop_server(server)
 
 
+def main(argv: list[str] | None = None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    if len(arguments) == 2 and arguments[0] == "--backend-fd":
+        _run_backend(int(arguments[1]))
+        return 0
+    if arguments != ["--frontend-built"]:
+        print(
+            "Run `make test-dashboard-browser-smoke` so app/static is rebuilt before the browser smoke test.",
+            file=sys.stderr,
+        )
+        return 2
+    return run()
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--backend-fd":
-        _run_backend(int(sys.argv[2]))
-        raise SystemExit(0)
-    raise SystemExit(run())
+    raise SystemExit(main())

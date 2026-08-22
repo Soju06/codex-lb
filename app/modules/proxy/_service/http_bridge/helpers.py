@@ -384,13 +384,10 @@ def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int
             started_at = getattr(future, _HTTP_BRIDGE_INFLIGHT_STARTED_AT_ATTR, None)
             age_seconds = max(0.0, now - started_at) if isinstance(started_at, (int, float)) else 0.0
             oldest_age_seconds = max(oldest_age_seconds, int(age_seconds))
-            cleanup_reason: str | None = None
             is_stale = isinstance(started_at, (int, float)) and age_seconds >= stale_after_seconds
             if is_stale:
                 stale += 1
-            if future.done():
-                cleanup_reason = "done"
-            if cleanup_reason is None:
+            if not future.done():
                 continue
             service._http_bridge_inflight_sessions.pop(key, None)
             cleaned += 1
@@ -402,7 +399,7 @@ def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int
             logger.warning(
                 "http_bridge_inflight_session_create_cleanup reason=%s bridge_kind=%s bridge_key=%s"
                 " age_seconds=%d stale_after_seconds=%d done=%s cancelled=%s",
-                cleanup_reason,
+                "done",
                 key.affinity_kind,
                 _hash_identifier(key.affinity_key),
                 int(age_seconds),
@@ -420,11 +417,12 @@ def _cleanup_http_bridge_inflight_sessions_nowait(service: Any) -> dict[str, int
 
 
 def _http_bridge_inflight_creation_count(service: Any) -> int:
-    return sum(
-        1
-        for future in service._http_bridge_inflight_sessions.values()
-        if not getattr(future, "_http_bridge_handoff", False)
-    )
+    def _counts_as_live_creation(future: Any) -> bool:
+        if getattr(future, "_http_bridge_handoff", False):
+            return False
+        return not future.done()
+
+    return sum(1 for future in service._http_bridge_inflight_sessions.values() if _counts_as_live_creation(future))
 
 
 def _http_bridge_session_generation_count(service: Any) -> int:
@@ -505,7 +503,7 @@ def http_bridge_activity_snapshot_nowait(service: Any) -> dict[str, int | bool]:
         else:
             pending_or_queued_requests += max(0, pending_count)
 
-    inflight_session_creates = len(service._http_bridge_inflight_sessions)
+    inflight_session_creates = _http_bridge_inflight_creation_count(service)
     active_cleanup_tasks = sum(
         1
         for task in service._background_cleanup_tasks

@@ -3447,6 +3447,26 @@ class _HTTPBridgeStreamingMixin:
                 retry_request_state.operation_attempt_generation = request_state.operation_attempt_generation
                 retry_request_state.operation_persisted_response_id = request_state.operation_persisted_response_id
                 retry_request_state.operation_rebind_required = request_state.operation_rebind_required
+                # An anchored recovery replays the proxy's own anchor, so the
+                # retry inherits its provenance. Without this the retry looks
+                # client-anchored: diagnostics report
+                # ``previous_response_source=client_supplied`` for an id no
+                # client sent, ``_http_bridge_request_state_wedged_reattach``
+                # cannot recognise the reattach, and an upstream denial of the
+                # anchor is not attributable to this proxy. The anchor-free
+                # recovery paths carry no anchor at all, so the flag stays
+                # false there and cannot describe an id the retry never sends.
+                retry_request_state.proxy_injected_previous_response_id = (
+                    request_state.proxy_injected_previous_response_id and retry_previous_response_id is not None
+                )
+                # Carried with the flag above, not separately: the anchor's
+                # retirability depends on whether the payload it was injected
+                # onto was full-resend shaped, and a retry that replays the
+                # anchor replays that shape too.
+                retry_request_state.proxy_injected_anchor_had_full_resend_payload = (
+                    request_state.proxy_injected_anchor_had_full_resend_payload
+                    and retry_request_state.proxy_injected_previous_response_id
+                )
                 if recovery_path == "local_previous_response_error":
                     # The prior response.failed/error made the operation
                     # terminal. Re-enter record_operation so its owner fence

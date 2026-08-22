@@ -416,6 +416,27 @@ class DurableBridgeSessionCoordinator:
             return None
         return _to_lookup(snapshot)
 
+    async def clear_live_session_response_anchor_if_matches(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        response_id: str,
+    ) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).clear_latest_response_anchor_if_matches(
+                session_id=session_id,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                response_id=response_id,
+            )
+        if snapshot is None:
+            return None
+        return _to_lookup(snapshot)
+
     async def record_recovery_attempt(
         self,
         *,

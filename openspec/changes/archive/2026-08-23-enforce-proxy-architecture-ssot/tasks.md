@@ -45,5 +45,5 @@
   architecture checker and its full unit test file.
 - [x] 5.2 Run strict scoped OpenSpec validation, affected main-spec validation,
   changed-file Ruff lint/format, focused `ty`, and `git diff --check`.
-- [ ] 5.3 Complete an independent review of the committed diff and resolve every
+- [x] 5.3 Complete an independent review of the committed diff and resolve every
   actionable in-scope finding before publication.

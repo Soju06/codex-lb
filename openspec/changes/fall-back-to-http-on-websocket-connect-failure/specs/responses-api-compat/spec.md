@@ -90,10 +90,14 @@ HTTP Responses requests MUST pin the upstream transport to `"http"` and MUST
 bypass the bridge, so a sticky follow-up that a client moved to the HTTP
 route cannot resolve back onto the unavailable websocket upstream. When
 bridge session creation fails with a server-level transient
-`upstream_unavailable` error carrying pre-submit session-creation provenance,
+`upstream_unavailable` error carrying pre-submit session-creation provenance
+**and** connect-phase transport provenance (`failure_phase = "connect"`),
 before any line reached the client and with no unsettled API-key usage
 reservation, the proxy MUST retry the turn over raw HTTP with the upstream
-transport pinned to `"http"` for that request. The fallback MUST NOT replay
+transport pinned to `"http"` for that request. A pre-submit failure that
+shares the `upstream_unavailable` envelope without connect provenance — an
+exhausted token-refresh loop in particular — is account evidence and MUST
+propagate unchanged. The fallback MUST NOT replay
 a failure without pre-submit provenance (the turn may already have
 dispatched upstream), MUST NOT run after any line reached the client, MUST
 NOT run while an API-key usage reservation is unsettled (reservation
@@ -116,6 +120,12 @@ settlement owns that path), and MUST NOT absorb non-transient failures.
 - **GIVEN** the HTTP responses bridge is enabled with the default upstream transport
 - **WHEN** bridge session creation fails with a 5xx classified `upstream_unavailable` error carrying pre-submit provenance before any line reached the client
 - **THEN** the turn is retried over raw HTTP with the upstream transport pinned to `"http"`
+
+#### Scenario: refresh-provenance failures propagate unchanged
+
+- **GIVEN** bridge session creation exhausts token refresh for the selected account and surfaces a pre-submit 502 `upstream_unavailable` without connect provenance
+- **WHEN** the failure reaches the bridge wrapper
+- **THEN** the failure propagates without an HTTP replay
 
 #### Scenario: post-submit transient failures are not replayed
 

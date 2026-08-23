@@ -1062,13 +1062,21 @@ class _HTTPBridgeStreamingMixin:
                 # the same turn twice. It is also confined to the
                 # subscription path: API-key reservations are settled by the
                 # finally block below, so re-entering streaming with the
-                # same reservation would double-settle it.
+                # same reservation would double-settle it. The
+                # ``failure_phase == "connect"`` requirement confines the
+                # replay to websocket-open transport evidence: an exhausted
+                # token-refresh loop surfaces the same 502
+                # ``upstream_unavailable`` envelope from this pre-submit
+                # stage, but it is account evidence — retrying it over raw
+                # HTTP re-runs the same failing refresh and buries the
+                # actionable error under ``no_accounts``.
                 fallback_error_code, _fallback_error_message = _proxy_error_code_message(exc)
                 if (
                     bridge_yielded_any
                     or api_key_reservation is not None
                     or not getattr(exc, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, False)
                     or fallback_error_code != "upstream_unavailable"
+                    or exc.failure_phase != "connect"
                     or (exc.status_code is not None and exc.status_code < 500)
                 ):
                     raise

@@ -386,7 +386,7 @@ def _bridge_payload() -> Any:
 
 
 def _pre_submit_error() -> ProxyResponseError:
-    exc = _proxy_error(502, "upstream_unavailable", "Request to upstream timed out")
+    exc = _proxy_error(502, "upstream_unavailable", "Request to upstream timed out", failure_phase="connect")
     setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
     return exc
 
@@ -484,6 +484,33 @@ async def test_http_bridge_falls_back_to_http_on_pre_submit_transient_failure(
     assert chunks == ['data: {"type":"response.completed"}\n\n']
     assert len(retry_calls) == 1
     assert retry_calls[0]["upstream_stream_transport_override"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_refresh_provenance_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An exhausted token-refresh loop surfaces the same pre-submit 502
+    # ``upstream_unavailable`` envelope, but without connect provenance it is
+    # account evidence: a raw-HTTP replay re-runs the same failing refresh
+    # and buries the actionable error under ``no_accounts``.
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+
+    async def refresh_failing_bridge(*_args: object, **_kwargs: object):
+        exc = _proxy_error(502, "upstream_unavailable", "temporary refresh failure")
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+        raise exc
+        yield ""
+
+    async def fallback_must_not_run(*_args: object, **_kwargs: object):
+        raise AssertionError("fallback must not replay an account-scoped refresh failure")
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", refresh_failing_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", fallback_must_not_run)
+
+    with pytest.raises(ProxyResponseError):
+        await _collect_bridge_stream(service)
 
 
 @pytest.mark.asyncio

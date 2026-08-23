@@ -26,17 +26,13 @@ failure count, cooldown deadline, last failure detail, and update time in the
 replicas cannot shorten an existing cooldown.
 
 When the cooldown expires, the proxy MUST admit exactly one probe request and
-MUST hold a half-open lease that suppresses other non-bypassed requests for
-that key while the probe is outstanding. The half-open lease MUST be no longer
-than the base backoff (sixty seconds), because a failing probe records a
-failure that clears the lease and arms a fresh cooldown, so a longer lease only
-extends the window in which an unrecorded probe failure leaves the key
-suppressed. If the circuit's last recorded failure is an eventless poison class
-(`stream_incomplete` or `stream_idle_timeout` with no observed response event),
-the proxy MUST abandon the session's durable continuity anchor before admitting
-the probe, so the probe resends the captured full history rather than the
-anchored request the circuit was opened on. A `clean_close` last failure MUST
-leave the anchor intact.
+MUST keep suppressing other non-bypassed requests for that key while that
+probe may still be running. When the circuit opens on an eventless
+poison-class failure (`stream_incomplete` or `stream_idle_timeout` with no
+observed response event), the proxy MUST quarantine the session key as
+specified under the silent-session quarantine requirement, so the probe
+admitted after the cooldown is planned without the anchor the circuit opened
+on. A `clean_close` opening MUST NOT quarantine the key.
 
 When the proxy suppresses a submission, the `retry_after_seconds` it returns
 and the detail it logs MUST reflect the timer that is actually refusing the
@@ -88,26 +84,18 @@ and durable circuit state.
 - **AND** persists at least two consecutive failures and a cooldown deadline
 - **AND** subsequent pre-created replay is suppressed until that deadline
 
-#### Scenario: half-open probe abandons a poisoned anchor before dispatch
+#### Scenario: circuit opened by eventless failures quarantines the key
 
-- **GIVEN** a hard-affinity key's circuit is open with `stream_incomplete` as its last recorded eventless failure
-- **AND** the session holds a durable continuity anchor
-- **WHEN** the cooldown expires and the next request arrives
-- **THEN** the proxy clears the durable continuity anchor through the fenced durable write
-- **AND** admits that request as the probe so it resends full history without the anchor
+- **GIVEN** a hard-affinity key has one recorded eventless `stream_incomplete` failure
+- **WHEN** a second eventless `stream_incomplete` failure opens the circuit
+- **THEN** the session key is quarantined with reason `retry_circuit_poisoned_anchor`
+- **AND** the next full-resend request on that key is planned without the durable anchor
 
-#### Scenario: half-open probe preserves the anchor after a clean close
+#### Scenario: circuit opened by clean closes does not quarantine the key
 
-- **GIVEN** a hard-affinity key's circuit is open with `clean_close` as its last recorded failure
-- **WHEN** the cooldown expires and the next request arrives
-- **THEN** the probe is admitted with the durable continuity anchor intact
-
-#### Scenario: half-open lease is bounded by the base backoff
-
-- **GIVEN** a probe has been admitted for a hard-affinity key
-- **WHEN** other non-bypassed requests for that key arrive
-- **THEN** they are suppressed for no longer than the base backoff
-- **AND** a recorded probe failure clears the lease and opens a fresh cooldown
+- **GIVEN** a hard-affinity key has one recorded `clean_close` failure
+- **WHEN** a second `clean_close` failure opens the circuit
+- **THEN** the session key is not quarantined
 
 #### Scenario: suppression reports the half-open lease after the cooldown expires
 
@@ -157,10 +145,10 @@ exist. The default threshold MUST be no greater than seven failures.
 Recovery MUST NOT depend on the counter reaching that threshold: because an
 open circuit admits only one probe per half-open lease, the counter may never
 reach a threshold above the circuit's own opening threshold from an interactive
-client. The retry circuit's half-open transition MUST therefore abandon the
-anchor independently, as specified under the durable retry-circuit
-requirement, so a dead anchor is dropped on the first probe after the circuit
-opens.
+client. The circuit opening on an eventless poison-class failure MUST
+therefore quarantine the key independently, as specified under the
+silent-session quarantine requirement, so a full-resend probe after the
+circuit opens is planned without the dead anchor.
 
 #### Scenario: Admission waiters cannot defer anchor poisoning forever
 
@@ -174,12 +162,12 @@ opens.
 - **AND** the next attach starts from fresh durable state rather than the
   poisoned previous-response anchor
 
-#### Scenario: A dead anchor is dropped before the poison threshold is reached
+#### Scenario: A dead anchor is bypassed before the poison threshold is reached
 
 - **GIVEN** a hard durable bridge key has two consecutive eventless `stream_incomplete` failures and an open circuit
 - **AND** the configured poison threshold is greater than two
-- **WHEN** the cooldown expires and the next request is admitted as the probe
-- **THEN** the durable continuity anchor has already been abandoned
+- **WHEN** the cooldown expires and the next full-resend request is admitted as the probe
+- **THEN** the key is quarantined and the probe is planned without the dead anchor
 - **AND** the probe resends full history rather than the dead anchor
 
 #### Scenario: Lease liveness comparison is timezone-safe
@@ -187,3 +175,94 @@ opens.
 - **WHEN** the dead-owner classifier evaluates lease liveness against the application's naive-UTC clock
 - **THEN** both timestamps MUST be normalized to naive UTC before comparison
 - **AND** the anchored-lookup path MUST NOT raise on mixed-awareness datetimes
+
+### Requirement: Silent HTTP bridge sessions are quarantined from re-attach and reuse
+
+When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its session key for a bounded window so later requests stop attaching to it. A session proves silent/wedged when either (a) a pending request being failed or retired carried a proxy-injected `previous_response_id`, had sent `response.create`, observed upstream response events, and never had `response.created` assigned, (b) the session key hits two consecutive eventless `missing_response_created_timeout` retires, or (c) the hard-affinity retry circuit for the key opens on an eventless poison-class failure (`stream_incomplete` or `stream_idle_timeout`), in which case the quarantine reason MUST be `retry_circuit_poisoned_anchor`. This holds for every path that fails or retires the request — partial stale-holder cleanup, the reader-failure funnel, and direct all-stale session retirement alike. The quarantine MUST be evaluated only when a request is already being failed or its session retired — never against a live owned turn — so a stream whose `response.created` was observed (including deferred-reasoning streams with long event gaps) MUST NOT be quarantined, and mere event silence during an owned live turn MUST NOT trigger quarantine by itself.
+
+While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
+
+Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection.
+
+#### Scenario: Reattach streams events but response.created is never assigned (#1534)
+
+- **GIVEN** a durable HTTP bridge session with a stored anchor whose fresh reattach injected a proxy-owned `previous_response_id`
+- **AND** the reattached upstream stream delivers response events but `response.created` is never assigned
+- **WHEN** the stream fails or the session is retired with that request still pending
+- **THEN** the request fails terminally as before
+- **AND** the session key is quarantined with reason `reattach_missing_response_created`
+
+#### Scenario: All-stale direct retirement still quarantines the key
+
+- **GIVEN** a wedged reattach (proxy-injected `previous_response_id`, `response.create` sent, response events observed, `response.created` never assigned) that is the ONLY stale pending request on its session
+- **WHEN** the stuck-gate watchdog retires the session directly instead of failing the stale holder individually
+- **THEN** the session key is quarantined with reason `reattach_missing_response_created`
+- **AND** the next request takes the fresh no-anchor path instead of rebuilding the identical anchored reattach
+
+#### Scenario: Next request after the wedge completes on the fresh path
+
+- **GIVEN** a session key quarantined after a reattach that streamed events without `response.created`
+- **WHEN** a later request arrives for the same key with a full-conversation-resend payload and no client `previous_response_id`
+- **THEN** the proxy does not inject the durable anchor for that request
+- **AND** the request is sent upstream unanchored with the client's own full payload
+- **AND** the request can complete normally instead of rebuilding the identical wedged reattach
+
+#### Scenario: Suppressed anchor does not come back through session state
+
+- **GIVEN** a quarantined session key and a full-conversation-resend payload whose stored durable prefix is trimmable but whose fresh suffix does not retain the prior output
+- **WHEN** the fresh-reattach durable-anchor injection is skipped because of the quarantine
+- **THEN** the durable anchor is not rehydrated into the fresh session's completed-response state
+- **AND** the session-level injection does not re-add the same anchor or trim the stored prefix
+- **AND** the dispatch goes upstream genuinely unanchored with the client's untrimmed payload
+- **AND** the suppression applies even when the fresh-reattach injection was already ineligible for other reasons (for example a conversation-scoped payload, a live alias session, or an active-owner forward that falls back to a local rebind)
+
+#### Scenario: Quarantined session is excluded from reuse selection
+
+- **GIVEN** a session marked quarantined that is still live or retained for admission handoff
+- **WHEN** a new request looks up that session key
+- **THEN** the session is not considered reusable
+- **AND** the request proceeds on a fresh session instead
+- **AND** a replacement session created under the same still-quarantined key is likewise not reusable until a completion or the TTL clears the quarantine
+
+#### Scenario: Repeated eventless timeouts quarantine the key
+
+- **GIVEN** a session key whose pending request already retired once with the eventless `missing_response_created_timeout`
+- **WHEN** a subsequent attach on the same key retires with the same eventless timeout before any response completes on the key
+- **THEN** the session key is quarantined with reason `repeated_eventless_timeout`
+- **AND** the first timeout alone does not quarantine the key
+
+#### Scenario: Deferred-reasoning live turn is never quarantined
+
+- **GIVEN** an owned live turn whose `response.created` was observed and whose events flow with long gaps (deferred reasoning)
+- **WHEN** its stream later fails or its session is retired
+- **THEN** the session key is not quarantined
+- **AND** later requests keep the existing reuse and anchor-injection behavior
+
+#### Scenario: Delta-only payloads keep their anchor while quarantined
+
+- **GIVEN** a quarantined session key — including one whose quarantined session is still open with other active requests
+- **WHEN** a later request arrives whose payload does not look like a full conversation resend
+- **THEN** the still-open quarantined session counts as absent for durable-anchor selection
+- **AND** the durable anchor is still injected for that request, preserving the client's only way to convey prior context
+
+#### Scenario: Quarantine is bounded and self-clearing
+
+- **GIVEN** a quarantined session key
+- **WHEN** a response completes on that session key, or the quarantine TTL elapses
+- **THEN** the quarantine (and its eventless strike counter) is cleared
+- **AND** a session that survived the quarantine window is reusable again instead of staying rejected forever
+- **AND** no durable row, janitor work, or account-health write was involved at any point
+
+#### Scenario: Retry circuit opened by eventless failures quarantines the key
+
+- **GIVEN** a hard-affinity bridge key whose retry circuit has one recorded eventless `stream_incomplete` failure
+- **WHEN** a second eventless `stream_incomplete` failure opens the circuit
+- **THEN** the session key is quarantined with reason `retry_circuit_poisoned_anchor`
+- **AND** a subsequent full-resend request on that key is dispatched unanchored through the existing fresh path
+- **AND** a subsequent delta-only request on that key still receives the durable anchor
+
+#### Scenario: Retry circuit opened by clean closes leaves the key unquarantined
+
+- **GIVEN** a hard-affinity bridge key whose retry circuit has one recorded `clean_close` failure
+- **WHEN** a second `clean_close` failure opens the circuit
+- **THEN** the session key is not quarantined

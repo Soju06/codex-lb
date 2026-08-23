@@ -35,6 +35,10 @@ _HTTP_BRIDGE_QUARANTINE_MAX_ENTRIES = 1024
 
 _HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON = "reattach_missing_response_created"
 _HTTP_BRIDGE_QUARANTINE_REPEATED_EVENTLESS_REASON = "repeated_eventless_timeout"
+# The hard-affinity retry circuit opened on an eventless poison-class failure
+# (``stream_incomplete`` / ``stream_idle_timeout``): the anchor it opened on
+# must not be re-injected into the probe admitted after the cooldown (#1852).
+_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON = "retry_circuit_poisoned_anchor"
 
 
 @dataclass(slots=True)

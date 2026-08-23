@@ -32,24 +32,28 @@ upstream instability.
 
 ## What Changes
 
-- On the transition to half-open, when the circuit's last recorded failure is
-  one of the eventless poison classes, the proxy abandons the durable
-  continuity anchor **before** admitting the probe, so the probe resends the
-  captured full history instead of the rejected anchored request. This reuses
-  the existing fenced `rebind_session_account(clear_continuity=True)` write
-  and emits a `half_open_anchor_abandoned` circuit event. A `clean_close`
-  last failure leaves the anchor intact.
-- The half-open lease is bounded to one base backoff (60 s). A failing probe
-  records a failure, which clears the lease and arms a fresh cooldown, so a
-  longer lease only widens the window in which an unrecorded probe failure
-  leaves the key silently suppressed.
+- When the hard-affinity retry circuit opens on an eventless poison-class
+  failure (`stream_incomplete` / `stream_idle_timeout`), the proxy quarantines
+  the bridge key with reason `retry_circuit_poisoned_anchor`. The existing
+  quarantine path (#1534) then plans the next full-resend request on that key
+  **unanchored** — the fresh-reattach injection, durable hydration, and
+  session-level injection are all suppressed — so the probe admitted after
+  the cooldown resends the client's full history instead of the anchor the
+  circuit opened on. Delta-only payloads keep their anchor, exactly as the
+  quarantine requirement already specifies, because it is their only way to
+  convey prior context. Quarantine keeps its existing TTL, registry bound,
+  and clear-on-completion semantics, and still writes no account health.
 - The suppression 503 reports whichever timer is actually refusing the
   request: `retry_after_seconds` and the logged detail now distinguish
   `hard_key_half_open` from `hard_key_cooldown`, and the message no longer
   claims the bridge is "cooling down" when it is not.
 
+The half-open lease is unchanged: it bounds the probe's lifetime so exactly
+one probe runs per transition, and shortening it would admit concurrent
+continuations on a hard key while a long probe is still streaming.
+
 No new settings. The anchor-poison threshold setting is unchanged; the
-half-open abandonment makes recovery independent of it rather than
+circuit-open quarantine makes recovery independent of it rather than
 reinterpreting it.
 
 ## Capabilities
@@ -63,11 +67,12 @@ reinterpreting it.
 ## Impact
 
 - Code: `app/modules/proxy/_service/http_bridge/retry_circuit.py`
-  (half-open transition, lease bound, block-reason helper) and
-  `request_submit.py` (suppression response).
-- Tests: unit coverage for anchor abandonment on poison details, anchor
-  preservation on `clean_close`, block-reason reporting in both states, and
-  the lease bound.
+  (circuit-open quarantine, block-reason helper), `quarantine.py` (reason),
+  and `request_submit.py` (suppression response).
+- Tests: the circuit-open quarantine on a poison detail and its absence on
+  `clean_close`; a product-path test that opens the circuit with two
+  eventless failures and asserts the next full-resend request is planned
+  without the durable anchor; block-reason reporting in both states.
 - API/schema: the suppression 503 message text changes and its
   `retry_after_seconds` becomes accurate during the half-open lease; the
   error code (`upstream_request_timeout`) and status are unchanged. No

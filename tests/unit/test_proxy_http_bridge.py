@@ -31522,3 +31522,122 @@ async def test_admission_waiters_do_not_accumulate_callbacks_on_shared_inflight_
     remaining = await asyncio.gather(*waiters[25:], return_exceptions=True)
     assert all(isinstance(result, ProxyResponseError) and result.status_code == 429 for result in remaining)
     assert key not in service._http_bridge_inflight_sessions
+
+
+@pytest.mark.asyncio
+async def test_half_open_probe_abandons_poisoned_anchor() -> None:
+    # A probe that replays the same anchored request cannot distinguish
+    # "upstream recovered" from "this anchor is poison", so the transition to
+    # half-open drops the durable anchor and lets the probe resend history.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-poison-probe")
+    hard_session.durable_session_id = "durable-poison-probe"
+    hard_session.durable_owner_epoch = 3
+    now = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now - 1.0,
+            last_detail="stream_incomplete",
+            last_touched_monotonic=now,
+        )
+    )
+    rebind = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=rebind,
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+
+    rebind.assert_awaited_once()
+    await_args = rebind.await_args
+    assert await_args is not None
+    assert await_args.kwargs["clear_continuity"] is True
+    assert await_args.kwargs["session_id"] == "durable-poison-probe"
+
+
+@pytest.mark.asyncio
+async def test_half_open_probe_preserves_anchor_for_non_poison_detail() -> None:
+    # A clean pre-response close is not anchor evidence, so the anchor stays.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-clean-probe")
+    hard_session.durable_session_id = "durable-clean-probe"
+    hard_session.durable_owner_epoch = 3
+    now = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now - 1.0,
+            last_detail="clean_close",
+            last_touched_monotonic=now,
+        )
+    )
+    rebind = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=rebind,
+    )
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+
+    rebind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_retry_block_reports_half_open_lease_not_expired_cooldown() -> None:
+    # Once the cooldown has expired but the lease has not, the cooldown is no
+    # longer what is refusing the request; reporting it advertises a ~1s
+    # retry-after while the caller is barred for the rest of the lease.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-block-reason")
+    now = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now - 1.0,
+            last_detail="clean_close",
+            last_touched_monotonic=now,
+        )
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is True
+    assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
+
+    block_seconds, reason = await service._http_bridge_precreated_retry_block(hard_session)
+    assert reason == "hard_key_half_open"
+    assert block_seconds > 1.0
+    # The legacy cooldown view reports ~0 here, which is exactly the misleading
+    # retry hint this pair of values replaces.
+    assert await service._http_bridge_precreated_retry_cooldown_seconds(hard_session) == 0.0
+
+
+@pytest.mark.asyncio
+async def test_retry_block_reports_cooldown_while_cooling() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-block-cooldown")
+    now = time.monotonic()
+    cast(Any, service)._http_bridge_retry_circuits[hard_session.key] = (
+        http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+            consecutive_failures=2,
+            cooldown_until=now + 30.0,
+            last_detail="stream_incomplete",
+            last_touched_monotonic=now,
+        )
+    )
+    service._durable_bridge = SimpleNamespace(lookup_retry_circuit=AsyncMock(return_value=None))
+
+    block_seconds, reason = await service._http_bridge_precreated_retry_block(hard_session)
+    assert reason == "hard_key_cooldown"
+    assert 0.0 < block_seconds <= 30.0
+
+
+def test_half_open_probe_lease_is_bounded_by_base_backoff() -> None:
+    # A failing probe records a failure, which clears the lease and arms a new
+    # cooldown; a lease longer than one backoff only widens the window in which
+    # an unrecorded probe failure leaves the key silently suppressed.
+    assert (
+        http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_PROBE_LEASE_SECONDS
+        <= http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS
+    )

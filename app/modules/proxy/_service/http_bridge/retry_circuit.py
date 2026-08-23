@@ -23,6 +23,14 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS = 60.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS = 30.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS = 600.0
+# The lease only has to keep a stampede off the single in-flight probe. A
+# failing probe records a failure, which clears the lease and arms a fresh
+# cooldown, so a lease longer than one backoff only extends the window in
+# which an unrecorded probe failure leaves the key silently suppressed.
+_HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_PROBE_LEASE_SECONDS = min(
+    _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS,
+    _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS,
+)
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
     {
         "stream_incomplete",
@@ -42,6 +50,41 @@ _HTTP_BRIDGE_ANCHOR_POISON_DETAILS = {
     "stream_idle_timeout": "repeated_zero_event_idle_timeout",
     "stream_incomplete": "repeated_zero_event_stream_incomplete",
 }
+
+
+async def _abandon_anchor_for_half_open_probe(
+    service: Any,
+    session: _HTTPBridgeSession,
+    *,
+    detail: str,
+) -> bool:
+    """Drop the durable anchor so the half-open probe is a real experiment.
+
+    Imported lazily: ``upstream_events`` already imports this module, so a
+    module-level import would be circular.
+    """
+    from app.modules.proxy._service.http_bridge.upstream_events import (
+        _abandon_durable_http_bridge_continuity,
+    )
+
+    try:
+        cleared = await _abandon_durable_http_bridge_continuity(service, session, detail=detail)
+    except Exception:
+        logger.warning(
+            "Failed to abandon durable anchor for half-open probe bridge_kind=%s bridge_key=%s",
+            session.key.affinity_kind,
+            _hash_identifier(session.key.affinity_key),
+            exc_info=True,
+        )
+        return False
+    logger.info(
+        "http_bridge_retry_circuit event=half_open_anchor_abandoned bridge_kind=%s bridge_key=%s detail=%s cleared=%s",
+        session.key.affinity_kind,
+        _hash_identifier(session.key.affinity_key),
+        detail,
+        cleared,
+    )
+    return bool(cleared)
 
 
 def _http_bridge_anchor_poison_detail(detail: str | None) -> str | None:
@@ -379,6 +422,8 @@ class _HTTPBridgeRetryCircuitMixin:
 
         await self._load_http_bridge_retry_circuit(session)
         now = time.monotonic()
+        probe_should_abandon_anchor = False
+        probe_poison_detail: str | None = None
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
             if state is None or state.cooldown_until <= now:
@@ -394,13 +439,33 @@ class _HTTPBridgeRetryCircuitMixin:
                     return False
                 if state is not None and state.cooldown_until > 0:
                     state.cooldown_until = 0.0
-                    state.half_open_until = now + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
+                    state.half_open_until = now + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_PROBE_LEASE_SECONDS
+                    # A probe that replays the same anchored request cannot
+                    # tell "upstream recovered" from "this anchor is poison":
+                    # the suspected cause is the input, so holding it fixed
+                    # means the circuit can only re-open. Drop the durable
+                    # anchor first so the probe resends full history instead.
+                    probe_poison_detail = _http_bridge_anchor_poison_detail(state.last_detail)
+                    probe_should_abandon_anchor = probe_poison_detail is not None
                     logger.info(
-                        "http_bridge_retry_circuit event=half_open bridge_kind=%s bridge_key=%s failures=%s",
+                        "http_bridge_retry_circuit event=half_open bridge_kind=%s bridge_key=%s failures=%s "
+                        "anchor_free_probe=%s",
                         session.key.affinity_kind,
                         _hash_identifier(session.key.affinity_key),
                         state.consecutive_failures,
+                        probe_should_abandon_anchor,
                     )
+                    if probe_poison_detail is not None:
+                        # Performed under the circuit lock deliberately: it
+                        # runs at most once per lease for a key that is
+                        # already wedged, and the clear must land before the
+                        # probe is planned, or the bridge re-injects the very
+                        # anchor this transition judged poisonous.
+                        await _abandon_anchor_for_half_open_probe(
+                            self,
+                            session,
+                            detail=probe_poison_detail,
+                        )
                 return True
 
             retry_after = max(0.0, state.cooldown_until - now)
@@ -446,6 +511,37 @@ class _HTTPBridgeRetryCircuitMixin:
                 state.last_detail,
             )
             return False
+
+    async def _http_bridge_precreated_retry_block(
+        self: Any,
+        session: _HTTPBridgeSession,
+    ) -> tuple[float, str]:
+        """Return ``(seconds_blocked, reason)`` for a suppressed submission.
+
+        The cooldown is not always what is refusing the request: once it has
+        expired the half-open lease keeps refusing everything except the one
+        admitted probe. Reporting the cooldown in that window advertises a
+        retry-after of ~1s while the caller is barred for the rest of the
+        lease, which turns a wedged key into a client retry storm.
+        """
+        if session.key.strength != "hard":
+            return 0.0, "none"
+
+        await self._load_http_bridge_retry_circuit(session)
+        now = time.monotonic()
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(session.key)
+            if state is None:
+                return 0.0, "none"
+            cooldown_remaining = max(0.0, state.cooldown_until - now)
+            half_open_remaining = (
+                max(0.0, state.half_open_until - now)
+                if state.consecutive_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+                else 0.0
+            )
+        if half_open_remaining > cooldown_remaining:
+            return half_open_remaining, "hard_key_half_open"
+        return cooldown_remaining, "hard_key_cooldown"
 
     async def _http_bridge_precreated_retry_cooldown_seconds(self: Any, session: _HTTPBridgeSession) -> float:
         if session.key.strength != "hard":

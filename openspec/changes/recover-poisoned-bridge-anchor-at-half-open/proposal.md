@@ -43,6 +43,14 @@ upstream instability.
   quarantine requirement already specifies, because it is their only way to
   convey prior context. Quarantine keeps its existing TTL, registry bound,
   and clear-on-completion semantics, and still writes no account health.
+- An upstream terminal error frame that fails a pending request before any
+  response event now records an attempt-scoped circuit strike. Such failures
+  settle through the terminal path rather than the retirement funnel and
+  previously never advanced the circuit at all — in the observed incident,
+  five eventless `previous_response_not_found` terminal frames on one key
+  left the persisted counter at `1`, so neither the circuit nor the
+  quarantine above could ever engage while the bridge kept re-injecting the
+  dead anchor.
 - The suppression 503 reports whichever timer is actually refusing the
   request: `retry_after_seconds` and the logged detail now distinguish
   `hard_key_half_open` from `hard_key_cooldown`, and the message no longer

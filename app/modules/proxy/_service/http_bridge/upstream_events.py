@@ -3059,6 +3059,19 @@ class _HTTPBridgeUpstreamEventsMixin:
                 cache_key_family=session.key.affinity_kind,
                 model_class=_extract_model_class(session.request_model) if session.request_model else None,
             )
+            if error_code is not None and terminal_request_state.response_event_count == 0:
+                # An upstream terminal frame that fails the request before any
+                # response event is the same pre-response failure the circuit
+                # measures on eventless retirements; it reaches this settlement
+                # path instead of the retirement funnel, so it would otherwise
+                # never count. Attempt-scoped recording keeps a later
+                # retirement of the same lifecycle from double-counting, and
+                # the recorder itself drops non-circuit details and soft keys.
+                await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=error_code,
+                    attempt=terminal_request_state.response_create_attempt,
+                )
 
         try:
             await self._finalize_websocket_request_state(

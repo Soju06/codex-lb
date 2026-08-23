@@ -15,7 +15,13 @@ session still owns at least one pending request and no response event has been
 observed for that request lifecycle. Retiring an idle upstream bridge with no
 pending request MUST NOT advance the circuit or cause a later request to be
 treated as a repeated failure. A pending request that has already emitted a
-response event MUST remain excluded from this pre-response circuit.
+response event MUST remain excluded from this pre-response circuit. An
+upstream terminal error frame that fails a pending request before any
+response event was observed MUST record one failure for that request
+lifecycle through the same attempt-scoped recorder, because that failure
+settles through the terminal path rather than a retirement and would
+otherwise never advance the circuit; a later retirement of the same lifecycle
+MUST NOT count it again.
 
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
@@ -69,6 +75,13 @@ and durable circuit state.
 - **GIVEN** a hard-affinity HTTP bridge owns a pending request with no observed response event
 - **WHEN** the bridge retires because the upstream fails before acknowledging the request
 - **THEN** the retry circuit records exactly one failure for that request lifecycle
+
+#### Scenario: eventless terminal error frame consumes exactly one strike
+
+- **GIVEN** a hard-affinity HTTP bridge owns a pending request with no observed response event
+- **WHEN** upstream fails that request with a terminal error frame (for example a rewritten `previous_response_not_found`) before any response event
+- **THEN** the retry circuit records exactly one failure for that request lifecycle
+- **AND** a subsequent retirement of the same lifecycle does not record a second failure
 
 #### Scenario: midstream retirement does not consume a pre-response strike
 

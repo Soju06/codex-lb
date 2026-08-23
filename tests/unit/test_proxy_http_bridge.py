@@ -31743,3 +31743,153 @@ async def test_retry_block_reports_cooldown_while_cooling() -> None:
     block_seconds, reason = await service._http_bridge_precreated_retry_block(hard_session)
     assert reason == "hard_key_cooldown"
     assert 0.0 < block_seconds <= 30.0
+
+
+def _make_terminal_error_bridge_fixture(
+    *,
+    request_id: str,
+    key_value: str,
+    response_event_count: int,
+) -> tuple[proxy_service.ProxyService, proxy_service._HTTPBridgeSession, proxy_service._WebSocketRequestState]:
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id=request_id,
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=1)
+    request_state.response_event_count = response_event_count
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", key_value, None),
+        headers={"x-codex-session-id": key_value},
+        affinity=proxy_service._AffinityPolicy(
+            key=key_value,
+            kind=proxy_service.StickySessionKind.CODEX_SESSION,
+        ),
+        request_model="gpt-5.4",
+        account=cast(Any, SimpleNamespace(id="acc-1", status=AccountStatus.ACTIVE)),
+        upstream=cast(UpstreamWebSocket, SimpleNamespace(close=AsyncMock())),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=1.0,
+        idle_ttl_seconds=120.0,
+    )
+    return service, session, request_state
+
+
+_PREVIOUS_RESPONSE_NOT_FOUND_FRAME = json.dumps(
+    {
+        "type": "error",
+        "status": 400,
+        "error": {
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found",
+            "message": "Previous response with id 'resp_dead_anchor' not found.",
+            "param": "previous_response_id",
+        },
+    },
+    separators=(",", ":"),
+)
+
+
+@pytest.mark.asyncio
+async def test_eventless_terminal_error_records_attempt_scoped_circuit_strike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Product path: upstream answers the anchored request with a terminal
+    # error frame before any response event. That settles through the
+    # terminal path rather than the retirement funnel, and previously never
+    # advanced the circuit, so the dead anchor was re-injected forever.
+    service, session, request_state = _make_terminal_error_bridge_fixture(
+        request_id="req-terminal-strike",
+        key_value="sid-terminal-strike",
+        response_event_count=0,
+    )
+    record_failure = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    record_failure.assert_awaited_once()
+    await_args = record_failure.await_args
+    assert await_args is not None
+    assert await_args.args[0] is session
+    assert await_args.kwargs["detail"] == "stream_incomplete"
+    assert await_args.kwargs["attempt"] is request_state.response_create_attempt
+
+
+@pytest.mark.asyncio
+async def test_midstream_terminal_error_does_not_record_circuit_strike(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A request that already streamed response events is excluded from the
+    # pre-response circuit, exactly as midstream retirements are.
+    service, session, _request_state = _make_terminal_error_bridge_fixture(
+        request_id="req-terminal-midstream",
+        key_value="sid-terminal-midstream",
+        response_event_count=3,
+    )
+    record_failure = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", record_failure)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    record_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_two_eventless_terminal_errors_open_circuit_and_quarantine_key() -> None:
+    # End to end through the real recorder: two eventless terminal-frame
+    # failures on one hard key open the circuit and quarantine the key, so
+    # the next full-resend request is planned without the dead anchor.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-terminal-open-1",
+        key_value="sid-terminal-open",
+        response_event_count=0,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    second = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-open-2",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=2.0,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    second.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    session.pending_requests.append(second)
+    session.queued_request_count = 1
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.reason == "retry_circuit_poisoned_anchor"

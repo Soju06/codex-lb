@@ -6,7 +6,9 @@
       when the retry circuit opens on an eventless poison-class failure, so
       the existing quarantine path plans the next full-resend request
       unanchored; leave `clean_close` alone
-- [x] 1.2 Report the timer actually refusing a suppressed submission
+- [x] 1.2 Record an attempt-scoped circuit strike when an upstream terminal
+      error frame fails a pending request before any response event
+- [x] 1.3 Report the timer actually refusing a suppressed submission
       (`hard_key_half_open` vs `hard_key_cooldown`) in both the 503
       `retry_after_seconds` and the circuit event detail, and stop claiming
       "cooling down" when the cooldown has expired
@@ -18,7 +20,11 @@
 - [x] 2.2 Product path: after the circuit opens on eventless failures, the
       next full-resend request through `_stream_via_http_bridge` is prepared
       with no `previous_response_id`
-- [x] 2.3 Block reason reports the half-open lease once the cooldown has
+- [x] 2.3 Product path: an eventless `previous_response_not_found` terminal
+      frame through `_process_http_bridge_upstream_text` records one
+      attempt-scoped strike; a midstream one records none; two of them open
+      the circuit and quarantine the key through the real recorder
+- [x] 2.4 Block reason reports the half-open lease once the cooldown has
       expired (where the legacy cooldown view reports ~0) and the cooldown
       while cooling
 

@@ -16,6 +16,9 @@ from app.core.openai.models import CompactResponsePayload
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import (
+    API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET,
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
@@ -89,6 +92,26 @@ def _service_tier_from_response(
     if not isinstance(extra, Mapping):
         return None
     return _normalize_service_tier_value(extra.get("service_tier"))
+
+
+def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
+    if budget is None:
+        return 0.0
+    input_tokens = _bounded_lease_token_estimate(
+        budget.input_tokens,
+        default=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+    )
+    output_tokens = _bounded_lease_token_estimate(
+        budget.output_tokens,
+        default=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    )
+    return float(input_tokens + output_tokens)
+
+
+def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
+    if value is None:
+        return default
+    return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
 class _ApiKeyUsageMixin:

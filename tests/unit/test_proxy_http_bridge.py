@@ -11472,12 +11472,14 @@ async def _run_session_anchor_owner_stream(
     *,
     account_id: str,
     anchor_owner_account_id: str | None,
-) -> list[proxy_service.ResponsesRequest]:
-    """Drive _stream_via_http_bridge for a trimmable session-anchor turn.
+    self_contained_full_resend: bool,
+    pending_tool_loop_complete: bool | None = None,
+) -> tuple[list[proxy_service.ResponsesRequest], list[dict[str, Any]], list[str]]:
+    """Drive _stream_via_http_bridge for a session-anchor decision.
 
-    The stored prefix matches the incoming input (so the trim branch WOULD
-    apply); the only variable is whether the serving account owns the anchor.
-    Returns the payloads passed to each prepare call.
+    The full resend always matches the stored prefix. Its fresh suffix either
+    retains completed assistant output or omits that context. Returns every
+    payload passed to the prepare boundary.
     """
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     prefix_items: list[proxy_service.JsonValue] = [
@@ -11485,40 +11487,88 @@ async def _run_session_anchor_owner_stream(
         {"role": "assistant", "content": [{"type": "output_text", "text": "b"}]},
         {"role": "user", "content": [{"type": "input_text", "text": "c"}]},
     ]
+    continuation_item: proxy_service.JsonValue = {
+        "role": "user",
+        "content": [{"type": "input_text", "text": "d"}],
+    }
+    retained_output: list[proxy_service.JsonValue] = []
+    pending_tool_calls: dict[str, str] = {}
+    if pending_tool_loop_complete is not None:
+        pending_tool_calls = {"call_lookup": "function_call"}
+        retained_output.append(
+            {
+                "type": "function_call",
+                "call_id": "call_lookup",
+                "name": "lookup",
+                "arguments": "{}",
+            }
+        )
+        if pending_tool_loop_complete:
+            retained_output.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_lookup",
+                    "output": "result",
+                }
+            )
+    elif self_contained_full_resend:
+        retained_output.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "prior answer"}],
+            }
+        )
+    input_items = [*prefix_items, *retained_output]
+    if pending_tool_loop_complete is None:
+        input_items.append(continuation_item)
     payload = proxy_service.ResponsesRequest.model_validate(
         {
             "model": "gpt-5.4",
             "instructions": "hi",
-            "input": [*prefix_items, {"role": "user", "content": [{"type": "input_text", "text": "d"}]}],
+            "input": input_items,
         },
     )
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="req-session-anchor-owner",
-        model="gpt-5.4",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=1.0,
-        event_queue=asyncio.Queue(),
-        transport="http",
-    )
-    event_queue = request_state.event_queue
-    assert event_queue is not None
-    await event_queue.put(None)
     prepared_payloads: list[proxy_service.ResponsesRequest] = []
+    sent_frames: list[dict[str, Any]] = []
+    real_prepare = service._prepare_http_bridge_request
 
-    def fake_prepare(
+    def recording_prepare(
         prepared_payload: proxy_service.ResponsesRequest,
-        _headers: dict[str, str] | Any,
+        prepared_headers: dict[str, str] | Any,
         *,
         api_key: proxy_service.ApiKeyData | None,
         api_key_reservation: proxy_service.ApiKeyUsageReservationData | None,
         request_id: str,
         client_ip: str | None = None,
     ) -> tuple[proxy_service._WebSocketRequestState, str]:
-        del api_key, api_key_reservation, request_id, client_ip
         prepared_payloads.append(prepared_payload)
-        return request_state, '{"type":"response.create"}'
+        return real_prepare(
+            prepared_payload,
+            prepared_headers,
+            api_key=api_key,
+            api_key_reservation=api_key_reservation,
+            request_id=request_id,
+            client_ip=client_ip,
+        )
+
+    async def fake_submit(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+    ) -> None:
+        del _session, queue_limit
+        sent_frames.append(json.loads(text_data))
+        event_queue = request_state.event_queue
+        assert event_queue is not None
+        await event_queue.put(
+            'data: {"type":"response.completed","response":'
+            '{"id":"resp_session_test","status":"completed","output":[]}}\n\n'
+        )
+        await event_queue.put(None)
 
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-anchor-owner", None),
@@ -11542,6 +11592,7 @@ async def _run_session_anchor_owner_stream(
         last_completed_response_account_id=anchor_owner_account_id,
         last_completed_input_count=3,
         last_completed_input_prefix_fingerprint=proxy_service._fingerprint_input_items(prefix_items),
+        last_pending_tool_calls=pending_tool_calls,
     )
 
     monkeypatch.setattr(
@@ -11564,56 +11615,182 @@ async def _run_session_anchor_owner_stream(
     )
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
-    monkeypatch.setattr(service, "_prepare_http_bridge_request", fake_prepare)
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", recording_prepare)
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
-    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit)
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
 
-    async for _chunk in service._stream_via_http_bridge(
-        payload,
-        headers={"x-codex-session-id": "sid-anchor-owner"},
-        codex_session_affinity=True,
-        propagate_http_errors=False,
-        openai_cache_affinity=False,
-        api_key=None,
-        api_key_reservation=None,
-        suppress_text_done_events=False,
-        idle_ttl_seconds=120.0,
-        codex_idle_ttl_seconds=1800.0,
-        max_sessions=8,
-        queue_limit=4,
-    ):
-        pass
-    return prepared_payloads
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-anchor-owner"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+    return prepared_payloads, sent_frames, chunks
 
 
 @pytest.mark.asyncio
-async def test_stream_via_http_bridge_injects_session_anchor_when_account_owns_it(
+async def test_stream_via_http_bridge_skips_session_anchor_for_self_contained_full_resend(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.service"):
+        prepared, sent_frames, chunks = await _run_session_anchor_owner_stream(
+            monkeypatch,
+            account_id="acc-1",
+            anchor_owner_account_id="acc-1",
+            self_contained_full_resend=True,
+        )
+
+    assert all(payload.previous_response_id is None for payload in prepared)
+    assert prepared[-1].input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "a"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "b"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "c"}]},
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "d"}]},
+    ]
+    assert "session_anchor_injection_skipped" in caplog.text
+    assert "reason=full_resend_safe_fresh_context" in caplog.text
+    assert "previous_response_id" not in sent_frames[-1]
+    assert sent_frames[-1]["input"] == prepared[-1].input
+    assert any("response.completed" in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_keeps_session_anchor_for_unsafe_full_resend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Serving account owns the anchor -> the compact anchor is injected as normal.
-    prepared = await _run_session_anchor_owner_stream(monkeypatch, account_id="acc-1", anchor_owner_account_id="acc-1")
-    # Injection re-prepares the payload, so the final (sent) request carries the anchor.
+    prepared, sent_frames, chunks = await _run_session_anchor_owner_stream(
+        monkeypatch,
+        account_id="acc-1",
+        anchor_owner_account_id="acc-1",
+        self_contained_full_resend=False,
+    )
+
     assert prepared[-1].previous_response_id == "resp_session_latest"
+    assert prepared[-1].input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "d"}]},
+    ]
+    assert sent_frames[-1]["previous_response_id"] == "resp_session_latest"
+    assert sent_frames[-1]["input"] == prepared[-1].input
+    assert any("response.completed" in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_skips_session_anchor_for_complete_pending_tool_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, sent_frames, chunks = await _run_session_anchor_owner_stream(
+        monkeypatch,
+        account_id="acc-1",
+        anchor_owner_account_id="acc-1",
+        self_contained_full_resend=False,
+        pending_tool_loop_complete=True,
+    )
+
+    assert all(payload.previous_response_id is None for payload in prepared)
+    assert isinstance(prepared[-1].input, list)
+    assert prepared[-1].input[-2:] == [
+        {
+            "type": "function_call",
+            "call_id": "call_lookup",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_lookup",
+            "output": "result",
+        },
+    ]
+    assert "previous_response_id" not in sent_frames[-1]
+    assert sent_frames[-1]["input"] == prepared[-1].input
+    assert any("response.completed" in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_repairs_missing_pending_tool_output_on_anchored_resend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, sent_frames, chunks = await _run_session_anchor_owner_stream(
+        monkeypatch,
+        account_id="acc-1",
+        anchor_owner_account_id="acc-1",
+        self_contained_full_resend=False,
+        pending_tool_loop_complete=False,
+    )
+
+    assert prepared[-1].previous_response_id == "resp_session_latest"
+    assert isinstance(prepared[-1].input, list)
+    assert prepared[-1].input[0] == {
+        "type": "function_call_output",
+        "call_id": "call_lookup",
+        "output": (
+            "Tool call was not executed because the previous turn was interrupted before tool output was available."
+        ),
+    }
+    assert prepared[-1].input[1:] == [
+        {
+            "type": "function_call",
+            "call_id": "call_lookup",
+            "name": "lookup",
+            "arguments": "{}",
+        },
+    ]
+    assert sent_frames[-1]["previous_response_id"] == "resp_session_latest"
+    assert sent_frames[-1]["input"] == prepared[-1].input
+    assert any("response.completed" in chunk for chunk in chunks)
 
 
 @pytest.mark.asyncio
 async def test_stream_via_http_bridge_skips_session_anchor_after_cross_account_failover(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # Anchor was created on acc-1 but the session now serves on acc-2 (failover).
-    # A previous_response_id is account-scoped upstream, so injecting it here would
-    # send an unresolvable anchor with the history trimmed away -> upstream never
-    # emits response.created -> the response-create gate wedges. It must be skipped
-    # and the full history resent instead.
-    prepared = await _run_session_anchor_owner_stream(monkeypatch, account_id="acc-2", anchor_owner_account_id="acc-1")
+    # A previous_response_id is account-scoped upstream, so the session path
+    # must not send an acc-1 anchor through acc-2.
+    with caplog.at_level(logging.INFO, logger="app.modules.proxy.service"):
+        prepared, sent_frames, chunks = await _run_session_anchor_owner_stream(
+            monkeypatch,
+            account_id="acc-2",
+            anchor_owner_account_id="acc-1",
+            self_contained_full_resend=True,
+        )
     assert all(payload.previous_response_id != "resp_session_latest" for payload in prepared)
     assert prepared[-1].input == [
         {"role": "user", "content": [{"type": "input_text", "text": "a"}]},
         {"role": "assistant", "content": [{"type": "output_text", "text": "b"}]},
         {"role": "user", "content": [{"type": "input_text", "text": "c"}]},
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "prior answer"}],
+        },
         {"role": "user", "content": [{"type": "input_text", "text": "d"}]},
     ]
+    assert "event=cross_account_anchor_declined" in caplog.text
+    assert "previous_response_id" not in sent_frames[-1]
+    assert sent_frames[-1]["input"] == prepared[-1].input
+    assert any("response.completed" in chunk for chunk in chunks)
 
 
 @pytest.mark.asyncio

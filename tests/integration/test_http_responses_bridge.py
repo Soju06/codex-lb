@@ -8919,9 +8919,9 @@ async def test_backend_responses_http_bridge_declines_cross_account_anchor_and_s
     assert bridge_session.last_completed_response_id == "resp_cross_account_serving_1"
     assert bridge_session.last_completed_response_account_id == serving_account.id
 
-    # Same-account continuity is untouched: once the durable record names the
-    # account that actually created the response, the very next turn anchors on
-    # it instead of resending the whole history.
+    # The next same-account full resend retains completed assistant output, so
+    # it is self-contained and must not receive the session anchor even though
+    # its stored prefix matches.
     durable_record = _durable_record(
         account_id=serving_account.id,
         latest_response_id="resp_cross_account_serving_1",
@@ -8953,7 +8953,17 @@ async def test_backend_responses_http_bridge_declines_cross_account_anchor_and_s
     _assert_created_text_delta_completed(second_events)
     assert len(serving_upstream.sent_text) == 2
     follow_up_payload = json.loads(serving_upstream.sent_text[1])
-    assert follow_up_payload["previous_response_id"] == "resp_cross_account_serving_1"
+    assert "previous_response_id" not in follow_up_payload
+    assert follow_up_payload["input"] == [
+        *compacted_resend,
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "OK"}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": "third question"}]},
+    ]
     assert bridge_session.response_create_gate.locked() is False
 
 

@@ -257,6 +257,36 @@ def _http_bridge_durable_recovery_predecessor_proven(request_state: _WebSocketRe
     return request_state.previous_response_id is not None or request_state.operation_parent_response_id is not None
 
 
+def _http_bridge_full_resend_has_safe_fresh_context(
+    input_items: list[JsonValue],
+    *,
+    stored_count: int,
+    pending_tool_calls: Mapping[str, str] | None,
+) -> bool:
+    replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+        input_items,
+        stored_count=stored_count,
+        # Classification only: inline Responses-Lite developer IDs must
+        # remain visible until the proof rejects response-owned messages.
+        preserve_developer_message_ids=True,
+    )
+    if replay_projection is None:
+        return False
+    return responses_input_suffix_retains_prior_output(
+        replay_projection.input_items,
+        stored_count=replay_projection.stored_prefix_count,
+        canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+    ) or (
+        pending_tool_calls is not None
+        and responses_input_suffix_matches_pending_tool_calls(
+            replay_projection.input_items,
+            stored_count=replay_projection.stored_prefix_count,
+            pending_tool_calls=pending_tool_calls,
+            canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
+        )
+    )
+
+
 class _VerifiedDurableFullResend:
     """Immutable proof that one payload contains a durable turn's complete context."""
 
@@ -359,31 +389,12 @@ class _VerifiedDurableFullResend:
         ):
             return None
         input_items = cast(list[JsonValue], payload.input)
-        replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+        pending_tool_calls = durable_lookup.latest_pending_tool_calls
+        if not _http_bridge_full_resend_has_safe_fresh_context(
             input_items,
             stored_count=stored_count,
-            # Classification only, mirroring classify_durable_full_resend:
-            # inline Responses-Lite developer IDs must remain visible until
-            # the exact-manifest check rejects response-owned messages.
-            preserve_developer_message_ids=True,
-        )
-        pending_tool_calls = durable_lookup.latest_pending_tool_calls
-        if replay_projection is None:
-            return None
-        safe_fresh_context = responses_input_suffix_retains_prior_output(
-            replay_projection.input_items,
-            stored_count=replay_projection.stored_prefix_count,
-            canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
-        ) or (
-            pending_tool_calls is not None
-            and responses_input_suffix_matches_pending_tool_calls(
-                replay_projection.input_items,
-                stored_count=replay_projection.stored_prefix_count,
-                pending_tool_calls=pending_tool_calls,
-                canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
-            )
-        )
-        if not safe_fresh_context:
+            pending_tool_calls=pending_tool_calls,
+        ):
             return None
         return cls(
             _token=cls.__construction_token,
@@ -1368,30 +1379,11 @@ class _HTTPBridgeStreamingMixin:
                 or not isinstance(payload.input, list)
             ):
                 return None, None, False
-            replay_projection = project_responses_input_for_account_neutral_fresh_replay(
+            safe_fresh_context = _http_bridge_full_resend_has_safe_fresh_context(
                 cast(list[JsonValue], payload.input),
                 stored_count=stored_count,
-                # Classification only: inline Responses-Lite developer IDs
-                # must remain visible until the exact-manifest check rejects
-                # response-owned messages. Cross-account replay uses the
-                # default ID-stripping projection below.
-                preserve_developer_message_ids=True,
+                pending_tool_calls=lookup.latest_pending_tool_calls,
             )
-            safe_fresh_context = False
-            if replay_projection is not None:
-                safe_fresh_context = responses_input_suffix_retains_prior_output(
-                    replay_projection.input_items,
-                    stored_count=replay_projection.stored_prefix_count,
-                    canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
-                ) or (
-                    lookup.latest_pending_tool_calls is not None
-                    and responses_input_suffix_matches_pending_tool_calls(
-                        replay_projection.input_items,
-                        stored_count=replay_projection.stored_prefix_count,
-                        pending_tool_calls=lookup.latest_pending_tool_calls,
-                        canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
-                    )
-                )
             return stored_count, lookup.latest_input_full_fingerprint, safe_fresh_context
 
         if durable_lookup is not None:
@@ -2645,6 +2637,18 @@ class _HTTPBridgeStreamingMixin:
             stored_count=stored_count_preview,
             stored_fingerprint=stored_fingerprint_preview,
         )
+        session_payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(effective_payload)
+        session_full_resend_has_safe_fresh_context = False
+        if (
+            session_payload_looks_like_full_resend
+            and session_anchor_trimmable
+            and isinstance(incoming_input_preview, list)
+        ):
+            session_full_resend_has_safe_fresh_context = _http_bridge_full_resend_has_safe_fresh_context(
+                cast(list[JsonValue], incoming_input_preview),
+                stored_count=stored_count_preview,
+                pending_tool_calls=session.last_pending_tool_calls or None,
+            )
         # A previous_response_id is account-scoped upstream: only the account that
         # created the response can resume it. If this session's serving account is
         # not the anchor's owner (e.g. the session failed over after the durable
@@ -2659,7 +2663,7 @@ class _HTTPBridgeStreamingMixin:
         recovery_session_can_anchor = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
             key=session.key.affinity_key,
-        ) and (not _http_bridge_payload_looks_like_full_resend(effective_payload) or session_anchor_trimmable)
+        ) and (not session_payload_looks_like_full_resend or session_anchor_trimmable)
         session_anchor_candidate = (
             session.codex_session
             # Honor the quarantine decision end to end: the durable anchor
@@ -2670,7 +2674,21 @@ class _HTTPBridgeStreamingMixin:
             and session.last_completed_response_id is not None
             and (session_anchor_trimmable or recovery_session_can_anchor)
         )
-        if session_anchor_candidate and not session_anchor_account_owned:
+        # A verified self-contained full resend already carries its
+        # continuity. Send it unchanged because a matching stored prefix does
+        # not prove that the session response ID remains valid upstream.
+        if session_anchor_candidate and session_anchor_account_owned and session_full_resend_has_safe_fresh_context:
+            _log_http_bridge_event(
+                "session_anchor_injection_skipped",
+                session.key,
+                account_id=session.account.id,
+                model=effective_payload.model,
+                detail="reason=full_resend_safe_fresh_context",
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                owner_check_applied=False,
+            )
+        elif session_anchor_candidate and not session_anchor_account_owned:
             _log_http_bridge_event(
                 "cross_account_anchor_declined",
                 session.key,
@@ -2686,11 +2704,8 @@ class _HTTPBridgeStreamingMixin:
                 model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
                 owner_check_applied=True,
             )
-        if session_anchor_candidate and session_anchor_account_owned:
+        elif session_anchor_candidate and session_anchor_account_owned:
             fresh_upstream_request_text = text_data
-            session_level_payload_looks_like_full_resend = _http_bridge_payload_looks_like_full_resend(
-                effective_payload
-            )
             effective_payload = effective_payload.model_copy(
                 update={"previous_response_id": session.last_completed_response_id}
             )
@@ -2707,7 +2722,7 @@ class _HTTPBridgeStreamingMixin:
             request_state.preferred_account_id = durable_lookup.account_id if durable_lookup is not None else None
             request_state.excluded_account_ids.update(fresh_replay_excluded_account_ids)
             request_state.proxy_injected_previous_response_id = True
-            request_state.proxy_injected_anchor_had_full_resend_payload = session_level_payload_looks_like_full_resend
+            request_state.proxy_injected_anchor_had_full_resend_payload = session_payload_looks_like_full_resend
             request_state.fresh_upstream_request_text = fresh_upstream_request_text
             # Session-level anchor injection may be attached to a payload
             # that relied on the anchor for context (for example a

@@ -45,6 +45,10 @@ codex-lb SwiftBar is read-only; consult its compatibility table for the
 authentication modes supported by the current release. Review each project's
 repository and release notes before connecting it.
 
+OpenSpec: the [user-documentation capability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation)
+governs this listing, while [admin-auth](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth)
+defines the guest and admin access contracts.
+
 ## Screenshots
 
 | Settings | Login |

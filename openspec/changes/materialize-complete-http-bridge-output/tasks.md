@@ -11,10 +11,16 @@
   whose upstream parent-response chain is unavailable.
 - [x] 1.6 Persist the first/root Codex operation with a session-scoped
   fingerprint when complete-transcript recovery is enabled.
+- [x] 1.7 Deduplicate echoed preceding tool output during normal and retained-
+  snapshot continuation replay, including known omitted reasoning/tool
+  envelopes, while keeping partial/ambiguous prefixes fail-closed.
+- [x] 1.8 Avoid re-appending a synthetic snapshot root's stored tool call when
+  the continuation contains only the matching tool output.
 
 ## 2. Verification
 
 - [x] 2.1 Add focused unit coverage for empty terminal output and missing completion.
 - [x] 2.2 Add coverage for snapshot bounds and recovery after parent-chain purge.
 - [x] 2.3 Add coverage for root-operation registration and fingerprint scoping.
-- [ ] 2.4 Run focused tests, lint, and strict OpenSpec validation.
+- [x] 2.4 Run focused tests and lint; strict OpenSpec validation remains to be
+  run before publishing the change.

@@ -84,6 +84,157 @@ def test_build_complete_replay_payload_inserts_prior_assistant_output() -> None:
     assert all("id" not in item for item in parsed["input"])
 
 
+def test_build_complete_replay_payload_deduplicates_echoed_tool_output_delta() -> None:
+    call: dict[str, object] = {
+        "id": "fc_1",
+        "type": "function_call",
+        "status": "completed",
+        "name": "exec",
+        "arguments": "{}",
+        "call_id": "call_1",
+    }
+    payload = build_complete_replay_payload(
+        [
+            _turn(
+                1,
+                parent_response_id=None,
+                response_id="resp_1",
+                request_input=[{"type": "message", "role": "user", "content": "run it"}],
+                output=[call],
+            ),
+        ],
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "previous_response_id": "resp_1",
+                "input": [
+                    {"type": "reasoning", "summary": []},
+                    call,
+                    {"type": "function_call_output", "call_id": "call_1", "output": "done"},
+                ],
+            }
+        ),
+    )
+
+    assert payload is not None
+    input_items = json.loads(payload)["input"]
+    assert [item["type"] for item in input_items] == ["message", "function_call", "function_call_output"]
+    assert [item.get("call_id") for item in input_items] == [None, "call_1", "call_1"]
+
+
+def test_build_complete_replay_payload_deduplicates_echoed_tool_output_from_snapshot() -> None:
+    call: dict[str, object] = {
+        "id": "fc_1",
+        "type": "function_call",
+        "status": "completed",
+        "name": "exec",
+        "arguments": "{}",
+        "call_id": "call_1",
+    }
+    operation = DurableBridgeOperationSnapshot(
+        operation_id="op_snapshot_tool",
+        session_id="session",
+        request_fingerprint="fingerprint",
+        account_id="account",
+        model="gpt-test",
+        parent_response_id=None,
+        state="completed",
+        response_id="resp_snapshot_tool",
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "input": [
+                    {"type": "message", "role": "user", "content": "run it"},
+                    {key: value for key, value in call.items() if key != "id"},
+                ],
+            }
+        ),
+        response_replay_input_complete=True,
+    )
+    turn = DurableBridgeTranscriptTurn(
+        operation=operation,
+        events=(),
+        response_output_items_json=json.dumps([call]),
+        replay_input_includes_response_output=True,
+    )
+
+    payload = build_complete_replay_payload(
+        [turn],
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "previous_response_id": "resp_snapshot_tool",
+                "input": [
+                    {"type": "reasoning", "summary": []},
+                    call,
+                    {"type": "function_call_output", "call_id": "call_1", "output": "done"},
+                ],
+            }
+        ),
+    )
+
+    assert payload is not None
+    input_items = json.loads(payload)["input"]
+    assert [item["type"] for item in input_items] == ["message", "function_call", "function_call_output"]
+
+
+def test_build_complete_replay_payload_snapshot_accepts_tool_output_only_delta() -> None:
+    call: dict[str, object] = {
+        "id": "fc_1",
+        "type": "function_call",
+        "status": "completed",
+        "name": "exec",
+        "arguments": "{}",
+        "call_id": "call_1",
+    }
+    operation = DurableBridgeOperationSnapshot(
+        operation_id="op_snapshot_tool_delta",
+        session_id="session",
+        request_fingerprint="fingerprint",
+        account_id="account",
+        model="gpt-test",
+        parent_response_id=None,
+        state="completed",
+        response_id="resp_snapshot_tool_delta",
+        request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "input": [
+                    {"type": "message", "role": "user", "content": "run it"},
+                    {key: value for key, value in call.items() if key != "id"},
+                ],
+            }
+        ),
+        response_replay_input_complete=True,
+    )
+    turn = DurableBridgeTranscriptTurn(
+        operation=operation,
+        events=(),
+        response_output_items_json=json.dumps([call]),
+        replay_input_includes_response_output=True,
+    )
+
+    payload = build_complete_replay_payload(
+        [turn],
+        continuation_request_text=json.dumps(
+            {
+                "type": "response.create",
+                "model": "gpt-test",
+                "previous_response_id": "resp_snapshot_tool_delta",
+                "input": [{"type": "function_call_output", "call_id": "call_1", "output": "done"}],
+            }
+        ),
+    )
+
+    assert payload is not None
+    input_items = json.loads(payload)["input"]
+    assert [item["type"] for item in input_items] == ["message", "function_call", "function_call_output"]
+
+
 def test_build_replay_input_snapshot_is_self_contained_and_strips_ids() -> None:
     snapshot = build_replay_input_snapshot(
         [],
@@ -177,6 +328,7 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
 
     assert turns is not None
     assert len(turns) == 1
+    assert turns[0].replay_input_includes_response_output is True
     replay = build_complete_replay_payload(
         turns,
         continuation_request_text=json.dumps(
@@ -230,18 +382,18 @@ def test_build_complete_replay_payload_rejects_broken_parent_continuation() -> N
 def test_materialize_output_items_prefers_output_item_done_over_empty_completed_output() -> None:
     events = [
         (
-            'event: response.output_item.done\ndata: '
+            "event: response.output_item.done\ndata: "
             '{"type":"response.output_item.done","output_index":1,"item":'
             '{"id":"msg_1","type":"message","role":"assistant","status":"completed",'
             '"content":[{"type":"output_text","text":"answer"}]}}\n\n'
         ),
         (
-            'event: response.output_item.done\ndata: '
+            "event: response.output_item.done\ndata: "
             '{"type":"response.output_item.done","output_index":0,"item":'
             '{"id":"rs_1","type":"reasoning","summary":[]}}\n\n'
         ),
         (
-            'event: response.completed\ndata: '
+            "event: response.completed\ndata: "
             '{"type":"response.completed","response":{"id":"resp_1","status":"completed",'
             '"output":[]}}\n\n'
         ),
@@ -256,7 +408,7 @@ def test_materialize_output_items_prefers_output_item_done_over_empty_completed_
 def test_materialize_output_items_requires_terminal_completion() -> None:
     events = [
         (
-            'event: response.output_item.done\ndata: '
+            "event: response.output_item.done\ndata: "
             '{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}\n\n'
         ),
     ]

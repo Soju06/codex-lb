@@ -206,6 +206,11 @@ class DurableBridgeTranscriptTurn:
     operation: DurableBridgeOperationSnapshot
     events: tuple[str, ...]
     response_output_items_json: str = "[]"
+    # A replay snapshot already contains the operation's terminal output in
+    # its canonical input list.  Keep that fact on the synthetic turn so the
+    # replay builder does not append the same output a second time when the
+    # client resends it as the continuation prefix.
+    replay_input_includes_response_output: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1833,10 +1838,8 @@ class DurableBridgeRepository:
                         DurableBridgeTranscriptTurn(
                             operation=synthetic_operation,
                             events=(),
-                            # The snapshot already includes this turn's
-                            # output. Do not append it a second time during
-                            # continuation replay.
-                            response_output_items_json="[]",
+                            response_output_items_json=snapshot.response_output_items_json or "[]",
+                            replay_input_includes_response_output=True,
                         )
                     ]
             if (

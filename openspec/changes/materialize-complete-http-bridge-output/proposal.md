@@ -14,6 +14,11 @@ needs.
   recovery does not depend on upstream retaining every parent response.
 - Record the first/root Codex turn in the durable operation ledger so the
   replay chain has an anchor even when the client sends only deltas afterward.
+- Deduplicate a preceding tool output when a continuation sends that output
+  as the leading delta, including when the parent is represented by a retained
+  replay snapshot.
+- Preserve synthetic snapshot roots when a continuation sends only a tool
+  output delta; never duplicate the stored function call.
 - Keep malformed, incomplete, or oversized event transcripts fail-closed.
 - Add focused regression coverage for ordered output-item reconstruction.
 

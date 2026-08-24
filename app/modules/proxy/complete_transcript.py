@@ -127,9 +127,22 @@ def build_complete_replay_payload(
         if index > 0 and prior_output is None:
             return None
         canonical_with_prior = canonical_input + (prior_output or [])
-        if canonical_with_prior and _items_prefix_matches(turn_input, canonical_with_prior):
-            fresh_input = turn_input[len(canonical_with_prior) :]
+        if (
+            canonical_with_prior
+            and (matched_input := _strip_omitted_output_prefix(turn_input, canonical_with_prior)) is not None
+        ):
+            fresh_input = matched_input
             include_prior_output = False
+        elif (
+            index > 0
+            and prior_output
+            and (matched_input := _strip_omitted_output_prefix(turn_input, prior_output)) is not None
+        ):
+            # Responses clients may send the immediately preceding output as
+            # the first part of a delta (for example a function_call followed
+            # by its function_call_output).  It is already inserted below;
+            # strip the echoed prefix so tool call IDs are not duplicated.
+            fresh_input = matched_input
         elif client_input_history and _items_prefix_matches(turn_input, client_input_history):
             fresh_input = turn_input[len(client_input_history) :]
         elif client_input_history and _items_prefix_matches(client_input_history, turn_input):
@@ -152,22 +165,47 @@ def build_complete_replay_payload(
             return None
         if not isinstance(continuation_payload, dict):
             return None
-        if materialized[-1].operation.response_id is not None and continuation_payload.get(
-            "previous_response_id"
-        ) != materialized[-1].operation.response_id:
+        if (
+            materialized[-1].operation.response_id is not None
+            and continuation_payload.get("previous_response_id") != materialized[-1].operation.response_id
+        ):
             return None
         continuation_input = _normalize_input(continuation_payload.get("input"))
         if continuation_input is None:
             return None
         continuation_input = [_strip_item_id(item) for item in continuation_input]
-        include_prior_output = True
         latest_prior_output = _sanitize_output_items(materialized[-1].response_output_items_json)
         if latest_prior_output is None:
             return None
-        canonical_with_latest_output = canonical_input + latest_prior_output
-        if canonical_with_latest_output and _items_prefix_matches(continuation_input, canonical_with_latest_output):
-            continuation_input = continuation_input[len(canonical_with_latest_output) :]
+        replay_input_includes_latest_output = bool(
+            getattr(materialized[-1], "replay_input_includes_response_output", False)
+        )
+        # Synthetic snapshot roots already contain their terminal output in
+        # ``canonical_input``.  A continuation may send only the new tool
+        # output (without echoing the preceding function call), so default to
+        # not appending that output a second time.  Ordinary turns retain the
+        # historical behavior and insert their stored output once.
+        include_prior_output = not replay_input_includes_latest_output
+        canonical_with_latest_output = (
+            canonical_input if replay_input_includes_latest_output else canonical_input + latest_prior_output
+        )
+        if (
+            canonical_with_latest_output
+            and (matched_input := _strip_omitted_output_prefix(continuation_input, canonical_with_latest_output))
+            is not None
+        ):
+            continuation_input = matched_input
             include_prior_output = False
+        elif (
+            latest_prior_output
+            and (matched_input := _strip_omitted_output_prefix(continuation_input, latest_prior_output)) is not None
+        ):
+            # A delta may echo only the immediately preceding output rather
+            # than the full canonical history.  Strip that output; synthetic
+            # snapshot roots already contain it, while ordinary turns need it
+            # inserted once below.
+            continuation_input = matched_input
+            include_prior_output = not replay_input_includes_latest_output
         elif client_input_history and _items_prefix_matches(continuation_input, client_input_history):
             continuation_input = continuation_input[len(client_input_history) :]
         elif client_input_history and _items_prefix_matches(client_input_history, continuation_input):
@@ -296,6 +334,30 @@ def _items_prefix_matches(items: list[JsonValue], prefix: list[JsonValue]) -> bo
     if len(items) < len(prefix):
         return False
     return all(_canonical_item(left) == _canonical_item(right) for left, right in zip(items, prefix))
+
+
+def _strip_omitted_output_prefix(items: list[JsonValue], prefix: list[JsonValue]) -> list[JsonValue] | None:
+    """Strip a stored output prefix while tolerating omitted output echoes.
+
+    Reasoning and hosted search/tool envelopes are intentionally removed from
+    account-neutral replay snapshots. Codex may still echo those items before
+    the retained tool call in a continuation request. They are safe to drop,
+    but only after every non-omitted item matches the durable prefix.
+    """
+    item_index = 0
+    for expected in prefix:
+        while item_index < len(items) and _is_omitted_output_item(items[item_index]):
+            item_index += 1
+        if item_index >= len(items) or _canonical_item(items[item_index]) != _canonical_item(expected):
+            return None
+        item_index += 1
+    while item_index < len(items) and _is_omitted_output_item(items[item_index]):
+        item_index += 1
+    return items[item_index:]
+
+
+def _is_omitted_output_item(item: JsonValue) -> bool:
+    return isinstance(item, dict) and item.get("type") in _OMIT_OUTPUT_TYPES
 
 
 def _canonical_item(item: JsonValue) -> str:

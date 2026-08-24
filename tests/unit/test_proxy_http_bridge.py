@@ -11474,6 +11474,7 @@ async def _run_session_anchor_owner_stream(
     anchor_owner_account_id: str | None,
     self_contained_full_resend: bool,
     pending_tool_loop_complete: bool | None = None,
+    pending_tool_calls_without_suffix: bool = False,
 ) -> tuple[list[proxy_service.ResponsesRequest], list[dict[str, Any]], list[str]]:
     """Drive _stream_via_http_bridge for a session-anchor decision.
 
@@ -11520,6 +11521,8 @@ async def _run_session_anchor_owner_stream(
                 "content": [{"type": "output_text", "text": "prior answer"}],
             }
         )
+    if pending_tool_calls_without_suffix:
+        pending_tool_calls = {"call_lookup": "function_call"}
     input_items = [*prefix_items, *retained_output]
     if pending_tool_loop_complete is None:
         input_items.append(continuation_item)
@@ -11754,6 +11757,32 @@ async def test_stream_via_http_bridge_repairs_missing_pending_tool_output_on_anc
             "arguments": "{}",
         },
     ]
+    assert sent_frames[-1]["previous_response_id"] == "resp_session_latest"
+    assert sent_frames[-1]["input"] == prepared[-1].input
+    assert any("response.completed" in chunk for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_does_not_let_retained_output_bypass_pending_tool_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared, sent_frames, chunks = await _run_session_anchor_owner_stream(
+        monkeypatch,
+        account_id="acc-1",
+        anchor_owner_account_id="acc-1",
+        self_contained_full_resend=True,
+        pending_tool_calls_without_suffix=True,
+    )
+
+    assert prepared[-1].previous_response_id == "resp_session_latest"
+    assert isinstance(prepared[-1].input, list)
+    assert prepared[-1].input[0] == {
+        "type": "function_call_output",
+        "call_id": "call_lookup",
+        "output": (
+            "Tool call was not executed because the previous turn was interrupted before tool output was available."
+        ),
+    }
     assert sent_frames[-1]["previous_response_id"] == "resp_session_latest"
     assert sent_frames[-1]["input"] == prepared[-1].input
     assert any("response.completed" in chunk for chunk in chunks)

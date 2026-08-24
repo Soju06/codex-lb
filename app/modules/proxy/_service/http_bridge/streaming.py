@@ -272,18 +272,17 @@ def _http_bridge_full_resend_has_safe_fresh_context(
     )
     if replay_projection is None:
         return False
-    return responses_input_suffix_retains_prior_output(
-        replay_projection.input_items,
-        stored_count=replay_projection.stored_prefix_count,
-        canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
-    ) or (
-        pending_tool_calls is not None
-        and responses_input_suffix_matches_pending_tool_calls(
+    if pending_tool_calls:
+        return responses_input_suffix_matches_pending_tool_calls(
             replay_projection.input_items,
             stored_count=replay_projection.stored_prefix_count,
             pending_tool_calls=pending_tool_calls,
             canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
         )
+    return responses_input_suffix_retains_prior_output(
+        replay_projection.input_items,
+        stored_count=replay_projection.stored_prefix_count,
+        canonical_lite_developer_index=replay_projection.canonical_lite_developer_index,
     )
 
 

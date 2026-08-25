@@ -271,6 +271,8 @@ def _recent_burn_rate_credits_per_hour(
     latest = rows[-1] if rows else None
     latest_reset_at = latest.reset_at if latest is not None else None
     latest_window_minutes = latest.window_minutes if latest is not None else None
+    if latest_reset_at is None or latest_window_minutes is None:
+        return None
     recent_rows = [
         row
         for row in rows
@@ -328,6 +330,8 @@ def _smoothed_remaining_credits(
     latest = rows[-1] if rows else None
     latest_reset_at = latest.reset_at if latest is not None else None
     latest_window_minutes = latest.window_minutes if latest is not None else None
+    if latest_reset_at is None or latest_window_minutes is None:
+        return current_remaining_credits
     recent_rows = [
         row
         for row in rows

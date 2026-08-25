@@ -5,7 +5,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.modules.dashboard.weekly_pace import _recent_burn_rate_credits_per_hour
+from app.modules.dashboard.weekly_pace import (
+    _recent_burn_rate_credits_per_hour,
+    _smoothed_remaining_credits,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -81,6 +84,8 @@ def test_non_finite_samples_are_ignored() -> None:
     [
         (2_000_000_000, None, 10_080, 10_080),
         (2_000_000_000, 2_000_000_000, 10_080, None),
+        (None, None, 10_080, 10_080),
+        (2_000_000_000, 2_000_000_000, None, None),
     ],
 )
 def test_incomplete_latest_metadata_does_not_mix_quota_segments(
@@ -112,3 +117,13 @@ def test_incomplete_latest_metadata_does_not_mix_quota_segments(
     )
 
     assert rate is None
+
+    smoothed_remaining = _smoothed_remaining_credits(
+        rows=rows,
+        full_credits=100.0,
+        current_remaining_credits=42.0,
+        now=BASE_TIME + timedelta(minutes=1),
+        smoothing_window_minutes=30,
+    )
+
+    assert smoothed_remaining == 42.0

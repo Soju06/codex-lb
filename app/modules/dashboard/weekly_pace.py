@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from math import ceil, isfinite
-from typing import Literal
+from math import ceil, exp, isfinite, log
+from typing import Literal, Protocol
 
 from app.core.usage.depletion import EWMAState, ewma_update
 from app.core.utils.time import naive_utc_to_epoch
@@ -47,6 +48,13 @@ class _Projection:
     projected_shortfall_credits: float
     projected_depletion_hours: float | None
     projected_minimum_remaining_credits: float
+
+
+class _UsageRateSample(Protocol):
+    used_percent: float
+    recorded_at: datetime
+    reset_at: int | None
+    window_minutes: int | None
 
 
 def build_weekly_credit_pace(
@@ -112,7 +120,12 @@ def build_weekly_credit_pace(
             working_days=working_days,
         )
         expected_remaining_credits = full_credits * (1.0 - used_schedule_fraction)
-        account_rate = _recent_burn_rate_credits_per_hour(rows, full_credits, now)
+        account_rate = _recent_burn_rate_credits_per_hour(
+            rows,
+            full_credits,
+            now,
+            smoothing_window_minutes=smoothing_window_minutes,
+        )
         smoothed_remaining_credits = _smoothed_remaining_credits(
             rows=rows,
             full_credits=full_credits,
@@ -248,24 +261,57 @@ def _weekly_timing(summary: AccountSummary, now_ms: float) -> tuple[float, float
 
 
 def _recent_burn_rate_credits_per_hour(
-    rows: list[UsageHistory],
+    rows: Sequence[_UsageRateSample],
     full_credits: float,
     now: datetime,
+    *,
+    smoothing_window_minutes: int,
 ) -> float | None:
     recent_start = now - RECENT_BURN_WINDOW
-    recent_rows = [row for row in rows if row.recorded_at >= recent_start and row.recorded_at <= now]
+    latest = rows[-1] if rows else None
+    latest_reset_at = latest.reset_at if latest is not None else None
+    latest_window_minutes = latest.window_minutes if latest is not None else None
+    recent_rows = [
+        row
+        for row in rows
+        if row.recorded_at >= recent_start
+        and row.recorded_at <= now
+        and isinstance(row.used_percent, int | float)
+        and isfinite(row.used_percent)
+        and (latest_reset_at is None or row.reset_at == latest_reset_at)
+        and (latest_window_minutes is None or row.window_minutes == latest_window_minutes)
+    ]
     if len(recent_rows) < 2:
         return None
 
-    state: EWMAState | None = None
-    for row in recent_rows:
-        state = ewma_update(
+    first = recent_rows[0]
+    state = EWMAState(
+        rate=0.0,
+        last_used_percent=float(first.used_percent),
+        last_timestamp=float(naive_utc_to_epoch(first.recorded_at)),
+        last_reset_at=first.reset_at,
+    )
+    half_life_seconds = max(60.0, float(smoothing_window_minutes) * 60.0)
+    for row in recent_rows[1:]:
+        timestamp = float(naive_utc_to_epoch(row.recorded_at))
+        elapsed_seconds = timestamp - state.last_timestamp
+        if elapsed_seconds <= 0:
+            continue
+        alpha = 1.0 - exp(-log(2.0) * elapsed_seconds / half_life_seconds)
+        next_state = ewma_update(
             state,
             row.used_percent,
-            float(naive_utc_to_epoch(row.recorded_at)),
+            timestamp,
+            alpha=alpha,
             reset_at=row.reset_at,
         )
-    if state is None or state.rate is None:
+        state = next_state if next_state.rate is not None else EWMAState(
+            rate=0.0,
+            last_used_percent=float(row.used_percent),
+            last_timestamp=timestamp,
+            last_reset_at=row.reset_at,
+        )
+    if state.rate is None:
         return None
     return max(0.0, state.rate * full_credits * 36.0)
 

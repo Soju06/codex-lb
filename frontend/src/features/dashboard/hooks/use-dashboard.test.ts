@@ -4,8 +4,9 @@ import { HttpResponse, http } from "msw";
 import { createElement, type PropsWithChildren } from "react";
 import { describe, expect, it } from "vitest";
 
-import { useDashboard } from "@/features/dashboard/hooks/use-dashboard";
+import { useDashboard, useDashboardProjections } from "@/features/dashboard/hooks/use-dashboard";
 import { server } from "@/test/mocks/server";
+import { useDashboardPreferencesStore } from "@/hooks/use-dashboard-preferences";
 
 function createTestQueryClient(): QueryClient {
   return new QueryClient({
@@ -25,7 +26,8 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useDashboard", () => {
-  it("loads dashboard overview via MSW and configures 30s refetch", async () => {
+  it("loads dashboard overview via MSW and configures the selected refetch cadence", async () => {
+    useDashboardPreferencesStore.setState({ refreshSeconds: 15 });
     const queryClient = createTestQueryClient();
     const { result } = renderHook(() => useDashboard("30d"), {
       wrapper: createWrapper(queryClient),
@@ -39,7 +41,7 @@ describe("useDashboard", () => {
     const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "overview", "30d"] });
     const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
       ?.refetchInterval;
-    expect(refetchInterval).toBe(30_000);
+    expect(refetchInterval).toBe(15_000);
   });
 
   it("passes timeframe to the overview endpoint", async () => {
@@ -79,6 +81,20 @@ describe("useDashboard", () => {
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(requestedTimeframe).toBe("1d");
+  });
+
+  it("applies the selected cadence to projection polling", () => {
+    useDashboardPreferencesStore.setState({ refreshSeconds: 5 });
+    const queryClient = createTestQueryClient();
+
+    renderHook(() => useDashboardProjections(false), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    const query = queryClient.getQueryCache().find({ queryKey: ["dashboard", "projections"] });
+    const refetchInterval = (query?.options as { refetchInterval?: unknown } | undefined)
+      ?.refetchInterval;
+    expect(refetchInterval).toBe(5_000);
   });
 
   it("exposes error state on request failure", async () => {

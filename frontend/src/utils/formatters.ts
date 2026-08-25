@@ -169,12 +169,15 @@ export function formatPercent(value: unknown): string {
   return `${Math.round(numeric)}%`;
 }
 
-export function formatPercentNullable(value: unknown): string {
+export function formatPercentNullable(value: unknown, maximumFractionDigits = 0): string {
   const numeric = toNumber(value);
   if (numeric === null) {
     return "--";
   }
-  return `${Math.round(numeric)}%`;
+  if (maximumFractionDigits <= 0) {
+    return `${Math.round(numeric)}%`;
+  }
+  return `${numeric.toLocaleString("en-US", { maximumFractionDigits })}%`;
 }
 
 export function formatPercentValue(value: unknown): number {

@@ -32,8 +32,19 @@ describe("useDashboardPreferencesStore", () => {
 
     expect(useDashboardPreferencesStore.getState().accountViewMode).toBe("cards");
     expect(useDashboardPreferencesStore.getState().accountListSort).toBeNull();
+    expect(useDashboardPreferencesStore.getState().refreshSeconds).toBe(15);
     expect(window.localStorage.getItem("codex-lb-dashboard-account-view-mode")).toBe("cards");
     expect(window.localStorage.getItem("codex-lb-dashboard-account-list-sort")).toBeNull();
+    expect(window.localStorage.getItem("codex-lb-dashboard-refresh-seconds")).toBe("15");
+  });
+
+  it("persists a valid dashboard refresh cadence", async () => {
+    const { useDashboardPreferencesStore } = await import("@/hooks/use-dashboard-preferences");
+
+    useDashboardPreferencesStore.getState().setRefreshSeconds(5);
+
+    expect(useDashboardPreferencesStore.getState().refreshSeconds).toBe(5);
+    expect(window.localStorage.getItem("codex-lb-dashboard-refresh-seconds")).toBe("5");
   });
 
   it("persists account view mode updates", async () => {

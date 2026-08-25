@@ -31900,7 +31900,7 @@ def test_denied_anchor_id_ignores_a_client_supplied_anchor():
 def test_denied_anchor_id_picks_the_shared_anchor_from_a_fan_out():
     """A grouped denial settles several requests that shared one anchor."""
     request_states = [
-        _denied_anchor_request_state(proxy_injected=False),
+        _denied_anchor_request_state(previous_response_id="resp_shared", proxy_injected=False),
         _denied_anchor_request_state(previous_response_id="resp_shared"),
         _denied_anchor_request_state(previous_response_id="resp_shared"),
     ]
@@ -31913,6 +31913,27 @@ def test_denied_anchor_id_rejects_an_ambiguous_fan_out():
     request_states = [
         _denied_anchor_request_state(previous_response_id="resp_first"),
         _denied_anchor_request_state(previous_response_id="resp_second"),
+    ]
+
+    assert http_bridge_upstream_events_module._denied_proxy_injected_anchor_id(request_states) is None
+
+
+@pytest.mark.parametrize(
+    ("other_proxy_injected", "other_full_resend_shaped"),
+    [(False, True), (True, False)],
+    ids=["client-supplied", "delta-only"],
+)
+def test_denied_anchor_id_checks_ineligible_grouped_anchors_for_ambiguity(
+    other_proxy_injected: bool,
+    other_full_resend_shaped: bool,
+):
+    request_states = [
+        _denied_anchor_request_state(previous_response_id="resp_eligible"),
+        _denied_anchor_request_state(
+            previous_response_id="resp_other",
+            proxy_injected=other_proxy_injected,
+            full_resend_shaped=other_full_resend_shaped,
+        ),
     ]
 
     assert http_bridge_upstream_events_module._denied_proxy_injected_anchor_id(request_states) is None

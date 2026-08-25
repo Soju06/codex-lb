@@ -14,6 +14,7 @@
 - [x] 1.10 Add cancellation coverage proving a cancelled durable clear still unregisters the local alias and clears the in-memory carrier.
 - [x] 1.11 Add fan-out coverage proving distinct eligible anchors make an unscoped denial ineligible for retirement.
 - [x] 1.12 Add generation-race coverage proving detached denials reach a live successor and later successors inherit tombstones.
+- [x] 1.13 Cover grouped ambiguity when the distinct anchor is client-supplied or delta-only.
 
 ## 2. Anchor Retirement
 
@@ -29,6 +30,7 @@
 - [x] 2.10 Keep alias unregister and in-memory cleanup in the durable clear's cancellation-safe `finally` path.
 - [x] 2.11 Require every retirement-eligible grouped request to agree on one anchor before retirement.
 - [x] 2.12 Publish tombstones to live same-key successors, clear their matching local carrier, and inherit tombstones during successor registration.
+- [x] 2.13 Require all non-null grouped anchors to agree before applying retirement eligibility.
 
 ## 3. Recovery Provenance
 

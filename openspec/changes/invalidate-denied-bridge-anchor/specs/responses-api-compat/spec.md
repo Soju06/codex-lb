@@ -6,7 +6,7 @@
 
 When upstream answers an HTTP bridge request with a `previous_response_not_found` terminal frame, and the `previous_response_id` on that request was injected by the proxy onto a full-resend-shaped payload, the proxy MUST retire that anchor on the first denial rather than waiting for the eventless-failure poison threshold. Retirement MUST clear the durable anchor only when the denied id is still the durable latest response and the session owner fence still matches; the write MUST clear the four anchor-bound fields and delete only the matching response-id alias, preserving turn-state and sibling response aliases. The proxy MUST clear the in-memory session carrier even if durable cleanup or alias unregistering fails.
 
-Before awaiting durable cleanup, the proxy MUST publish the denied id to the live session. Publication MUST be serialized with the submitter's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. Immediately before dispatch, any already-prepared request carrying that id as a proxy-injected anchor MUST fail closed without sending another upstream frame. This revalidation MUST close the retirement/dispatch race; it MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
+Before awaiting durable cleanup, the proxy MUST publish the denied id to the live session. Publication MUST be serialized with the submitter's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. Before publishing any reversible recovery alias or dispatching upstream, any already-prepared request carrying that id as a proxy-injected anchor MUST fail closed without sending another upstream frame. This revalidation MUST close the retirement/dispatch race; it MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
 
 The proxy MUST NOT retire the anchor when:
 
@@ -70,6 +70,7 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **AND** another request receives `previous_response_not_found` for that anchor before the prepared request reaches the upstream send
 - **WHEN** the prepared request reaches its final dispatch check
 - **THEN** the proxy fails it closed as `stream_incomplete`
+- **AND** the proxy MUST NOT publish a reversible recovery alias for that undispatched request
 - **AND** the proxy MUST NOT send that denied anchor upstream again
 
 #### Scenario: Denial publication wins against a prepared dispatch

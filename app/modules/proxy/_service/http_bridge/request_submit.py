@@ -1705,6 +1705,29 @@ class _HTTPBridgeRequestSubmitMixin:
                         502,
                         openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
                     )
+                if (
+                    request_state.proxy_injected_previous_response_id
+                    and request_state.previous_response_id is not None
+                    and request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
+                ):
+                    # Denial publication owns this same lifecycle lock. Once a
+                    # submitter reaches this check, the tombstone cannot appear
+                    # until its send section completes, so reject before any
+                    # reversible recovery alias is published.
+                    _record_continuity_fail_closed(
+                        surface="http_bridge",
+                        reason="denied_proxy_anchor_before_dispatch",
+                        previous_response_id=request_state.previous_response_id,
+                        session_id=request_state.session_id,
+                        upstream_error_code="previous_response_not_found",
+                    )
+                    raise ProxyResponseError(
+                        502,
+                        openai_error(
+                            "stream_incomplete",
+                            "The previous response anchor was rejected upstream; retry the request.",
+                        ),
+                    )
                 recovery_receipt: DurableBridgeAliasRegistrationReceipt | None = None
                 upstream_send_started = False
                 try:
@@ -1887,25 +1910,6 @@ class _HTTPBridgeRequestSubmitMixin:
                                     "The recovery checkpoint was consumed before dispatch; retry the request.",
                                 ),
                             )
-                    if (
-                        request_state.proxy_injected_previous_response_id
-                        and request_state.previous_response_id is not None
-                        and request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
-                    ):
-                        _record_continuity_fail_closed(
-                            surface="http_bridge",
-                            reason="denied_proxy_anchor_before_dispatch",
-                            previous_response_id=request_state.previous_response_id,
-                            session_id=request_state.session_id,
-                            upstream_error_code="previous_response_not_found",
-                        )
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "stream_incomplete",
-                                "The previous response anchor was rejected upstream; retry the request.",
-                            ),
-                        )
                     async with session.pending_lock:
                         session.pending_requests.append(request_state)
                         session.admission_waiter_count = max(0, session.admission_waiter_count - 1)

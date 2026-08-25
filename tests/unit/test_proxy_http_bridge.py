@@ -444,9 +444,12 @@ async def test_submit_hard_turn_walks_race_path_chain_before_recording(
 async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A queued request must revalidate an anchor retired by a sibling turn."""
+    """A queued recovery must reject a denied anchor before publishing aliases."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
-    session = _make_bridge_session(key_value="denied-anchor-dispatch-race")
+    key = _make_account_neutral_replay_session_key("denied-anchor-dispatch-race")
+    session = _make_bridge_session(key=key)
+    session.durable_session_id = "durable-denied-anchor-dispatch-race"
+    session.durable_owner_epoch = 4
     session.denied_proxy_injected_anchor_ids.add("resp-denied")
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-denied-anchor-dispatch-race",
@@ -466,6 +469,11 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
         UpstreamWebSocket,
         SimpleNamespace(send_text=send_text, close=AsyncMock()),
     )
+    register_recovery_turn_state = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(register_recovery_turn_state=register_recovery_turn_state),
+    )
     service._http_bridge_sessions[session.key] = session
     monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
     monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
@@ -478,12 +486,22 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
             queue_limit=8,
             request_scope_id="scope-denied-anchor-dispatch-race",
             owned_unanchored_handoff=False,
+            recovery_turn_state="http_turn_denied_anchor_dispatch_race",
         )
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    register_recovery_turn_state.assert_not_awaited()
     send_text.assert_not_awaited()
     assert not session.pending_requests
+    assert session.downstream_turn_state_aliases == set()
+    assert (
+        proxy_service._http_bridge_turn_state_alias_key(
+            "http_turn_denied_anchor_dispatch_race",
+            None,
+        )
+        not in service._http_bridge_turn_state_index
+    )
 
 
 @pytest.mark.asyncio

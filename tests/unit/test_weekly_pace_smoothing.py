@@ -74,3 +74,41 @@ def test_non_finite_samples_are_ignored() -> None:
 
     assert rate is not None
     assert rate > 0.0
+
+
+@pytest.mark.parametrize(
+    ("prior_reset_at", "latest_reset_at", "prior_window_minutes", "latest_window_minutes"),
+    [
+        (2_000_000_000, None, 10_080, 10_080),
+        (2_000_000_000, 2_000_000_000, 10_080, None),
+    ],
+)
+def test_incomplete_latest_metadata_does_not_mix_quota_segments(
+    prior_reset_at: int | None,
+    latest_reset_at: int | None,
+    prior_window_minutes: int | None,
+    latest_window_minutes: int | None,
+) -> None:
+    rows = [
+        _UsageRow(
+            used_percent=10.0,
+            recorded_at=BASE_TIME,
+            reset_at=prior_reset_at,
+            window_minutes=prior_window_minutes,
+        ),
+        _UsageRow(
+            used_percent=11.0,
+            recorded_at=BASE_TIME + timedelta(minutes=1),
+            reset_at=latest_reset_at,
+            window_minutes=latest_window_minutes,
+        ),
+    ]
+
+    rate = _recent_burn_rate_credits_per_hour(
+        rows,
+        full_credits=100.0,
+        now=BASE_TIME + timedelta(minutes=1),
+        smoothing_window_minutes=30,
+    )
+
+    assert rate is None

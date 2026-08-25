@@ -278,8 +278,8 @@ def _recent_burn_rate_credits_per_hour(
         and row.recorded_at <= now
         and isinstance(row.used_percent, int | float)
         and isfinite(row.used_percent)
-        and (latest_reset_at is None or row.reset_at == latest_reset_at)
-        and (latest_window_minutes is None or row.window_minutes == latest_window_minutes)
+        and row.reset_at == latest_reset_at
+        and row.window_minutes == latest_window_minutes
     ]
     if len(recent_rows) < 2:
         return None
@@ -333,8 +333,8 @@ def _smoothed_remaining_credits(
         for row in rows
         if row.recorded_at >= smoothing_start
         and row.recorded_at <= now
-        and (latest_reset_at is None or row.reset_at == latest_reset_at)
-        and (latest_window_minutes is None or row.window_minutes == latest_window_minutes)
+        and row.reset_at == latest_reset_at
+        and row.window_minutes == latest_window_minutes
     ]
     if not recent_rows:
         return current_remaining_credits

@@ -1034,6 +1034,51 @@ async def _clear_denied_http_bridge_anchor_if_matches(
     return lookup is not None
 
 
+def _clear_denied_http_bridge_anchor_from_memory(
+    session: "_HTTPBridgeSession",
+    denied_response_id: str,
+) -> None:
+    """Clear trim state only while it still belongs to the denied anchor."""
+    if session.last_completed_response_id != denied_response_id:
+        return
+    session.last_completed_response_id = None
+    session.last_completed_response_account_id = None
+    session.last_completed_input_count = 0
+    session.last_completed_input_prefix_fingerprint = None
+    session.last_pending_tool_calls.clear()
+
+
+async def _publish_denied_http_bridge_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    denied_response_id: str,
+) -> bool:
+    """Publish a tombstone to the denied generation and every live successor."""
+    async with session.lifecycle_lock:
+        async with service._http_bridge_lock:
+            session.denied_proxy_injected_anchor_ids.add(denied_response_id)
+            successor = service._http_bridge_sessions.get(session.key)
+        denied_generation_still_matches = session.last_completed_response_id == denied_response_id
+
+    seen_generations = {id(session)}
+    while successor is not None and id(successor) not in seen_generations:
+        seen_generations.add(id(successor))
+        async with successor.lifecycle_lock:
+            async with service._http_bridge_lock:
+                successor.denied_proxy_injected_anchor_ids.add(denied_response_id)
+                service._unregister_http_bridge_previous_response_id_locked(
+                    successor,
+                    denied_response_id,
+                )
+                _clear_denied_http_bridge_anchor_from_memory(successor, denied_response_id)
+                current_session = service._http_bridge_sessions.get(session.key)
+        if current_session is None or current_session is successor or current_session is session:
+            break
+        successor = current_session
+    return denied_generation_still_matches
+
+
 async def _invalidate_denied_http_bridge_anchor(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -1066,18 +1111,20 @@ async def _invalidate_denied_http_bridge_anchor(
     """
     if denied_response_id is None:
         return False
-    async with session.lifecycle_lock:
-        # Serialize publication with the submitter's final tombstone check and
-        # upstream send. A sibling completion can advance the current carrier
-        # while an already-prepared request still holds the denied id; that
-        # request must remain fenced even when there is no current anchor left
-        # to clear.
-        session.denied_proxy_injected_anchor_ids.add(denied_response_id)
-        # Another request may have completed and advanced the anchor between
-        # the denied dispatch and this frame. Only retire the id that was
-        # refused.
-        if session.last_completed_response_id != denied_response_id:
-            return False
+    # Serialize each publication with that generation's final tombstone check
+    # and upstream send. A same-key successor may already be live while this
+    # detached generation drains; it must receive the same tombstone because
+    # the predecessor's durable clear can be fenced by the successor's epoch.
+    denied_generation_still_matches = await _publish_denied_http_bridge_anchor(
+        service,
+        session,
+        denied_response_id=denied_response_id,
+    )
+    # Another request may have completed and advanced the denied generation's
+    # anchor between its dispatch and this frame. Only retire the id that was
+    # refused; successor tombstones remain published to fence stale hydration.
+    if not denied_generation_still_matches:
+        return False
     cleared = False
     try:
         cleared = await _clear_denied_http_bridge_anchor_if_matches(
@@ -1093,12 +1140,7 @@ async def _invalidate_denied_http_bridge_anchor(
             # durable write was in flight. This cleanup also runs when the
             # durable await is cancelled, so the tombstone cannot retain a
             # matching in-memory trim carrier.
-            if session.last_completed_response_id == denied_response_id:
-                session.last_completed_response_id = None
-                session.last_completed_response_account_id = None
-                session.last_completed_input_count = 0
-                session.last_completed_input_prefix_fingerprint = None
-                session.last_pending_tool_calls.clear()
+            _clear_denied_http_bridge_anchor_from_memory(session, denied_response_id)
     return cleared
 
 

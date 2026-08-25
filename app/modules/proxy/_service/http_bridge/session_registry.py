@@ -75,6 +75,16 @@ def _requires_durable_recovery_alias_serialization(session: _HTTPBridgeSession) 
     )
 
 
+def _inherit_http_bridge_denied_anchor_ids_locked(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+) -> None:
+    """Carry tombstones from detached same-key generations into a successor."""
+    for detached_session in service._http_bridge_detached_sessions.values():
+        if detached_session.key == session.key:
+            session.denied_proxy_injected_anchor_ids.update(detached_session.denied_proxy_injected_anchor_ids)
+
+
 class _HTTPBridgeSessionRegistryMixin:
     async def prune_idle_http_bridge_sessions(self: Any) -> int:
         """Run the idle sweep off the request path (issue #1354).

@@ -13,6 +13,7 @@
 - [x] 1.9 Prove tombstone rejection occurs before a reversible recovery alias is published.
 - [x] 1.10 Add cancellation coverage proving a cancelled durable clear still unregisters the local alias and clears the in-memory carrier.
 - [x] 1.11 Add fan-out coverage proving distinct eligible anchors make an unscoped denial ineligible for retirement.
+- [x] 1.12 Add generation-race coverage proving detached denials reach a live successor and later successors inherit tombstones.
 
 ## 2. Anchor Retirement
 
@@ -27,6 +28,7 @@
 - [x] 2.9 Move the lifecycle-serialized tombstone check before recovery alias registration so undispatched requests cannot leave stale routing state.
 - [x] 2.10 Keep alias unregister and in-memory cleanup in the durable clear's cancellation-safe `finally` path.
 - [x] 2.11 Require every retirement-eligible grouped request to agree on one anchor before retirement.
+- [x] 2.12 Publish tombstones to live same-key successors, clear their matching local carrier, and inherit tombstones during successor registration.
 
 ## 3. Recovery Provenance
 

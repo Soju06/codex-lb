@@ -48,6 +48,7 @@ from app.modules.proxy._service.http_bridge import mixin as http_bridge_mixin_mo
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
 from app.modules.proxy._service.http_bridge import request_submit as http_bridge_request_submit_module
 from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
+from app.modules.proxy._service.http_bridge import session_registry as http_bridge_session_registry_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
 from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, mark_account_routing_unavailable
@@ -31683,6 +31684,11 @@ def _denied_anchor_service(*, cleared: bool = True) -> Any:
         session.previous_response_ids.discard(response_id)
 
     return SimpleNamespace(
+        _http_bridge_lock=asyncio.Lock(),
+        _http_bridge_sessions={},
+        _unregister_http_bridge_previous_response_id_locked=lambda target, response_id: (
+            target.previous_response_ids.discard(response_id)
+        ),
         _durable_bridge=SimpleNamespace(
             clear_live_session_response_anchor_if_matches=AsyncMock(
                 return_value=SimpleNamespace() if cleared else None,
@@ -31741,6 +31747,43 @@ async def test_invalidate_denied_bridge_anchor_keeps_an_anchor_a_sibling_already
     assert "resp_denied" in session.denied_proxy_injected_anchor_ids
     assert session.last_completed_response_id == "resp_completed_meanwhile"
     assert session.last_completed_input_count == 12
+
+
+@pytest.mark.asyncio
+async def test_invalidate_denied_bridge_anchor_propagates_to_a_live_successor():
+    """A detached denial must fence the generation that advanced its owner epoch."""
+    predecessor = _denied_anchor_session()
+    successor = _denied_anchor_session()
+    successor.durable_owner_epoch = 5
+    service = _denied_anchor_service(cleared=False)
+    service._http_bridge_sessions[predecessor.key] = successor
+
+    cleared = await http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+        service,
+        predecessor,
+        denied_response_id="resp_denied",
+    )
+
+    assert cleared is False
+    assert "resp_denied" in predecessor.denied_proxy_injected_anchor_ids
+    assert "resp_denied" in successor.denied_proxy_injected_anchor_ids
+    assert successor.last_completed_response_id is None
+    assert successor.last_completed_input_prefix_fingerprint is None
+    assert successor.previous_response_ids == {"resp_old"}
+
+
+def test_http_bridge_successor_inherits_denied_anchors_from_detached_generations():
+    predecessor = _denied_anchor_session()
+    predecessor.denied_proxy_injected_anchor_ids.update({"resp_denied", "resp_other_denied"})
+    successor = _make_bridge_session(key=predecessor.key)
+    service = SimpleNamespace(_http_bridge_detached_sessions={id(predecessor): predecessor})
+
+    http_bridge_session_registry_module._inherit_http_bridge_denied_anchor_ids_locked(
+        cast(Any, service),
+        successor,
+    )
+
+    assert successor.denied_proxy_injected_anchor_ids == {"resp_denied", "resp_other_denied"}
 
 
 @pytest.mark.asyncio

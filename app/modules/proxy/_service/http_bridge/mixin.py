@@ -157,7 +157,10 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_connect_deadline,
     _websocket_safe_headers_with_turn_state,
 )
-from app.modules.proxy._service.http_bridge.session_registry import _HTTPBridgeSessionRegistryMixin
+from app.modules.proxy._service.http_bridge.session_registry import (
+    _HTTPBridgeSessionRegistryMixin,
+    _inherit_http_bridge_denied_anchor_ids_locked,
+)
 from app.modules.proxy._service.http_bridge.streaming import _HTTPBridgeStreamingMixin
 from app.modules.proxy._service.http_bridge.upstream_events import _HTTPBridgeUpstreamEventsMixin
 from app.modules.proxy._service.observability import _hash_identifier
@@ -1569,6 +1572,7 @@ class _HTTPBridgeMixin(
                         self._http_bridge_inflight_sessions.pop(key, None)
                         if original_request_unanchored:
                             _reserve_http_bridge_unanchored_handoff(created_session, request_scope_id=request_scope_id)
+                        _inherit_http_bridge_denied_anchor_ids_locked(self, created_session)
                         self._http_bridge_sessions[key] = created_session
                         session_registered = True
                         if inflight_future is not None and not inflight_future.done():

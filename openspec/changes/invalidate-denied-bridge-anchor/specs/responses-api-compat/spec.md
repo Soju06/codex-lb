@@ -6,7 +6,7 @@
 
 When upstream answers an HTTP bridge request with a `previous_response_not_found` terminal frame, and the `previous_response_id` on that request was injected by the proxy onto a full-resend-shaped payload, the proxy MUST retire that anchor on the first denial rather than waiting for the eventless-failure poison threshold. Retirement MUST clear the durable anchor only when the denied id is still the durable latest response and the session owner fence still matches; the write MUST clear the four anchor-bound fields and delete only the matching response-id alias, preserving turn-state and sibling response aliases. The proxy MUST clear the in-memory session carrier even if durable cleanup or alias unregistering fails.
 
-Before awaiting durable cleanup, the proxy MUST publish the denied id to the live session. Publication MUST be serialized with the submitter's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. Before publishing any reversible recovery alias or dispatching upstream, any already-prepared request carrying that id as a proxy-injected anchor MUST fail closed without sending another upstream frame. This revalidation MUST close the retirement/dispatch race; it MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
+Before awaiting durable cleanup, the proxy MUST publish the denied id to the denied session generation and every live same-key successor. Each publication MUST be serialized with that generation's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. A successor registered after publication MUST inherit tombstones from detached same-key generations before becoming canonical. Successor publication MUST unregister the matching local alias and clear matching in-memory trim state because the successor's advanced owner epoch can fence the predecessor's durable clear. Before publishing any reversible recovery alias or dispatching upstream, any already-prepared request carrying that id as a proxy-injected anchor MUST fail closed without sending another upstream frame. This revalidation MUST close the retirement/dispatch race; it MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
 
 The proxy MUST NOT retire the anchor when:
 
@@ -85,6 +85,15 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **WHEN** denial publication acquires session lifecycle ownership before the prepared request's final send section
 - **THEN** the denied id is tombstoned before the prepared request revalidates
 - **AND** the prepared request fails closed without sending an upstream frame
+
+#### Scenario: A detached denial reaches the live successor
+
+- **GIVEN** a denied request belongs to a detached generation
+- **AND** a same-key successor advanced the durable owner epoch and became live
+- **WHEN** the detached generation handles the denial
+- **THEN** the proxy MUST tombstone the denied id on both generations
+- **AND** MUST clear matching alias and trim state from the successor
+- **AND** a later successor MUST inherit the tombstone before canonical registration
 
 #### Scenario: Sibling response aliases survive retirement
 

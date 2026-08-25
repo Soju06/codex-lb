@@ -1112,14 +1112,16 @@ def _denied_proxy_injected_anchor_id(
     its anchor is gone, which is the same rule the expired-anchor path applies
     before clearing durable continuity.
     """
-    for request_state in request_states:
-        if (
-            request_state.proxy_injected_previous_response_id
-            and request_state.proxy_injected_anchor_had_full_resend_payload
-            and request_state.previous_response_id is not None
-        ):
-            return request_state.previous_response_id
-    return None
+    eligible_response_ids = {
+        request_state.previous_response_id
+        for request_state in request_states
+        if request_state.proxy_injected_previous_response_id
+        and request_state.proxy_injected_anchor_had_full_resend_payload
+        and request_state.previous_response_id is not None
+    }
+    if len(eligible_response_ids) != 1:
+        return None
+    return eligible_response_ids.pop()
 
 
 async def _retire_denied_http_bridge_anchor(

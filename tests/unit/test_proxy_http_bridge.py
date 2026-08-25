@@ -31865,6 +31865,16 @@ def test_denied_anchor_id_picks_the_shared_anchor_from_a_fan_out():
     assert http_bridge_upstream_events_module._denied_proxy_injected_anchor_id(request_states) == "resp_shared"
 
 
+def test_denied_anchor_id_rejects_an_ambiguous_fan_out():
+    """An unscoped denial cannot prove which of two distinct anchors failed."""
+    request_states = [
+        _denied_anchor_request_state(previous_response_id="resp_first"),
+        _denied_anchor_request_state(previous_response_id="resp_second"),
+    ]
+
+    assert http_bridge_upstream_events_module._denied_proxy_injected_anchor_id(request_states) is None
+
+
 @pytest.mark.asyncio
 async def test_retire_denied_bridge_anchor_swallows_bookkeeping_failures():
     """Retirement is cleanup and must never change how the denial is delivered."""

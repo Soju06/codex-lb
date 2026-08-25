@@ -18,7 +18,7 @@ When the durable clear cannot be confirmed or its await is cancelled, the proxy 
 
 Retirement is bookkeeping and MUST NOT change how the denial is delivered downstream. A failure while retiring MUST NOT propagate into terminal-event handling.
 
-A denial that settles several requests sharing one anchor MUST retire that anchor once, on the same terms.
+A denial that settles several requests sharing one anchor MUST retire that anchor once, on the same terms. For an unscoped grouped denial, all retirement-eligible request states MUST agree on one `previous_response_id`; if distinct eligible anchors are present, the proxy MUST skip retirement because the denied anchor is ambiguous.
 
 The downstream error contract is unchanged: the denial is still reported to the client as `stream_incomplete`, so the client retains its own anchor and is not driven into a full-history resend.
 
@@ -63,6 +63,12 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **GIVEN** several pending requests on one session share a proxy-injected anchor
 - **WHEN** upstream answers with a single `previous_response_not_found` that settles all of them together
 - **THEN** the proxy retires that anchor before the grouped settlement completes
+
+#### Scenario: An ambiguous fan-out denial retires no anchor
+
+- **GIVEN** an unscoped `previous_response_not_found` settles grouped requests carrying distinct retirement-eligible anchors
+- **WHEN** no denied response id identifies one anchor
+- **THEN** the proxy MUST NOT tombstone or clear either anchor
 
 #### Scenario: A prepared denied anchor is rejected before dispatch
 

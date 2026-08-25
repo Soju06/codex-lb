@@ -2,15 +2,17 @@
 
 ## 1. Implementation
 
-- [x] 1.1 Surface server-level transient websocket connect failures
-      (`upstream_unavailable` / `upstream_websocket_handshake_failed`, 5xx)
-      carrying `failure_phase = "connect"` provenance without recording
-      account failure health or rotating accounts; failures without connect
-      provenance (OAuth refresh transport errors) keep the penalized
-      failover path
+- [x] 1.1 Stamp host-scoped transport provenance at the direct upstream
+      websocket open (connect timeout, invalid handshake, 5xx upgrade
+      rejection, non-host-wide connect network error) and withhold it from
+      credential-scoped rejections, TLS verification failures, host-wide
+      network loss and every routed open; surface failures carrying that
+      provenance without recording account failure health or rotating
+      accounts, and keep everything else on the penalized failover path
 - [x] 1.2 Arm a bounded per-instance transport-failure marker on that surface
-      path and when a websocket open exhausts the request budget, and clear
-      it on the next successful upstream websocket connect
+      path and when a websocket open exhausts the request budget after the
+      upstream connector began, and clear it on the next successful upstream
+      websocket connect
 - [x] 1.3 Deny responses websocket handshakes with HTTP 426 while the marker
       is armed or `upstream_stream_transport` is pinned to `"http"`
 - [x] 1.4 Bypass the HTTP responses bridge and pin the raw path's upstream
@@ -18,19 +20,29 @@
       transport is pinned to `"http"`
 - [x] 1.5 Fall back from a bridge session-creation failure carrying
       pre-submit provenance to raw HTTP streaming, never replaying
-      post-submit failures and skipping the fallback while an API-key usage
-      reservation is unsettled
+      post-submit failures, never replaying a turn whose continuity anchor
+      only the bridge's prepared payload carries, and skipping the fallback
+      while an API-key usage reservation is unsettled
+- [x] 1.6 Arm the transport-failure marker from the bridge fallback, whose
+      pre-dispatch failover never reaches the websocket failover decision
 
 ## 2. Regression coverage
 
-- [x] 2.1 Failover decision: transient 5xx surfaces without penalty and arms
-      the marker; account-scoped and sub-5xx failures keep the penalized
-      failover path
-- [x] 2.2 Handshake admission: 426 denial while armed or pinned, normal accept
+- [x] 2.1 Failover decision: transport-provenance failures surface without
+      penalty and arm the marker; account-scoped, refresh and sub-5xx
+      failures keep the penalized failover path
+- [x] 2.2 Connect-site provenance through the real client conversion: direct
+      5xx handshake, direct connect timeout, direct credential rejection,
+      direct and routed TLS verification failure, routed 5xx handshake
+- [x] 2.3 Handshake admission: 426 denial while armed or pinned, normal accept
       otherwise, marker TTL expiry and clear
-- [x] 2.3 Bridge: pinned-http bypass, transient pre-stream fallback, and the
-      negative cases (partial stream, API-key reservation, non-transient
-      failure) all covered at `_stream_http_bridge_or_retry`
+- [x] 2.4 Budget exhaustion: a stalled connector arms the marker, a budget
+      that expires in local admission does not
+- [x] 2.5 Bridge: pinned-http bypass, transient pre-stream fallback, marker
+      arming, the real bridge recording prepared-anchor provenance, and the
+      negative cases (prepared anchor, partial stream, API-key reservation,
+      refresh provenance, non-transient failure) at
+      `_stream_http_bridge_or_retry`
 
 ## 3. Verification
 

@@ -4,19 +4,30 @@
 
 ### Requirement: Connect-phase websocket transport failures surface without account penalty
 
-When a direct Responses websocket upstream connect attempt fails with a
-server-level transient transport error — a classified `upstream_unavailable`
-or `upstream_websocket_handshake_failed` failure whose HTTP status is absent
-or 5xx **and** whose failure provenance is the websocket open itself
-(`failure_phase = "connect"`) — the proxy MUST surface the classified failure
-to the client on that attempt. It MUST NOT record account failure health for
-the selected account and MUST NOT rotate to another account, because the
-failure is evidence about the websocket transport, not the account, and
-penalizing the account starves hard-affinity selection for the client's HTTP
-retry of the same turn. Failures that merely share the
-`upstream_unavailable` envelope without connect provenance — OAuth refresh
-transport errors in particular — and account-scoped connect failures
-(authentication, rate limit, quota, and any sub-5xx classification) MUST
+The direct upstream websocket open MUST stamp host-scoped transport
+provenance on the failures that prove the websocket transport itself did not
+come up: a connect timeout, an invalid handshake, a 5xx upgrade rejection,
+and a connect-phase network error other than host-wide network loss. It MUST
+NOT stamp that provenance on failures that are scoped to something narrower
+than the transport — credential-scoped handshake rejections (401, 403, 429
+and any other sub-5xx status), TLS verification failures, host-wide network
+loss, and every routed-proxy open, which proves nothing beyond the health of
+one account's proxy endpoint.
+
+When a Responses websocket upstream connect attempt fails carrying that
+transport provenance, and the failure is not confirmed pre-dispatch route
+evidence, the proxy MUST surface the classified failure to the client on that
+attempt. It MUST NOT record account failure health for the selected account
+and MUST NOT rotate to another account, because the failure is evidence about
+the websocket transport, not the account, and penalizing the account starves
+hard-affinity selection for the client's HTTP retry of the same turn.
+
+Classification MUST key on that provenance rather than on the sanitized error
+code, which cannot carry it in either direction: the Responses policy
+preserves the upstream handshake body, so a direct 5xx upgrade rejection
+surfaces as `upstream_error` or whatever code the edge returned, while OAuth
+refresh transport errors, routed handshakes and TLS failures all share the
+`upstream_unavailable` envelope. Failures without transport provenance MUST
 retain the existing classify-penalize-failover behavior.
 
 #### Scenario: websocket connect timeout surfaces without penalty
@@ -41,17 +52,42 @@ retain the existing classify-penalize-failover behavior.
 - **THEN** the failure is classified and recorded against the account
 - **AND** the connect series proceeds with its existing failover decision
 
+#### Scenario: direct 5xx handshake rejection is transport evidence
+
+- **GIVEN** a direct Responses websocket connect series selected an account
+- **WHEN** the upstream rejects the upgrade with HTTP 503 and an unstructured body, which the client converts to code `upstream_error`
+- **THEN** the failure carries websocket transport provenance
+- **AND** it surfaces without an account penalty despite not matching a websocket-specific error code
+
+#### Scenario: routed handshake failure keeps account failover
+
+- **GIVEN** accounts reach upstream through different proxy routes
+- **WHEN** one account's routed websocket open fails with an HTTP 5xx handshake
+- **THEN** the failure carries no websocket transport provenance
+- **AND** the connect series proceeds with its existing account/route failover decision instead of denying handshakes instance-wide
+
+#### Scenario: TLS verification failure stays out of the transport fallback
+
+- **GIVEN** a Responses websocket connect series selected an account
+- **WHEN** the upstream websocket open fails TLS certificate verification
+- **THEN** the failure carries no websocket transport provenance
+- **AND** handshakes are not denied, because a raw HTTP retry reaches the same invalid TLS configuration
+
 ### Requirement: Websocket handshake denial steers Codex clients to HTTP during websocket outages
 
 Codex clients activate their session-scoped HTTP transport fallback only when
 the websocket handshake is rejected with HTTP 426 (`Upgrade Required`);
 in-band error events — regardless of embedded status — retry on the websocket
-transport. After a connect-phase transient websocket transport failure, or
-after a websocket open consumes the request budget without completing, the
-proxy MUST deny new Responses websocket handshakes with HTTP 426 for a
-bounded window (60 seconds), and MUST clear that denial state on the next
-successful upstream websocket connect so the websocket transport resumes
-automatically. While `upstream_stream_transport` is pinned to `"http"`, the
+transport. After a websocket connect failure carrying transport provenance,
+or after a websocket open consumes the request budget once the upstream
+connector itself has begun, the proxy MUST deny new Responses websocket
+handshakes with HTTP 426 for a bounded window (60 seconds), and MUST clear
+that denial state on the next successful upstream websocket connect so the
+websocket transport resumes automatically. A request budget that expires
+before the connector begins — while the open is still waiting on local
+websocket-connect admission or resolving the account's route — MUST NOT arm
+the denial state: that is local contention, and forcing every client onto
+HTTP would amplify the overload it came from. While `upstream_stream_transport` is pinned to `"http"`, the
 proxy MUST deny Responses websocket handshakes with HTTP 426 unconditionally.
 The denial MUST NOT apply to the realtime websocket surfaces, whose upstream
 is distinct.
@@ -65,9 +101,16 @@ is distinct.
 
 #### Scenario: budget-exhausted websocket open arms the denial state
 
-- **GIVEN** the request budget expires while the upstream websocket open is stalled
+- **GIVEN** the request budget expires while the upstream websocket connector is stalled
 - **WHEN** the budget-exhausted failure is emitted to the client
 - **THEN** the transport-failure denial state is armed for subsequent handshakes
+
+#### Scenario: budget exhausted in local admission does not arm the denial state
+
+- **GIVEN** the request budget is shorter than the local websocket-connect admission wait
+- **WHEN** the budget expires before the upstream connector begins
+- **THEN** the failure surfaces as local admission evidence
+- **AND** the transport-failure denial state is not armed
 
 #### Scenario: handshake accepted after the denial window expires
 
@@ -97,10 +140,23 @@ reservation, the proxy MUST retry the turn over raw HTTP with the upstream
 transport pinned to `"http"` for that request. A pre-submit failure that
 shares the `upstream_unavailable` envelope without connect provenance — an
 exhausted token-refresh loop in particular — is account evidence and MUST
-propagate unchanged. The fallback MUST NOT replay
-a failure without pre-submit provenance (the turn may already have
-dispatched upstream), MUST NOT run after any line reached the client, MUST
-NOT run while an API-key usage reservation is unsettled (reservation
+propagate unchanged.
+
+Bridge session creation runs its own pre-dispatch failover and never reaches
+the websocket failover decision, so when that fallback accepts a failure the
+websocket transport classifier also recognizes, the proxy MUST arm the
+transport-failure denial state; otherwise bridge-only traffic leaves it clear
+and every later request re-attempts the unavailable websocket bridge before
+falling back.
+
+The raw-HTTP replay carries the incoming payload, not the bridge's prepared
+payload, and the raw path never injects a response anchor. When bridge
+session creation prepared a continuity anchor the incoming payload does not
+carry, the proxy MUST NOT replay the turn over raw HTTP: doing so would send
+the new turn alone and silently drop the prior conversation. The fallback
+MUST NOT replay a failure without pre-submit provenance (the turn may already
+have dispatched upstream), MUST NOT run after any line reached the client,
+MUST NOT run while an API-key usage reservation is unsettled (reservation
 settlement owns that path), and MUST NOT absorb non-transient failures.
 
 #### Scenario: pinned HTTP upstream transport bypasses the bridge
@@ -120,6 +176,19 @@ settlement owns that path), and MUST NOT absorb non-transient failures.
 - **GIVEN** the HTTP responses bridge is enabled with the default upstream transport
 - **WHEN** bridge session creation fails with a 5xx classified `upstream_unavailable` error carrying pre-submit provenance before any line reached the client
 - **THEN** the turn is retried over raw HTTP with the upstream transport pinned to `"http"`
+
+#### Scenario: bridge connect fallback arms the denial state
+
+- **GIVEN** bridge session creation fails with a websocket connect failure carrying transport provenance
+- **WHEN** the turn is retried over raw HTTP
+- **THEN** the transport-failure denial state is armed
+- **AND** subsequent HTTP requests bypass the bridge and the next websocket handshake is denied with HTTP 426
+
+#### Scenario: bridge-prepared continuity anchors are not replayed over raw HTTP
+
+- **GIVEN** an incoming Responses request carries no `previous_response_id` and the bridge injected the durable session anchor into its prepared payload
+- **WHEN** bridge session creation then fails pre-submit with a transient `upstream_unavailable` error
+- **THEN** the failure propagates without an HTTP replay, because the incoming payload alone would drop the prior conversation
 
 #### Scenario: refresh-provenance failures propagate unchanged
 

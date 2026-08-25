@@ -22,6 +22,7 @@ therefore takes three cooperating behaviors:
 from __future__ import annotations
 
 import asyncio
+import ssl
 import time
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -29,16 +30,29 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
+import app.core.clients.proxy_websocket as proxy_websocket_module
 import app.modules.proxy._service.http_bridge.streaming as http_bridge_streaming_module
 import app.modules.proxy._service.support as transport_health
 import app.modules.proxy._service.websocket.mixin as ws_mixin
 import app.modules.proxy.api as proxy_api_module
 from app.core.balancer.types import ClassifiedFailure
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.codex import CodexTransportError
+from app.core.clients.proxy import ProxyResponseError, is_confirmed_pre_dispatch_transport_error
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
+    connect_responses_websocket,
+)
+from app.core.config.settings import Settings as AppSettings
+from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
-from app.db.models import Account
+from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
+from app.db.models import Account, HttpBridgeSessionState
 from app.modules.proxy import service as proxy_service
+from app.modules.proxy._service.websocket.mixin import _WebSocketMixin
 
 pytestmark = pytest.mark.unit
 
@@ -49,11 +63,25 @@ def _proxy_error(
     message: str,
     *,
     failure_phase: str | None = None,
+    failure_detail: str | None = None,
 ) -> ProxyResponseError:
     return ProxyResponseError(
         status,
         openai_error(code, message, error_type="server_error"),
         failure_phase=failure_phase,
+        failure_detail=failure_detail,
+    )
+
+
+def _transport_error(status: int, code: str, message: str) -> ProxyResponseError:
+    """A connect failure carrying the direct open's transport provenance."""
+
+    return _proxy_error(
+        status,
+        code,
+        message,
+        failure_phase="connect",
+        failure_detail=UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
     )
 
 
@@ -98,7 +126,7 @@ async def test_transient_connect_timeout_surfaces_without_penalty_and_arms_marke
 
     action = await _decide(
         harness,
-        _proxy_error(502, "upstream_unavailable", "Request to upstream timed out", failure_phase="connect"),
+        _transport_error(502, "upstream_unavailable", "Request to upstream timed out"),
     )
 
     assert action == "surface"
@@ -112,11 +140,10 @@ async def test_server_level_handshake_failure_surfaces_without_penalty() -> None
 
     action = await _decide(
         harness,
-        _proxy_error(
+        _transport_error(
             503,
             "upstream_websocket_handshake_failed",
             "Upstream websocket handshake failed with HTTP 503",
-            failure_phase="connect",
         ),
     )
 
@@ -162,32 +189,34 @@ async def test_sub_5xx_transient_failure_keeps_penalized_failover_path() -> None
 
 
 def test_connect_transport_failure_classifier_provenance() -> None:
-    # Both the failover decision and the forced-surface replacement branch
-    # share this classifier, so its provenance gates decide where the
-    # handshake-denial marker can arm.
-    qualifies = ws_mixin._websocket_connect_transport_failure_code(
-        _proxy_error(502, "upstream_unavailable", "Request to upstream timed out", failure_phase="connect"),
+    # The failover decision, the forced-surface replacement branch and the
+    # bridge fallback all share this classifier, so its provenance gates
+    # decide everywhere the handshake-denial marker can arm.
+    qualifies = transport_health.websocket_connect_transport_failure_code(
+        _transport_error(502, "upstream_unavailable", "Request to upstream timed out"),
         confirmed_pre_dispatch=False,
     )
     assert qualifies == "upstream_unavailable"
 
-    no_connect_phase = ws_mixin._websocket_connect_transport_failure_code(
+    no_connect_phase = transport_health.websocket_connect_transport_failure_code(
         _proxy_error(502, "upstream_unavailable", "token refresh transport error"),
         confirmed_pre_dispatch=False,
     )
     assert no_connect_phase is None
 
-    pre_dispatch = ws_mixin._websocket_connect_transport_failure_code(
-        _proxy_error(502, "upstream_unavailable", "proxy route connect failed", failure_phase="connect"),
+    pre_dispatch = transport_health.websocket_connect_transport_failure_code(
+        _transport_error(502, "upstream_unavailable", "proxy route connect failed"),
         confirmed_pre_dispatch=True,
     )
     assert pre_dispatch is None
 
-    sub_5xx = ws_mixin._websocket_connect_transport_failure_code(
-        _proxy_error(429, "upstream_unavailable", "slow down", failure_phase="connect"),
+    # An account-, route-, or configuration-scoped connect failure reuses the
+    # same envelope but carries no transport provenance.
+    no_provenance = transport_health.websocket_connect_transport_failure_code(
+        _proxy_error(502, "upstream_unavailable", "routed handshake failed", failure_phase="connect"),
         confirmed_pre_dispatch=False,
     )
-    assert sub_5xx is None
+    assert no_provenance is None
 
 
 def test_transport_failure_marker_expires_and_clears() -> None:
@@ -210,8 +239,12 @@ async def test_budget_exhaustion_during_websocket_open_arms_marker() -> None:
     # the budget-exhausted emit bypasses the failover decision, so the
     # budgeted opener itself must arm the handshake-denial marker.
     class _StalledOpenHarness(ws_mixin._WebSocketMixin):
-        async def _open_upstream_websocket(self, account: Any, headers: Any, *, request_state: Any = None) -> Any:
+        async def _open_upstream_websocket(
+            self, account: Any, headers: Any, *, request_state: Any = None, connect_progress: Any = None
+        ) -> Any:
             del account, headers, request_state
+            if connect_progress is not None:
+                connect_progress.upstream_connect_started = True
             await asyncio.sleep(5.0)
 
     harness = _StalledOpenHarness()
@@ -234,9 +267,11 @@ async def test_process_network_recovery_exhaustion_during_open_arms_marker(
     # budget runs out reaches the same budget-exhausted emit and must arm
     # the marker like the stalled-open branch.
     class _ConnectFailingOpenHarness(ws_mixin._WebSocketMixin):
-        async def _open_upstream_websocket(self, account: Any, headers: Any, *, request_state: Any = None) -> Any:
+        async def _open_upstream_websocket(
+            self, account: Any, headers: Any, *, request_state: Any = None, connect_progress: Any = None
+        ) -> Any:
             del account, headers, request_state
-            raise _proxy_error(502, "upstream_unavailable", "Request to upstream timed out", failure_phase="connect")
+            raise _transport_error(502, "upstream_unavailable", "Request to upstream timed out")
 
     monkeypatch.setattr(ws_mixin, "_wait_for_process_network_recovery", AsyncMock(return_value="exhausted"))
     harness = _ConnectFailingOpenHarness()
@@ -259,7 +294,9 @@ async def test_exhausted_route_resolution_failure_does_not_arm_marker(
     # ``upstream_proxy_unavailable`` failures are pre-dispatch route
     # evidence without connect provenance and must not deny handshakes.
     class _RouteFailingOpenHarness(ws_mixin._WebSocketMixin):
-        async def _open_upstream_websocket(self, account: Any, headers: Any, *, request_state: Any = None) -> Any:
+        async def _open_upstream_websocket(
+            self, account: Any, headers: Any, *, request_state: Any = None, connect_progress: Any = None
+        ) -> Any:
             del account, headers, request_state
             raise _proxy_error(
                 502,
@@ -386,7 +423,7 @@ def _bridge_payload() -> Any:
 
 
 def _pre_submit_error() -> ProxyResponseError:
-    exc = _proxy_error(502, "upstream_unavailable", "Request to upstream timed out", failure_phase="connect")
+    exc = _transport_error(502, "upstream_unavailable", "Request to upstream timed out")
     setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
     return exc
 
@@ -606,3 +643,386 @@ async def test_http_bridge_non_transient_failure_propagates(
 
     with pytest.raises(ProxyResponseError):
         await _collect_bridge_stream(service)
+
+
+# --- Connect-site provenance, through the real client conversion ------------
+#
+# The sanitized error code cannot carry transport provenance in either
+# direction, so these exercise the actual `_connect_upstream_websocket`
+# conversion rather than hand-built envelopes.
+
+
+def _connect_settings() -> Any:
+    return SimpleNamespace(
+        upstream_base_url="https://chatgpt.com/backend-api",
+        upstream_connect_timeout_seconds=7.0,
+        proxy_downstream_websocket_idle_timeout_seconds=120.0,
+        max_sse_event_bytes=4321,
+        upstream_websocket_trust_env=False,
+    )
+
+
+async def _direct_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> ProxyResponseError:
+    async def fake_websocket_connect(url: str, **kwargs: Any) -> Any:
+        del url, kwargs
+        raise failure
+
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", fake_websocket_connect, raising=False)
+    monkeypatch.setattr(proxy_websocket_module, "get_settings", _connect_settings)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+            allow_direct_egress=True,
+        )
+    return exc_info.value
+
+
+async def _routed_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: CodexTransportError,
+) -> ProxyResponseError:
+    route = ResolvedUpstreamRoute(
+        mode="account_bound",
+        pool_id="pool_1",
+        endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+    )
+
+    class _FailingCodexClient:
+        async def open_ws_with_route_metadata(self, url: str, **kwargs: Any) -> Any:
+            del url, kwargs
+            raise failure
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(proxy_websocket_module, "get_settings", _connect_settings)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await connect_responses_websocket(
+            {"openai-beta": "responses_websockets=2026-02-06"},
+            "access-token",
+            "account-123",
+            route=route,
+            codex_client=cast(Any, _FailingCodexClient()),
+        )
+    return exc_info.value
+
+
+def _classify(exc: ProxyResponseError) -> str | None:
+    return transport_health.websocket_connect_transport_failure_code(
+        exc,
+        confirmed_pre_dispatch=is_confirmed_pre_dispatch_transport_error(exc),
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_5xx_handshake_is_classified_as_transport_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The responses policy preserves the upstream handshake body, so a bare
+    # 503 upgrade rejection surfaces as ``upstream_error`` rather than either
+    # websocket-specific code. Provenance, not the code, must classify it, or
+    # the common direct outage never steers Codex clients onto HTTP.
+    exc = await _direct_connect_failure(
+        monkeypatch,
+        InvalidStatus(Response(503, "Service Unavailable", Headers({}), b"upstream is down")),
+    )
+
+    assert exc.status_code == 503
+    assert exc.payload["error"].get("code") == "upstream_error"
+    assert exc.failure_detail == UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL
+    assert _classify(exc) == "upstream_error"
+
+
+@pytest.mark.asyncio
+async def test_direct_credential_handshake_rejection_stays_account_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = await _direct_connect_failure(
+        monkeypatch,
+        InvalidStatus(Response(401, "Unauthorized", Headers({}), b"")),
+    )
+
+    assert exc.failure_detail is None
+    assert _classify(exc) is None
+
+
+@pytest.mark.asyncio
+async def test_direct_connect_timeout_is_classified_as_transport_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = await _direct_connect_failure(monkeypatch, asyncio.TimeoutError())
+
+    assert exc.failure_detail == UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL
+    assert _classify(exc) == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_direct_tls_verification_failure_stays_out_of_transport_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A certificate failure is stable endpoint configuration: retrying it over
+    # raw HTTP hits the same invalid TLS configuration, so it must not deny
+    # handshakes with 426.
+    exc = await _direct_connect_failure(
+        monkeypatch,
+        ssl.SSLCertVerificationError("certificate verify failed"),
+    )
+
+    assert exc.failure_detail is None
+    assert _classify(exc) is None
+
+
+@pytest.mark.asyncio
+async def test_routed_5xx_handshake_stays_in_account_failover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One account's exhausted proxy route proves nothing about the websocket
+    # transport other accounts reach. Classifying it as a global outage would
+    # skip healthy-account selection and force unrelated clients onto HTTP.
+    exc = await _routed_connect_failure(
+        monkeypatch,
+        CodexTransportError(
+            "Codex upstream websocket failed via proxy endpoint ep_1: HTTP 503",
+            status_code=503,
+        ),
+    )
+
+    assert exc.failure_phase == "connect"
+    assert exc.payload["error"].get("code") == "upstream_unavailable"
+    assert is_confirmed_pre_dispatch_transport_error(exc) is False
+    assert _classify(exc) is None
+
+
+@pytest.mark.asyncio
+async def test_routed_tls_verification_failure_stays_out_of_transport_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = await _routed_connect_failure(
+        monkeypatch,
+        CodexTransportError(
+            "Codex upstream websocket failed via proxy endpoint ep_1: ClientConnectorCertificateError",
+            failure_phase="connect",
+            retryable_same_contract=True,
+            is_tls_verification_failure=True,
+        ),
+    )
+
+    assert _classify(exc) is None
+
+
+# --- Bridge fallback continuity and marker arming ---------------------------
+
+
+def _durable_anchor_lookup() -> Any:
+    return proxy_service.DurableBridgeLookup(
+        session_id="sess-transport-fallback",
+        canonical_kind="turn_state_header",
+        canonical_key="http_turn_fresh",
+        api_key_scope="__anonymous__",
+        account_id="acc-1",
+        owner_instance_id=None,
+        owner_epoch=1,
+        lease_expires_at=None,
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="http_turn_fresh",
+        latest_response_id="resp_latest",
+        latest_input_item_count=1,
+        latest_input_full_fingerprint="a" * 64,
+    )
+
+
+@pytest.mark.asyncio
+async def test_bridge_connect_failure_records_prepared_anchor_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The bridge injects the durable anchor into its own prepared payload
+    # before session creation runs. When creation then fails pre-submit, the
+    # surfaced error must say so: the raw path never injects a response
+    # anchor, so replaying the incoming payload would drop prior context.
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        upstream_stream_transport="default",
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_service_get_settings",
+        lambda: AppSettings(
+            http_responses_session_bridge_enabled=True,
+            http_responses_session_bridge_instance_id="instance-transport-fallback",
+        ),
+    )
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_request_targets",
+        AsyncMock(return_value=_durable_anchor_lookup()),
+    )
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
+
+    async def failing_session_creation(*_args: object, **_kwargs: object) -> Any:
+        raise _transport_error(502, "upstream_unavailable", "Request to upstream timed out")
+
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", failing_session_creation)
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _chunk in service._stream_via_http_bridge(
+            proxy_service.ResponsesRequest.model_validate(
+                {
+                    "model": "gpt-5.6-sol",
+                    "instructions": "test",
+                    "input": [{"type": "message", "role": "user", "content": "next turn"}],
+                }
+            ),
+            headers={"x-codex-turn-state": "http_turn_fresh"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert getattr(exc_info.value, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, False) is True
+    assert getattr(exc_info.value, http_bridge_streaming_module._HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, False) is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_prepared_anchor_failure_is_not_replayed_over_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+
+    async def anchor_losing_bridge(*_args: object, **_kwargs: object):
+        exc = _pre_submit_error()
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, True)
+        raise exc
+        yield ""
+
+    async def fallback_must_not_run(*_args: object, **_kwargs: object):
+        raise AssertionError("fallback must not replay a payload missing the bridge-prepared anchor")
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", anchor_losing_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", fallback_must_not_run)
+
+    with pytest.raises(ProxyResponseError):
+        await _collect_bridge_stream(service)
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_connect_fallback_arms_transport_failure_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Bridge session creation runs its own pre-dispatch failover and never
+    # reaches the websocket failover decision, so bridge-only traffic would
+    # otherwise leave the marker clear: every later request would re-attempt
+    # the dead websocket bridge, and the next handshake would be accepted.
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+
+    async def failing_bridge(*_args: object, **_kwargs: object):
+        raise _pre_submit_error()
+        yield ""
+
+    async def record_stream_with_retry(*_args: object, **_kwargs: object):
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", failing_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", record_stream_with_retry)
+
+    await _collect_bridge_stream(service)
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_refresh_provenance_failure_does_not_arm_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+
+    async def refresh_failing_bridge(*_args: object, **_kwargs: object):
+        exc = _proxy_error(502, "upstream_unavailable", "temporary refresh failure")
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+        raise exc
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", refresh_failing_bridge)
+
+    with pytest.raises(ProxyResponseError):
+        await _collect_bridge_stream(service)
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is False
+
+
+# --- Budget exhaustion before the connector runs ----------------------------
+
+
+class _AdmissionStalledService(_WebSocketMixin):
+    """Real ``_open_upstream_websocket`` whose admission gate never admits."""
+
+    def __init__(self) -> None:
+        self._encryptor = TokenEncryptor()
+
+        class _WorkAdmission:
+            async def acquire_websocket_connect(self) -> Any:
+                await asyncio.sleep(5.0)
+
+        self._work_admission = _WorkAdmission()
+
+    def _get_work_admission(self) -> Any:
+        return self._work_admission
+
+    async def _resolve_upstream_route_for_account(self, _account: object, *, operation: str) -> None:
+        del operation
+        return None
+
+
+@pytest.mark.asyncio
+async def test_budget_exhausted_in_local_admission_does_not_arm_marker() -> None:
+    # A request budget shorter than the local websocket-connect admission wait
+    # expires before any upstream socket is attempted. Denying handshakes then
+    # answers local contention by forcing every client onto HTTP, amplifying
+    # the overload it came from.
+    service = _AdmissionStalledService()
+    account = cast(
+        Any,
+        SimpleNamespace(
+            access_token_encrypted=service._encryptor.encrypt("access-token"),
+            chatgpt_account_id="account-123",
+            codex_installation_id=None,
+            id="acct-transport-fallback",
+        ),
+    )
+
+    with pytest.raises(ProxyResponseError):
+        await service._open_upstream_websocket_with_budget(account, {}, timeout_seconds=0.05)
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is False

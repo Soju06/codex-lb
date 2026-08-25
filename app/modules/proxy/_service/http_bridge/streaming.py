@@ -24,6 +24,7 @@ from app.core.clients.proxy import (  # noqa: F401
     _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
+    is_confirmed_pre_dispatch_transport_error,
     pop_compact_timeout_overrides,
     pop_stream_timeout_overrides,
     pop_transcribe_timeout_overrides,
@@ -173,7 +174,9 @@ from app.modules.proxy._service.support import (
     _signal_propagated_responses_service_cleanup_ready,
     _ttft_event_visible_at,
     _WebSocketRequestState,
+    mark_upstream_websocket_transport_failure,
     upstream_websocket_transport_recently_failed,
+    websocket_connect_transport_failure_code,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -246,6 +249,7 @@ _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 # strictly before the turn is submitted upstream, so only exceptions carrying
 # this attribute are safe for the wrapper's raw-HTTP replay.
 _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR = "http_bridge_pre_submit_failure"
+_HTTP_BRIDGE_PREPARED_ANCHOR_ATTR = "http_bridge_prepared_continuity_anchor"
 
 
 def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
@@ -1075,11 +1079,26 @@ class _HTTPBridgeStreamingMixin:
                     bridge_yielded_any
                     or api_key_reservation is not None
                     or not getattr(exc, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, False)
+                    or getattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, False)
                     or fallback_error_code != "upstream_unavailable"
                     or exc.failure_phase != "connect"
                     or (exc.status_code is not None and exc.status_code < 500)
                 ):
                     raise
+                # Bridge session creation runs its own pre-dispatch failover,
+                # which never reaches the websocket failover decision, so this
+                # is the only place bridge-only traffic can arm the marker.
+                # Without it every later HTTP request re-attempts the dead
+                # websocket bridge before falling back, and the next
+                # downstream handshake is accepted instead of denied with 426.
+                if (
+                    websocket_connect_transport_failure_code(
+                        exc,
+                        confirmed_pre_dispatch=is_confirmed_pre_dispatch_transport_error(exc),
+                    )
+                    is not None
+                ):
+                    mark_upstream_websocket_transport_failure()
                 bridge_transport_unavailable = True
         finally:
             with anyio.CancelScope(shield=True):
@@ -2193,6 +2212,14 @@ class _HTTPBridgeStreamingMixin:
                 # upstream; record that provenance so the outer wrapper knows
                 # a raw-HTTP replay cannot dispatch the turn twice.
                 setattr(exc, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+                # A bridge-injected anchor lives only on ``effective_payload``:
+                # the raw path recovers the owner from the turn-state header
+                # but never injects a response anchor, so replaying the
+                # incoming payload would send the new turn alone and silently
+                # drop the prior conversation. Only a payload that already
+                # carries its own continuity is a safe fresh raw-HTTP replay.
+                if effective_payload.previous_response_id != payload.previous_response_id:
+                    setattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, True)
                 if not owner_unavailable_allows_account_neutral_replay(exc):
                     exc_code, _exc_message = _proxy_error_code_message(exc)
                     if not unanchored_fork_spill_attempted and _http_bridge_unanchored_fork_can_spill_on_cap(

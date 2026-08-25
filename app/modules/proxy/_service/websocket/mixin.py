@@ -345,6 +345,7 @@ from app.modules.proxy._service.support import (
     _WebSocketUpstreamControl,
     clear_upstream_websocket_transport_failure,
     mark_upstream_websocket_transport_failure,
+    websocket_connect_transport_failure_code,
 )
 from app.modules.proxy._service.support import (
     _HTTPBridgeOwnerForward as _HTTPBridgeOwnerForward,
@@ -505,34 +506,6 @@ def _facade() -> Any:
     return sys.modules["app.modules.proxy.service"]
 
 
-def _websocket_connect_transport_failure_code(
-    exc: ProxyResponseError,
-    *,
-    confirmed_pre_dispatch: bool,
-) -> str | None:
-    """Code of a server-level websocket-open transport failure, else ``None``.
-
-    The ``failure_phase == "connect"`` provenance confines the match to the
-    websocket open itself: account-scoped failures that share the
-    ``upstream_unavailable`` envelope — OAuth refresh transport errors in
-    particular — and confirmed pre-dispatch proxy-route failures never
-    qualify, so they keep their classify-penalize-failover handling.
-    """
-    if confirmed_pre_dispatch or exc.failure_phase != "connect":
-        return None
-    connect_error = _parse_openai_error(exc.payload)
-    connect_error_code = _normalize_error_code(
-        connect_error.code if connect_error else None,
-        connect_error.type if connect_error else None,
-    )
-    if connect_error_code in (
-        "upstream_unavailable",
-        "upstream_websocket_handshake_failed",
-    ) and (exc.status_code is None or exc.status_code >= 500):
-        return connect_error_code
-    return None
-
-
 logger = logging.getLogger(__name__)
 
 _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily unavailable; retry later."
@@ -544,6 +517,19 @@ _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
 )
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_ACTION = "fail_closed_capability_routing"
+
+
+@dataclass(slots=True)
+class _WebSocketConnectProgress:
+    """Whether an upstream websocket open reached the network connector.
+
+    Local websocket-connect admission and the account's route resolution run
+    inside the same request budget scope as the connector, so a budget
+    timeout that fires before this flag is set is local-contention evidence,
+    not upstream websocket transport evidence.
+    """
+
+    upstream_connect_started: bool = False
 
 
 class _WebSocketReplaySequenceRegression(Exception):
@@ -3636,7 +3622,7 @@ class _WebSocketMixin:
                     # handshake-denial marker even though the failover
                     # decision is skipped.
                     if (
-                        _websocket_connect_transport_failure_code(
+                        websocket_connect_transport_failure_code(
                             exc,
                             confirmed_pre_dispatch=confirmed_pre_dispatch,
                         )
@@ -4398,7 +4384,7 @@ class _WebSocketMixin:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
         confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
-        transport_failure_code = _websocket_connect_transport_failure_code(
+        transport_failure_code = websocket_connect_transport_failure_code(
             exc,
             confirmed_pre_dispatch=confirmed_pre_dispatch,
         )
@@ -4495,9 +4481,15 @@ class _WebSocketMixin:
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
                 _raise_proxy_budget_exhausted()
+            connect_progress = _WebSocketConnectProgress()
             try:
                 with anyio.fail_after(remaining_seconds):
-                    upstream = await proxy._open_upstream_websocket(account, headers, request_state=request_state)
+                    upstream = await proxy._open_upstream_websocket(
+                        account,
+                        headers,
+                        request_state=request_state,
+                        connect_progress=connect_progress,
+                    )
                 recovery.log_recovered()
                 return upstream
             except ProxyResponseError as exc:
@@ -4517,7 +4509,7 @@ class _WebSocketMixin:
                     # failures are pre-dispatch route evidence and must not
                     # deny handshakes with 426.
                     if (
-                        _websocket_connect_transport_failure_code(
+                        websocket_connect_transport_failure_code(
                             exc,
                             confirmed_pre_dispatch=is_confirmed_pre_dispatch_transport_error(exc),
                         )
@@ -4534,7 +4526,12 @@ class _WebSocketMixin:
                 # timeout: the budget-exhausted emit below bypasses the
                 # failover decision, so arm the handshake-denial marker here
                 # or short-budget deployments never steer clients to HTTP.
-                mark_upstream_websocket_transport_failure()
+                # A budget shorter than the local admission wait expires
+                # before the connector ever runs; denying handshakes then
+                # would answer local contention by pushing every client onto
+                # HTTP, amplifying the overload it came from.
+                if connect_progress.upstream_connect_started:
+                    mark_upstream_websocket_transport_failure()
                 _raise_proxy_budget_exhausted()
 
     async def _open_upstream_websocket(
@@ -4543,6 +4540,7 @@ class _WebSocketMixin:
         headers: dict[str, str],
         *,
         request_state: "_WebSocketRequestState | None" = None,
+        connect_progress: _WebSocketConnectProgress | None = None,
     ) -> UpstreamWebSocket:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
@@ -4564,6 +4562,8 @@ class _WebSocketMixin:
                         error_type="server_error",
                     ),
                 ) from exc
+            if connect_progress is not None:
+                connect_progress.upstream_connect_started = True
             upstream = await _facade()._call_with_supported_optional_kwargs(
                 _facade().connect_responses_websocket,
                 headers,

@@ -17,7 +17,10 @@ import anyio
 from app.core.auth.refresh import RefreshError, is_transient_refresh_contention, refresh_contention_kind
 from app.core.balancer.types import UpstreamError
 from app.core.clients.proxy import CodexControlRequestPrivacyPolicy, ProxyResponseError
-from app.core.clients.proxy_websocket import UpstreamWebSocket
+from app.core.clients.proxy_websocket import (
+    UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
+    UpstreamWebSocket,
+)
 from app.core.config.settings import get_settings
 from app.core.errors import OpenAIErrorEnvelope, openai_error
 from app.core.openai.model_registry import get_model_registry
@@ -36,6 +39,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy.affinity import _AffinityPolicy
+from app.modules.proxy.helpers import _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import (
     AccountLease,
     AccountSelection,
@@ -1765,6 +1769,34 @@ def mark_upstream_websocket_transport_failure() -> None:
 def clear_upstream_websocket_transport_failure() -> None:
     global _upstream_ws_transport_failure_at
     _upstream_ws_transport_failure_at = None
+
+
+def websocket_connect_transport_failure_code(
+    exc: ProxyResponseError,
+    *,
+    confirmed_pre_dispatch: bool,
+) -> str | None:
+    """Code of a host-scoped upstream websocket transport failure, else ``None``.
+
+    The discriminator is the provenance the direct upstream open stamps, not
+    the sanitized error code. Codes cannot carry it in either direction: the
+    responses policy preserves the upstream handshake body, so a direct 5xx
+    upgrade rejection surfaces as ``upstream_error`` or whatever the edge
+    returned, while OAuth refresh transport errors, routed-proxy handshakes,
+    TLS verification failures and host-wide network loss all share the
+    ``upstream_unavailable`` envelope and must keep their
+    classify-penalize-failover handling.
+    """
+
+    if confirmed_pre_dispatch or exc.failure_phase != "connect":
+        return None
+    if exc.failure_detail != UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL:
+        return None
+    connect_error = _parse_openai_error(exc.payload)
+    return _normalize_error_code(
+        connect_error.code if connect_error else None,
+        connect_error.type if connect_error else None,
+    )
 
 
 def upstream_websocket_transport_recently_failed() -> bool:

@@ -363,12 +363,17 @@ async def _rollback_http_bridge_recovery_turn_state_registration(
     return await _await_task_deferring_cancellation(rollback_task)
 
 
+def _durable_dispatch_send_timeout_seconds() -> float:
+    return float(_service_get_settings().upstream_connect_timeout_seconds)
+
+
 async def _send_http_bridge_request_text_with_archive_id(
     session: "_HTTPBridgeSession",
     request_state: _WebSocketRequestState,
     text_data: str,
     *,
     on_send_started: Callable[[], None] | None = None,
+    timeout_seconds: float | None = None,
 ) -> None:
     text_data = _text_with_operation_id(text_data, request_state.operation_id)
     # Operation metadata is added after the initial payload sizing pass. Check
@@ -385,7 +390,17 @@ async def _send_http_bridge_request_text_with_archive_id(
         request_state.response_create_sent_at = _service_time().monotonic()
         session.upstream_reader_wakeup.set()
         try:
-            await session.upstream.send_text(text_data)
+            if timeout_seconds is None:
+                await session.upstream.send_text(text_data)
+            else:
+                try:
+                    async with asyncio.timeout(max(0.001, timeout_seconds)):
+                        await session.upstream.send_text(text_data)
+                except TimeoutError:
+                    raise UpstreamWebSocketTransportError(
+                        "Upstream websocket send timed out",
+                        error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
+                    ) from None
         except BaseException:
             # A failed or cancelled send is settled by its caller. Disarm the
             # owner watchdog before lifecycle ownership is released so the
@@ -1980,6 +1995,7 @@ class _HTTPBridgeRequestSubmitMixin:
                                         request_state,
                                         text_data,
                                         on_send_started=mark_upstream_send_started,
+                                        timeout_seconds=_durable_dispatch_send_timeout_seconds(),
                                     )
                         else:
                             await _send_http_bridge_request_text_with_archive_id(
@@ -2000,6 +2016,39 @@ class _HTTPBridgeRequestSubmitMixin:
                                 "Durable denied-anchor dispatch fence failed; failing closed",
                                 exc_info=True,
                             )
+                            if recovery_receipt is not None:
+                                rollback_cancellation: asyncio.CancelledError | None = None
+                                async with session.recovery_alias_lock:
+                                    try:
+                                        (
+                                            rolled_back,
+                                            rollback_cancellation,
+                                        ) = await _rollback_http_bridge_recovery_turn_state_registration(
+                                            self,
+                                            recovery_receipt,
+                                        )
+                                    except Exception:
+                                        rolled_back = False
+                                        logger.warning(
+                                            "Failed to roll back HTTP bridge recovery alias "
+                                            "after dispatch fence failure",
+                                            exc_info=True,
+                                        )
+                                    if rolled_back:
+                                        recovery_receipt = None
+                                    else:
+                                        session.closed = True
+                                        session.upstream_control.reconnect_requested = True
+                                        session.upstream_control.retire_after_drain = True
+                                        _record_continuity_fail_closed(
+                                            surface="http_bridge",
+                                            reason="recovery_alias_rollback_failed",
+                                            previous_response_id=denied_proxy_anchor,
+                                            session_id=request_state.session_id,
+                                            upstream_error_code="bridge_continuity_persistence_failed",
+                                        )
+                                if rollback_cancellation is not None:
+                                    raise rollback_cancellation
                             raise ProxyResponseError(
                                 502,
                                 _http_bridge_owner_lookup_unavailable_error_envelope(),
@@ -2030,6 +2079,11 @@ class _HTTPBridgeRequestSubmitMixin:
                             await self._unregister_http_bridge_previous_response_id(
                                 session,
                                 denied_proxy_anchor,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to unregister remotely denied HTTP bridge anchor",
+                                exc_info=True,
                             )
                         finally:
                             _clear_denied_http_bridge_anchor_from_memory(

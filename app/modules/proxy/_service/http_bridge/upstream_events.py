@@ -1078,22 +1078,27 @@ async def _invalidate_denied_http_bridge_anchor(
         # refused.
         if session.last_completed_response_id != denied_response_id:
             return False
-    cleared = await _clear_denied_http_bridge_anchor_if_matches(
-        service,
-        session,
-        denied_response_id=denied_response_id,
-    )
+    cleared = False
     try:
-        await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
+        cleared = await _clear_denied_http_bridge_anchor_if_matches(
+            service,
+            session,
+            denied_response_id=denied_response_id,
+        )
     finally:
-        # Do not erase a newer response that completed while the fenced
-        # durable write was in flight.
-        if session.last_completed_response_id == denied_response_id:
-            session.last_completed_response_id = None
-            session.last_completed_response_account_id = None
-            session.last_completed_input_count = 0
-            session.last_completed_input_prefix_fingerprint = None
-            session.last_pending_tool_calls.clear()
+        try:
+            await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
+        finally:
+            # Do not erase a newer response that completed while the fenced
+            # durable write was in flight. This cleanup also runs when the
+            # durable await is cancelled, so the tombstone cannot retain a
+            # matching in-memory trim carrier.
+            if session.last_completed_response_id == denied_response_id:
+                session.last_completed_response_id = None
+                session.last_completed_response_account_id = None
+                session.last_completed_input_count = 0
+                session.last_completed_input_prefix_fingerprint = None
+                session.last_pending_tool_calls.clear()
     return cleared
 
 

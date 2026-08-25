@@ -14,7 +14,7 @@ The proxy MUST NOT retire the anchor when:
 - the anchor was injected onto a payload that is not full-resend shaped, because a delta-only request has no other way to convey prior context once its anchor is gone;
 - the session's current anchor is no longer the denied id, because a concurrent request may have completed and advanced it.
 
-When the durable clear cannot be confirmed, the proxy MUST NOT report the anchor as retired, and MUST still clear the in-memory anchor, which strictly removes one carrier that could re-inject the denied id. If the surviving durable record is read again on a later full-resend turn in the same live session, the proxy MUST retry the conditional durable clear and MUST suppress that tombstoned id from session hydration, anchor injection, and prefix trimming regardless of the retry outcome.
+When the durable clear cannot be confirmed or its await is cancelled, the proxy MUST NOT report the anchor as retired, and MUST still unregister the local response alias and clear the in-memory anchor, which strictly removes carriers that could re-inject or trim against the denied id. If the surviving durable record is read again on a later full-resend turn in the same live session, the proxy MUST retry the conditional durable clear and MUST suppress that tombstoned id from session hydration, anchor injection, and prefix trimming regardless of the retry outcome.
 
 Retirement is bookkeeping and MUST NOT change how the denial is delivered downstream. A failure while retiring MUST NOT propagate into terminal-event handling.
 
@@ -102,6 +102,13 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **THEN** it MUST retry the conditional durable clear under the owner fence
 - **AND** MUST NOT hydrate, inject, or trim against the tombstoned id even if that retry fails
 - **AND** the full-resend turn MUST remain eligible for unanchored upstream dispatch
+
+#### Scenario: Durable cleanup cancellation still clears memory
+
+- **GIVEN** a denied proxy-injected anchor has been tombstoned
+- **WHEN** cancellation interrupts its conditional durable clear
+- **THEN** the proxy MUST unregister the local response alias
+- **AND** MUST clear the matching in-memory anchor and trim metadata before cancellation propagates
 
 If alias unregistering raises after the durable clear, the same in-memory cleanup MUST still occur.
 

@@ -11,6 +11,7 @@
 - [x] 1.7 Add a coordinated regression proving denial publication and prepared dispatch are lifecycle-serialized.
 - [x] 1.8 Add route-level coverage proving a transient durable-clear failure is retried on the next turn without rehydrating, redispatching, or trimming against the tombstoned anchor.
 - [x] 1.9 Prove tombstone rejection occurs before a reversible recovery alias is published.
+- [x] 1.10 Add cancellation coverage proving a cancelled durable clear still unregisters the local alias and clears the in-memory carrier.
 
 ## 2. Anchor Retirement
 
@@ -23,6 +24,7 @@
 - [x] 2.7 Serialize tombstone publication with the submitter's final revalidation and send section.
 - [x] 2.8 Retry a surviving tombstoned durable anchor during hydration and suppress the stale lookup regardless of the retry outcome.
 - [x] 2.9 Move the lifecycle-serialized tombstone check before recovery alias registration so undispatched requests cannot leave stale routing state.
+- [x] 2.10 Keep alias unregister and in-memory cleanup in the durable clear's cancellation-safe `finally` path.
 
 ## 3. Recovery Provenance
 

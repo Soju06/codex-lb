@@ -31776,6 +31776,41 @@ async def test_invalidate_denied_bridge_anchor_drops_memory_even_when_the_durabl
     assert session.last_completed_input_prefix_fingerprint is None
 
 
+@pytest.mark.asyncio
+async def test_invalidate_denied_bridge_anchor_clears_memory_when_durable_clear_is_cancelled():
+    """Reader cancellation must not strand the tombstoned in-memory carrier."""
+    session = _denied_anchor_session()
+    service = _denied_anchor_service()
+    clear_started = asyncio.Event()
+
+    async def wait_for_cancellation(**_kwargs: Any) -> None:
+        clear_started.set()
+        await asyncio.Future()
+
+    service._durable_bridge.clear_live_session_response_anchor_if_matches = AsyncMock(side_effect=wait_for_cancellation)
+    invalidate = asyncio.create_task(
+        http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
+            service,
+            session,
+            denied_response_id="resp_denied",
+        )
+    )
+    await asyncio.wait_for(clear_started.wait(), timeout=1.0)
+    invalidate.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(invalidate, timeout=1.0)
+
+    service._unregister_http_bridge_previous_response_id.assert_awaited_once_with(session, "resp_denied")
+    assert session.previous_response_ids == {"resp_old"}
+    assert "resp_denied" in session.denied_proxy_injected_anchor_ids
+    assert session.last_completed_response_id is None
+    assert session.last_completed_response_account_id is None
+    assert session.last_completed_input_count == 0
+    assert session.last_completed_input_prefix_fingerprint is None
+    assert session.last_pending_tool_calls == {}
+
+
 def _denied_anchor_request_state(
     *,
     previous_response_id: str | None = "resp_denied",

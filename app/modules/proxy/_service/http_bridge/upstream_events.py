@@ -1011,6 +1011,29 @@ async def _abandon_durable_http_bridge_continuity(
     return True
 
 
+async def _clear_denied_http_bridge_anchor_if_matches(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    denied_response_id: str,
+) -> bool:
+    """Best-effort clear one denied durable anchor under the owner fence."""
+    if session.durable_session_id is None or session.durable_owner_epoch is None:
+        return False
+    try:
+        lookup = await service._durable_bridge.clear_live_session_response_anchor_if_matches(
+            session_id=session.durable_session_id,
+            api_key_id=session.key.api_key_id,
+            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+            owner_epoch=session.durable_owner_epoch,
+            response_id=denied_response_id,
+        )
+    except Exception:
+        logger.warning("Failed to clear denied HTTP bridge response anchor", exc_info=True)
+        return False
+    return lookup is not None
+
+
 async def _invalidate_denied_http_bridge_anchor(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -1037,9 +1060,9 @@ async def _invalidate_denied_http_bridge_anchor(
     latest response, and removes only that response alias. The in-memory clear
     is unconditional for the same id even when the durable write is fenced,
     because it strictly removes one way for the denied id to come back. A
-    durable row that survives re-injects the id on a later turn, which is denied
-    in turn and re-enters this path, so the clear is re-attempted rather than
-    lost.
+    durable row that survives is suppressed during the next hydration and its
+    conditional clear is re-attempted there, so a transient cleanup failure
+    cannot re-inject the id or permanently fence later requests.
     """
     if denied_response_id is None:
         return False
@@ -1055,31 +1078,22 @@ async def _invalidate_denied_http_bridge_anchor(
         # refused.
         if session.last_completed_response_id != denied_response_id:
             return False
-    cleared = False
+    cleared = await _clear_denied_http_bridge_anchor_if_matches(
+        service,
+        session,
+        denied_response_id=denied_response_id,
+    )
     try:
-        if session.durable_session_id is not None and session.durable_owner_epoch is not None:
-            lookup = await service._durable_bridge.clear_live_session_response_anchor_if_matches(
-                session_id=session.durable_session_id,
-                api_key_id=session.key.api_key_id,
-                instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-                owner_epoch=session.durable_owner_epoch,
-                response_id=denied_response_id,
-            )
-            cleared = lookup is not None
-    except Exception:
-        logger.warning("Failed to clear denied HTTP bridge response anchor", exc_info=True)
+        await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
     finally:
-        try:
-            await service._unregister_http_bridge_previous_response_id(session, denied_response_id)
-        finally:
-            # Do not erase a newer response that completed while the fenced
-            # durable write was in flight.
-            if session.last_completed_response_id == denied_response_id:
-                session.last_completed_response_id = None
-                session.last_completed_response_account_id = None
-                session.last_completed_input_count = 0
-                session.last_completed_input_prefix_fingerprint = None
-                session.last_pending_tool_calls.clear()
+        # Do not erase a newer response that completed while the fenced
+        # durable write was in flight.
+        if session.last_completed_response_id == denied_response_id:
+            session.last_completed_response_id = None
+            session.last_completed_response_account_id = None
+            session.last_completed_input_count = 0
+            session.last_completed_input_prefix_fingerprint = None
+            session.last_pending_tool_calls.clear()
     return cleared
 
 

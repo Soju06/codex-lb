@@ -140,6 +140,9 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_event_error_param,
     _websocket_event_error_type,
 )
+from app.modules.proxy._service.http_bridge.upstream_events import (
+    _clear_denied_http_bridge_anchor_if_matches,
+)
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
 )
@@ -2593,6 +2596,23 @@ class _HTTPBridgeStreamingMixin:
                             session.last_used_at = _service_time().monotonic()
                 return
         session = session_or_forward
+        durable_denied_response_id = (
+            durable_lookup.latest_response_id
+            if durable_lookup is not None
+            and durable_lookup.latest_response_id is not None
+            and durable_lookup.latest_response_id in session.denied_proxy_injected_anchor_ids
+            else None
+        )
+        if durable_denied_response_id is not None:
+            # The first clear may have lost a transient database race after the
+            # denial already tombstoned and removed the in-memory anchor. Retry
+            # the conditional durable cleanup, but never hydrate this stale
+            # lookup snapshot even when the retry is fenced or fails again.
+            await _clear_denied_http_bridge_anchor_if_matches(
+                self,
+                session,
+                denied_response_id=durable_denied_response_id,
+            )
         if (
             # A quarantine-suppressed anchor (#1534) must not be rehydrated
             # into the session either: doing so would let the session-level
@@ -2604,6 +2624,7 @@ class _HTTPBridgeStreamingMixin:
             and durable_full_resend_anchor_fingerprint is not None
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None
+            and durable_denied_response_id is None
         ):
             if durable_lookup.latest_response_id != session.last_completed_response_id:
                 # The pending tool calls were recorded for the session's own

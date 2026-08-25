@@ -15590,11 +15590,13 @@ class _DeniesAnchoredTurnUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("first_clear_outcome", ["error", "fenced"])
 async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_denied(
     async_client,
     app_instance,
     monkeypatch,
     caplog,
+    first_clear_outcome,
 ):
     """A denied proxy-injected anchor must not be re-injected into the next turn.
 
@@ -15656,6 +15658,25 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
+    service = get_proxy_service_for_app(app_instance)
+    real_clear_anchor = service._durable_bridge.clear_live_session_response_anchor_if_matches
+    clear_attempts = 0
+
+    async def fail_first_clear_anchor(**kwargs):
+        nonlocal clear_attempts
+        clear_attempts += 1
+        if clear_attempts == 1:
+            if first_clear_outcome == "error":
+                raise RuntimeError("transient denied-anchor cleanup failure")
+            return None
+        return await real_clear_anchor(**kwargs)
+
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "clear_live_session_response_anchor_if_matches",
+        fail_first_clear_anchor,
+    )
+
     headers = {"session_id": "http-bridge-denied-anchor-session"}
 
     def _user_item(text: str) -> dict[str, Any]:
@@ -15687,6 +15708,7 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
         headers=headers,
     )
     assert third.status_code == 200
+    assert clear_attempts == 2, "the surviving durable tombstone must be cleared on the next turn"
 
     dispatched = [json.loads(text) for text in upstream.sent_text]
     anchored = [frame for frame in dispatched if frame.get("previous_response_id") is not None]

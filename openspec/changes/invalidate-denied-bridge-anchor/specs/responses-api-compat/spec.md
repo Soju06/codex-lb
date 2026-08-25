@@ -14,7 +14,7 @@ The proxy MUST NOT retire the anchor when:
 - the anchor was injected onto a payload that is not full-resend shaped, because a delta-only request has no other way to convey prior context once its anchor is gone;
 - the session's current anchor is no longer the denied id, because a concurrent request may have completed and advanced it.
 
-When the durable clear cannot be confirmed, the proxy MUST NOT report the anchor as retired, and MUST still clear the in-memory anchor, which strictly removes one carrier that could re-inject the denied id. A durable record that survives re-injects the id on a later turn, which is denied in turn and re-enters this path, so the clear is re-attempted rather than lost.
+When the durable clear cannot be confirmed, the proxy MUST NOT report the anchor as retired, and MUST still clear the in-memory anchor, which strictly removes one carrier that could re-inject the denied id. If the surviving durable record is read again on a later full-resend turn in the same live session, the proxy MUST retry the conditional durable clear and MUST suppress that tombstoned id from session hydration, anchor injection, and prefix trimming regardless of the retry outcome.
 
 Retirement is bookkeeping and MUST NOT change how the denial is delivered downstream. A failure while retiring MUST NOT propagate into terminal-event handling.
 
@@ -92,6 +92,15 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **WHEN** the denial is handled
 - **THEN** the proxy MUST clear the in-memory session anchor
 - **AND** MUST NOT report the anchor as retired
+
+#### Scenario: A surviving durable tombstone is retried without redispatch
+
+- **GIVEN** the first conditional durable clear of a denied proxy-injected anchor failed
+- **AND** the durable lookup returns that tombstoned id on the next full-resend turn in the same live session
+- **WHEN** the proxy prepares the next turn
+- **THEN** it MUST retry the conditional durable clear under the owner fence
+- **AND** MUST NOT hydrate, inject, or trim against the tombstoned id even if that retry fails
+- **AND** the full-resend turn MUST remain eligible for unanchored upstream dispatch
 
 If alias unregistering raises after the durable clear, the same in-memory cleanup MUST still occur.
 

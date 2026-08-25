@@ -9,6 +9,7 @@
 - [x] 1.5 Add a pre-dispatch regression proving a request that already captured a denied proxy-injected anchor is failed closed without sending another upstream frame.
 - [x] 1.6 Cover the sibling-advanced race and prove the denied id is still tombstoned while the newer current anchor is preserved.
 - [x] 1.7 Add a coordinated regression proving denial publication and prepared dispatch are lifecycle-serialized.
+- [x] 1.8 Add route-level coverage proving a transient durable-clear failure is retried on the next turn without rehydrating, redispatching, or trimming against the tombstoned anchor.
 
 ## 2. Anchor Retirement
 
@@ -19,6 +20,7 @@
 - [x] 2.5 Publish a session-local denied-anchor tombstone before the first await and reject any prepared proxy-injected request carrying that id immediately before dispatch.
 - [x] 2.6 Publish the tombstone before checking whether a sibling already advanced the current anchor, so that check cannot reopen the dispatch race.
 - [x] 2.7 Serialize tombstone publication with the submitter's final revalidation and send section.
+- [x] 2.8 Retry a surviving tombstoned durable anchor during hydration and suppress the stale lookup regardless of the retry outcome.
 
 ## 3. Recovery Provenance
 

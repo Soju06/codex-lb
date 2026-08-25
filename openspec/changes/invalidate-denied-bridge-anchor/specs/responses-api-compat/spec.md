@@ -4,17 +4,18 @@
 
 ### Requirement: Explicit upstream previous-response denials retire proxy-injected anchors
 
-When upstream answers an HTTP bridge request with a `previous_response_not_found` terminal frame, and the `previous_response_id` on that request was injected by the proxy onto a full-resend-shaped payload, the proxy MUST retire that anchor on the first denial rather than waiting for the eventless-failure poison threshold. Retirement MUST clear the durable anchor only when the denied id is still the durable latest response and the session owner fence still matches; the write MUST clear the four anchor-bound fields and delete only the matching response-id alias, preserving turn-state and sibling response aliases. The proxy MUST clear the in-memory session carrier even if durable cleanup or alias unregistering fails.
+When upstream answers an HTTP bridge request with a `previous_response_not_found` terminal frame, and the `previous_response_id` on that request was injected by the proxy onto a full-resend-shaped payload, the proxy MUST retire that anchor on the first denial rather than waiting for the eventless-failure poison threshold. The denial fact MUST be written durably for the logical session regardless of owner epoch so every replica and successor can observe it. The same transaction MUST clear the four anchor-bound fields only when the denied id is still the durable latest response and MUST delete only the matching response-id alias, preserving a newer anchor, turn-state, and sibling response aliases. The proxy MUST clear the matching in-memory session carrier even if durable cleanup or alias unregistering fails.
 
-Before awaiting durable cleanup, the proxy MUST publish the denied id to the denied session generation and every live same-key successor. Each publication MUST be serialized with that generation's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. A successor registered after publication MUST inherit tombstones from detached same-key generations before becoming canonical. Successor publication MUST unregister the matching local alias and clear matching in-memory trim state because the successor's advanced owner epoch can fence the predecessor's durable clear. Before publishing any reversible recovery alias or dispatching upstream, any already-prepared request carrying that id as a proxy-injected anchor MUST fail closed without sending another upstream frame. This revalidation MUST close the retirement/dispatch race; it MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
+Before awaiting durable cleanup, the proxy MUST publish the denied id to the denied session generation and every live same-key successor. Each process-local publication MUST be serialized with that generation's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. A successor registered after publication MUST inherit tombstones from detached same-key generations before becoming canonical. Successor publication MUST unregister the matching local alias and clear matching in-memory trim state. A replica that loads a durable anchor MUST check the durable denial before request-level anchor injection and MUST remove the anchor plus its count, fingerprint, and pending-tool metadata from that lookup before preparing the payload. Before publishing any reversible recovery alias or dispatching upstream, an already-prepared request carrying that id as a proxy-injected anchor MUST check both local and durable tombstones and fail closed without sending another upstream frame. These checks MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
 
 The proxy MUST NOT retire the anchor when:
 
 - the anchor was supplied by the client, because removing it changes the meaning of the client's own request;
-- the anchor was injected onto a payload that is not full-resend shaped, because a delta-only request has no other way to convey prior context once its anchor is gone;
-- the session's current anchor is no longer the denied id, because a concurrent request may have completed and advanced it.
+- the anchor was injected onto a payload that is not full-resend shaped, because a delta-only request has no other way to convey prior context once its anchor is gone.
 
-When the durable clear cannot be confirmed or its await is cancelled, the proxy MUST NOT report the anchor as retired, and MUST still unregister the local response alias and clear the in-memory anchor, which strictly removes carriers that could re-inject or trim against the denied id. If the surviving durable record is read again on a later full-resend turn in the same live session, the proxy MUST retry the conditional durable clear and MUST suppress that tombstoned id from session hydration, anchor injection, and prefix trimming regardless of the retry outcome.
+When the session's current anchor is no longer the denied id because a concurrent request advanced it, the proxy MUST NOT clear the newer anchor. It MUST still persist the denial fact and remove the denied response alias.
+
+When the durable denial write and conditional clear cannot be confirmed or their await is cancelled, the proxy MUST NOT report the anchor as retired, and MUST still unregister the local response alias and clear the in-memory anchor, which strictly removes carriers that could re-inject or trim against the denied id. If the surviving durable record is read again on a later full-resend turn in the same live session, the proxy MUST retry durable retirement and MUST suppress that tombstoned id from session hydration, anchor injection, and prefix trimming regardless of the retry outcome.
 
 Retirement is bookkeeping and MUST NOT change how the denial is delivered downstream. A failure while retiring MUST NOT propagate into terminal-event handling.
 
@@ -26,7 +27,8 @@ The downstream error contract is unchanged: the denial is still reported to the 
 
 - **GIVEN** an HTTP bridge session whose stored anchor was injected by the proxy
 - **WHEN** upstream answers the anchored request with `previous_response_not_found`
-- **THEN** the proxy clears the durable continuity record under the session's owner epoch
+- **THEN** the proxy durably records the denial independent of the session's owner epoch
+- **AND** clears the matching durable continuity fields only if that id remains current
 - **AND** clears the in-memory session anchor and its stored input count and prefix fingerprint
 - **AND** the next turn on that session dispatches without a `previous_response_id`
 
@@ -43,7 +45,7 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **AND** another request on the same session completed first and advanced the session anchor to a different response id
 - **WHEN** the denial is handled
 - **THEN** the proxy MUST NOT clear the session anchor
-- **AND** it MUST still tombstone the denied id so an already-prepared proxy-injected request cannot dispatch it
+- **AND** it MUST still durably tombstone the denied id and remove its alias so another owner cannot dispatch it
 
 #### Scenario: Client-supplied anchors are left alone
 
@@ -95,6 +97,21 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **THEN** the proxy MUST tombstone the denied id on both generations
 - **AND** MUST clear matching alias and trim state from the successor
 - **AND** a later successor MUST inherit the tombstone before canonical registration
+
+#### Scenario: A durable denial reaches another replica before payload preparation
+
+- **GIVEN** one replica durably records a denied proxy-injected anchor
+- **AND** another replica resolves the same logical session with that anchor
+- **WHEN** the second replica prepares a request-level continuity payload
+- **THEN** it MUST remove the denied anchor and all anchor-bound trim metadata before injection
+- **AND** the first request on that replica remains eligible for unanchored full-history dispatch
+
+#### Scenario: A remotely denied prepared request is rejected before dispatch
+
+- **GIVEN** a replica prepared a request with a proxy-injected anchor
+- **AND** another replica durably tombstoned that anchor before the first replica dispatches
+- **WHEN** the prepared request reaches its final dispatch check
+- **THEN** it MUST fail closed before recovery alias publication and upstream send
 
 #### Scenario: Sibling response aliases survive retirement
 

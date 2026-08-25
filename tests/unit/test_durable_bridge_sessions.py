@@ -1785,6 +1785,228 @@ async def test_durable_bridge_clear_response_anchor_is_noop_after_epoch_advance(
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_denied_anchor_retirement_persists_tombstone_and_clears_matching_state(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-denied-anchor",
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_process_epoch="process-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_turn_state(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        turn_state="http_turn_denied",
+        lease_ttl_seconds=60.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_denied",
+        lease_ttl_seconds=60.0,
+        input_item_count=3,
+        input_full_fingerprint="d" * 64,
+        pending_tool_calls={"call-denied": "function_call"},
+    )
+
+    cleared = await coordinator.retire_denied_session_response_anchor(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        response_id="resp_denied",
+    )
+
+    assert cleared is True
+    assert await coordinator.response_anchor_is_denied(
+        session_id=claimed.session_id,
+        api_key_id="key-1",
+        response_id="resp_denied",
+    )
+    lookup_by_turn = await coordinator.lookup_request_targets(
+        session_key_kind="request",
+        session_key_value="req-denied-anchor",
+        api_key_id="key-1",
+        turn_state="http_turn_denied",
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert lookup_by_turn is not None
+    assert lookup_by_turn.latest_response_id is None
+    assert lookup_by_turn.latest_input_item_count is None
+    assert lookup_by_turn.latest_input_full_fingerprint is None
+    assert lookup_by_turn.latest_pending_tool_calls is None
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-denied-alias",
+            api_key_id="key-1",
+            turn_state=None,
+            session_header=None,
+            previous_response_id="resp_denied",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_request_lookup_marks_a_durably_denied_latest_anchor(
+    coordinator: DurableBridgeSessionCoordinator,
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-denied-lookup",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="process-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_denied_lookup",
+        lease_ttl_seconds=60.0,
+    )
+    async with async_session_factory() as session:
+        await DurableBridgeRepository(session).upsert_alias(
+            session_id=claimed.session_id,
+            alias_kind="denied_previous_response_id",
+            alias_value="resp_denied_lookup",
+            api_key_scope="__anonymous__",
+        )
+
+    lookup = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-denied-lookup",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+
+    assert lookup is not None
+    assert lookup.latest_response_id == "resp_denied_lookup"
+    assert lookup.denied_latest_response_id == "resp_denied_lookup"
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_denial_survives_owner_advance_without_clearing_newer_anchor(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-denied-owner-advance",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="process-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp_denied_old_owner",
+        lease_ttl_seconds=60.0,
+    )
+    successor = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-denied-owner-advance",
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_process_epoch="process-b",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state="http_turn_successor",
+        latest_response_id="resp_successor",
+        allow_takeover=True,
+        force_owner_epoch_advance=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=successor.session_id,
+        api_key_id=None,
+        instance_id="instance-b",
+        owner_epoch=successor.owner_epoch,
+        response_id="resp_successor",
+        lease_ttl_seconds=60.0,
+    )
+
+    cleared = await coordinator.retire_denied_session_response_anchor(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        response_id="resp_denied_old_owner",
+    )
+
+    assert cleared is False
+    assert await coordinator.response_anchor_is_denied(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        response_id="resp_denied_old_owner",
+    )
+    current = await coordinator.lookup_request_targets(
+        session_key_kind="session_header",
+        session_key_value="sid-denied-owner-advance",
+        api_key_id=None,
+        turn_state=None,
+        session_header=None,
+        previous_response_id=None,
+    )
+    assert current is not None
+    assert current.owner_epoch == successor.owner_epoch
+    assert current.latest_response_id == "resp_successor"
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-denied-old-owner",
+            api_key_id=None,
+            turn_state=None,
+            session_header=None,
+            previous_response_id="resp_denied_old_owner",
+        )
+        is None
+    )
+    assert (
+        await coordinator.lookup_request_targets(
+            session_key_kind="request",
+            session_key_value="req-successor",
+            api_key_id=None,
+            turn_state=None,
+            session_header=None,
+            previous_response_id="resp_successor",
+        )
+        is not None
+    )
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_claim_takes_over_after_release(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

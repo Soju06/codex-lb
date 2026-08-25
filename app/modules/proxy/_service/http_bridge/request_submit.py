@@ -81,6 +81,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
+    _http_bridge_owner_lookup_unavailable_error_envelope,
     _http_bridge_precreated_retry_failure_error,
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
@@ -129,6 +130,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
 )
 from app.modules.proxy._service.http_bridge.upstream_events import (
     _abandon_durable_http_bridge_continuity,
+    _clear_denied_http_bridge_anchor_from_memory,
 )
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -1705,19 +1707,60 @@ class _HTTPBridgeRequestSubmitMixin:
                         502,
                         openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
                     )
+                denied_proxy_anchor = (
+                    request_state.previous_response_id if request_state.proxy_injected_previous_response_id else None
+                )
+                durable_anchor_denied = False
                 if (
-                    request_state.proxy_injected_previous_response_id
-                    and request_state.previous_response_id is not None
-                    and request_state.previous_response_id in session.denied_proxy_injected_anchor_ids
+                    denied_proxy_anchor is not None
+                    and denied_proxy_anchor not in session.denied_proxy_injected_anchor_ids
+                    and session.durable_session_id is not None
+                ):
+                    try:
+                        durable_anchor_denied = await self._durable_bridge.response_anchor_is_denied(
+                            session_id=session.durable_session_id,
+                            api_key_id=session.key.api_key_id,
+                            response_id=denied_proxy_anchor,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Durable denied-anchor dispatch check failed; failing closed",
+                            exc_info=True,
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            _http_bridge_owner_lookup_unavailable_error_envelope(),
+                        ) from exc
+                    if durable_anchor_denied:
+                        session.denied_proxy_injected_anchor_ids.add(denied_proxy_anchor)
+                        try:
+                            await self._unregister_http_bridge_previous_response_id(
+                                session,
+                                denied_proxy_anchor,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to unregister remotely denied HTTP bridge anchor",
+                                exc_info=True,
+                            )
+                        finally:
+                            _clear_denied_http_bridge_anchor_from_memory(
+                                session,
+                                denied_proxy_anchor,
+                            )
+                if denied_proxy_anchor is not None and (
+                    durable_anchor_denied or denied_proxy_anchor in session.denied_proxy_injected_anchor_ids
                 ):
                     # Denial publication owns this same lifecycle lock. Once a
-                    # submitter reaches this check, the tombstone cannot appear
-                    # until its send section completes, so reject before any
-                    # reversible recovery alias is published.
+                    # local submitter reaches this check, the tombstone cannot
+                    # appear until its send section completes. The durable
+                    # recheck applies the same fence to denials published by a
+                    # different replica or detached-only generation. Reject
+                    # before any reversible recovery alias is published.
                     _record_continuity_fail_closed(
                         surface="http_bridge",
                         reason="denied_proxy_anchor_before_dispatch",
-                        previous_response_id=request_state.previous_response_id,
+                        previous_response_id=denied_proxy_anchor,
                         session_id=request_state.session_id,
                         upstream_error_code="previous_response_not_found",
                     )

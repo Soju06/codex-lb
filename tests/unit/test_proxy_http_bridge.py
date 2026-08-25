@@ -86,6 +86,39 @@ def _durable_owner_lookup(*, process_epoch: str, lease_expires_at: datetime) -> 
     )
 
 
+@pytest.mark.asyncio
+async def test_durable_tombstone_removes_anchor_before_request_payload_preparation() -> None:
+    lookup = DurableBridgeLookup(
+        session_id="durable-denied-before-injection",
+        canonical_kind="session_header",
+        canonical_key="sid-denied-before-injection",
+        api_key_scope="key-1",
+        account_id="acc-owner",
+        owner_instance_id="remote-instance",
+        owner_process_epoch="remote-process",
+        owner_epoch=8,
+        lease_expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="http_turn_denied",
+        latest_response_id="resp_denied",
+        latest_input_item_count=9,
+        latest_input_full_fingerprint="f" * 64,
+        latest_pending_tool_calls={"call-denied": "function_call"},
+        denied_latest_response_id="resp_denied",
+    )
+
+    sanitized, denied_response_id = http_bridge_streaming_module._without_denied_durable_anchor(lookup)
+
+    assert denied_response_id == "resp_denied"
+    assert sanitized is not None
+    assert sanitized.latest_response_id is None
+    assert sanitized.latest_input_item_count is None
+    assert sanitized.latest_input_full_fingerprint is None
+    assert sanitized.latest_pending_tool_calls is None
+    assert sanitized.latest_turn_state == "http_turn_denied"
+    assert sanitized.account_id == "acc-owner"
+
+
 def test_http_bridge_dead_owner_epoch_uses_standard_previous_response_not_found_contract() -> None:
     now = datetime.now(UTC).replace(tzinfo=None)
     stale = http_bridge_streaming_module._http_bridge_durable_owner_is_dead(
@@ -506,6 +539,74 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_submit_rejects_a_remotely_tombstoned_proxy_anchor_before_alias_and_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote denial must fence a request prepared before local publication."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = _make_account_neutral_replay_session_key("remote-denied-anchor-dispatch")
+    session = _make_bridge_session(key=key)
+    session.durable_session_id = "durable-remote-denied-anchor"
+    session.durable_owner_epoch = 7
+    session.last_completed_response_id = "resp-remote-denied"
+    session.previous_response_ids.add("resp-remote-denied")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-remote-denied-anchor",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-remote-denied",
+        proxy_injected_previous_response_id=True,
+        request_text='{"type":"response.create","input":"next"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    response_anchor_is_denied = AsyncMock(return_value=True)
+    register_recovery_turn_state = AsyncMock()
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            response_anchor_is_denied=response_anchor_is_denied,
+            register_recovery_turn_state=register_recovery_turn_state,
+        ),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-remote-denied-anchor",
+            owned_unanchored_handoff=False,
+            recovery_turn_state="http_turn_remote_denied_anchor",
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    response_anchor_is_denied.assert_awaited_once_with(
+        session_id="durable-remote-denied-anchor",
+        api_key_id=None,
+        response_id="resp-remote-denied",
+    )
+    register_recovery_turn_state.assert_not_awaited()
+    send_text.assert_not_awaited()
+    assert "resp-remote-denied" in session.denied_proxy_injected_anchor_ids
+    assert "resp-remote-denied" not in session.previous_response_ids
+    assert session.last_completed_response_id is None
+
+
+@pytest.mark.asyncio
 async def test_denied_anchor_publication_serializes_with_prepared_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -525,7 +626,7 @@ async def test_denied_anchor_publication_serializes_with_prepared_dispatch(
     service._durable_bridge = cast(
         Any,
         SimpleNamespace(
-            clear_live_session_response_anchor_if_matches=AsyncMock(return_value=SimpleNamespace()),
+            retire_denied_session_response_anchor=AsyncMock(return_value=True),
         ),
     )
     service._http_bridge_sessions[session.key] = session
@@ -31686,14 +31787,11 @@ def _denied_anchor_service(*, cleared: bool = True) -> Any:
     return SimpleNamespace(
         _http_bridge_lock=asyncio.Lock(),
         _http_bridge_sessions={},
+        _http_bridge_detached_sessions={},
         _unregister_http_bridge_previous_response_id_locked=lambda target, response_id: (
             target.previous_response_ids.discard(response_id)
         ),
-        _durable_bridge=SimpleNamespace(
-            clear_live_session_response_anchor_if_matches=AsyncMock(
-                return_value=SimpleNamespace() if cleared else None,
-            )
-        ),
+        _durable_bridge=SimpleNamespace(retire_denied_session_response_anchor=AsyncMock(return_value=cleared)),
         _unregister_http_bridge_previous_response_id=AsyncMock(side_effect=unregister_previous_response_id),
     )
 
@@ -31716,9 +31814,8 @@ async def test_invalidate_denied_bridge_anchor_clears_both_carriers():
     )
 
     assert cleared is True
-    clear_kwargs = service._durable_bridge.clear_live_session_response_anchor_if_matches.await_args.kwargs
+    clear_kwargs = service._durable_bridge.retire_denied_session_response_anchor.await_args.kwargs
     assert clear_kwargs["session_id"] == "durable-denied-anchor"
-    assert clear_kwargs["owner_epoch"] == 4
     assert clear_kwargs["response_id"] == "resp_denied"
     service._unregister_http_bridge_previous_response_id.assert_awaited_once_with(session, "resp_denied")
     assert session.previous_response_ids == {"resp_old"}
@@ -31742,9 +31839,17 @@ async def test_invalidate_denied_bridge_anchor_keeps_an_anchor_a_sibling_already
     )
 
     assert cleared is False
-    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_not_awaited()
-    service._unregister_http_bridge_previous_response_id.assert_not_awaited()
+    service._durable_bridge.retire_denied_session_response_anchor.assert_awaited_once_with(
+        session_id="durable-denied-anchor",
+        api_key_id=None,
+        response_id="resp_denied",
+    )
+    service._unregister_http_bridge_previous_response_id.assert_awaited_once_with(
+        session,
+        "resp_denied",
+    )
     assert "resp_denied" in session.denied_proxy_injected_anchor_ids
+    assert session.previous_response_ids == {"resp_old"}
     assert session.last_completed_response_id == "resp_completed_meanwhile"
     assert session.last_completed_input_count == 12
 
@@ -31798,7 +31903,7 @@ async def test_invalidate_denied_bridge_anchor_ignores_a_missing_anchor():
     )
 
     assert cleared is False
-    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_not_awaited()
+    service._durable_bridge.retire_denied_session_response_anchor.assert_not_awaited()
     assert session.last_completed_response_id == "resp_denied"
 
 
@@ -31830,7 +31935,7 @@ async def test_invalidate_denied_bridge_anchor_clears_memory_when_durable_clear_
         clear_started.set()
         await asyncio.Future()
 
-    service._durable_bridge.clear_live_session_response_anchor_if_matches = AsyncMock(side_effect=wait_for_cancellation)
+    service._durable_bridge.retire_denied_session_response_anchor = AsyncMock(side_effect=wait_for_cancellation)
     invalidate = asyncio.create_task(
         http_bridge_upstream_events_module._invalidate_denied_http_bridge_anchor(
             service,
@@ -31966,5 +32071,5 @@ async def test_retire_denied_bridge_anchor_leaves_a_delta_only_anchor_alone():
         request_states=[_denied_anchor_request_state(full_resend_shaped=False)],
     )
 
-    service._durable_bridge.clear_live_session_response_anchor_if_matches.assert_not_awaited()
+    service._durable_bridge.retire_denied_session_response_anchor.assert_not_awaited()
     assert session.last_completed_response_id == "resp_denied"

@@ -50,6 +50,7 @@ _PURGE_CLOSED_BATCH_SIZE = 500
 # same-row claim contention.
 _CLAIM_CAS_ATTEMPTS = 5
 _SESSION_ID_LOOKUP_CHUNK_SIZE = 500
+_DENIED_PREVIOUS_RESPONSE_ALIAS_KIND = "denied_previous_response_id"
 
 
 class DurableBridgeAliasRegistration(StrEnum):
@@ -937,20 +938,20 @@ class DurableBridgeRepository:
             values=values,
         )
 
-    async def clear_latest_response_anchor_if_matches(
+    async def retire_denied_response_anchor(
         self,
         *,
         session_id: str,
         api_key_scope: str,
-        instance_id: str,
-        owner_epoch: int,
         response_id: str,
-    ) -> DurableBridgeSessionSnapshot | None:
-        """Clear one response anchor and its matching alias under the owner fence.
+    ) -> bool:
+        """Persist a denial and clear its matching anchor across owner changes.
 
-        The response-id predicate makes a concurrent newer completion win over
-        a stale denial. Only the denied response alias is removed; turn-state
-        and other response aliases remain routable.
+        The denial itself is durable coordination: a successor owner can read
+        it even when this caller's owner epoch is stale. The response-id
+        predicate still makes a concurrent newer completion win. Only the
+        denied response alias is removed; turn-state and sibling aliases remain
+        routable.
         """
 
         values: dict[str, object] = {
@@ -960,21 +961,34 @@ class DurableBridgeRepository:
             "latest_pending_tool_calls_json": None,
         }
         async with sqlite_writer_section():
+            session_exists = await self._session.scalar(
+                select(HttpBridgeSessionRecord.id)
+                .where(
+                    HttpBridgeSessionRecord.id == session_id,
+                    HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+                )
+                .with_for_update()
+            )
+            if session_exists is None:
+                await self._session.rollback()
+                return False
+            await self._execute_alias_upsert(
+                session_id=session_id,
+                alias_kind=_DENIED_PREVIOUS_RESPONSE_ALIAS_KIND,
+                alias_value=response_id,
+                api_key_scope=api_key_scope,
+            )
             cleared = await self._session.execute(
                 update(HttpBridgeSessionRecord)
                 .where(
                     HttpBridgeSessionRecord.id == session_id,
                     HttpBridgeSessionRecord.api_key_scope == api_key_scope,
-                    HttpBridgeSessionRecord.owner_instance_id == instance_id,
-                    HttpBridgeSessionRecord.owner_epoch == owner_epoch,
                     HttpBridgeSessionRecord.latest_response_id == response_id,
                 )
                 .values(**values)
                 .returning(HttpBridgeSessionRecord.id)
             )
-            if cleared.scalar_one_or_none() is None:
-                await self._session.rollback()
-                return None
+            anchor_cleared = cleared.scalar_one_or_none() is not None
             await self._session.execute(
                 delete(HttpBridgeSessionAlias).where(
                     HttpBridgeSessionAlias.session_id == session_id,
@@ -984,9 +998,28 @@ class DurableBridgeRepository:
                     HttpBridgeSessionAlias.api_key_scope == api_key_scope,
                 )
             )
-            row = await self._session.get(HttpBridgeSessionRecord, session_id)
             await self._session.commit()
-        return _to_snapshot(row)
+        return anchor_cleared
+
+    async def response_anchor_is_denied(
+        self,
+        *,
+        session_id: str,
+        api_key_scope: str,
+        response_id: str,
+    ) -> bool:
+        denied_alias_id = await self._session.scalar(
+            select(HttpBridgeSessionAlias.id)
+            .where(
+                HttpBridgeSessionAlias.session_id == session_id,
+                HttpBridgeSessionAlias.alias_kind == _DENIED_PREVIOUS_RESPONSE_ALIAS_KIND,
+                HttpBridgeSessionAlias.alias_hash == durable_bridge_hash(response_id),
+                HttpBridgeSessionAlias.alias_value == response_id,
+                HttpBridgeSessionAlias.api_key_scope == api_key_scope,
+            )
+            .limit(1)
+        )
+        return denied_alias_id is not None
 
     async def record_recovery_attempt(
         self,

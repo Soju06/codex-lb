@@ -15,6 +15,8 @@
 - [x] 1.11 Add fan-out coverage proving distinct eligible anchors make an unscoped denial ineligible for retirement.
 - [x] 1.12 Add generation-race coverage proving detached denials reach a live successor and later successors inherit tombstones.
 - [x] 1.13 Cover grouped ambiguity when the distinct anchor is client-supplied or delta-only.
+- [x] 1.14 Add durable repository coverage proving a denial survives owner-epoch advance, removes only its matching alias, and preserves a newer anchor.
+- [x] 1.15 Add cross-replica preparation and final-dispatch coverage proving a durable tombstone prevents request-level injection, recovery alias publication, and upstream send.
 
 ## 2. Anchor Retirement
 
@@ -31,6 +33,8 @@
 - [x] 2.11 Require every retirement-eligible grouped request to agree on one anchor before retirement.
 - [x] 2.12 Publish tombstones to live same-key successors, clear their matching local carrier, and inherit tombstones during successor registration.
 - [x] 2.13 Require all non-null grouped anchors to agree before applying retirement eligibility.
+- [x] 2.14 Persist denial tombstones independently of owner epoch in the existing durable alias table, while conditionally clearing only an exact current anchor and deleting only the denied response alias.
+- [x] 2.15 Strip durable tombstones before request-level payload preparation and recheck them before reversible alias publication and final upstream dispatch.
 
 ## 3. Recovery Provenance
 

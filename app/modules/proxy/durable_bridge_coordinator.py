@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +49,7 @@ class DurableBridgeLookup:
     model: str | None = None
     latest_pending_tool_calls: dict[str, str] | None = None
     owner_process_epoch: str | None = None
+    denied_latest_response_id: str | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
@@ -125,7 +126,7 @@ class DurableBridgeSessionCoordinator:
                     # during a handoff. Preserve an explicitly requested
                     # response anchor; otherwise prefer the newest persisted
                     # response anchor rather than alias-resolution order.
-                    return _to_lookup(account_snapshot)
+                    return await _to_request_lookup(repository, account_snapshot)
                 specific_aliases = [
                     (alias_kind, snapshot)
                     for alias_kind, snapshot in resolved_aliases
@@ -144,7 +145,7 @@ class DurableBridgeSessionCoordinator:
                         kind=specific_snapshot.session_key_kind,
                         key=specific_snapshot.session_key_value,
                     ) and conflicting_alias_kinds == {_DURABLE_SESSION_HEADER_ALIAS}:
-                        return _to_lookup(specific_snapshot)
+                        return await _to_request_lookup(repository, specific_snapshot)
                 # Turn-state/response/session aliases are independent hard
                 # evidence. Returning the first match would silently discard a
                 # conflicting durable owner based on source ordering.
@@ -157,7 +158,7 @@ class DurableBridgeSessionCoordinator:
                     ),
                 )
             if resolved_aliases:
-                return _to_lookup(resolved_aliases[0][1])
+                return await _to_request_lookup(repository, resolved_aliases[0][1])
             snapshot = await repository.get_session(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
@@ -176,7 +177,7 @@ class DurableBridgeSessionCoordinator:
                     )
             if snapshot is None:
                 return None
-            return _to_lookup(snapshot)
+            return await _to_request_lookup(repository, snapshot)
 
     async def lookup_turn_state_target(
         self,
@@ -416,26 +417,33 @@ class DurableBridgeSessionCoordinator:
             return None
         return _to_lookup(snapshot)
 
-    async def clear_live_session_response_anchor_if_matches(
+    async def retire_denied_session_response_anchor(
         self,
         *,
         session_id: str,
         api_key_id: str | None,
-        instance_id: str,
-        owner_epoch: int,
         response_id: str,
-    ) -> DurableBridgeLookup | None:
+    ) -> bool:
         async with self._session() as session:
-            snapshot = await DurableBridgeRepository(session).clear_latest_response_anchor_if_matches(
+            return await DurableBridgeRepository(session).retire_denied_response_anchor(
                 session_id=session_id,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
-                instance_id=instance_id,
-                owner_epoch=owner_epoch,
                 response_id=response_id,
             )
-        if snapshot is None:
-            return None
-        return _to_lookup(snapshot)
+
+    async def response_anchor_is_denied(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        response_id: str,
+    ) -> bool:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).response_anchor_is_denied(
+                session_id=session_id,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                response_id=response_id,
+            )
 
     async def record_recovery_attempt(
         self,
@@ -968,4 +976,21 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
         latest_pending_tool_calls=snapshot.latest_pending_tool_calls,
+    )
+
+
+async def _to_request_lookup(
+    repository: DurableBridgeRepository,
+    snapshot: DurableBridgeSessionSnapshot,
+) -> DurableBridgeLookup:
+    denied_latest_response_id = None
+    if snapshot.latest_response_id is not None and await repository.response_anchor_is_denied(
+        session_id=snapshot.id,
+        api_key_scope=snapshot.api_key_scope,
+        response_id=snapshot.latest_response_id,
+    ):
+        denied_latest_response_id = snapshot.latest_response_id
+    return replace(
+        _to_lookup(snapshot),
+        denied_latest_response_id=denied_latest_response_id,
     )

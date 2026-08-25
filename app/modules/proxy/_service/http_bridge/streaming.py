@@ -141,6 +141,7 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
     _websocket_event_error_type,
 )
 from app.modules.proxy._service.http_bridge.upstream_events import (
+    _clear_denied_http_bridge_anchor_from_memory,
     _clear_denied_http_bridge_anchor_if_matches,
 )
 from app.modules.proxy._service.observability import (
@@ -413,6 +414,25 @@ def _verify_durable_full_resend(
     if durable_lookup is None or durable_lookup.account_id is None or durable_lookup.latest_response_id is None:
         return None
     return _VerifiedDurableFullResend._verify(payload, durable_lookup)
+
+
+def _without_denied_durable_anchor(
+    durable_lookup: DurableBridgeLookup | None,
+) -> tuple[DurableBridgeLookup | None, str | None]:
+    """Remove a durably tombstoned anchor before any request-level injection."""
+    if durable_lookup is None or durable_lookup.denied_latest_response_id is None:
+        return durable_lookup, None
+    response_id = durable_lookup.denied_latest_response_id
+    return (
+        dataclasses.replace(
+            durable_lookup,
+            latest_response_id=None,
+            latest_input_item_count=None,
+            latest_input_full_fingerprint=None,
+            latest_pending_tool_calls=None,
+        ),
+        response_id,
+    )
 
 
 def _http_bridge_client_full_history_recovery_enabled(request_state: _WebSocketRequestState) -> bool:
@@ -1308,12 +1328,14 @@ class _HTTPBridgeStreamingMixin:
                         exc_info=True,
                     )
                 durable_lookup = None
+        durable_lookup, durable_denied_response_id = _without_denied_durable_anchor(durable_lookup)
         if affinity.abandon_unavailable_legacy_owner:
             # A verified goal restart deliberately resends all portable state.
             # The old bridge row is therefore not additional ownership proof:
             # promoting it to preferred_account_id below would bypass the only
             # selection path allowed to atomically retire the raw sticky owner.
             durable_lookup = None
+            durable_denied_response_id = None
         if durable_lookup is not None and durable_lookup.latest_response_id is not None:
             current_instance = _service_get_settings().http_responses_session_bridge_instance_id
             current_process_epoch = http_bridge_owner_process_epoch()
@@ -2596,7 +2618,7 @@ class _HTTPBridgeStreamingMixin:
                             session.last_used_at = _service_time().monotonic()
                 return
         session = session_or_forward
-        durable_denied_response_id = (
+        session_denied_response_id = durable_denied_response_id or (
             durable_lookup.latest_response_id
             if durable_lookup is not None
             and durable_lookup.latest_response_id is not None
@@ -2604,6 +2626,17 @@ class _HTTPBridgeStreamingMixin:
             else None
         )
         if durable_denied_response_id is not None:
+            async with session.lifecycle_lock:
+                session.denied_proxy_injected_anchor_ids.add(durable_denied_response_id)
+                _clear_denied_http_bridge_anchor_from_memory(
+                    session,
+                    durable_denied_response_id,
+                )
+            await self._unregister_http_bridge_previous_response_id(
+                session,
+                durable_denied_response_id,
+            )
+        elif session_denied_response_id is not None:
             # The first clear may have lost a transient database race after the
             # denial already tombstoned and removed the in-memory anchor. Retry
             # the conditional durable cleanup, but never hydrate this stale
@@ -2611,7 +2644,7 @@ class _HTTPBridgeStreamingMixin:
             await _clear_denied_http_bridge_anchor_if_matches(
                 self,
                 session,
-                denied_response_id=durable_denied_response_id,
+                denied_response_id=session_denied_response_id,
             )
         if (
             # A quarantine-suppressed anchor (#1534) must not be rehydrated
@@ -2624,7 +2657,7 @@ class _HTTPBridgeStreamingMixin:
             and durable_full_resend_anchor_fingerprint is not None
             and durable_lookup is not None
             and durable_lookup.latest_response_id is not None
-            and durable_denied_response_id is None
+            and session_denied_response_id is None
         ):
             if durable_lookup.latest_response_id != session.last_completed_response_id:
                 # The pending tool calls were recorded for the session's own

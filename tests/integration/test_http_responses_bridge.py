@@ -15659,7 +15659,7 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
 
     service = get_proxy_service_for_app(app_instance)
-    real_clear_anchor = service._durable_bridge.clear_live_session_response_anchor_if_matches
+    real_clear_anchor = service._durable_bridge.retire_denied_session_response_anchor
     clear_attempts = 0
 
     async def fail_first_clear_anchor(**kwargs):
@@ -15673,7 +15673,7 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
 
     monkeypatch.setattr(
         service._durable_bridge,
-        "clear_live_session_response_anchor_if_matches",
+        "retire_denied_session_response_anchor",
         fail_first_clear_anchor,
     )
 

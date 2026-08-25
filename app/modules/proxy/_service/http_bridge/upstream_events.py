@@ -1017,21 +1017,18 @@ async def _clear_denied_http_bridge_anchor_if_matches(
     *,
     denied_response_id: str,
 ) -> bool:
-    """Best-effort clear one denied durable anchor under the owner fence."""
-    if session.durable_session_id is None or session.durable_owner_epoch is None:
+    """Persist one denied id and conditionally clear its matching anchor."""
+    if session.durable_session_id is None:
         return False
     try:
-        lookup = await service._durable_bridge.clear_live_session_response_anchor_if_matches(
+        return await service._durable_bridge.retire_denied_session_response_anchor(
             session_id=session.durable_session_id,
             api_key_id=session.key.api_key_id,
-            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-            owner_epoch=session.durable_owner_epoch,
             response_id=denied_response_id,
         )
     except Exception:
         logger.warning("Failed to clear denied HTTP bridge response anchor", exc_info=True)
         return False
-    return lookup is not None
 
 
 def _clear_denied_http_bridge_anchor_from_memory(
@@ -1055,27 +1052,36 @@ async def _publish_denied_http_bridge_anchor(
     denied_response_id: str,
 ) -> bool:
     """Publish a tombstone to the denied generation and every live successor."""
-    async with session.lifecycle_lock:
-        async with service._http_bridge_lock:
-            session.denied_proxy_injected_anchor_ids.add(denied_response_id)
-            successor = service._http_bridge_sessions.get(session.key)
-        denied_generation_still_matches = session.last_completed_response_id == denied_response_id
-
-    seen_generations = {id(session)}
-    while successor is not None and id(successor) not in seen_generations:
-        seen_generations.add(id(successor))
-        async with successor.lifecycle_lock:
+    seen_generations: set[int] = set()
+    generations: list[_HTTPBridgeSession] = [session]
+    denied_generation_still_matches = False
+    while generations:
+        generation = generations.pop()
+        if id(generation) in seen_generations:
+            continue
+        seen_generations.add(id(generation))
+        async with generation.lifecycle_lock:
             async with service._http_bridge_lock:
-                successor.denied_proxy_injected_anchor_ids.add(denied_response_id)
-                service._unregister_http_bridge_previous_response_id_locked(
-                    successor,
-                    denied_response_id,
-                )
-                _clear_denied_http_bridge_anchor_from_memory(successor, denied_response_id)
+                generation.denied_proxy_injected_anchor_ids.add(denied_response_id)
+                if generation is session:
+                    denied_generation_still_matches = generation.last_completed_response_id == denied_response_id
+                else:
+                    service._unregister_http_bridge_previous_response_id_locked(
+                        generation,
+                        denied_response_id,
+                    )
+                    _clear_denied_http_bridge_anchor_from_memory(
+                        generation,
+                        denied_response_id,
+                    )
                 current_session = service._http_bridge_sessions.get(session.key)
-        if current_session is None or current_session is successor or current_session is session:
-            break
-        successor = current_session
+                if current_session is not None and id(current_session) not in seen_generations:
+                    generations.append(current_session)
+                generations.extend(
+                    detached_session
+                    for detached_session in service._http_bridge_detached_sessions.values()
+                    if detached_session.key == session.key and id(detached_session) not in seen_generations
+                )
     return denied_generation_still_matches
 
 
@@ -1120,11 +1126,10 @@ async def _invalidate_denied_http_bridge_anchor(
         session,
         denied_response_id=denied_response_id,
     )
-    # Another request may have completed and advanced the denied generation's
-    # anchor between its dispatch and this frame. Only retire the id that was
-    # refused; successor tombstones remain published to fence stale hydration.
-    if not denied_generation_still_matches:
-        return False
+    # Another request may have completed and advanced this generation's anchor
+    # before the denial arrived. The durable denial still has to reach remote
+    # owners, while the repository's exact response-id predicate protects the
+    # newer anchor from the conditional clear below.
     cleared = False
     try:
         cleared = await _clear_denied_http_bridge_anchor_if_matches(
@@ -1141,7 +1146,7 @@ async def _invalidate_denied_http_bridge_anchor(
             # durable await is cancelled, so the tombstone cannot retain a
             # matching in-memory trim carrier.
             _clear_denied_http_bridge_anchor_from_memory(session, denied_response_id)
-    return cleared
+    return denied_generation_still_matches and cleared
 
 
 def _denied_proxy_injected_anchor_id(

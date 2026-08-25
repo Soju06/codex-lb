@@ -11,7 +11,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
 from app.core.utils.time import to_utc_naive
 from app.db.models import HttpBridgeSessionState
-from app.db.session import close_session
+from app.db.session import close_session, sqlite_writer_section
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
@@ -444,6 +444,29 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
                 response_id=response_id,
             )
+
+    @asynccontextmanager
+    async def response_anchor_dispatch_fence(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        response_id: str,
+    ) -> AsyncIterator[bool]:
+        """Yield the denial state while holding its row lock through send."""
+
+        api_key_scope = durable_bridge_api_key_scope(api_key_id)
+        # Keep the process-local SQLite writer slot until _session closes and
+        # rolls back the no-op locking UPDATE. Other processes are serialized
+        # by SQLite's own writer lock; PostgreSQL uses the session-row lock.
+        async with sqlite_writer_section():
+            async with self._session() as session:
+                denied = await DurableBridgeRepository(session).response_anchor_is_denied_for_dispatch(
+                    session_id=session_id,
+                    api_key_scope=api_key_scope,
+                    response_id=response_id,
+                )
+                yield denied
 
     async def record_recovery_attempt(
         self,

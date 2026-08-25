@@ -6,7 +6,7 @@
 
 When upstream answers an HTTP bridge request with a `previous_response_not_found` terminal frame, and the `previous_response_id` on that request was injected by the proxy onto a full-resend-shaped payload, the proxy MUST retire that anchor on the first denial rather than waiting for the eventless-failure poison threshold. The denial fact MUST be written durably for the logical session regardless of owner epoch so every replica and successor can observe it. The same transaction MUST clear the four anchor-bound fields only when the denied id is still the durable latest response and MUST delete only the matching response-id alias, preserving a newer anchor, turn-state, and sibling response aliases. The proxy MUST clear the matching in-memory session carrier even if durable cleanup or alias unregistering fails.
 
-Before awaiting durable cleanup, the proxy MUST publish the denied id to the denied session generation and every live same-key successor. Each process-local publication MUST be serialized with that generation's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. A successor registered after publication MUST inherit tombstones from detached same-key generations before becoming canonical. Successor publication MUST unregister the matching local alias and clear matching in-memory trim state. A replica that loads a durable anchor MUST check the durable denial before request-level anchor injection and MUST remove the anchor plus its count, fingerprint, and pending-tool metadata from that lookup before preparing the payload. Before publishing any reversible recovery alias or dispatching upstream, an already-prepared request carrying that id as a proxy-injected anchor MUST check both local and durable tombstones and fail closed without sending another upstream frame. These checks MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
+Before awaiting durable cleanup, the proxy MUST publish the denied id to the denied session generation and every live same-key successor. Each process-local publication MUST be serialized with that generation's final tombstone check and upstream send so either an already-started send finishes first or publication wins and fences that send. A successor registered after publication MUST inherit tombstones from detached same-key generations before becoming canonical. Successor publication MUST unregister the matching local alias and clear matching in-memory trim state. A replica that loads a durable anchor MUST check the durable denial before request-level anchor injection and MUST remove the anchor plus its count, fingerprint, and pending-tool metadata from that lookup before preparing the payload. Before publishing any reversible recovery alias or dispatching upstream, an already-prepared request carrying that id as a proxy-injected anchor MUST check both local and durable tombstones and fail closed without sending another upstream frame. Its final durable check MUST acquire the same durable session-row fence used by denial publication and MUST hold that fence through the WebSocket send, so a remote denial cannot commit between a clean check and dispatch. These checks MUST NOT reject a client-supplied anchor merely because the same id is tombstoned for proxy injection.
 
 The proxy MUST NOT retire the anchor when:
 
@@ -112,6 +112,14 @@ The downstream error contract is unchanged: the denial is still reported to the 
 - **AND** another replica durably tombstoned that anchor before the first replica dispatches
 - **WHEN** the prepared request reaches its final dispatch check
 - **THEN** it MUST fail closed before recovery alias publication and upstream send
+
+#### Scenario: Cross-replica denial publication is ordered with dispatch
+
+- **GIVEN** one replica has acquired a clean final dispatch fence for a proxy-injected anchor
+- **AND** another replica begins durably publishing a denial for that same anchor before the first replica sends
+- **WHEN** the first replica hands the frame to the WebSocket transport
+- **THEN** the denial publication MUST remain blocked until that send releases the fence
+- **AND** if denial publication acquires the fence first, the prepared request MUST observe the tombstone and MUST NOT send
 
 #### Scenario: Sibling response aliases survive retirement
 

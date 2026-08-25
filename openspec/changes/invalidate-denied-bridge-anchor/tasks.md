@@ -17,6 +17,8 @@
 - [x] 1.13 Cover grouped ambiguity when the distinct anchor is client-supplied or delta-only.
 - [x] 1.14 Add durable repository coverage proving a denial survives owner-epoch advance, removes only its matching alias, and preserves a newer anchor.
 - [x] 1.15 Add cross-replica preparation and final-dispatch coverage proving a durable tombstone prevents request-level injection, recovery alias publication, and upstream send.
+- [x] 1.16 Add a deterministic durable-coordinator regression proving a denial that starts after a clean dispatch recheck cannot commit until the dispatch fence releases, and that a denial that wins the fence prevents dispatch.
+- [x] 1.17 Add submit-path coverage proving the final durable fence is held through the WebSocket send and a tombstone appearing after the initial recheck still prevents that send.
 
 ## 2. Anchor Retirement
 
@@ -35,6 +37,7 @@
 - [x] 2.13 Require all non-null grouped anchors to agree before applying retirement eligibility.
 - [x] 2.14 Persist denial tombstones independently of owner epoch in the existing durable alias table, while conditionally clearing only an exact current anchor and deleting only the denied response alias.
 - [x] 2.15 Strip durable tombstones before request-level payload preparation and recheck them before reversible alias publication and final upstream dispatch.
+- [x] 2.16 Acquire one durable session-row fence for the final tombstone check, hold it through the WebSocket send, and make denial retirement acquire the same fence before publishing its tombstone.
 
 ## 3. Recovery Provenance
 
@@ -45,3 +48,4 @@
 
 - [x] 4.1 Run the touched bridge unit and integration suites, ruff, and type checks.
 - [x] 4.2 Run strict OpenSpec validation for this change and review the final diff for unrelated changes.
+- [x] 4.3 Re-run the touched bridge and durable-coordinator suites plus ruff, type checking, strict OpenSpec validation, and final diff review after adding the cross-replica dispatch fence.

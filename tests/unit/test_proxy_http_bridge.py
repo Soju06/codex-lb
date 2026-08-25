@@ -10,7 +10,7 @@ import subprocess
 import time
 from collections import deque
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -603,6 +603,152 @@ async def test_submit_rejects_a_remotely_tombstoned_proxy_anchor_before_alias_an
     send_text.assert_not_awaited()
     assert "resp-remote-denied" in session.denied_proxy_injected_anchor_ids
     assert "resp-remote-denied" not in session.previous_response_ids
+    assert session.last_completed_response_id is None
+
+
+@pytest.mark.asyncio
+async def test_submit_holds_durable_anchor_fence_through_upstream_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="durable-anchor-send-fence")
+    session.durable_session_id = "durable-anchor-send-fence"
+    session.durable_owner_epoch = 3
+    fence_held = False
+
+    async def send_text(_text: str) -> None:
+        assert fence_held is True
+
+    @asynccontextmanager
+    async def response_anchor_dispatch_fence(**_kwargs: object):
+        nonlocal fence_held
+        fence_held = True
+        try:
+            yield False
+        finally:
+            fence_held = False
+
+    send_text_mock = AsyncMock(side_effect=send_text)
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text_mock, close=AsyncMock()),
+    )
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            response_anchor_is_denied=AsyncMock(return_value=False),
+            response_anchor_dispatch_fence=response_anchor_dispatch_fence,
+        ),
+    )
+    service._http_bridge_sessions[session.key] = session
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-durable-anchor-send-fence",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-send-fence",
+        proxy_injected_previous_response_id=True,
+        request_text='{"type":"response.create","input":"next"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    await service._submit_http_bridge_request_with_handoff(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+        queue_limit=8,
+        request_scope_id="scope-durable-anchor-send-fence",
+        owned_unanchored_handoff=False,
+    )
+
+    send_text_mock.assert_awaited_once()
+    assert fence_held is False
+
+
+@pytest.mark.asyncio
+async def test_submit_final_durable_fence_rejects_tombstone_after_initial_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denial published after the early check still prevents the send."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    key = _make_account_neutral_replay_session_key("late-remote-denied-anchor")
+    session = _make_bridge_session(key=key)
+    session.durable_session_id = "durable-late-remote-denied-anchor"
+    session.durable_owner_epoch = 8
+    session.last_completed_response_id = "resp-late-remote-denied"
+    session.previous_response_ids.add("resp-late-remote-denied")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-late-remote-denied-anchor",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-late-remote-denied",
+        proxy_injected_previous_response_id=True,
+        request_text='{"type":"response.create","input":"next"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    receipt = DurableBridgeAliasRegistrationReceipt(
+        status=DurableBridgeAliasRegistration.REGISTERED,
+        session_id=session.durable_session_id,
+        api_key_scope="__anonymous__",
+        alias_kind="turn_state",
+        alias_value="http_turn_late_remote_denied",
+        instance_id="test-instance",
+        owner_epoch=session.durable_owner_epoch,
+        previous_alias_session_id=None,
+        previous_alias_owner_epoch=None,
+        previous_alias_account_id=None,
+        previous_latest_turn_state=None,
+    )
+
+    @asynccontextmanager
+    async def response_anchor_dispatch_fence(**_kwargs: object):
+        yield True
+
+    rollback_recovery_turn_state_registration = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            response_anchor_is_denied=AsyncMock(return_value=False),
+            response_anchor_dispatch_fence=response_anchor_dispatch_fence,
+            register_recovery_turn_state=AsyncMock(return_value=receipt),
+            rollback_recovery_turn_state_registration=rollback_recovery_turn_state_registration,
+        ),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-late-remote-denied-anchor",
+            owned_unanchored_handoff=False,
+            recovery_turn_state="http_turn_late_remote_denied",
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    send_text.assert_not_awaited()
+    rollback_recovery_turn_state_registration.assert_awaited_once_with(receipt=receipt)
+    assert "resp-late-remote-denied" in session.denied_proxy_injected_anchor_ids
+    assert "resp-late-remote-denied" not in session.previous_response_ids
     assert session.last_completed_response_id is None
 
 

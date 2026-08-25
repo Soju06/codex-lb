@@ -961,15 +961,11 @@ class DurableBridgeRepository:
             "latest_pending_tool_calls_json": None,
         }
         async with sqlite_writer_section():
-            session_exists = await self._session.scalar(
-                select(HttpBridgeSessionRecord.id)
-                .where(
-                    HttpBridgeSessionRecord.id == session_id,
-                    HttpBridgeSessionRecord.api_key_scope == api_key_scope,
-                )
-                .with_for_update()
+            session_exists = await self._lock_response_anchor_coordination(
+                session_id=session_id,
+                api_key_scope=api_key_scope,
             )
-            if session_exists is None:
+            if not session_exists:
                 await self._session.rollback()
                 return False
             await self._execute_alias_upsert(
@@ -1020,6 +1016,59 @@ class DurableBridgeRepository:
             .limit(1)
         )
         return denied_alias_id is not None
+
+    async def response_anchor_is_denied_for_dispatch(
+        self,
+        *,
+        session_id: str,
+        api_key_scope: str,
+        response_id: str,
+    ) -> bool:
+        """Lock denial publication through the caller's upstream send.
+
+        The coordinator intentionally keeps this transaction open while the
+        caller performs its final WebSocket send. Denial retirement acquires
+        the same row lock before publishing its tombstone, so a clean check and
+        the send cannot be separated by a cross-replica denial commit.
+        """
+
+        session_exists = await self._lock_response_anchor_coordination(
+            session_id=session_id,
+            api_key_scope=api_key_scope,
+        )
+        if not session_exists:
+            raise LookupError("Durable HTTP bridge session disappeared before dispatch")
+        return await self.response_anchor_is_denied(
+            session_id=session_id,
+            api_key_scope=api_key_scope,
+            response_id=response_id,
+        )
+
+    async def _lock_response_anchor_coordination(
+        self,
+        *,
+        session_id: str,
+        api_key_scope: str,
+    ) -> bool:
+        """Acquire the cross-replica row fence shared by send and denial."""
+
+        predicate = (
+            HttpBridgeSessionRecord.id == session_id,
+            HttpBridgeSessionRecord.api_key_scope == api_key_scope,
+        )
+        if self._session.get_bind().dialect.name == "sqlite":
+            # SQLite ignores SELECT FOR UPDATE. Start the write transaction
+            # before reading aliases so another process cannot commit a denial
+            # between the read and the caller's send.
+            locked = await self._session.execute(
+                update(HttpBridgeSessionRecord)
+                .where(*predicate)
+                .values(last_seen_at=HttpBridgeSessionRecord.last_seen_at)
+                .returning(HttpBridgeSessionRecord.id)
+            )
+            return locked.scalar_one_or_none() is not None
+        locked_id = await self._session.scalar(select(HttpBridgeSessionRecord.id).where(*predicate).with_for_update())
+        return locked_id is not None
 
     async def record_recovery_attempt(
         self,

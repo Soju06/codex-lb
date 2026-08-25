@@ -1751,12 +1751,9 @@ class _HTTPBridgeRequestSubmitMixin:
                 if denied_proxy_anchor is not None and (
                     durable_anchor_denied or denied_proxy_anchor in session.denied_proxy_injected_anchor_ids
                 ):
-                    # Denial publication owns this same lifecycle lock. Once a
-                    # local submitter reaches this check, the tombstone cannot
-                    # appear until its send section completes. The durable
-                    # recheck applies the same fence to denials published by a
-                    # different replica or detached-only generation. Reject
-                    # before any reversible recovery alias is published.
+                    # Reject known tombstones before publishing any reversible
+                    # recovery alias. A second, transactionally fenced recheck
+                    # below closes the cross-replica gap through the actual send.
                     _record_continuity_fail_closed(
                         surface="http_bridge",
                         reason="denied_proxy_anchor_before_dispatch",
@@ -1967,14 +1964,46 @@ class _HTTPBridgeRequestSubmitMixin:
                         # roll back a newly-created operation.
                         upstream_send_started = True
 
+                    final_durable_anchor_denied = False
+                    durable_dispatch_fence_entered = False
                     try:
-                        await _send_http_bridge_request_text_with_archive_id(
-                            session,
-                            request_state,
-                            text_data,
-                            on_send_started=mark_upstream_send_started,
-                        )
+                        if denied_proxy_anchor is not None and session.durable_session_id is not None:
+                            async with self._durable_bridge.response_anchor_dispatch_fence(
+                                session_id=session.durable_session_id,
+                                api_key_id=session.key.api_key_id,
+                                response_id=denied_proxy_anchor,
+                            ) as final_durable_anchor_denied:
+                                durable_dispatch_fence_entered = True
+                                if not final_durable_anchor_denied:
+                                    await _send_http_bridge_request_text_with_archive_id(
+                                        session,
+                                        request_state,
+                                        text_data,
+                                        on_send_started=mark_upstream_send_started,
+                                    )
+                        else:
+                            await _send_http_bridge_request_text_with_archive_id(
+                                session,
+                                request_state,
+                                text_data,
+                                on_send_started=mark_upstream_send_started,
+                            )
                     except BaseException as exc:
+                        if (
+                            denied_proxy_anchor is not None
+                            and session.durable_session_id is not None
+                            and not durable_dispatch_fence_entered
+                        ):
+                            if not isinstance(exc, Exception):
+                                raise
+                            logger.warning(
+                                "Durable denied-anchor dispatch fence failed; failing closed",
+                                exc_info=True,
+                            )
+                            raise ProxyResponseError(
+                                502,
+                                _http_bridge_owner_lookup_unavailable_error_envelope(),
+                            ) from exc
                         request_state.recovery_attempt_dispatched = upstream_send_started
                         request_state.operation_dispatched = (
                             request_state.operation_id is not None and upstream_send_started
@@ -1995,6 +2024,64 @@ class _HTTPBridgeRequestSubmitMixin:
                             # send so the reader cannot observe an ownership gap.
                             session.claim_liveness_settlement()
                         raise
+                    if final_durable_anchor_denied and denied_proxy_anchor is not None:
+                        session.denied_proxy_injected_anchor_ids.add(denied_proxy_anchor)
+                        try:
+                            await self._unregister_http_bridge_previous_response_id(
+                                session,
+                                denied_proxy_anchor,
+                            )
+                        finally:
+                            _clear_denied_http_bridge_anchor_from_memory(
+                                session,
+                                denied_proxy_anchor,
+                            )
+                        if recovery_receipt is not None:
+                            rollback_cancellation: asyncio.CancelledError | None = None
+                            async with session.recovery_alias_lock:
+                                try:
+                                    (
+                                        rolled_back,
+                                        rollback_cancellation,
+                                    ) = await _rollback_http_bridge_recovery_turn_state_registration(
+                                        self,
+                                        recovery_receipt,
+                                    )
+                                except Exception:
+                                    rolled_back = False
+                                    logger.warning(
+                                        "Failed to roll back remotely denied HTTP bridge recovery alias",
+                                        exc_info=True,
+                                    )
+                                if rolled_back:
+                                    recovery_receipt = None
+                                else:
+                                    session.closed = True
+                                    session.upstream_control.reconnect_requested = True
+                                    session.upstream_control.retire_after_drain = True
+                                    _record_continuity_fail_closed(
+                                        surface="http_bridge",
+                                        reason="recovery_alias_rollback_failed",
+                                        previous_response_id=denied_proxy_anchor,
+                                        session_id=request_state.session_id,
+                                        upstream_error_code="bridge_continuity_persistence_failed",
+                                    )
+                            if rollback_cancellation is not None:
+                                raise rollback_cancellation
+                        _record_continuity_fail_closed(
+                            surface="http_bridge",
+                            reason="denied_proxy_anchor_before_dispatch",
+                            previous_response_id=denied_proxy_anchor,
+                            session_id=request_state.session_id,
+                            upstream_error_code="previous_response_not_found",
+                        )
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "stream_incomplete",
+                                "The previous response anchor was rejected upstream; retry the request.",
+                            ),
+                        )
                     request_state.recovery_attempt_dispatched = True
                     request_state.operation_dispatched = request_state.operation_id is not None
                     session.last_used_at = _service_time().monotonic()

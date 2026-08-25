@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.utils.time import utcnow
@@ -1858,6 +1859,120 @@ async def test_durable_bridge_denied_anchor_retirement_persists_tombstone_and_cl
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_dispatch_fence_orders_cross_replica_denial_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A remote tombstone cannot commit between the final check and send."""
+    from app.modules.proxy import durable_bridge_coordinator as coordinator_module
+    from app.modules.proxy import durable_bridge_repository as repository_module
+
+    @contextlib.asynccontextmanager
+    async def replica_local_writer_section() -> AsyncIterator[None]:
+        # The two coordinators model separate processes, whose process-local
+        # writer locks do not coordinate with each other.
+        yield
+
+    monkeypatch.setattr(coordinator_module, "sqlite_writer_section", replica_local_writer_section)
+    monkeypatch.setattr(repository_module, "sqlite_writer_section", replica_local_writer_section)
+    original_lock = DurableBridgeRepository._lock_response_anchor_coordination
+    publication_attempted = asyncio.Event()
+
+    async def observed_lock(
+        repository: DurableBridgeRepository,
+        *,
+        session_id: str,
+        api_key_scope: str,
+    ) -> bool:
+        task = asyncio.current_task()
+        if task is not None and task.get_name() == "remote-denial-publication":
+            publication_attempted.set()
+        return await original_lock(
+            repository,
+            session_id=session_id,
+            api_key_scope=api_key_scope,
+        )
+
+    monkeypatch.setattr(DurableBridgeRepository, "_lock_response_anchor_coordination", observed_lock)
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'dispatch-fence.sqlite'}",
+        poolclass=NullPool,
+        connect_args={"timeout": 5.0},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    def session_factory() -> AsyncSession:
+        return session_maker()
+
+    dispatcher = DurableBridgeSessionCoordinator(session_factory)
+    publisher = DurableBridgeSessionCoordinator(session_factory)
+    claimed = await dispatcher.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-cross-replica-dispatch-fence",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="process-a",
+        lease_ttl_seconds=60.0,
+        account_id="acc-1",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id=None,
+        allow_takeover=True,
+    )
+    await dispatcher.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp-cross-replica-fence",
+        lease_ttl_seconds=60.0,
+    )
+
+    fence_acquired = asyncio.Event()
+    release_fence = asyncio.Event()
+
+    async def hold_dispatch_fence() -> None:
+        async with dispatcher.response_anchor_dispatch_fence(
+            session_id=claimed.session_id,
+            api_key_id=None,
+            response_id="resp-cross-replica-fence",
+        ) as denied:
+            assert denied is False
+            fence_acquired.set()
+            await release_fence.wait()
+
+    dispatch_task = asyncio.create_task(hold_dispatch_fence())
+    await fence_acquired.wait()
+    publication_task = asyncio.create_task(
+        publisher.retire_denied_session_response_anchor(
+            session_id=claimed.session_id,
+            api_key_id=None,
+            response_id="resp-cross-replica-fence",
+        ),
+        name="remote-denial-publication",
+    )
+    await publication_attempted.wait()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(asyncio.shield(publication_task), timeout=0.05)
+    release_fence.set()
+    await dispatch_task
+    assert await publication_task is True
+    async with dispatcher.response_anchor_dispatch_fence(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        response_id="resp-cross-replica-fence",
+    ) as denied_after_publication:
+        assert denied_after_publication is True
+
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

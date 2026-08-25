@@ -2046,6 +2046,43 @@ class _HTTPBridgeUpstreamEventsMixin:
                     )
                 )
 
+            # This grouped settlement returns before the single-request
+            # settlement path below, so without recording here a multi-request
+            # continuity failure fails every grouped request with a synthetic
+            # terminal event and never advances the circuit — leaving the anchor
+            # that failed them reusable. The detail is read back off the built
+            # event so it matches whatever the single-request path would have
+            # recorded for the same reason, and recording precedes the persist
+            # and delivery machinery below for the same reason it does there: a
+            # client resending on observed completion must not outrun it.
+            for (
+                grouped_request_state,
+                _grouped_terminal_block,
+                grouped_terminal_event,
+                _grouped_terminal_payload,
+                _grouped_terminal_event_type,
+                _grouped_terminal_operation_state,
+            ) in grouped_terminal_events:
+                if grouped_request_state.response_event_count != 0:
+                    continue
+                grouped_terminal_error = (
+                    grouped_terminal_event.response.error
+                    if grouped_terminal_event is not None and grouped_terminal_event.response is not None
+                    else None
+                )
+                grouped_terminal_detail = _normalize_error_code(
+                    grouped_terminal_error.code if grouped_terminal_error else None,
+                    grouped_terminal_error.type if grouped_terminal_error else None,
+                )
+                if grouped_terminal_detail is None:
+                    continue
+                await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=grouped_terminal_detail,
+                    attempt=grouped_request_state.response_create_attempt,
+                    terminal_pre_response_frame=True,
+                )
+
             append_terminal_batch = getattr(
                 getattr(self, "_http_bridge_operation_event_batcher", None),
                 "append_terminal_event",

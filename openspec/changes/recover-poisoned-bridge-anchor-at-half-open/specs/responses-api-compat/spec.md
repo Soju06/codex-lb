@@ -28,6 +28,10 @@ without counting a response event. The recording MUST complete before the
 terminal frame and its end-of-stream sentinel are published downstream, so a
 client that resends the moment it observes completion cannot have that resend
 planned while the resulting cooldown and quarantine are still being written.
+The grouped multi-request continuity settlement, which fails several pending
+requests with synthetic terminal events and returns before that path, MUST
+record one failure for each grouped request that observed no response event,
+under the same ordering rule.
 
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
@@ -48,7 +52,10 @@ on. This MUST hold however the circuit reached its threshold: when concurrent
 replicas each record a locally-first failure and the durable conflict merge is
 what opens the circuit, the recording replica MUST re-evaluate the quarantine
 against the merged state, because no replica observed the threshold under its
-own lock. A `clean_close` opening MUST NOT quarantine the key.
+own lock. That re-evaluation MUST turn on the merged opening itself and not on
+the cooldown it leaves: a merge can adopt a cooldown that has already elapsed,
+and such a key is at its threshold with no cooldown left, so the next request
+is the half-open probe the quarantine exists to protect. A `clean_close` opening MUST NOT quarantine the key.
 
 When the proxy suppresses a submission, the `retry_after_seconds` it returns
 and the detail it logs MUST reflect the timer that is actually refusing the
@@ -107,6 +114,13 @@ and durable circuit state.
 - **THEN** the retry-circuit failure is recorded before the terminal frame or its end-of-stream sentinel reaches the downstream queue
 - **AND** the terminal frame is still published to the client afterwards
 
+#### Scenario: grouped continuity failure records one strike per eventless request
+
+- **GIVEN** a hard-affinity HTTP bridge with several pending requests sharing one anchor
+- **WHEN** upstream reports `previous_response_not_found` and the grouped settlement fails them all with synthetic terminal events
+- **THEN** each grouped request that observed no response event records one attempt-scoped strike
+- **AND** the strikes are recorded before the grouped terminal events are persisted or delivered
+
 #### Scenario: midstream retirement does not consume a pre-response strike
 
 - **GIVEN** a hard-affinity HTTP bridge owns a pending request with an observed response event
@@ -134,6 +148,13 @@ and durable circuit state.
 - **WHEN** the durable conflict merge raises the recording replica's view to the threshold and opens the cooldown
 - **THEN** that replica re-evaluates the quarantine against the merged state
 - **AND** the session key is quarantined with reason `retry_circuit_poisoned_anchor`
+
+#### Scenario: a merged opening whose cooldown already elapsed still quarantines
+
+- **GIVEN** another replica opened the circuit long enough ago that its cooldown deadline is already in the past
+- **WHEN** this worker's durable write merges that state and raises it to the threshold with no cooldown remaining
+- **THEN** the key is still quarantined with reason `retry_circuit_poisoned_anchor`
+- **AND** the quarantine covers the half-open lease, because the next request on that key is the probe
 
 #### Scenario: circuit opened by clean closes does not quarantine the key
 

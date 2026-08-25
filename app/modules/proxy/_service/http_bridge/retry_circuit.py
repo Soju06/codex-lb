@@ -615,6 +615,7 @@ class _HTTPBridgeRetryCircuitMixin:
         try:
             await self._persist_http_bridge_retry_circuit(session, state)
             merged_cooldown_remaining = 0.0
+            merged_poison_opened = False
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
                     self._http_bridge_retry_circuit_loaded_keys.add(session.key)
@@ -625,9 +626,20 @@ class _HTTPBridgeRetryCircuitMixin:
                 # an open circuit above, so the quarantine decision has to be
                 # revisited against the merged state or the probe admitted
                 # after this cooldown is planned with the poisoned anchor.
-                if not quarantine_poisoned_anchor and poison_class_failure and consecutive_failures >= threshold:
+                #
+                # The merged cooldown can already have elapsed — another replica
+                # may have opened the circuit long enough ago that its deadline
+                # is in the past by the time this write returns. That key is at
+                # its threshold with no cooldown left, so the very next request
+                # is the half-open probe: it needs the quarantine most, not
+                # least. Track the opening itself, and let a zero remainder fall
+                # through to the bare half-open lease.
+                merged_poison_opened = (
+                    not quarantine_poisoned_anchor and poison_class_failure and consecutive_failures >= threshold
+                )
+                if merged_poison_opened:
                     merged_cooldown_remaining = max(0.0, state.cooldown_until - time.monotonic())
-            if merged_cooldown_remaining > 0.0:
+            if merged_poison_opened:
                 _quarantine_http_bridge_session(
                     self,
                     session,

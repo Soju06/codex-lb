@@ -20,13 +20,18 @@
 - [x] 1.5 Record the terminal strike before the terminal frame and its
       end-of-stream sentinel are published downstream, so a client resending
       on observed completion cannot be planned ahead of the cooldown and
-      quarantine
+      quarantine; the grouped multi-request continuity settlement returns
+      before that path and MUST record its own strikes the same way
 - [x] 1.6 Re-evaluate the poison quarantine after the durable conflict merge
       opens the circuit, for the multi-replica case where no worker sees the
       threshold under its own lock
 - [x] 1.7 Hold a `retry_circuit_poisoned_anchor` quarantine for at least the
-      remaining cooldown plus the half-open lease; the default TTL equals the
-      maximum cooldown, so at that cooldown both lapsed in the same instant
+      remaining cooldown plus the half-open lease — the whole window in which
+      the probe can be admitted. The default TTL alone cannot cover that
+      window: it equals the maximum cooldown, so at that cooldown the
+      quarantine lapsed in the same instant the cooldown did. The floor is
+      applied per call (`minimum_seconds`); the shared default TTL is
+      unchanged, so quarantines armed for other reasons keep their window
 
 ## 2. Regression coverage
 
@@ -45,10 +50,14 @@
 - [x] 2.5 Product path: a native `response.failed` envelope consumes a strike,
       and two of them open the circuit and quarantine the key
 - [x] 2.6 Product path: the terminal strike is recorded while the downstream
-      queue is still empty, and the terminal frame is published afterwards
+      queue is still empty, and the terminal frame is published afterwards;
+      a grouped multi-request continuity failure records one strike per
+      eventless grouped request
 - [x] 2.7 A durable merge that raises this worker to the threshold quarantines
-      the key; a maximum-cooldown quarantine outlives that cooldown by the
-      half-open lease
+      the key, including when the merged cooldown has already elapsed (that key
+      is at its threshold with no cooldown left, so the next request is the
+      probe); a quarantine armed at the maximum cooldown stays active through
+      that cooldown and the half-open lease that follows
 
 ## 3. Verification
 

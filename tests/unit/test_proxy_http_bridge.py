@@ -32062,3 +32062,105 @@ async def test_poison_quarantine_outlives_the_maximum_retry_cooldown() -> None:
         cooldown_remaining + http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS,
         abs=1.0,
     )
+
+
+@pytest.mark.asyncio
+async def test_grouped_continuity_failure_records_a_strike_per_eventless_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The grouped multi-request continuity settlement returns before the
+    # single-request terminal path, so without its own recording it failed
+    # every grouped request with a synthetic terminal event and left the anchor
+    # that failed them reusable.
+    service, session, first = _make_terminal_error_bridge_fixture(
+        request_id="req-grouped-1",
+        key_value="sid-grouped-strikes",
+        response_event_count=0,
+    )
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    second = proxy_service._WebSocketRequestState(
+        request_id="req-grouped-2",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.5,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    second.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    session.pending_requests.append(second)
+    session.queued_request_count = 2
+
+    first_queue = first.event_queue
+    second_queue = second.event_queue
+    assert first_queue is not None and second_queue is not None
+    recorded: list[tuple[str | None, int | None, int]] = []
+
+    async def _record(*_args: Any, **kwargs: Any) -> None:
+        attempt = kwargs.get("attempt")
+        recorded.append(
+            (
+                kwargs.get("detail"),
+                attempt.ordinal if attempt is not None else None,
+                first_queue.qsize() + second_queue.qsize(),
+            )
+        )
+
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", _record)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    assert [(detail, ordinal) for detail, ordinal, _depth in recorded] == [
+        ("stream_incomplete", 1),
+        ("stream_incomplete", 2),
+    ], f"every eventless grouped request must record one strike, got {recorded}"
+    assert all(depth == 0 for _detail, _ordinal, depth in recorded), (
+        f"grouped strikes must land before any grouped terminal event is delivered, got {recorded}"
+    )
+    assert first_queue.qsize() > 0 and second_queue.qsize() > 0
+
+
+@pytest.mark.asyncio
+async def test_merged_poison_opening_quarantines_even_with_no_cooldown_left() -> None:
+    # A durable merge can adopt a cooldown that already elapsed — another
+    # replica may have opened the circuit long enough ago that its deadline is
+    # in the past. That key sits at its threshold with no cooldown left, so the
+    # very next request is the half-open probe: it needs the quarantine most.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-merge-elapsed")
+    now_wall = time.time()
+    merged = DurableBridgeRetryCircuitSnapshot(
+        session_key_kind="session_header",
+        session_key_hash="hash-merge-elapsed",
+        api_key_scope="none",
+        consecutive_failures=2,
+        cooldown_until_epoch=now_wall - 30.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_wall,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=merged),
+    )
+
+    now = time.monotonic()
+    consecutive_failures = await service._record_http_bridge_retry_circuit_failure(
+        hard_session,
+        detail="stream_incomplete",
+    )
+
+    assert consecutive_failures == 2
+    state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
+    assert state.cooldown_until <= time.monotonic(), "the merged cooldown must already be spent"
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, hard_session.key) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[hard_session.key]
+    assert entry.reason == "retry_circuit_poisoned_anchor"
+    assert entry.quarantined_until - now == pytest.approx(
+        http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS,
+        abs=1.0,
+    ), "with no cooldown left the quarantine must still cover the half-open lease"

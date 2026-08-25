@@ -26,6 +26,7 @@ from app.core.plan_types import ACCOUNT_PLAN_TYPES, coerce_account_plan_type, no
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
@@ -199,14 +200,14 @@ class _UsageRefreshSingleflight:
             if wait_for_existing is None:
                 break
             try:
-                await asyncio.shield(wait_for_existing)
+                await wait_on_shared_future(wait_for_existing)
             except asyncio.CancelledError:
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
                     raise
             except Exception:
                 pass
-        return await asyncio.shield(task)
+        return await wait_on_shared_future(task)
 
     async def _run_factory(
         self,

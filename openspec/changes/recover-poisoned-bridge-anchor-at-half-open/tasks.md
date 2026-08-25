@@ -12,6 +12,21 @@
       (`hard_key_half_open` vs `hard_key_cooldown`) in both the 503
       `retry_after_seconds` and the circuit event detail, and stop claiming
       "cooling down" when the cooldown has expired
+- [x] 1.4 Keep a native terminal failure envelope (`response.failed` /
+      `response.incomplete`) circuit-eligible: it marks the `response.create`
+      attempt answered without counting a response event, so without an
+      explicit pre-response assertion the recorder rejected it and only the
+      top-level `error` shape ever consumed a strike
+- [x] 1.5 Record the terminal strike before the terminal frame and its
+      end-of-stream sentinel are published downstream, so a client resending
+      on observed completion cannot be planned ahead of the cooldown and
+      quarantine
+- [x] 1.6 Re-evaluate the poison quarantine after the durable conflict merge
+      opens the circuit, for the multi-replica case where no worker sees the
+      threshold under its own lock
+- [x] 1.7 Hold a `retry_circuit_poisoned_anchor` quarantine for at least the
+      remaining cooldown plus the half-open lease; the default TTL equals the
+      maximum cooldown, so at that cooldown both lapsed in the same instant
 
 ## 2. Regression coverage
 
@@ -27,6 +42,13 @@
 - [x] 2.4 Block reason reports the half-open lease once the cooldown has
       expired (where the legacy cooldown view reports ~0) and the cooldown
       while cooling
+- [x] 2.5 Product path: a native `response.failed` envelope consumes a strike,
+      and two of them open the circuit and quarantine the key
+- [x] 2.6 Product path: the terminal strike is recorded while the downstream
+      queue is still empty, and the terminal frame is published afterwards
+- [x] 2.7 A durable merge that raises this worker to the threshold quarantines
+      the key; a maximum-cooldown quarantine outlives that cooldown by the
+      half-open lease
 
 ## 3. Verification
 

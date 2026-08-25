@@ -104,17 +104,32 @@ def _http_bridge_session_key_quarantined(service: Any, key: _HTTPBridgeSessionKe
     return entry is not None and entry.quarantined_until > now
 
 
-def _quarantine_http_bridge_session(service: Any, session: _HTTPBridgeSession, *, reason: str) -> None:
+def _quarantine_http_bridge_session(
+    service: Any,
+    session: _HTTPBridgeSession,
+    *,
+    reason: str,
+    minimum_seconds: float | None = None,
+) -> None:
     """Quarantine a bridge session that has proven silent/wedged.
 
     Session-scoped only: no account-health writes happen here, and the entry
     is bounded by TTL, a registry size cap, and the healthy-completion clear.
+
+    ``minimum_seconds`` raises the floor for callers whose suppression window
+    is itself bounded elsewhere. The default TTL equals the retry circuit's
+    maximum cooldown, so a poison quarantine armed at that cooldown would
+    otherwise expire in the same instant the cooldown does, handing the
+    poisoned anchor straight back to the request that cooldown was holding.
     """
     now = time.monotonic()
     registry = _http_bridge_quarantine_registry(service)
     entry = registry.setdefault(session.key, _HTTPBridgeQuarantineEntry())
     already_quarantined = entry.quarantined_until > now
-    entry.quarantined_until = max(entry.quarantined_until, now + _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS)
+    ttl_seconds = _HTTP_BRIDGE_QUARANTINE_TTL_SECONDS
+    if minimum_seconds is not None:
+        ttl_seconds = max(ttl_seconds, minimum_seconds)
+    entry.quarantined_until = max(entry.quarantined_until, now + ttl_seconds)
     entry.last_touched_monotonic = now
     entry.reason = reason
     _prune_http_bridge_quarantine_registry(registry, now)
@@ -126,7 +141,7 @@ def _quarantine_http_bridge_session(service: Any, session: _HTTPBridgeSession, *
         session.key,
         account_id=session.account.id,
         model=session.request_model,
-        detail=f"reason={reason}, ttl_seconds={_HTTP_BRIDGE_QUARANTINE_TTL_SECONDS:.0f}",
+        detail=f"reason={reason}, ttl_seconds={ttl_seconds:.0f}",
         cache_key_family=session.key.affinity_kind,
         model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )

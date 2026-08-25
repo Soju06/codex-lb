@@ -59,6 +59,7 @@ from app.modules.proxy.durable_bridge_coordinator import DurableBridgeLookup, Du
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    DurableBridgeRetryCircuitSnapshot,
 )
 from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.http_bridge_event_batcher import TerminalOperationEventAppendResult
@@ -31893,3 +31894,171 @@ async def test_two_eventless_terminal_errors_open_circuit_and_quarantine_key() -
     assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
     entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
     assert entry.reason == "retry_circuit_poisoned_anchor"
+
+
+_NATIVE_RESPONSE_FAILED_FRAME = json.dumps(
+    {
+        "type": "response.failed",
+        "response": {
+            "id": "resp_failed_native",
+            "object": "response",
+            "status": "failed",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found",
+                "message": "Previous response with id 'resp_dead_anchor' not found.",
+                "param": "previous_response_id",
+            },
+        },
+    },
+    separators=(",", ":"),
+)
+
+
+@pytest.mark.asyncio
+async def test_native_response_failed_frame_consumes_a_circuit_strike() -> None:
+    # Product path through the real recorder: a native ``response.failed``
+    # envelope marks the attempt observed without counting a response event,
+    # so the pre-response failure it reports has to stay circuit-eligible.
+    # Two of them on one hard key open the circuit and quarantine it, exactly
+    # as the top-level ``error`` envelope does.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-native-failed-1",
+        key_value="sid-native-failed",
+        response_event_count=0,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
+
+    await service._process_http_bridge_upstream_text(session, _NATIVE_RESPONSE_FAILED_FRAME)
+
+    state = cast(Any, service)._http_bridge_retry_circuits[session.key]
+    assert state.consecutive_failures == 1, "a native terminal failure frame must consume a strike"
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False
+
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    second = proxy_service._WebSocketRequestState(
+        request_id="req-native-failed-2",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=2.0,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    second.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    session.pending_requests.append(second)
+    session.queued_request_count = 1
+
+    await service._process_http_bridge_upstream_text(session, _NATIVE_RESPONSE_FAILED_FRAME)
+
+    assert state.consecutive_failures == 2
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.reason == "retry_circuit_poisoned_anchor"
+
+
+@pytest.mark.asyncio
+async def test_terminal_strike_is_recorded_before_the_client_can_resend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The client resends as soon as it observes completion. If the strike were
+    # recorded after the terminal frame and its queue sentinel were published,
+    # that resend could be planned and dispatched with the same poisoned anchor
+    # while the cooldown and quarantine were still awaiting durable I/O.
+    service, session, request_state = _make_terminal_error_bridge_fixture(
+        request_id="req-terminal-order",
+        key_value="sid-terminal-order",
+        response_event_count=0,
+    )
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    observed_queue_depths: list[int] = []
+
+    async def _record(*_args: Any, **_kwargs: Any) -> None:
+        observed_queue_depths.append(event_queue.qsize())
+
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", _record)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(session, _NATIVE_RESPONSE_FAILED_FRAME)
+
+    assert observed_queue_depths == [0], (
+        f"nothing may reach the downstream queue before the strike is recorded, observed depths {observed_queue_depths}"
+    )
+    assert event_queue.qsize() > 0, "the terminal frame must still be published afterwards"
+
+
+@pytest.mark.asyncio
+async def test_durable_merge_that_opens_the_circuit_quarantines_the_key() -> None:
+    # Multi-replica: each worker records only its locally-first failure, so
+    # neither sees the threshold under its own lock. The durable merge is what
+    # opens the circuit, so the quarantine decision has to be revisited against
+    # the merged state or the probe is planned with the poisoned anchor.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-merge-quarantine")
+    now_wall = time.time()
+    merged = DurableBridgeRetryCircuitSnapshot(
+        session_key_kind="session_header",
+        session_key_hash="hash-merge",
+        api_key_scope="none",
+        consecutive_failures=2,
+        cooldown_until_epoch=now_wall + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_wall,
+    )
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=merged),
+    )
+
+    consecutive_failures = await service._record_http_bridge_retry_circuit_failure(
+        hard_session,
+        detail="stream_incomplete",
+    )
+
+    assert consecutive_failures == 2, "the durable merge must raise this worker's view to the threshold"
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, hard_session.key) is True
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[hard_session.key]
+    assert entry.reason == "retry_circuit_poisoned_anchor"
+
+
+@pytest.mark.asyncio
+async def test_poison_quarantine_outlives_the_maximum_retry_cooldown() -> None:
+    # The default quarantine TTL equals the circuit's maximum cooldown, so a
+    # quarantine armed at that cooldown would lapse in the same instant the
+    # cooldown does and hand the poisoned anchor back to the very request the
+    # cooldown was holding. It has to cover the probe's whole admission window.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-circuit-quarantine-ttl")
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    for _ in range(8):
+        await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")
+
+    state = cast(Any, service)._http_bridge_retry_circuits[hard_session.key]
+    now = time.monotonic()
+    cooldown_remaining = state.cooldown_until - now
+    assert cooldown_remaining == pytest.approx(
+        http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS,
+        abs=1.0,
+    ), "the fixture must drive the circuit to its maximum cooldown"
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[hard_session.key]
+    assert entry.quarantined_until > state.cooldown_until, (
+        "the quarantine must still be live when the probe this cooldown gates is planned"
+    )
+    assert entry.quarantined_until - now == pytest.approx(
+        cooldown_remaining + http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS,
+        abs=1.0,
+    )

@@ -2943,6 +2943,50 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if retried:
                         return
 
+        if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
+            error_code = None
+            if settlement_event_type == "error":
+                error = settlement_event.error if settlement_event else None
+                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+            elif settlement_event and settlement_event.response:
+                error = settlement_event.response.error
+                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+            _log_http_bridge_event(
+                "terminal_error",
+                session.key,
+                account_id=session.account.id,
+                model=session.request_model,
+                detail=error_code,
+                pending_count=await self._http_bridge_pending_count(session),
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(session.request_model) if session.request_model else None,
+            )
+            if (
+                error_code is not None
+                and terminal_request_state is not None
+                and terminal_request_state.response_event_count == 0
+            ):
+                # An upstream terminal frame that fails the request before any
+                # response event is the same pre-response failure the circuit
+                # measures on eventless retirements; it reaches this settlement
+                # path instead of the retirement funnel, so it would otherwise
+                # never count. Attempt-scoped recording keeps a later
+                # retirement of the same lifecycle from double-counting, and
+                # the recorder itself drops non-circuit details and soft keys.
+                #
+                # This runs before the terminal frame and its queue sentinel
+                # reach the client: once completion is observable the client can
+                # resend the same anchor immediately, and the cooldown and
+                # quarantine have to already be visible to that resend rather
+                # than still awaiting durable I/O. Recovery paths that retry
+                # this request in place have all declined by here.
+                await self._record_http_bridge_retry_circuit_failure(
+                    session,
+                    detail=error_code,
+                    attempt=terminal_request_state.response_create_attempt,
+                    terminal_pre_response_frame=True,
+                )
+
         matched_event_queue = (
             completed_event_queue
             if completed_event_queue_claimed and matched_request_state is terminal_request_state
@@ -3040,38 +3084,6 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # returns. A concurrent timeout may still be finishing
                     # awaited recovery work before it rechecks this scope.
                     completed_delivery_scope.terminal_enqueued = True
-
-        if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
-            error_code = None
-            if settlement_event_type == "error":
-                error = settlement_event.error if settlement_event else None
-                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-            elif settlement_event and settlement_event.response:
-                error = settlement_event.response.error
-                error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-            _log_http_bridge_event(
-                "terminal_error",
-                session.key,
-                account_id=session.account.id,
-                model=session.request_model,
-                detail=error_code,
-                pending_count=await self._http_bridge_pending_count(session),
-                cache_key_family=session.key.affinity_kind,
-                model_class=_extract_model_class(session.request_model) if session.request_model else None,
-            )
-            if error_code is not None and terminal_request_state.response_event_count == 0:
-                # An upstream terminal frame that fails the request before any
-                # response event is the same pre-response failure the circuit
-                # measures on eventless retirements; it reaches this settlement
-                # path instead of the retirement funnel, so it would otherwise
-                # never count. Attempt-scoped recording keeps a later
-                # retirement of the same lifecycle from double-counting, and
-                # the recorder itself drops non-circuit details and soft keys.
-                await self._record_http_bridge_retry_circuit_failure(
-                    session,
-                    detail=error_code,
-                    attempt=terminal_request_state.response_create_attempt,
-                )
 
         try:
             await self._finalize_websocket_request_state(

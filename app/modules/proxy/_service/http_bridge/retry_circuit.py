@@ -62,6 +62,19 @@ def _http_bridge_anchor_poison_detail(detail: str | None) -> str | None:
     return _HTTP_BRIDGE_ANCHOR_POISON_DETAILS.get(aliased)
 
 
+def _http_bridge_poison_quarantine_minimum_seconds(cooldown_remaining: float) -> float:
+    """Keep a poison quarantine alive across the cooldown and its probe window.
+
+    The probe that has to be planned unanchored is only admitted once the
+    cooldown expires, and it may then be admitted anywhere inside the
+    half-open lease that follows. Quarantine's default TTL equals the maximum
+    cooldown, so at that cooldown both would lapse in the same instant and the
+    probe would be planned with the anchor the circuit opened on. This is the
+    same span the durable retry-circuit row already reserves for itself.
+    """
+    return max(0.0, cooldown_remaining) + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
+
+
 @dataclass(slots=True)
 class _HTTPBridgeRetryCircuitState:
     consecutive_failures: int = 0
@@ -500,7 +513,18 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
         attempt: _HTTPBridgeResponseCreateAttempt | None = None,
+        terminal_pre_response_frame: bool = False,
     ) -> int | None:
+        """Count one hard-key failure against the retry circuit.
+
+        ``terminal_pre_response_frame`` is asserted only by the settlement path
+        for an upstream terminal frame that failed the request before any
+        response event. ``response.failed``/``response.incomplete`` mark the
+        attempt observed without counting a response event, so without that
+        assertion a native terminal envelope is rejected below as already
+        settled and never consumes a strike. The eventless retirement funnel
+        never asserts it, so its "upstream answered" guard is unchanged.
+        """
         detail = _HTTP_BRIDGE_RETRY_CIRCUIT_DETAIL_ALIASES.get(detail, detail)
         if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
             return None
@@ -513,7 +537,7 @@ class _HTTPBridgeRetryCircuitMixin:
                     attempt=scoped_attempt,
                     detail=detail,
                 )
-            if scoped_attempt.disarmed or scoped_attempt.response_observed:
+            if scoped_attempt.disarmed or (scoped_attempt.response_observed and not terminal_pre_response_frame):
                 return None
 
         await self._load_http_bridge_retry_circuit(session)
@@ -524,11 +548,15 @@ class _HTTPBridgeRetryCircuitMixin:
         now = time.monotonic()
         duplicate_attempt: _HTTPBridgeResponseCreateAttempt | None = None
         state: _HTTPBridgeRetryCircuitState | None = None
+        poison_class_failure = _http_bridge_anchor_poison_detail(detail) is not None
         quarantine_poisoned_anchor = False
+        quarantine_cooldown_remaining = 0.0
         async with self._http_bridge_retry_circuit_lock:
             if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
                 duplicate_attempt = scoped_attempt
-            elif scoped_attempt is not None and (scoped_attempt.disarmed or scoped_attempt.response_observed):
+            elif scoped_attempt is not None and (
+                scoped_attempt.disarmed or (scoped_attempt.response_observed and not terminal_pre_response_frame)
+            ):
                 return None
             else:
                 state = self._http_bridge_retry_circuits.setdefault(
@@ -557,7 +585,8 @@ class _HTTPBridgeRetryCircuitMixin:
                     # key routes a full-resend probe through the existing
                     # unanchored fresh path; delta-only payloads keep their
                     # anchor there, because it is their only context.
-                    quarantine_poisoned_anchor = _http_bridge_anchor_poison_detail(detail) is not None
+                    quarantine_poisoned_anchor = poison_class_failure
+                    quarantine_cooldown_remaining = max(0.0, state.cooldown_until - now)
                     if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                         http_bridge_retry_circuit_total.labels(outcome="opened").inc()
                     logger.warning(
@@ -581,13 +610,30 @@ class _HTTPBridgeRetryCircuitMixin:
                 self,
                 session,
                 reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(quarantine_cooldown_remaining),
             )
         try:
             await self._persist_http_bridge_retry_circuit(session, state)
+            merged_cooldown_remaining = 0.0
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
                     self._http_bridge_retry_circuit_loaded_keys.add(session.key)
                 consecutive_failures = state.consecutive_failures
+                # Replicas that each record their locally-first failure stay
+                # below the threshold under their own lock, and it is the
+                # durable merge that opens the circuit. Neither worker ever saw
+                # an open circuit above, so the quarantine decision has to be
+                # revisited against the merged state or the probe admitted
+                # after this cooldown is planned with the poisoned anchor.
+                if not quarantine_poisoned_anchor and poison_class_failure and consecutive_failures >= threshold:
+                    merged_cooldown_remaining = max(0.0, state.cooldown_until - time.monotonic())
+            if merged_cooldown_remaining > 0.0:
+                _quarantine_http_bridge_session(
+                    self,
+                    session,
+                    reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                    minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(merged_cooldown_remaining),
+                )
             return consecutive_failures
         finally:
             if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_settled is not None:

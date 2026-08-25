@@ -21,7 +21,13 @@ response event was observed MUST record one failure for that request
 lifecycle through the same attempt-scoped recorder, because that failure
 settles through the terminal path rather than a retirement and would
 otherwise never advance the circuit; a later retirement of the same lifecycle
-MUST NOT count it again.
+MUST NOT count it again. A native terminal failure envelope
+(`response.failed` or `response.incomplete`) MUST remain eligible for that
+recording even though it marks the `response.create` attempt as answered
+without counting a response event. The recording MUST complete before the
+terminal frame and its end-of-stream sentinel are published downstream, so a
+client that resends the moment it observes completion cannot have that resend
+planned while the resulting cooldown and quarantine are still being written.
 
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
@@ -38,7 +44,11 @@ poison-class failure (`stream_incomplete` or `stream_idle_timeout` with no
 observed response event), the proxy MUST quarantine the session key as
 specified under the silent-session quarantine requirement, so the probe
 admitted after the cooldown is planned without the anchor the circuit opened
-on. A `clean_close` opening MUST NOT quarantine the key.
+on. This MUST hold however the circuit reached its threshold: when concurrent
+replicas each record a locally-first failure and the durable conflict merge is
+what opens the circuit, the recording replica MUST re-evaluate the quarantine
+against the merged state, because no replica observed the threshold under its
+own lock. A `clean_close` opening MUST NOT quarantine the key.
 
 When the proxy suppresses a submission, the `retry_after_seconds` it returns
 and the detail it logs MUST reflect the timer that is actually refusing the
@@ -83,6 +93,20 @@ and durable circuit state.
 - **THEN** the retry circuit records exactly one failure for that request lifecycle
 - **AND** a subsequent retirement of the same lifecycle does not record a second failure
 
+#### Scenario: native terminal failure envelope consumes a strike
+
+- **GIVEN** a hard-affinity HTTP bridge owns a pending request with no counted response event
+- **WHEN** upstream fails it with a native `response.failed` envelope that never sent `response.created`
+- **THEN** the envelope still consumes one attempt-scoped retry-circuit strike
+- **AND** two such envelopes on the same key open the circuit and quarantine it with reason `retry_circuit_poisoned_anchor`
+
+#### Scenario: the terminal strike lands before the client observes completion
+
+- **GIVEN** a hard-affinity HTTP bridge owns a pending request with no counted response event
+- **WHEN** upstream fails it with an eventless terminal error frame
+- **THEN** the retry-circuit failure is recorded before the terminal frame or its end-of-stream sentinel reaches the downstream queue
+- **AND** the terminal frame is still published to the client afterwards
+
 #### Scenario: midstream retirement does not consume a pre-response strike
 
 - **GIVEN** a hard-affinity HTTP bridge owns a pending request with an observed response event
@@ -103,6 +127,13 @@ and durable circuit state.
 - **WHEN** a second eventless `stream_incomplete` failure opens the circuit
 - **THEN** the session key is quarantined with reason `retry_circuit_poisoned_anchor`
 - **AND** the next full-resend request on that key is planned without the durable anchor
+
+#### Scenario: a circuit opened by the durable merge still quarantines the key
+
+- **GIVEN** concurrent replicas that each record only their locally-first eventless `stream_incomplete` failure, so neither reaches the threshold under its own lock
+- **WHEN** the durable conflict merge raises the recording replica's view to the threshold and opens the cooldown
+- **THEN** that replica re-evaluates the quarantine against the merged state
+- **AND** the session key is quarantined with reason `retry_circuit_poisoned_anchor`
 
 #### Scenario: circuit opened by clean closes does not quarantine the key
 
@@ -197,6 +228,8 @@ While a session key is quarantined: an existing session under that key MUST NOT 
 
 Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection.
 
+A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in force for at least the remaining cooldown of the circuit that armed it plus that circuit's half-open lease, because the probe it exists to protect is only admitted once that cooldown expires and may then be admitted anywhere inside the lease that follows. The default TTL alone MUST NOT be relied on for this: it equals the circuit's maximum cooldown, so at that cooldown the quarantine would otherwise lapse in the same instant the cooldown does and hand the poisoned anchor back to the very request the cooldown was holding.
+
 #### Scenario: Reattach streams events but response.created is never assigned (#1534)
 
 - **GIVEN** a durable HTTP bridge session with a stored anchor whose fresh reattach injected a proxy-owned `previous_response_id`
@@ -228,6 +261,13 @@ Quarantine state MUST be bounded and self-recovering: it is in-memory and sessio
 - **AND** the session-level injection does not re-add the same anchor or trim the stored prefix
 - **AND** the dispatch goes upstream genuinely unanchored with the client's untrimmed payload
 - **AND** the suppression applies even when the fresh-reattach injection was already ineligible for other reasons (for example a conversation-scoped payload, a live alias session, or an active-owner forward that falls back to a local rebind)
+
+#### Scenario: A poison quarantine outlives the cooldown that armed it
+
+- **GIVEN** repeated eventless poison-class failures have driven a hard-affinity circuit to its maximum cooldown
+- **WHEN** the quarantine is armed with reason `retry_circuit_poisoned_anchor` at that same instant
+- **THEN** the quarantine window extends past the cooldown deadline by at least the circuit's half-open lease
+- **AND** the probe admitted once that cooldown expires is still planned without the poisoned anchor
 
 #### Scenario: Quarantined session is excluded from reuse selection
 

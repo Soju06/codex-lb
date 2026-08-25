@@ -15,7 +15,7 @@ The proxy MUST NOT retire the anchor when:
 
 When the session's current anchor is no longer the denied id because a concurrent request advanced it, the proxy MUST NOT clear the newer anchor. It MUST still persist the denial fact and remove the denied response alias.
 
-When the durable denial write and conditional clear cannot be confirmed or their await is cancelled, the proxy MUST NOT report the anchor as retired, and MUST still unregister the local response alias and clear the in-memory anchor, which strictly removes carriers that could re-inject or trim against the denied id. If the surviving durable record is read again on a later full-resend turn in the same live session, the proxy MUST retry durable retirement and MUST suppress that tombstoned id from session hydration, anchor injection, and prefix trimming regardless of the retry outcome.
+When the durable denial write and conditional clear cannot be confirmed or their await is cancelled, the proxy MUST NOT report the anchor as retired, and MUST still unregister the local response alias and clear the in-memory anchor, which strictly removes carriers that could re-inject or trim against the denied id. If the surviving durable record is read again on a later full-resend turn in the same live session, the proxy MUST retry durable retirement and MUST suppress that tombstoned id from session hydration, anchor injection, and prefix trimming regardless of the retry outcome. If the stale durable anchor was already injected or trimmed before the live session's process-local tombstone became visible, the proxy MUST rebuild the prepared request from the client's original full-resend payload before dispatch.
 
 Retirement is bookkeeping and MUST NOT change how the denial is delivered downstream. A failure while retiring MUST NOT propagate into terminal-event handling.
 
@@ -161,9 +161,11 @@ The downstream error contract is unchanged: the denial is still reported to the 
 
 - **GIVEN** the first conditional durable clear of a denied proxy-injected anchor failed
 - **AND** the durable lookup returns that tombstoned id on the next full-resend turn in the same live session
+- **AND** request-level preparation injected and trimmed against that id before the live session tombstone was resolved
 - **WHEN** the proxy prepares the next turn
 - **THEN** it MUST retry the conditional durable clear under the owner fence
-- **AND** MUST NOT hydrate, inject, or trim against the tombstoned id even if that retry fails
+- **AND** MUST rebuild the already-prepared request from the client's original full resend
+- **AND** MUST NOT hydrate, inject, or trim against the tombstoned id even if the retry fails
 - **AND** the full-resend turn MUST remain eligible for unanchored upstream dispatch
 
 #### Scenario: Durable cleanup cancellation still clears memory

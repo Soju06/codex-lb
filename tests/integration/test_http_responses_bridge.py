@@ -15661,11 +15661,12 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
     service = get_proxy_service_for_app(app_instance)
     real_clear_anchor = service._durable_bridge.retire_denied_session_response_anchor
     clear_attempts = 0
+    allow_clear = False
 
-    async def fail_first_clear_anchor(**kwargs):
+    async def fail_initial_clear_anchor(**kwargs):
         nonlocal clear_attempts
         clear_attempts += 1
-        if clear_attempts == 1:
+        if not allow_clear:
             if first_clear_outcome == "error":
                 raise RuntimeError("transient denied-anchor cleanup failure")
             return None
@@ -15674,7 +15675,7 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
     monkeypatch.setattr(
         service._durable_bridge,
         "retire_denied_session_response_anchor",
-        fail_first_clear_anchor,
+        fail_initial_clear_anchor,
     )
 
     headers = {"session_id": "http-bridge-denied-anchor-session"}
@@ -15701,6 +15702,18 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
         headers=headers,
     )
     assert second.status_code == 502
+    clear_attempts_before_retry = clear_attempts
+    allow_clear = True
+
+    async def miss_live_session_during_anchor_preflight(**kwargs):
+        del kwargs
+        return False
+
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_has_live_local_session",
+        miss_live_session_during_anchor_preflight,
+    )
 
     third = await async_client.post(
         "/backend-api/codex/responses",
@@ -15708,7 +15721,9 @@ async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_den
         headers=headers,
     )
     assert third.status_code == 200
-    assert clear_attempts == 2, "the surviving durable tombstone must be cleared on the next turn"
+    assert clear_attempts == clear_attempts_before_retry + 1, (
+        "the surviving durable tombstone must be cleared on the next turn"
+    )
 
     dispatched = [json.loads(text) for text in upstream.sent_text]
     anchored = [frame for frame in dispatched if frame.get("previous_response_id") is not None]

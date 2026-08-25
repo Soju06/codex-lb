@@ -2647,6 +2647,51 @@ class _HTTPBridgeStreamingMixin:
                 denied_response_id=session_denied_response_id,
             )
         if (
+            session_denied_response_id is not None
+            and proxy_injected_previous_response_id
+            and request_state.previous_response_id == session_denied_response_id
+            and payload.previous_response_id is None
+            and payload_looks_like_full_resend
+        ):
+            # The live-session preflight above is only a snapshot. A session or
+            # same-key successor carrying the process-local tombstone can become
+            # resolvable after that check, while the stale durable lookup has
+            # already injected the denied id and trimmed the full resend. Rebuild
+            # from the client's original payload before any session hydration or
+            # final dispatch check so a successful cleanup retry cannot leave the
+            # already-prepared request stuck in a pre-dispatch 502 loop.
+            previous_request_state = request_state
+            effective_payload = payload
+            request_state, text_data = prepare_bridge_request(effective_payload)
+            request_state.enforce_openai_sdk_contract = enforce_openai_sdk_contract
+            request_state.affinity_policy = affinity
+            _apply_http_bridge_downstream_turn_state(
+                request_state,
+                downstream_turn_state=downstream_turn_state,
+                incoming_turn_state_header=incoming_turn_state_header,
+            )
+            request_state.transport = _REQUEST_TRANSPORT_HTTP
+            request_state.request_stage = _http_bridge_request_stage(
+                headers=headers,
+                payload=effective_payload,
+                durable_lookup=durable_lookup,
+            )
+            request_state.preferred_account_id = previous_request_state.preferred_account_id
+            request_state.excluded_account_ids.update(previous_request_state.excluded_account_ids)
+            proxy_injected_previous_response_id = False
+            fresh_upstream_request_text = None
+            previous_response_trimmed_input_count = None
+            previous_response_trimmed_input_fingerprint = None
+            _log_http_bridge_event(
+                "fresh_reattach_anchor_rebuilt_after_local_tombstone",
+                session.key,
+                account_id=session.account.id,
+                model=effective_payload.model,
+                detail=f"response_id={session_denied_response_id}, outcome=client_unanchored_full_resend",
+                cache_key_family=session.key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+            )
+        if (
             # A quarantine-suppressed anchor (#1534) must not be rehydrated
             # into the session either: doing so would let the session-level
             # injection below re-add the exact anchor the quarantine skipped

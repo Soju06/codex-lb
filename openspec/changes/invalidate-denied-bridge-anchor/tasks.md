@@ -22,6 +22,7 @@
 - [x] 1.18 Add submit-path coverage proving a wedged fenced send times out, releases the durable fence, and is classified as account-neutral liveness failure.
 - [x] 1.19 Add coverage proving dispatch-fence entry failure rolls back a published recovery alias and retires the session when rollback cannot be confirmed.
 - [x] 1.20 Add coverage proving local alias-unregister failure after a late tombstone cannot escape into account-penalizing send-failure handling.
+- [x] 1.21 Strengthen route-level cleanup-retry coverage so a stale durable anchor is already injected and trimmed before the live-session tombstone is resolved, then prove the original full resend is rebuilt and dispatched unanchored.
 
 ## 2. Anchor Retirement
 
@@ -44,6 +45,7 @@
 - [x] 2.17 Bound the fenced WebSocket send with the existing upstream transport timeout and classify expiry as account-neutral liveness failure so transaction unwind releases the durable fence.
 - [x] 2.18 Roll back any published recovery turn-state alias when durable dispatch-fence entry fails, and retire the session when rollback cannot be confirmed.
 - [x] 2.19 Contain local response-alias unregister failures after a late durable tombstone while still clearing matching in-memory trim state.
+- [x] 2.20 Rebuild a request-level anchored payload from the client's original full resend when the resolved live session reveals that the prepared proxy-injected anchor was already tombstoned.
 
 ## 3. Recovery Provenance
 
@@ -56,3 +58,4 @@
 - [x] 4.2 Run strict OpenSpec validation for this change and review the final diff for unrelated changes.
 - [x] 4.3 Re-run the touched bridge and durable-coordinator suites plus ruff, type checking, strict OpenSpec validation, and final diff review after adding the cross-replica dispatch fence.
 - [x] 4.4 Re-run the touched bridge suites, ruff, type checking, strict OpenSpec validation, and final diff review after review-driven fence cleanup hardening.
+- [x] 4.5 Re-run the strengthened route regression, touched bridge suites, ruff, type checking, strict OpenSpec validation, and final diff review after rebuilding late-discovered local tombstones.

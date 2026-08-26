@@ -15,9 +15,12 @@ The bridge already has two useful safety signals:
    request states, including detached generations during settlement.
 
 The new cleanup uses both signals. A database owner lease is also checked so
-one replica cannot abandon work that another replica still owns. The sweep is
-therefore conservative: it may leave a stale row until the next pass, but it
-cannot turn a live owner or pending request into a retryable duplicate.
+one replica cannot abandon work that another replica still owns. An owned row
+must remain expired for one additional durable lease period before it is
+eligible, so a brief renewal blip on one replica cannot let another replica
+fence an active finalization path. The sweep is therefore conservative: it may
+leave a stale row until the next pass, but it cannot turn a live owner or
+pending request into a retryable duplicate.
 
 The pending-operation protection snapshot is bounded before it is rendered as
 an expanding database predicate. If the snapshot exceeds the repository's
@@ -84,6 +87,10 @@ then requires:
 - the owner instance and epoch still equal the candidate values; and
 - the session has no owner or its lease is expired.
 
+An owned session's lease must have been expired for at least one full durable
+lease period. This cross-replica grace protects a still-running owner from a
+single renewal blip while preserving eventual convergence after owner loss.
+
 The final update is a single conditional update inside the write transaction.
 The state check prevents a late `update_operation` or recovery claim from
 reviving an already abandoned operation.
@@ -112,7 +119,9 @@ request text, response IDs, API keys, and account emails are not included.
 ## Race handling
 
 - A current owner renewing or claiming a row changes the session epoch or
-  operation `updated_at`; the compare-and-set then affects zero rows.
+  operation `updated_at`; the compare-and-set then affects zero rows. If a
+  renewal is briefly delayed, the additional lease-period grace keeps the row
+  ineligible before the compare-and-set is attempted.
 - A nonterminal status event that commits after candidate selection advances
   the operation's durable `event_bytes` progress; the compare-and-set also
   compares that progress. The current ORM append paths refresh `updated_at`,

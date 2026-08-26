@@ -1924,6 +1924,7 @@ class DurableBridgeRepository:
         self,
         *,
         cutoff: datetime,
+        lease_expired_before: datetime,
         protected_operation_ids: Collection[str] = (),
         batch_size: int = _PURGE_CLOSED_BATCH_SIZE,
         scan_cursor: DurableBridgeOperationAbandonmentScanCursor | None = None,
@@ -1954,7 +1955,7 @@ class DurableBridgeRepository:
         stale_owner = or_(
             HttpBridgeSessionRecord.owner_instance_id.is_(None),
             HttpBridgeSessionRecord.lease_expires_at.is_(None),
-            HttpBridgeSessionRecord.lease_expires_at <= now,
+            HttpBridgeSessionRecord.lease_expires_at <= lease_expired_before,
         )
         candidate_filter = [
             HttpBridgeOperationRecord.state.in_(ambiguous_states),
@@ -2044,16 +2045,20 @@ class DurableBridgeRepository:
                 owner_predicates = [
                     HttpBridgeSessionRecord.id == operation.session_id,
                     HttpBridgeSessionRecord.owner_epoch == owner_epoch,
-                    or_(
-                        HttpBridgeSessionRecord.lease_expires_at.is_(None),
-                        HttpBridgeSessionRecord.lease_expires_at <= now,
-                    ),
                 ]
                 if owner_instance_id is None:
                     owner_predicates.append(HttpBridgeSessionRecord.owner_instance_id.is_(None))
                     owner_lease_outcome = "ownerless"
                 else:
-                    owner_predicates.append(HttpBridgeSessionRecord.owner_instance_id == owner_instance_id)
+                    owner_predicates.extend(
+                        (
+                            HttpBridgeSessionRecord.owner_instance_id == owner_instance_id,
+                            or_(
+                                HttpBridgeSessionRecord.lease_expires_at.is_(None),
+                                HttpBridgeSessionRecord.lease_expires_at <= lease_expired_before,
+                            ),
+                        )
+                    )
                     owner_lease_outcome = "expired"
                 compare_and_set = await self._session.execute(
                     update(HttpBridgeOperationRecord)

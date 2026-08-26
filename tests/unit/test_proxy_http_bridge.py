@@ -34924,6 +34924,7 @@ async def test_prune_idle_http_bridge_sessions_is_a_noop_on_an_empty_registry() 
 @pytest.mark.asyncio
 async def test_stale_operation_maintenance_protects_canonical_detached_and_batched_ids(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     canonical = _make_bridge_session(
@@ -34957,7 +34958,8 @@ async def test_stale_operation_maintenance_protects_canonical_detached_and_batch
         lambda: _make_app_settings(http_responses_session_bridge_request_budget_seconds=120.0),
     )
 
-    assert await service.abandon_stale_http_bridge_operations() == 1
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.service"):
+        assert await service.abandon_stale_http_bridge_operations() == 1
 
     abandon_stale_operations.assert_awaited_once()
     assert abandon_stale_operations.await_args is not None
@@ -34965,6 +34967,12 @@ async def test_stale_operation_maintenance_protects_canonical_detached_and_batch
     assert kwargs["protected_operation_ids"] == {"op-canonical", "op-detached", "op-batched"}
     cutoff_age = (proxy_service.utcnow() - kwargs["cutoff"]).total_seconds()
     assert 1799.0 <= cutoff_age <= 1801.0
+    lease_expiry_grace = (proxy_service.utcnow() - kwargs["lease_expired_before"]).total_seconds()
+    assert 29.0 <= lease_expiry_grace <= 31.0
+    abandonment_record = next(
+        record for record in caplog.records if record.getMessage() == "Abandoned stale HTTP bridge operation"
+    )
+    assert getattr(abandonment_record, "reason", None) == "stale_owner"
 
 
 @pytest.mark.asyncio

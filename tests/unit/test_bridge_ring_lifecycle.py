@@ -2960,12 +2960,13 @@ async def test_stale_ambiguous_operation_is_abandoned_and_late_writers_are_fence
         await session.execute(
             update(HttpBridgeSessionRecord)
             .where(HttpBridgeSessionRecord.id == claim.id)
-            .values(owner_instance_id=None, lease_expires_at=None)
+            .values(owner_instance_id=None, lease_expires_at=utcnow())
         )
         await session.commit()
 
         sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(seconds=30),
         )
         assert len(sweep.abandonments) == 1
         assert sweep.abandonments[0].source_state == "unknown"
@@ -3170,6 +3171,7 @@ async def test_durable_event_progress_fences_abandonment_cas(
         protected_ids = {f"synthetic-protected-{index}" for index in range(_PROTECTED_OPERATION_ID_SAFE_LIMIT + 1)}
         sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(seconds=30),
             protected_operation_ids=protected_ids,
         )
 
@@ -3184,7 +3186,7 @@ async def test_durable_event_progress_fences_abandonment_cas(
 
 
 @pytest.mark.asyncio
-async def test_stale_operation_sweep_protects_live_owner_and_local_pending_id(
+async def test_stale_operation_sweep_protects_live_recently_expired_and_local_pending_id(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:
     session = async_session_factory()
@@ -3202,6 +3204,12 @@ async def test_stale_operation_sweep_protects_live_owner_and_local_pending_id(
             lease_ttl_seconds=1.0,
             session_key_value="sid-operation-expired",
         )
+        recently_expired = await _claim(
+            repository,
+            instance_id="inst-operation-recently-expired",
+            lease_ttl_seconds=1.0,
+            session_key_value="sid-operation-recently-expired",
+        )
         protected = await _claim(
             repository,
             instance_id="inst-operation-protected",
@@ -3212,6 +3220,7 @@ async def test_stale_operation_sweep_protects_live_owner_and_local_pending_id(
         for label, claim, instance_id in (
             ("live", live, "inst-operation-live"),
             ("expired", expired, "inst-operation-expired"),
+            ("recently-expired", recently_expired, "inst-operation-recently-expired"),
             ("protected", protected, "inst-operation-protected"),
         ):
             fingerprint = durable_bridge_hash(f"operation-{label}")
@@ -3239,21 +3248,30 @@ async def test_stale_operation_sweep_protects_live_owner_and_local_pending_id(
             .where(HttpBridgeSessionRecord.id.in_([expired.id, protected.id]))
             .values(lease_expires_at=utcnow() - timedelta(minutes=5))
         )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == recently_expired.id)
+            .values(lease_expires_at=utcnow() - timedelta(seconds=10))
+        )
         await session.commit()
 
         sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(seconds=30),
             protected_operation_ids={operation_ids["protected"]},
         )
         assert [item.source_state for item in sweep.abandonments] == ["acknowledged"]
         expired_operation = await repository.get_operation(operation_id=operation_ids["expired"])
         live_operation = await repository.get_operation(operation_id=operation_ids["live"])
+        recently_expired_operation = await repository.get_operation(operation_id=operation_ids["recently-expired"])
         protected_operation = await repository.get_operation(operation_id=operation_ids["protected"])
         assert expired_operation is not None
         assert live_operation is not None
+        assert recently_expired_operation is not None
         assert protected_operation is not None
         assert expired_operation.state == "abandoned"
         assert live_operation.state == "acknowledged"
+        assert recently_expired_operation.state == "acknowledged"
         assert protected_operation.state == "acknowledged"
     finally:
         await session.close()
@@ -3316,6 +3334,7 @@ async def test_stale_operation_sweep_bounds_oversized_protection_snapshot(
         assert len(protected_ids) > _PROTECTED_OPERATION_ID_SAFE_LIMIT
         sweep = await repository.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(seconds=30),
             protected_operation_ids=protected_ids,
         )
         assert len(sweep.abandonments) == 1
@@ -3378,6 +3397,7 @@ async def test_stale_operation_sweep_resumes_after_finite_protected_prefix(
         coordinator = DurableBridgeSessionCoordinator(async_session_factory)
         first_abandonments = await coordinator.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(seconds=30),
             protected_operation_ids=protected_ids,
         )
         assert first_abandonments == []
@@ -3389,6 +3409,7 @@ async def test_stale_operation_sweep_resumes_after_finite_protected_prefix(
 
         second_abandonments = await coordinator.abandon_stale_operations(
             cutoff=utcnow() - timedelta(minutes=30),
+            lease_expired_before=utcnow() - timedelta(seconds=30),
             protected_operation_ids=protected_ids,
         )
         assert [item.source_state for item in second_abandonments] == ["acknowledged"]

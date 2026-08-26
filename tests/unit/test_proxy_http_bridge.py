@@ -33186,3 +33186,71 @@ async def test_failed_anchor_abandonment_leaves_the_circuit_cooling() -> None:
     assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
         "a fenced clear is not proof, so the circuit must keep cooling"
     )
+
+
+@pytest.mark.asyncio
+async def test_abandonment_deletes_the_durable_circuit_opened_in_the_same_instant() -> None:
+    # Production shape: the circuit opens and the anchor is abandoned in the
+    # same instant, before persistence has stamped a version fence. The fence
+    # guard then skipped the durable delete, the row survived, the next load
+    # rehydrated it, and the key kept cooling for a cause that was gone.
+    # Observed live at 18:31:41Z: durable_anchor_poisoned fired, no reset was
+    # logged, and the row still read cooldown_until 18:32:41Z afterwards.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-unfenced-settle",
+        key_value="sid-unfenced-settle",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-unfenced-settle"
+    session.durable_owner_epoch = 1
+    clear_retry_circuit = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        # No snapshot returned, so persisted_updated_at_epoch stays 0 and the
+        # circuit carries no version fence.
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=clear_retry_circuit,
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    state = cast(Any, service)._http_bridge_retry_circuits.get(session.key)
+    assert state is not None and state.persisted_updated_at_epoch == 0, "the fixture must reproduce the unfenced shape"
+
+    cleared = await http_bridge_upstream_events_module._abandon_durable_http_bridge_continuity(
+        service,
+        session,
+        detail="repeated_zero_event_stream_incomplete",
+    )
+
+    assert cleared is True
+    clear_retry_circuit.assert_awaited_once()
+    assert clear_retry_circuit.await_args is not None
+    assert clear_retry_circuit.await_args.kwargs["expected_updated_at_epoch"] is None, (
+        "an unfenced settle must delete the row outright rather than skip it"
+    )
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuits
+
+
+@pytest.mark.asyncio
+async def test_ordinary_circuit_clear_still_respects_the_version_fence() -> None:
+    # The fence still protects a worker that observed nothing from clobbering a
+    # row another replica just wrote. Only a caller that removed the cause may
+    # bypass it.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-fence-kept",
+        key_value="sid-fence-kept",
+        response_event_count=0,
+    )
+    clear_retry_circuit = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=clear_retry_circuit,
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    await service._clear_http_bridge_retry_circuit(session)
+
+    clear_retry_circuit.assert_not_awaited()

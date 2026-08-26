@@ -69,7 +69,9 @@
       queue is still empty, and the terminal frame is published afterwards;
       a grouped multi-request continuity failure records one strike per
       eventless grouped request
-- [x] 2.10 A confirmed abandonment clears the circuit; a fenced one does not
+- [x] 2.10 A confirmed abandonment clears the circuit; a fenced one does not; the
+      durable row is deleted even with no version fence, while an ordinary clear
+      still respects it
 
 - [x] 2.9 Grouped poison strikes clear the anchor; a cancelled clear still
       finalizes; a merged cooldown extends an armed quarantine; the effective

@@ -65,6 +65,13 @@ exists and refuse requests that carry no anchor at all. The abandonment is the
 same proof of recovery a completed response carries. An abandonment that was
 fenced or failed proves nothing and MUST leave the cooldown running.
 
+That settle MUST remove the durable row even when this worker holds no version
+fence for it. A circuit opened and remediated in the same instant has not been
+persisted yet, and the fence guard would otherwise skip the delete, leaving a
+row that the next load rehydrates into a cooldown whose cause is gone. The
+fence MUST still apply to callers that merely observed the circuit rather than
+removing its cause.
+
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
 using exponential backoff from sixty seconds up to ten minutes. Clean-close
@@ -184,6 +191,7 @@ and durable circuit state.
 - **WHEN** the durable anchor those failures hit is successfully abandoned
 - **THEN** the retry circuit for that key is cleared rather than left cooling
 - **AND** a fenced or failed abandonment leaves the cooldown running
+- **AND** the durable row is deleted even when no version fence has been stamped for it
 
 #### Scenario: midstream retirement does not consume a pre-response strike
 

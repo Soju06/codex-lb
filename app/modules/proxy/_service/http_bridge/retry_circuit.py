@@ -817,7 +817,23 @@ class _HTTPBridgeRetryCircuitMixin:
             if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_settled is not None:
                 scoped_attempt.retry_circuit_failure_settled.set()
 
-    async def _clear_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> None:
+    async def _clear_http_bridge_retry_circuit(
+        self: Any,
+        session: _HTTPBridgeSession,
+        *,
+        settle_unfenced: bool = False,
+    ) -> None:
+        """Settle a hard key's retry circuit.
+
+        ``settle_unfenced`` is asserted by callers that have removed the cause
+        of the circuit rather than merely outlived it. The version fence below
+        exists so a worker that observed nothing cannot clobber a row another
+        replica just wrote, but it also skips the durable delete whenever this
+        worker's own state has not been persisted yet. A circuit opened and
+        remediated in the same instant is exactly that case: the row survives,
+        the next load rehydrates it, and the key keeps cooling for a cause that
+        is gone.
+        """
         if session.key.strength != "hard":
             return
 
@@ -833,7 +849,7 @@ class _HTTPBridgeRetryCircuitMixin:
         # concurrently, so leave the durable row untouched when no state was
         # observed. Preserve the existing best-effort clear on read failures,
         # which is still useful for settling a row after a transient outage.
-        if durable_load_succeeded and (state is None or expected_updated_at_epoch is None):
+        if durable_load_succeeded and (state is None or (expected_updated_at_epoch is None and not settle_unfenced)):
             return
         try:
             # Clearing is idempotent and must be attempted even when the

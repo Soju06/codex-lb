@@ -1055,7 +1055,7 @@ async def _abandon_durable_http_bridge_continuity(
     # cannot repeat that failure, which is the same evidence a completed
     # response carries, so settle the circuit the same way. A genuinely new
     # failure re-opens it at the usual threshold.
-    await service._clear_http_bridge_retry_circuit(session)
+    await service._clear_http_bridge_retry_circuit(session, settle_unfenced=True)
     return True
 
 

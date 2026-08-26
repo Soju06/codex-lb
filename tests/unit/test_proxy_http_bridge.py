@@ -33115,3 +33115,74 @@ def test_effective_anchor_poison_threshold_is_capped_at_the_circuit_threshold() 
     assert effective(circuit_threshold) == circuit_threshold
     assert effective(1) == 1
     assert effective(0) == 1
+
+
+@pytest.mark.asyncio
+async def test_abandoning_the_anchor_resets_the_retry_circuit() -> None:
+    # The circuit is opened by failures against the anchor the abandonment
+    # removes, so leaving its cooldown running backs off a cause that no longer
+    # exists. Observed live: ~25 rejections logged
+    # `reason=retry_circuit_cooldown_continuity_bound previous_response_id=None`
+    # in the 60s after a successful clear, none of which carried an anchor.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-anchor-clear-resets",
+        key_value="sid-anchor-clear-resets",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-clear-resets"
+    session.durable_owner_epoch = 1
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    state = cast(Any, service)._http_bridge_retry_circuits.get(session.key)
+    assert state is not None and state.consecutive_failures >= 2
+    assert state.cooldown_until > time.monotonic(), "the circuit must be cooling before the clear"
+
+    cleared = await http_bridge_upstream_events_module._abandon_durable_http_bridge_continuity(
+        service,
+        session,
+        detail="repeated_zero_event_stream_incomplete",
+    )
+
+    assert cleared is True
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuits, (
+        "a confirmed anchor abandonment must settle the circuit it invalidated"
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_anchor_abandonment_leaves_the_circuit_cooling() -> None:
+    # A fenced or failed clear proves nothing, so the cooldown must survive it.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-anchor-clear-fenced",
+        key_value="sid-anchor-clear-fenced",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-clear-fenced"
+    session.durable_owner_epoch = 1
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=AsyncMock(return_value=False),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+
+    cleared = await http_bridge_upstream_events_module._abandon_durable_http_bridge_continuity(
+        service,
+        session,
+        detail="repeated_zero_event_stream_incomplete",
+    )
+
+    assert cleared is False
+    assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
+        "a fenced clear is not proof, so the circuit must keep cooling"
+    )

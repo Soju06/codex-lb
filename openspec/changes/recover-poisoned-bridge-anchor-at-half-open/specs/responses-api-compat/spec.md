@@ -58,6 +58,13 @@ cooldown when durable persistence returns a longer deadline, so its floor
 covers the cooldown actually in force rather than the local backoff it was
 first computed from.
 
+A confirmed durable anchor abandonment MUST settle the retry circuit for that
+key. The circuit was opened by failures against the anchor the abandonment
+removed, so its cooldown would otherwise back off a cause that no longer
+exists and refuse requests that carry no anchor at all. The abandonment is the
+same proof of recovery a completed response carries. An abandonment that was
+fenced or failed proves nothing and MUST leave the cooldown running.
+
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
 using exponential backoff from sixty seconds up to ten minutes. Clean-close
@@ -170,6 +177,13 @@ and durable circuit state.
 - **GIVEN** a local opening that armed the poison quarantine from its own backoff
 - **WHEN** durable persistence merges in a longer cooldown deadline
 - **THEN** the quarantine floor is recomputed against the merged cooldown
+
+#### Scenario: abandoning the anchor settles the circuit it invalidated
+
+- **GIVEN** a hard-affinity key whose retry circuit is cooling from poison-class failures
+- **WHEN** the durable anchor those failures hit is successfully abandoned
+- **THEN** the retry circuit for that key is cleared rather than left cooling
+- **AND** a fenced or failed abandonment leaves the cooldown running
 
 #### Scenario: midstream retirement does not consume a pre-response strike
 

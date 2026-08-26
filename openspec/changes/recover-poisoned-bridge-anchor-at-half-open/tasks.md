@@ -43,6 +43,11 @@
       finalization reachable when the clear is cancelled, and re-arm the
       quarantine floor against a merged cooldown
 
+- [x] 1.10 Settle the retry circuit when a durable anchor abandonment succeeds.
+      The cooldown was opened by failures against the anchor just removed, so it
+      kept refusing unanchored requests for the rest of its backoff; a fenced or
+      failed clear still leaves it running
+
 
 ## 2. Regression coverage
 
@@ -64,6 +69,8 @@
       queue is still empty, and the terminal frame is published afterwards;
       a grouped multi-request continuity failure records one strike per
       eventless grouped request
+- [x] 2.10 A confirmed abandonment clears the circuit; a fenced one does not
+
 - [x] 2.9 Grouped poison strikes clear the anchor; a cancelled clear still
       finalizes; a merged cooldown extends an armed quarantine; the effective
       poison threshold is capped at the circuit threshold and honours lower

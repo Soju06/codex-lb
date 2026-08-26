@@ -1045,6 +1045,17 @@ async def _abandon_durable_http_bridge_continuity(
         cache_key_family=session.key.affinity_kind,
         model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )
+    # The circuit was opened by failures against the anchor this call just
+    # removed, so its cooldown is now backing off a cause that no longer
+    # exists. Leaving it running refuses requests that carry no anchor at all:
+    # observed live as a burst of ~25 rejections logged
+    # `reason=retry_circuit_cooldown_continuity_bound previous_response_id=None`
+    # in the 60s after a successful clear, every one of which would have gone
+    # upstream cleanly. A confirmed abandonment is proof the next attempt
+    # cannot repeat that failure, which is the same evidence a completed
+    # response carries, so settle the circuit the same way. A genuinely new
+    # failure re-opens it at the usual threshold.
+    await service._clear_http_bridge_retry_circuit(session)
     return True
 
 

@@ -11,10 +11,13 @@ routing without becoming permanently invisible behind healthier accounts.
 `reauth_required` means refresh-token exchange needs operator repair; it does not
 prove that the stored access token is unusable. Such accounts remain eligible
 for ordinary requests and retain sticky, bridge, file, response, and realtime
-ownership. Proactive refresh is skipped. If upstream later rejects the access
-token and forced refresh fails permanently, only that request excludes the
-account from its remaining movable retries. Paused, deactivated, deleted, and
-security-ineligible accounts retain their hard exclusions.
+ownership while the access token remains unexpired. Proactive refresh is skipped.
+At known access-token expiry, selection and bridge reuse reject the account
+locally: movable soft affinity may fail over, while hard account-owned continuity
+remains fail-closed. Before expiry, an upstream rejection plus permanent forced-
+refresh failure excludes the account only from that request's remaining movable
+retries. Paused, deactivated, deleted, and security-ineligible accounts retain
+their hard exclusions.
 
 ## Replica-local soft health
 

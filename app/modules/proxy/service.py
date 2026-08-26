@@ -922,7 +922,7 @@ class ProxyService(
     ) -> None:
         self._repo_factory = repo_factory
         self._encryptor = TokenEncryptor()
-        self._load_balancer = LoadBalancer(repo_factory)
+        self._load_balancer = LoadBalancer(repo_factory, encryptor=self._encryptor)
         self._capability_router = CapabilityRouter(repo_factory)
         self._live_websocket_connector = live_websocket_connector
         self._ring_membership = RingMembershipService(SessionLocal)

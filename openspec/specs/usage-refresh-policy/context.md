@@ -15,12 +15,14 @@ account as `rate_limited` even when Codex Desktop says the quota has reset.
 
 A permanent refresh-token failure marks an account `reauth_required` and stops
 proactive exchange of that refresh material, while ordinary requests may keep
-using the stored access token. Claimless forced refresh first reads current
-state: it adopts genuine peer rotation, uses fresh ciphertext as the guard for
-unchanged non-terminal material, and fails closed without exchange when terminal
-material is unchanged. A request that reaches this terminal failure may fail
-over after excluding the account locally; it does not globally de-route it or
-move owner-bound continuity to another account.
+using the stored access token until its known expiry. Claimless forced refresh
+first reads current state: it adopts genuine peer rotation, uses fresh ciphertext
+as the guard for unchanged non-terminal material, and fails closed without
+exchange when terminal material is unchanged. Before access-token expiry, a
+request that reaches this terminal failure may fail over after excluding the
+account locally; it does not globally de-route it or move owner-bound continuity
+to another account. At known expiry, selection and bridge reuse reject the
+account before upstream I/O.
 
 ## Upstream Usage Source
 

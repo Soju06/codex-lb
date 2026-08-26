@@ -209,6 +209,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
+from app.modules.proxy.account_eligibility import account_access_token_expires_at as _token_expiry
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
@@ -1976,6 +1977,7 @@ class _HTTPBridgeMixin(
             last_used_at=_service_time().monotonic(),
             idle_ttl_seconds=idle_ttl_seconds,
             codex_session=(affinity.kind == StickySessionKind.CODEX_SESSION or key.affinity_kind == "thread_header"),
+            access_token_expires_at=_token_expiry(account, self._encryptor),
             prewarm_lock=anyio.Lock(),
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
@@ -2415,7 +2417,7 @@ class _HTTPBridgeMixin(
                     await self._load_balancer.release_account_lease(old_lease)
                     session.account_lease = None
             session.account_lease = selected_account_lease
-            session.account, session.headers, session.upstream = account, connect_headers, upstream
+            session.replace_connection(account, connect_headers, upstream, _token_expiry(account, self._encryptor))
             session.catalog_omission_quota_admission = selection.catalog_omission_quota_admission
             session.upstream_control = _WebSocketUpstreamControl()
             session.closed = False

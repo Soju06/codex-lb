@@ -10,13 +10,13 @@
 
 ### Requirement: Re-authentication-required accounts remain request-routable
 
-The system MUST distinguish request routability from refresh-token eligibility. `active` and `reauth_required` accounts MUST be request-routable; paused and deactivated accounts MUST remain excluded.
+The system MUST distinguish request routability from refresh-token eligibility. `active` accounts MUST be request-routable. A `reauth_required` account MUST remain request-routable only while its stored access token is not known to be expired; paused and deactivated accounts MUST remain excluded.
 
-This status matrix is canonical for proxy selection, owner-bound affinity, warmup, automations, API-key account pools and scopes, probes, access-token-authenticated usage and reset-credit operations, and dashboard projections of routable capacity. Capability-specific references to active, eligible, or hard-unavailable accounts MUST apply this matrix unless a stricter security, ownership, model, quota, cooldown, or operator-policy gate is explicitly required.
+This status baseline is canonical for proxy selection, owner-bound affinity, warmup, automations, API-key account pools and scopes, probes, access-token-authenticated usage and reset-credit operations, and dashboard projections of routable capacity. Capability-specific references to active, eligible, or hard-unavailable accounts MUST apply this baseline unless a stricter credential-expiry, security, ownership, model, quota, cooldown, or operator-policy gate is explicitly required.
 
-Selecting a `reauth_required` account MUST use its stored access token without proactive refresh-token exchange. Its sticky, bridge, file, response, and realtime ownership MUST remain bound until a hard-unavailable transition or another existing ownership rule ends that binding.
+Selecting a routable `reauth_required` account MUST use its stored access token without proactive refresh-token exchange. Its sticky, bridge, file, response, and realtime ownership MUST remain bound while that token is unexpired. Once a known access-token expiry is reached, new proxy selection and live bridge reuse MUST stop before upstream I/O. Movable soft affinity MAY fail over, while hard account-owned continuity MUST remain fail-closed rather than crossing accounts.
 
-A permanent forced-refresh failure while serving a movable request MUST release the account's lease and exclude it from that request's remaining attempts. The failure MUST NOT create a process-wide routing block solely because the account remains `reauth_required`.
+A permanent forced-refresh failure while serving a movable request MUST release the account's lease and exclude it from that request's remaining attempts. The failure MUST NOT create a process-wide routing block before the stored access token's known expiry.
 
 #### Scenario: Token-invalidated account remains in the pool
 
@@ -28,9 +28,23 @@ A permanent forced-refresh failure while serving a movable request MUST release 
 #### Scenario: Warning state preserves ownership
 
 - **GIVEN** account A owns sticky or hard continuity
-- **WHEN** account A becomes `reauth_required`
+- **WHEN** account A becomes `reauth_required` with an unexpired stored access token
 - **THEN** the ownership remains bound to account A
 - **AND** the transition alone does not delete or rebind continuity
+
+#### Scenario: Expired warning account is quiesced locally
+
+- **GIVEN** account A is `reauth_required`
+- **AND** its stored access token has reached its known expiry
+- **WHEN** a new proxy request selects an account or considers bridge reuse
+- **THEN** account A is rejected before upstream I/O
+- **AND** hard account-owned continuity does not move to another account
+
+#### Scenario: All expired warning accounts report reauthentication
+
+- **GIVEN** every otherwise scoped account is `reauth_required` with a known-expired access token
+- **WHEN** account selection runs
+- **THEN** selection fails with an explicit message that all accounts require reauthentication
 
 #### Scenario: Current request excludes a rejected warning account
 

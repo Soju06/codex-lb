@@ -186,6 +186,24 @@ async def test_all_accounts_unavailable_does_not_overwrite_sticky():
 
 
 @pytest.mark.asyncio
+async def test_expired_reauth_sticky_owner_falls_back_without_rebinding_prompt_cache():
+    expired = AccountState(
+        "a",
+        AccountStatus.REAUTH_REQUIRED,
+        access_token_expires_at=time.time() - 1,
+    )
+    fallback = _active("b")
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness([expired, fallback], "key1", repo)
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.upsert.assert_not_called()
+    repo.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_fallback_overwrites_sticky_when_reallocate_sticky_true():
     """With reallocate_sticky=True (STICKY_THREAD), the sticky session IS
     deleted and the fallback IS persisted."""

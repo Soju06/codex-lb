@@ -10,8 +10,11 @@
 - [x] 2.1 Preserve sticky, bridge, and realtime ownership for `REAUTH_REQUIRED`; retain hard-unavailable cleanup.
 - [x] 2.2 Clear legacy local unavailable overlays when a routable committed snapshot converges.
 - [x] 2.3 Apply canonical eligibility to probes, warmup, automations, usage/reset credits, API-key pools, and dashboard projections.
+- [x] 2.4 Quiesce known-expired `REAUTH_REQUIRED` accounts in selection and bridge reuse while preserving hard-owner fail-closed behavior.
+- [x] 2.5 Restore explicit all-reauthentication messaging when every candidate has a known-expired access token.
 
 ## 3. Verification
 
 - [x] 3.1 Cover refresh preflight, routing, continuity, and supporting surfaces with regression tests.
-- [x] 3.2 Run changed tests, repository lint/type checks, and strict OpenSpec validation.
+- [x] 3.2 Cover expiry gating and all-expired messaging, then run repository lint/type checks and strict OpenSpec validation.
+- [x] 3.3 Add the PR author to contributor attribution metadata.

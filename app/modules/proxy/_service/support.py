@@ -1277,6 +1277,7 @@ class _HTTPBridgeSession:
     api_key: ApiKeyData | None = None
     codex_session: bool = False
     prewarmed: bool = False
+    access_token_expires_at: float | None = None
     prewarm_lock: anyio.Lock | None = None
     upstream_turn_state: str | None = None
     downstream_turn_state: str | None = None
@@ -1346,6 +1347,19 @@ class _HTTPBridgeSession:
     # counter a pre-response bridge timeout cannot tell "upstream said nothing"
     # apart from "upstream spoke and our matching lost the frame".
     unmatched_upstream_liveness_count: int = 0
+
+    def replace_connection(
+        self,
+        account: Account,
+        headers: dict[str, str],
+        upstream: UpstreamWebSocket,
+        access_token_expires_at: float | None,
+    ) -> None:
+        """Replace account-bound transport state as one in-memory operation."""
+        self.account = account
+        self.headers = headers
+        self.upstream = upstream
+        self.access_token_expires_at = access_token_expires_at
 
     def claim_liveness_settlement(self) -> bool:
         """Claim whole-deque settlement for a liveness-failed submitter.

@@ -4,9 +4,9 @@ A failed refresh token does not prove that the stored access token is unusable. 
 
 ## What Changes
 
-- Define one canonical status policy: `active` and `reauth_required` are request-routable; `paused` and `deactivated` are not.
-- Keep proactive refresh disabled for `reauth_required` while allowing ordinary access-token-authenticated operations.
-- Preserve owner-bound affinity for `reauth_required` accounts.
+- Define one canonical status baseline: `active` and unexpired `reauth_required` accounts are request-routable; known-expired, paused, and deactivated accounts are not.
+- Keep proactive refresh disabled for `reauth_required` while allowing ordinary access-token-authenticated operations until known access-token expiry.
+- Preserve owner-bound affinity while the stored access token remains unexpired, then reject reuse locally without crossing hard owners.
 - After permanent forced-refresh failure, exclude the account only from the current request's remaining movable retries.
 - Reconcile fresh account state before claimless forced refresh so peer rotations are adopted and unchanged terminal material is not exchanged.
 
@@ -14,7 +14,7 @@ A failed refresh token does not prove that the stored access token is unusable. 
 
 ### Modified Capabilities
 
-- `account-routing`: Own the canonical request-routability policy and its application to routing, continuity, and adjacent access-token surfaces.
+- `account-routing`: Own request routability, known-expiry quiescing, continuity, and explicit all-expired-pool errors.
 - `usage-refresh-policy`: Separate refresh eligibility from request eligibility and define safe claimless forced-refresh reconciliation.
 
 ## Impact

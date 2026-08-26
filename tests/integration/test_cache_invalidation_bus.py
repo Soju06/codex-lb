@@ -107,7 +107,7 @@ async def _namespace_version(namespace: str) -> int | None:
 
 
 def _fake_bridge_session(account: Account) -> "_HTTPBridgeSession":
-    return cast("_HTTPBridgeSession", SimpleNamespace(account=account))
+    return cast("_HTTPBridgeSession", SimpleNamespace(account=account, access_token_expires_at=None))
 
 
 def _make_replica_b_routing() -> tuple[RoutingAvailabilityCache, CacheInvalidationPoller]:

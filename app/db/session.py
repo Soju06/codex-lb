@@ -1030,7 +1030,9 @@ async def init_db() -> None:
             raise
 
 
-async def close_db() -> None:
+async def close_db() -> bool:
+    """Dispose database engines and report whether SQLite teardown fully drained."""
+    sqlite_teardown_drained = True
     if _wedged_teardown_cleanup_tasks:
         # Abandoned wedged teardowns plus their deferred bookkeeping closes.
         # Drain until the registry is stable — an abandoned teardown that
@@ -1049,6 +1051,7 @@ async def close_db() -> None:
                     "drain; their connections were already reclaimed (issue #1682)",
                     len(_wedged_teardown_cleanup_tasks),
                 )
+                sqlite_teardown_drained = False
                 break
             await asyncio.wait(tuple(_wedged_teardown_cleanup_tasks), timeout=remaining)
             # Completion callbacks (deregistration and scheduling of the
@@ -1058,3 +1061,4 @@ async def close_db() -> None:
     await engine.dispose()
     if _background_engine is not None:
         await _background_engine.dispose()
+    return sqlite_teardown_drained

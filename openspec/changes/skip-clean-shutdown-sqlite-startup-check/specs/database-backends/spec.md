@@ -51,7 +51,9 @@ file can keep its size and modification time across a long run, so a lost
 transition would leave a `clean` record that still matches.
 
 Recording `clean` MUST NOT be reachable unless the database engines actually
-finished disposing. A cancelled or failed disposal MUST leave the run state
+finished disposing and all reclaimed SQLite teardown work finished within the
+bounded shutdown drain. A cancelled or failed disposal, or a drain that
+abandons pending teardown work at its deadline, MUST leave the run state
 unclean.
 
 The configured check mode (`quick`, `full`, `off`) keeps its meaning: this
@@ -120,6 +122,14 @@ requirement governs only whether the selected mode runs on a given startup.
 - **GIVEN** a shutdown in which disposing the database engines raises or is
   cancelled
 - **WHEN** the lifespan teardown completes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: An abandoned teardown is not recorded as clean
+
+- **GIVEN** a reclaimed SQLite teardown task remains pending when the bounded
+  shutdown drain reaches its deadline
+- **WHEN** database disposal finishes
 - **THEN** the sidecar does not record a clean shutdown
 - **AND** the next startup runs the integrity check
 

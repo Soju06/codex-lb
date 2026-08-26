@@ -1677,7 +1677,7 @@ async def test_close_db_drains_a_pending_reclaimed_rollback_and_its_bookkeeping_
                 release_wedge.set()
 
             releaser = asyncio.ensure_future(_release_soon())
-            await asyncio.wait_for(session_module.close_db(), timeout=5.0)
+            assert await asyncio.wait_for(session_module.close_db(), timeout=5.0) is True
             # RED pre-fix: close_db saw an empty registry and returned
             # immediately, before the wedge was even released.
             assert release_wedge.is_set(), "close_db must drain the pending reclaimed rollback"
@@ -1707,7 +1707,7 @@ async def test_close_db_bounds_the_wedged_teardown_drain(monkeypatch, caplog) ->
     session_module._wedged_teardown_cleanup_tasks.add(stuck)
     try:
         with caplog.at_level(logging.WARNING, logger=session_module.__name__):
-            await asyncio.wait_for(session_module.close_db(), timeout=2.0)
+            assert await asyncio.wait_for(session_module.close_db(), timeout=2.0) is False
         assert any("still-pending wedged-teardown" in record.getMessage() for record in caplog.records), (
             "the bounded drain must report what it abandoned"
         )

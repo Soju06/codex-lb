@@ -33,6 +33,8 @@
 - [x] 3.2 Extract `_close_db_and_record_clean_shutdown()` so the ordering is
   testable, and keep `mark_lifespan_completed()` in the unconditional
   `finally`.
+- [x] 3.3 Treat a bounded teardown drain that abandons pending SQLite work as
+  incomplete, so it cannot record a clean shutdown.
 
 ## 4. Verification
 
@@ -49,3 +51,5 @@
 - [x] 4.5 Unit-test that a raised or cancelled `close_db()` does not record a
   clean shutdown.
 - [x] 4.6 Run Ruff check/format and `ty`.
+- [x] 4.7 Unit-test that a teardown drain reaching its deadline reports an
+  incomplete shutdown and does not record a clean sidecar.

@@ -329,8 +329,9 @@ async def _close_db_and_record_clean_shutdown() -> None:
     failed dispose must leave the run state unclean, because that is exactly
     the incomplete shutdown the next startup's integrity scan is for.
     """
-    await close_db()
-    mark_sqlite_shutdown_clean()
+    sqlite_teardown_drained = await close_db()
+    if sqlite_teardown_drained:
+        mark_sqlite_shutdown_clean()
 
 
 @asynccontextmanager

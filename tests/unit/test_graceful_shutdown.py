@@ -1106,8 +1106,9 @@ async def test_clean_shutdown_is_recorded_after_successful_disposal(
 ) -> None:
     order: list[str] = []
 
-    async def _close_db() -> None:
+    async def _close_db() -> bool:
         order.append("close_db")
+        return True
 
     monkeypatch.setattr(app_main, "close_db", _close_db)
     monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", lambda: order.append("mark_clean"))
@@ -1115,6 +1116,27 @@ async def test_clean_shutdown_is_recorded_after_successful_disposal(
     await app_main._close_db_and_record_clean_shutdown()
 
     assert order == ["close_db", "mark_clean"]
+
+
+@pytest.mark.asyncio
+async def test_clean_shutdown_is_not_recorded_when_wedged_teardown_was_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marked = False
+
+    async def _close_db() -> bool:
+        return False
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    await app_main._close_db_and_record_clean_shutdown()
+
+    assert marked is False
 
 
 @pytest.mark.asyncio

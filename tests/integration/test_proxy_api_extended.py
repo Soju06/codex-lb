@@ -2934,6 +2934,71 @@ async def test_source_responses_stream_reassembles_crlf_event_blocks(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_source_responses_forwards_unparseable_blocks_without_synthetic_terminal(monkeypatch):
+    """Unparseable source data passes through verbatim instead of becoming response.failed."""
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
+
+    malformed_block = 'data: {"type":"response.completed","response":{"id":"resp_unparseable"}\n\n'
+
+    async def malformed_body():
+        yield malformed_block.encode("utf-8")
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=malformed_body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.9", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_unparseable",
+        name="unparseable-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    chunks = [cast(str, chunk) async for chunk in response.body_iterator]
+    joined = "".join(chunks)
+    assert malformed_block in joined
+    assert "response.failed" not in joined
+
+
+@pytest.mark.asyncio
 async def test_iter_source_sse_event_blocks_closes_owner_when_aiter_fails():
     closed: list[str] = []
 

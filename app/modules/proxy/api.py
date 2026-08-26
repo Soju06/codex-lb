@@ -5602,6 +5602,7 @@ async def _wrap_source_responses_public_stream(
     normalized = _normalize_public_responses_stream(
         event_blocks,
         enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        forward_unparseable_data=True,
     )
     keepalive_stream = inject_sse_keepalives(
         normalized,
@@ -8349,6 +8350,7 @@ async def _normalize_public_responses_stream(
     stream: AsyncIterator[str],
     *,
     enforce_openai_sdk_contract: bool = True,
+    forward_unparseable_data: bool = False,
 ) -> AsyncIterator[str]:
     stream = _normalize_reasoning_summary_stream(stream)
     """Normalize the upstream SSE event stream for the public /v1 surface.
@@ -8367,6 +8369,7 @@ async def _normalize_public_responses_stream(
     """
     terminal_seen = False
     done_seen = False
+    unparseable_forwarded = False
     contract_violation_kind: str | None = None
     next_sequence_number = 0
     seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
@@ -8458,6 +8461,13 @@ async def _normalize_public_responses_stream(
         if payload is None:
             if _looks_like_sse_data_block(event_block):
                 contract_violation_kind = contract_violation_kind or "invalid_json"
+            if forward_unparseable_data:
+                # Source-routed streams forward blocks the proxy cannot parse
+                # byte-identically instead of eating upstream data: the pre-wrap
+                # contract was raw passthrough, and merged model-source routing
+                # tests assert source bytes reach the client.
+                unparseable_forwarded = True
+                yield event_block
             continue
         parsed_payload = payload
         raw_event_type = payload.get("type")
@@ -8584,6 +8594,12 @@ async def _normalize_public_responses_stream(
     if terminal_seen:
         if not done_seen and not enforce_openai_sdk_contract:
             yield "data: [DONE]\n\n"
+        return
+    if unparseable_forwarded:
+        # Raw source blocks already reached the client. Synthesizing a
+        # terminal here would mislabel a stream the proxy could not
+        # interpret (for example a successful source stream whose terminal
+        # event was not valid JSON) as a failure.
         return
     error_kind = contract_violation_kind or (
         "upstream_stream_truncated" if enforce_openai_sdk_contract else "stream_incomplete"

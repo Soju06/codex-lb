@@ -6,7 +6,7 @@ from collections.abc import Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -17,6 +17,7 @@ from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.core.usage import refresh_scheduler as refresh_scheduler_module
 from app.core.usage.models import UsagePayload
 from app.core.usage.refresh_scheduler import _select_long_window_entries
+from app.core.utils.shared_future import _WAITERS_ATTR, wait_on_shared_future
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.usage import updater as usage_updater_module
@@ -78,10 +79,168 @@ async def test_usage_refresh_singleflight_cancel_all_cancels_inflight_task() -> 
 
 
 @pytest.mark.asyncio
+async def test_usage_refresh_singleflight_concurrent_waiters_share_result() -> None:
+    singleflight = usage_updater_module._UsageRefreshSingleflight()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    result = usage_updater_module.AccountRefreshResult(usage_written=True)
+    factory_calls = 0
+
+    async def factory() -> usage_updater_module.AccountRefreshResult:
+        nonlocal factory_calls
+        factory_calls += 1
+        started.set()
+        await release.wait()
+        return result
+
+    waiters = [asyncio.create_task(singleflight.run("acc_shared_result", factory)) for _ in range(50)]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    release.set()
+
+    results = await asyncio.gather(*waiters)
+
+    assert factory_calls == 1
+    assert all(item is result for item in results)
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_singleflight_waiter_cancellation_leaves_factory_running() -> None:
+    singleflight = usage_updater_module._UsageRefreshSingleflight()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    factory_cancelled = asyncio.Event()
+    result = usage_updater_module.AccountRefreshResult(usage_written=True)
+
+    async def factory() -> usage_updater_module.AccountRefreshResult:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            factory_cancelled.set()
+            raise
+        return result
+
+    waiters = [asyncio.create_task(singleflight.run("acc_cancel_waiters", factory)) for _ in range(20)]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    inflight = singleflight._inflight["acc_cancel_waiters"]
+
+    for waiter in waiters[:-1]:
+        waiter.cancel()
+    cancelled = await asyncio.gather(*waiters[:-1], return_exceptions=True)
+
+    assert all(isinstance(item, asyncio.CancelledError) for item in cancelled)
+    assert not inflight.done()
+    assert not factory_cancelled.is_set()
+
+    release.set()
+    assert await waiters[-1] is result
+    assert not factory_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_singleflight_cancelled_waiters_keep_callback_fanout_bounded() -> None:
+    singleflight = usage_updater_module._UsageRefreshSingleflight()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    result = usage_updater_module.AccountRefreshResult(usage_written=False)
+
+    async def factory() -> usage_updater_module.AccountRefreshResult:
+        started.set()
+        await release.wait()
+        return result
+
+    waiters = [asyncio.create_task(singleflight.run("acc_callback_fanout", factory)) for _ in range(100)]
+    await asyncio.wait_for(started.wait(), timeout=1)
+    inflight = singleflight._inflight["acc_callback_fanout"]
+    for _ in range(10):
+        if len(getattr(inflight, _WAITERS_ATTR, set())) == len(waiters):
+            break
+        await asyncio.sleep(0)
+
+    callbacks = getattr(inflight, "_callbacks", None)
+    assert callbacks is not None and len(callbacks) == 2, (
+        "usage-refresh waiters must share one fan-out callback in addition to "
+        f"singleflight cleanup; found {None if callbacks is None else len(callbacks)} callbacks"
+    )
+    assert len(getattr(inflight, _WAITERS_ATTR)) == len(waiters)
+
+    for waiter in waiters:
+        waiter.cancel()
+    cancelled = await asyncio.gather(*waiters, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert all(isinstance(item, asyncio.CancelledError) for item in cancelled)
+    assert not inflight.done()
+    callbacks = getattr(inflight, "_callbacks", None)
+    assert callbacks is not None and len(callbacks) == 2
+    assert getattr(inflight, _WAITERS_ATTR) == set()
+
+    release.set()
+    assert await inflight is result
+
+
+@pytest.mark.asyncio
+async def test_usage_refresh_singleflight_non_joiner_waits_then_starts_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    singleflight = usage_updater_module._UsageRefreshSingleflight()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    successor_started = asyncio.Event()
+    release_successor = asyncio.Event()
+    first_result = usage_updater_module.AccountRefreshResult(usage_written=False)
+    successor_result = usage_updater_module.AccountRefreshResult(usage_written=True)
+    shared_waits: list[asyncio.Future[usage_updater_module.AccountRefreshResult]] = []
+
+    async def recording_wait(
+        shared: asyncio.Future[usage_updater_module.AccountRefreshResult],
+        *,
+        timeout: float | None = None,
+    ) -> usage_updater_module.AccountRefreshResult:
+        shared_waits.append(shared)
+        return await wait_on_shared_future(shared, timeout=timeout)
+
+    async def first_factory() -> usage_updater_module.AccountRefreshResult:
+        first_started.set()
+        await release_first.wait()
+        return first_result
+
+    async def successor_factory() -> usage_updater_module.AccountRefreshResult:
+        successor_started.set()
+        await release_successor.wait()
+        return successor_result
+
+    monkeypatch.setattr(usage_updater_module, "wait_on_shared_future", recording_wait)
+    first_waiter = asyncio.create_task(singleflight.run("acc_non_joiner", first_factory))
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    first_task = singleflight._inflight["acc_non_joiner"]
+    non_joiner = asyncio.create_task(
+        singleflight.run("acc_non_joiner", successor_factory, join_existing=False),
+    )
+    await asyncio.sleep(0)
+
+    assert not successor_started.is_set()
+    assert shared_waits.count(first_task) == 2
+
+    release_first.set()
+    assert await first_waiter is first_result
+    await asyncio.wait_for(successor_started.wait(), timeout=1)
+    successor_task = singleflight._inflight["acc_non_joiner"]
+    assert successor_task is not first_task
+
+    release_successor.set()
+    assert await non_joiner is successor_result
+    assert successor_task in shared_waits
+
+
+@pytest.mark.asyncio
 async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     account = _make_account("acc_owned_session", "workspace_owned")
+    stored_account = _make_account("acc_owned_session", "workspace_owned")
+    stored_account.status = AccountStatus.PAUSED
     refresh_started = asyncio.Event()
     allow_refresh_finish = asyncio.Event()
     non_owned_started = asyncio.Event()
@@ -126,26 +285,25 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
             return []
 
     class InnerUsageRepository(OuterUsageRepository):
-        def __init__(self, session) -> None:
-            self.session = session
+        pass
 
     class InnerAdditionalUsageRepository:
-        def __init__(self, session) -> None:
-            self.session = session
-
-    class InnerAccountsRepository:
-        def __init__(self, session) -> None:
-            self.session = session
-
-        async def get_by_id(self, account_id: str):
-            return account if account_id == account.id else None
+        pass
 
     @asynccontextmanager
-    async def recording_background_session():
+    async def owned_session_scope():
         try:
-            yield object()
+            yield
         finally:
             inner_session_closed.set()
+
+    class InnerAccountsRepository:
+        async def get_by_id(self, account_id: str):
+            async with owned_session_scope():
+                return account if account_id == account.id else None
+
+        async def get_by_id_fresh(self, account_id: str):
+            return stored_account if account_id == account.id else None
 
     async def fake_refresh_account_if_stale(
         self,
@@ -159,10 +317,9 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
         session_was_open_during_refresh.append(not inner_session_closed.is_set())
         return usage_updater_module.AccountRefreshResult(usage_written=True)
 
-    monkeypatch.setattr(usage_updater_module, "get_background_session", recording_background_session)
-    monkeypatch.setattr(usage_updater_module, "SessionAccountsRepository", InnerAccountsRepository)
-    monkeypatch.setattr(usage_updater_module, "SessionUsageRepository", InnerUsageRepository)
-    monkeypatch.setattr(usage_updater_module, "AdditionalUsageRepository", InnerAdditionalUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAccountsRepository", InnerAccountsRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundUsageRepository", InnerUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", InnerAdditionalUsageRepository)
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fake_refresh_account_if_stale)
     monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
 
@@ -191,6 +348,7 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
             [account],
             {},
             own_singleflight_sessions=True,
+            join_existing=True,
         )
     )
     await asyncio.wait_for(refresh_started.wait(), timeout=1)
@@ -200,13 +358,92 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
         await task
     await asyncio.sleep(0)
 
-    assert not inner_session_closed.is_set()
+    assert inner_session_closed.is_set()
     allow_refresh_finish.set()
-    await asyncio.wait_for(inner_session_closed.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert session_was_open_during_refresh == [False]
     allow_non_owned_finish.set()
     await non_owned_task
     await prefixed_non_owned_task
-    assert session_was_open_during_refresh == [True]
+    assert session_was_open_during_refresh == [False]
+
+
+@pytest.mark.parametrize(
+    ("join_existing", "expected_calls"),
+    [(True, 1), (False, 2)],
+)
+@pytest.mark.asyncio
+async def test_refresh_accounts_owned_session_join_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    join_existing: bool,
+    expected_calls: int,
+) -> None:
+    account = _make_account("acc_owned_join_policy", "workspace_owned_join_policy")
+    stored_account = _make_account("acc_owned_join_policy", "workspace_owned_join_policy")
+    stored_account.status = AccountStatus.PAUSED
+    started = asyncio.Event()
+    release = asyncio.Event()
+    refresh_calls = 0
+
+    @dataclass(frozen=True, slots=True)
+    class Settings:
+        usage_refresh_enabled: bool = True
+        usage_refresh_interval_seconds: int = 0
+        usage_refresh_auth_failure_cooldown_seconds: int = 0
+
+    class AccountsRepo:
+        async def get_by_id(self, account_id: str):
+            return account if account_id == account.id else None
+
+        async def get_by_id_fresh(self, account_id: str):
+            return stored_account if account_id == account.id else None
+
+    async def fake_owned_refresh(
+        self: UsageUpdater,
+        account_id: str,
+        *,
+        interval_seconds: int,
+    ) -> usage_updater_module.AccountRefreshResult:
+        nonlocal refresh_calls
+        assert self is not None
+        assert account_id == account.id
+        assert interval_seconds == 0
+        refresh_calls += 1
+        started.set()
+        await release.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=False)
+
+    monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
+    monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale_with_owned_session", fake_owned_refresh)
+
+    updater = UsageUpdater(
+        StubUsageRepository(),
+        cast(usage_updater_module.AccountsRepositoryPort, AccountsRepo()),
+    )
+    first = asyncio.create_task(
+        updater.refresh_accounts(
+            [account],
+            {},
+            own_singleflight_sessions=True,
+            join_existing=join_existing,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    second = asyncio.create_task(
+        updater.refresh_accounts(
+            [account],
+            {},
+            own_singleflight_sessions=True,
+            join_existing=join_existing,
+        )
+    )
+
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert refresh_calls == expected_calls
+    if join_existing:
+        assert account.status == AccountStatus.PAUSED
 
 
 @pytest.mark.asyncio
@@ -253,23 +490,17 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
             return []
 
     class InnerUsageRepository(OuterUsageRepository):
-        def __init__(self, session) -> None:
-            self.session = session
+        pass
 
     class InnerAdditionalUsageRepository:
-        def __init__(self, session) -> None:
-            self.session = session
+        pass
 
     class InnerAccountsRepository:
-        def __init__(self, session) -> None:
-            self.session = session
-
         async def get_by_id(self, account_id: str):
             return account if account_id == account.id else None
 
-    @asynccontextmanager
-    async def background_session():
-        yield object()
+        async def get_by_id_fresh(self, account_id: str):
+            return account if account_id == account.id else None
 
     async def fail_if_refreshed(
         self,
@@ -282,10 +513,9 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
         refresh_called = True
         return usage_updater_module.AccountRefreshResult(usage_written=True)
 
-    monkeypatch.setattr(usage_updater_module, "get_background_session", background_session)
-    monkeypatch.setattr(usage_updater_module, "SessionAccountsRepository", InnerAccountsRepository)
-    monkeypatch.setattr(usage_updater_module, "SessionUsageRepository", InnerUsageRepository)
-    monkeypatch.setattr(usage_updater_module, "AdditionalUsageRepository", InnerAdditionalUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAccountsRepository", InnerAccountsRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundUsageRepository", InnerUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", InnerAdditionalUsageRepository)
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fail_if_refreshed)
     monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
 

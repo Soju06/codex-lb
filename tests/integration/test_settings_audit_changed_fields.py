@@ -13,12 +13,13 @@ from app.db.session import SessionLocal
 pytestmark = pytest.mark.integration
 
 
-async def _wait_for_settings_changed_audit_log(*, attempts: int = 20) -> AuditLog:
+async def _wait_for_settings_changed_audit_log(*, after_id: int | None = None, attempts: int = 20) -> AuditLog:
     for _ in range(attempts):
         async with SessionLocal() as session:
-            result = await session.execute(
-                select(AuditLog).where(AuditLog.action == "settings_changed").order_by(AuditLog.id.desc())
-            )
+            filters = [AuditLog.action == "settings_changed"]
+            if after_id is not None:
+                filters.append(AuditLog.id > after_id)
+            result = await session.execute(select(AuditLog).where(*filters).order_by(AuditLog.id.desc()))
             row = result.scalars().first()
             if row is not None:
                 return row
@@ -139,6 +140,21 @@ async def test_settings_audit_changed_fields_empty_on_noop_put(async_client) -> 
     assert audit_log.details is not None, "settings_changed audit row missing details payload"
     details = json.loads(audit_log.details)
     assert details["changed_fields"] == [], f"no-op PUT should produce an empty changed_fields list; got {details!r}"
+
+
+@pytest.mark.asyncio
+async def test_settings_audit_records_capacity_override_clear_when_effective_is_unchanged(async_client) -> None:
+    pinned = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": 8})
+    assert pinned.status_code == 200
+    pinned_audit_log = await _wait_for_settings_changed_audit_log()
+
+    cleared = await async_client.put("/api/settings", json={"proxyAccountStreamLimit": None})
+    assert cleared.status_code == 200
+
+    audit_log = await _wait_for_settings_changed_audit_log(after_id=pinned_audit_log.id)
+    assert audit_log.details is not None, "settings_changed audit row missing details payload"
+    details = json.loads(audit_log.details)
+    assert "proxy_account_stream_limit" in details["changed_fields"]
 
 
 @pytest.mark.asyncio

@@ -56,7 +56,13 @@ _TTFT_EVENT_TYPES = frozenset(
         "response.reasoning_text.delta",
     }
 )
-_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset({"response.function_call_arguments.delta", "response.output_tool_call.delta"})
+_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset(
+    {
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+        "response.custom_tool_call_input.delta",
+    }
+)
 _TTFT_REASONING_EVENT_TYPES = frozenset(
     {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}
 )
@@ -232,10 +238,16 @@ def _ttft_event_visible_at(
     if event_type in _TTFT_EVENT_TYPES:
         delta = payload.get("delta") if payload is not None else None
         return now if isinstance(delta, str) and bool(delta) else None
-    if event_type != "response.output_item.added" or not isinstance(payload, dict):
+    if event_type not in {"response.output_item.added", "response.output_item.done"} or not isinstance(payload, dict):
         return None
     item = payload.get("item")
-    return now if isinstance(item, dict) and item.get("type") in _TTFT_OUTPUT_ITEM_TYPES else None
+    if not isinstance(item, dict) or item.get("type") not in _TTFT_OUTPUT_ITEM_TYPES:
+        return None
+    if item.get("type") == "custom_tool_call":
+        meaningful = any(isinstance(item.get(key), str) and bool(item[key]) for key in ("input", "arguments"))
+    else:
+        meaningful = any(item.get(key) not in (None, "", {}) for key in ("operation", "patch", "input"))
+    return now if meaningful else None
 
 
 def _is_ttft_event(
@@ -956,14 +968,10 @@ class _WebSocketRequestState:
     # ``_prepare_websocket_response_create_request`` (replays, archives),
     # which keeps those on the normalized-model check.
     raw_source_model: str | None = None
-    # True when the HTTP route would exclude this request from model-source
-    # routing (``responses_source_route_excluded``: a terminal compaction
-    # trigger, or ``input_file`` references pinned to the uploading
-    # subscription account). The WebSocket source-ownership guards skip such
-    # requests so the owner-routing logic can dispatch them to a subscription
-    # account, exactly like HTTP. ``False`` on request states that were not
-    # built by ``_prepare_websocket_response_create_request``, which keeps
-    # the guards active for those.
+    # True when the Codex HTTP route structurally excludes this request from
+    # model-source routing: a terminal compaction trigger or ``input_file``
+    # references pinned to the uploading subscription account. Previous
+    # response ownership is recorded separately after continuity lookup.
     source_route_excluded: bool = False
     request_usage_budget: ApiKeyRequestUsageBudget | None = None
     request_text: str | None = None
@@ -1019,6 +1027,18 @@ class _WebSocketRequestState:
     # on, and dropping the anchor there would silently turn a continuation into
     # a context-free fresh turn.
     fresh_upstream_request_is_retry_safe: bool = False
+    # Set only on the internally constructed one-shot request that replaces an
+    # explicitly rejected stale anchor with a verified full-history payload.
+    # It may bypass an older hard-key retry circuit without deleting that
+    # circuit or weakening admission for ordinary client retries.
+    verified_stale_anchor_replay: bool = False
+    # Snapshot of the hard-key circuit observed when the stale-anchor replay
+    # was authorized. ``captured=True`` with ``generation=None`` proves that no
+    # circuit existed; a newer local/durable failure must suppress submit.
+    verified_stale_anchor_retry_circuit_generation_captured: bool = False
+    verified_stale_anchor_retry_circuit_key: _HTTPBridgeSessionKey | None = None
+    verified_stale_anchor_retry_circuit_generation: tuple[int, float, int, float, int, float, float] | None = None
+    verified_stale_anchor_quarantine_generation: int | None = None
     # Stable fingerprint used by the durable recovery-attempt journal. It is
     # populated only for a proof-gated fresh replay candidate.
     recovery_attempt_fingerprint: str | None = None
@@ -1049,6 +1069,11 @@ class _WebSocketRequestState:
     # pre-dispatch admission failure may remove that row; an existing row
     # represents an ambiguous upstream attempt and must remain fenced.
     operation_created: bool = False
+    operation_rebound: bool = False
+    operation_rebound_from_session_id: str | None = None
+    operation_rebound_from_account_id: str | None = None
+    operation_rebound_from_model: str | None = None
+    operation_rebound_from_parent_response_id: str | None = None
     operation_replay: bool = False
     operation_dispatched: bool = False
     # Immutable durable attempt generation. Recovery claims increment the
@@ -1089,6 +1114,10 @@ class _WebSocketRequestState:
     previous_response_owner_lookup_outcome: str | None = None
     previous_response_owner_requested_at: datetime | None = None
     previous_response_owner_session_id: str | None = None
+    # Subscription account proven to own ``previous_response_id`` by the
+    # continuity index/request-log lookup. Identifier syntax is never used as
+    # an ownership signal, so ``None`` leaves configured source routing intact.
+    previous_response_owner_account_id: str | None = None
     response_create_gate_acquired: bool = False
     response_create_gate: asyncio.Semaphore | None = None
     response_create_admission: AdmissionLease | None = None
@@ -1727,8 +1756,8 @@ def _openai_error_envelope_from_response_failed_payload(
 
     envelope = openai_error(code, message, error_type)
     param_value = error_payload.get("param")
-    if isinstance(param_value, str) and param_value.strip():
-        envelope["error"]["param"] = param_value.strip()
+    if "param" in error_payload:
+        envelope["error"]["param"] = param_value.strip() if isinstance(param_value, str) else ""
     error_detail = envelope["error"]
     plan_type = error_payload.get("plan_type")
     if plan_type is not None:

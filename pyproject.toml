@@ -1,6 +1,6 @@
 [project]
 name = "codex-lb"
-version = "1.24.0-beta.3"
+version = "1.24.0"
 description = "Codex load balancer and proxy for ChatGPT accounts with usage dashboard"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -82,7 +82,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "httpx>=0.28.1",
     "ruff>=0.14.13",
-    "ty==0.0.72",
+    "ty==0.0.73",
     "openai>=2.16.0",
     "pytest-xdist>=3.8.0",
     "pytest-cov>=7.1.0",

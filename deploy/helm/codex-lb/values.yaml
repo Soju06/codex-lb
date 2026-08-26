@@ -164,8 +164,8 @@ config:
   sessionBridgeIdleTtlSeconds: 120
   # @param config.sessionBridgeCodexIdleTtlSeconds Idle TTL for Codex session bridge sessions
   sessionBridgeCodexIdleTtlSeconds: 900
-  # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions
-  sessionBridgeCodexPrewarmEnabled: true
+  # @param config.sessionBridgeCodexPrewarmEnabled Proactively open upstream WebSocket for Codex sessions (off by default; matches Settings / OpenSpec)
+  sessionBridgeCodexPrewarmEnabled: false
   # @param config.sessionBridgeMaxSessions Max in-memory bridge sessions per pod
   sessionBridgeMaxSessions: 256
   # @param config.sessionBridgeQueueLimit Max pending requests per bridge session

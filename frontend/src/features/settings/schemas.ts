@@ -77,9 +77,30 @@ export const DashboardSettingsSchema = z
       .default(5),
     singleAccountId: z.string().nullable().optional().default(null),
     proxyAccountResponseCreateLimit: z.number().int().min(0).optional().default(4),
+    proxyAccountResponseCreateLimitEnvironmentValue: z.number().int().min(0).optional().default(4),
+    proxyAccountResponseCreateLimitOverride: z.number().int().min(0).nullable().optional().default(null),
     proxyAccountStreamLimit: z.number().int().min(0).optional().default(8),
+    proxyAccountStreamLimitEnvironmentValue: z.number().int().min(0).optional().default(8),
+    proxyAccountStreamLimitOverride: z.number().int().min(0).nullable().optional().default(null),
     proxyAccountStreamRecoveryReserve: z.number().int().min(0).optional().default(1),
+    proxyAccountStreamRecoveryReserveEnvironmentValue: z.number().int().min(0).optional().default(1),
+    proxyAccountStreamRecoveryReserveOverride: z.number().int().min(0).nullable().optional().default(null),
     proxyApiKeyFairShareCongestionThresholdPct: z.number().int().min(0).max(100).optional().default(0),
+    proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue: z
+      .number()
+      .int()
+      .min(0)
+      .max(100)
+      .optional()
+      .default(0),
+    proxyApiKeyFairShareCongestionThresholdPctOverride: z
+      .number()
+      .int()
+      .min(0)
+      .max(100)
+      .nullable()
+      .optional()
+      .default(null),
     openaiCacheAffinityMaxAgeSeconds: z
       .number()
       .int()
@@ -180,10 +201,10 @@ export const SettingsUpdateRequestSchema = z
     relativeAvailabilityPower: z.number().positive().optional(),
     relativeAvailabilityTopK: z.number().int().min(1).max(20).optional(),
     singleAccountId: z.string().nullable().optional(),
-    proxyAccountResponseCreateLimit: z.number().int().min(0).optional(),
-    proxyAccountStreamLimit: z.number().int().min(0).optional(),
-    proxyAccountStreamRecoveryReserve: z.number().int().min(0).optional(),
-    proxyApiKeyFairShareCongestionThresholdPct: z.number().int().min(0).max(100).optional(),
+    proxyAccountResponseCreateLimit: z.number().int().min(0).nullable().optional(),
+    proxyAccountStreamLimit: z.number().int().min(0).nullable().optional(),
+    proxyAccountStreamRecoveryReserve: z.number().int().min(0).nullable().optional(),
+    proxyApiKeyFairShareCongestionThresholdPct: z.number().int().min(0).max(100).nullable().optional(),
     openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
     dashboardSessionTtlSeconds: z.number().int().min(3600).optional(),
     stickyReallocationBudgetThresholdPct: z.number().min(0).max(100).optional(),
@@ -217,8 +238,10 @@ export const SettingsUpdateRequestSchema = z
   .superRefine((settings, ctx) => {
     if (
       settings.proxyAccountStreamLimit !== undefined &&
+      settings.proxyAccountStreamLimit !== null &&
       settings.proxyAccountStreamLimit > 0 &&
       settings.proxyAccountStreamRecoveryReserve !== undefined &&
+      settings.proxyAccountStreamRecoveryReserve !== null &&
       settings.proxyAccountStreamRecoveryReserve > settings.proxyAccountStreamLimit
     ) {
       ctx.addIssue({

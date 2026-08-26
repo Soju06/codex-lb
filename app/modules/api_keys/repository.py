@@ -462,10 +462,17 @@ class ApiKeysRepository:
             await self._session.refresh(parent, attribute_names=["limits"])
         return await self.get_limits_by_key(key_id)
 
-    async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit], *, commit: bool = True) -> list[ApiKeyLimit]:
+    async def upsert_limits(
+        self,
+        key_id: str,
+        limits: list[ApiKeyLimit],
+        *,
+        commit: bool = True,
+        preserve_matched_usage: bool = False,
+    ) -> list[ApiKeyLimit]:
         existing = await self.get_limits_by_key(key_id)
         existing_by_key = {_limit_key(limit): limit for limit in existing}
-        incoming_keys = {_limit_key(limit) for limit in limits}
+        incoming_keys = {_limit_key(incoming) for incoming in limits}
 
         for incoming in limits:
             key = _limit_key(incoming)
@@ -475,8 +482,9 @@ class ApiKeysRepository:
                 self._session.add(incoming)
                 continue
             matched.max_value = incoming.max_value
-            matched.current_value = incoming.current_value
-            matched.reset_at = incoming.reset_at
+            if not preserve_matched_usage:
+                matched.current_value = incoming.current_value
+                matched.reset_at = incoming.reset_at
 
         for old_limit in existing:
             if _limit_key(old_limit) not in incoming_keys:

@@ -44,6 +44,7 @@ from app.modules.model_sources.forwarding import (
     SourceUsage,
     SourceUsageHolder,
 )
+from app.modules.request_logs.repository import RequestLogsRepository
 
 pytestmark = pytest.mark.integration
 
@@ -1994,6 +1995,64 @@ async def test_backend_codex_responses_file_pinned_payload_skips_model_source(as
 
 
 @pytest.mark.asyncio
+async def test_backend_codex_responses_recorded_previous_response_owner_skips_model_source(async_client, monkeypatch):
+    model = "external-codex-responses-prev-id"
+    previous_response_id = "resp_0ba42212936dca97016a0d52aec2588191bc2499d3088e4e3e"
+    await _create_model_source(
+        async_client,
+        name="codex-responses-prev-id",
+        model=model,
+        supports_responses=True,
+    )
+    account_id = await _import_account(async_client, "acct-prev-owner-codex", "prev-owner-codex@example.com")
+    async with SessionLocal() as session:
+        await RequestLogsRepository(session).add_log(
+            account_id=account_id,
+            request_id=previous_response_id,
+            model=model,
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=None,
+            status="success",
+            error_code=None,
+        )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("recorded subscription-owned previous_response_id must not use source routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key
+        observed["model"] = payload.model
+        observed["previous_response_id"] = payload.previous_response_id
+        observed["codex_session_affinity"] = kwargs.get("codex_session_affinity")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "continue",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}],
+            "previous_response_id": previous_response_id,
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed == {
+        "model": model,
+        "previous_response_id": previous_response_id,
+        "codex_session_affinity": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_file_pinned_payload_skips_model_source(async_client, monkeypatch):
     model = "external-v1-responses-file-pin"
     await _create_model_source(
@@ -2033,6 +2092,223 @@ async def test_v1_responses_file_pinned_payload_skips_model_source(async_client,
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert observed["model"] == model
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_recorded_previous_response_owner_skips_model_source(async_client, monkeypatch):
+    model = "external-v1-responses-prev-id"
+    previous_response_id = "resp_03ac4d75eac7c5d1016a0a619e8a688191b5267ba7ffac3111"
+    await _create_model_source(
+        async_client,
+        name="v1-responses-prev-id",
+        model=model,
+        supports_responses=True,
+    )
+    account_id = await _import_account(async_client, "acct-prev-owner-v1", "prev-owner-v1@example.com")
+    async with SessionLocal() as session:
+        await RequestLogsRepository(session).add_log(
+            account_id=account_id,
+            request_id=previous_response_id,
+            model=model,
+            input_tokens=None,
+            output_tokens=None,
+            latency_ms=None,
+            status="success",
+            error_code=None,
+        )
+    observed: dict[str, object] = {}
+
+    async def fail_source(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("recorded subscription-owned previous_response_id must not use /v1 source routing")
+
+    async def fake_stream_responses(request, payload, context, api_key, **kwargs):
+        del request, context, api_key, kwargs
+        observed["model"] = payload.model
+        observed["previous_response_id"] = payload.previous_response_id
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fail_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fake_stream_responses)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            "previous_response_id": previous_response_id,
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert observed["model"] == model
+    assert observed["previous_response_id"] == previous_response_id
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_source_owned_previous_response_id_keeps_model_source(async_client, monkeypatch):
+    model = "external-v1-responses-source-prev"
+    previous_response_id = "resp_a3a82ffdf2f04456a7ca120deedc78dc47e172e56ed5338760"
+    source_id = await _create_model_source(
+        async_client,
+        name="v1-responses-source-prev",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream_source(source, payload):
+        observed["source_id"] = source.id
+        observed["previous_response_id"] = payload.get("previous_response_id")
+        observed["model"] = payload.get("model")
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_v1_source_prev",'
+                b'"usage":{"input_tokens":1,"output_tokens":1}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    async def fail_subscription(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("source-owned previous_response_id must keep model-source routing")
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fail_subscription)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+            "previous_response_id": previous_response_id,
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    assert observed["previous_response_id"] == previous_response_id
+    assert observed["model"] == model
+    assert any("resp_v1_source_prev" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_backend_codex_responses_source_owned_previous_response_id_keeps_model_source(async_client, monkeypatch):
+    model = "external-codex-responses-source-prev"
+    previous_response_id = "resp_b4b93aaef3f15567b8db231effed89ed58f283f67fe6449871"
+    source_id = await _create_model_source(
+        async_client,
+        name="codex-responses-source-prev",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream_source(source, payload):
+        observed["source_id"] = source.id
+        observed["previous_response_id"] = payload.get("previous_response_id")
+        observed["model"] = payload.get("model")
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_codex_source_prev",'
+                b'"usage":{"input_tokens":1,"output_tokens":1}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    async def fail_subscription(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("source-owned previous_response_id must keep model-source routing")
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fail_subscription)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        json={
+            "model": model,
+            "instructions": "continue",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "next"}]}],
+            "previous_response_id": previous_response_id,
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    assert observed["previous_response_id"] == previous_response_id
+    assert observed["model"] == model
+    assert any("resp_codex_source_prev" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_compaction_trigger_keeps_model_source(async_client, monkeypatch):
+    model = "external-v1-responses-compact"
+    source_id = await _create_model_source(
+        async_client,
+        name="v1-responses-compact",
+        model=model,
+        supports_responses=True,
+    )
+    observed: dict[str, object] = {}
+
+    async def fake_stream_source(source, payload):
+        observed["source_id"] = source.id
+        observed["model"] = payload.get("model")
+        observed["input"] = payload.get("input")
+        usage_holder = SourceUsageHolder()
+
+        async def body():
+            usage_holder.usage = SourceUsage(input_tokens=1, output_tokens=1, cached_input_tokens=0)
+            yield (
+                b'data: {"type":"response.completed","response":{"id":"resp_v1_compact_source",'
+                b'"usage":{"input_tokens":1,"output_tokens":1}}\n\n'
+            )
+
+        return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=200)
+
+    async def fail_subscription(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("v1 compaction_trigger must remain eligible for model sources")
+
+    monkeypatch.setattr(proxy_api, "stream_source_responses", fake_stream_source)
+    monkeypatch.setattr(proxy_api, "_stream_responses", fail_subscription)
+
+    async with async_client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": model,
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {"type": "compaction_trigger"},
+            ],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        lines = [line async for line in response.aiter_lines() if line]
+
+    assert observed["source_id"] == source_id
+    assert observed["model"] == model
+    assert observed["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+        {"type": "compaction_trigger"},
+    ]
+    assert any("resp_v1_compact_source" in line for line in lines)
 
 
 @pytest.mark.asyncio

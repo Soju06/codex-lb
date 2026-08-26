@@ -132,7 +132,6 @@ from app.core.openai.parsing import parse_response_payload
 from app.core.openai.requests import (
     ResponsesCompactRequest,
     ResponsesRequest,
-    extract_input_file_ids,
     normalize_tool_type,
     responses_request_has_explicit_prompt_cache_controls,
     strip_replayed_tool_call_namespaces_from_payload,
@@ -1113,25 +1112,31 @@ async def responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        # Terminal compaction triggers run the upstream compact flow on the
-        # turn's owner account, and file-referencing requests are pinned to
-        # the account that received the upload; the shared predicate keeps
-        # this gate and the WebSocket source-ownership guards in agreement.
+        # Terminal compaction and file pins are structural subscription-only
+        # constraints. Previous-response ownership is resolved from continuity
+        # evidence below, after a viable source candidate exists.
         source_route_excluded = responses_source_route_excluded(responses_payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
-    source = None
-    if not source_route_excluded:
-        source_selection = await _select_responses_model_source(
-            responses_payload.model,
-            api_key,
-            raw_model=raw_source_model,
-            require_streaming=True,
+    try:
+        source_selection = (
+            None
+            if source_route_excluded
+            else await _select_responses_model_source_with_continuity(
+                request,
+                responses_payload,
+                context,
+                api_key,
+                raw_model=raw_source_model,
+                require_streaming=True,
+            )
         )
-        if source_selection is not None:
-            source, selected_model = source_selection
-            responses_payload.model = selected_model
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
+    source = source_selection[0] if source_selection is not None else None
+    if source_selection is not None:
+        responses_payload.model = source_selection[1]
     if source is not None:
         # Opportunistic admission gates subscription *account* capacity;
         # source-routed requests use no account, so a closed/empty pool must
@@ -1269,19 +1274,33 @@ async def v1_responses(
     if prohibit_fast_mode and _is_fast_mode_model_alias(raw_source_model):
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
-    # File-referencing Responses requests pin to the subscription account that
-    # registered the upload; that account-scoped invariant applies to /v1
-    # streams too, so such requests must not be source-routed.
-    source_selection = (
-        None
-        if extract_input_file_ids(responses_payload.input)
-        else await _select_responses_model_source(
-            responses_payload.model,
-            api_key,
-            raw_model=raw_source_model,
-            require_streaming=responses_payload.stream is True,
+    try:
+        # Share file-pin exclusions with Codex/WebSocket, but do not treat a
+        # terminal compaction_trigger as a source-route exclusion: /v1 has no
+        # Codex compact path. Previous-response ownership is resolved from
+        # continuity evidence below, after a viable source candidate exists.
+        source_route_excluded = responses_source_route_excluded(
+            responses_payload,
+            exclude_compaction=False,
         )
-    )
+    except ClientPayloadError as exc:
+        error = openai_client_payload_error(exc)
+        return _logged_error_json_response(request, 400, error)
+    try:
+        source_selection = (
+            None
+            if source_route_excluded
+            else await _select_responses_model_source_with_continuity(
+                request,
+                responses_payload,
+                context,
+                api_key,
+                raw_model=raw_source_model,
+                require_streaming=responses_payload.stream is True,
+            )
+        )
+    except ProxyResponseError as exc:
+        return _logged_error_json_response(request, exc.status_code, exc.payload)
     source = source_selection[0] if source_selection is not None else None
     if source_selection is not None:
         responses_payload.model = source_selection[1]
@@ -4408,6 +4427,33 @@ async def _select_responses_model_source(
         raw_model=raw_model,
         require_streaming=require_streaming,
     )
+
+
+async def _select_responses_model_source_with_continuity(
+    request: Request,
+    payload: ResponsesRequest,
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    *,
+    raw_model: str | None = None,
+    require_streaming: bool = False,
+) -> tuple[ModelSource, str] | None:
+    """Select a source unless recorded subscription continuity owns the anchor."""
+    source_selection = await _select_responses_model_source(
+        payload.model,
+        api_key,
+        raw_model=raw_model,
+        require_streaming=require_streaming,
+    )
+    if source_selection is None or payload.previous_response_id is None:
+        return source_selection
+    owner_account_id = await context.service._resolve_websocket_previous_response_owner(
+        previous_response_id=payload.previous_response_id,
+        api_key=api_key,
+        session_id=proxy_affinity_module._owner_lookup_session_id_from_headers(request.headers),
+        surface="http_source_route",
+    )
+    return None if owner_account_id is not None else source_selection
 
 
 async def _select_embeddings_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:

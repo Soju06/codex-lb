@@ -9307,7 +9307,17 @@ def _extract_public_output_item_text(item: Mapping[str, JsonValue]) -> str | Non
 
 
 def _looks_like_sse_data_block(event_block: str) -> bool:
-    return "data:" in event_block
+    """True when the block contains an SSE ``data`` field line.
+
+    Inspects complete field lines instead of substring matching, so field
+    values containing the literal ``data:`` (for example ``id: data:1``) do
+    not count as data, while the valid empty-field form (a bare ``data``
+    line) does.
+    """
+    for line in event_block.splitlines():
+        if line == "data" or line.startswith("data:"):
+            return True
+    return False
 
 
 def _looks_like_sse_comment_block(event_block: str) -> bool:

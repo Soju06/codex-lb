@@ -244,7 +244,7 @@ async def test_budget_exhaustion_during_websocket_open_arms_marker() -> None:
         ) -> Any:
             del account, headers, request_state
             if connect_progress is not None:
-                connect_progress.upstream_connect_started = True
+                connect_progress.direct_upstream_connect_started = True
             await asyncio.sleep(5.0)
 
     harness = _StalledOpenHarness()
@@ -985,34 +985,54 @@ async def test_http_bridge_refresh_provenance_failure_does_not_arm_marker(
 # --- Budget exhaustion before the connector runs ----------------------------
 
 
-class _AdmissionStalledService(_WebSocketMixin):
-    """Real ``_open_upstream_websocket`` whose admission gate never admits."""
+class _StallingOpenService(_WebSocketMixin):
+    """Real ``_open_upstream_websocket`` that stalls at a chosen stage."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, stall_admission: bool, route: Any = None) -> None:
         self._encryptor = TokenEncryptor()
+        self._route = route
+
+        class _ConnectLease:
+            def release(self) -> None:
+                return None
 
         class _WorkAdmission:
             async def acquire_websocket_connect(self) -> Any:
-                await asyncio.sleep(5.0)
+                if stall_admission:
+                    await asyncio.sleep(5.0)
+                return _ConnectLease()
 
         self._work_admission = _WorkAdmission()
 
     def _get_work_admission(self) -> Any:
         return self._work_admission
 
-    async def _resolve_upstream_route_for_account(self, _account: object, *, operation: str) -> None:
+    async def _resolve_upstream_route_for_account(self, _account: object, *, operation: str) -> Any:
         del operation
-        return None
+        return self._route
 
 
-@pytest.mark.asyncio
-async def test_budget_exhausted_in_local_admission_does_not_arm_marker() -> None:
-    # A request budget shorter than the local websocket-connect admission wait
-    # expires before any upstream socket is attempted. Denying handshakes then
-    # answers local contention by forcing every client onto HTTP, amplifying
-    # the overload it came from.
-    service = _AdmissionStalledService()
-    account = cast(
+class _StallingConnectorFacade:
+    """Stalls the connector call; everything else defers to the real facade."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(proxy_service, name)
+
+    async def _call_with_supported_optional_kwargs(
+        self,
+        function: object,
+        *args: object,
+        optional_kwargs: dict[str, object],
+    ) -> object:
+        del function, args, optional_kwargs
+        await asyncio.sleep(5.0)
+
+    async def connect_responses_websocket(self, *_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(5.0)
+
+
+def _stalling_account(service: Any) -> Any:
+    return cast(
         Any,
         SimpleNamespace(
             access_token_encrypted=service._encryptor.encrypt("access-token"),
@@ -1022,7 +1042,117 @@ async def test_budget_exhausted_in_local_admission_does_not_arm_marker() -> None
         ),
     )
 
+
+@pytest.mark.asyncio
+async def test_budget_exhausted_in_local_admission_does_not_arm_marker() -> None:
+    # A request budget shorter than the local websocket-connect admission wait
+    # expires before any upstream socket is attempted. Denying handshakes then
+    # answers local contention by forcing every client onto HTTP, amplifying
+    # the overload it came from.
+    service = _StallingOpenService(stall_admission=True)
+
     with pytest.raises(ProxyResponseError):
-        await service._open_upstream_websocket_with_budget(account, {}, timeout_seconds=0.05)
+        await service._open_upstream_websocket_with_budget(_stalling_account(service), {}, timeout_seconds=0.05)
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is False
+
+
+@pytest.mark.asyncio
+async def test_budget_exhausted_in_direct_connector_arms_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _StallingOpenService(stall_admission=False)
+    monkeypatch.setattr(ws_mixin, "_facade", lambda: _StallingConnectorFacade())
+
+    with pytest.raises(ProxyResponseError):
+        await service._open_upstream_websocket_with_budget(_stalling_account(service), {}, timeout_seconds=0.05)
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is True
+
+
+@pytest.mark.asyncio
+async def test_budget_exhausted_in_routed_connector_does_not_arm_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A stalled routed open shows one account's proxy endpoint unhealthy, the
+    # same scope as a routed handshake failure. The cancellation raises no
+    # ProxyResponseError for the routed exclusion to act on, so the progress
+    # flag itself must stay confined to the direct connector.
+    service = _StallingOpenService(
+        stall_admission=False,
+        route=ResolvedUpstreamRoute(
+            mode="account_bound",
+            pool_id="pool_1",
+            endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+        ),
+    )
+    monkeypatch.setattr(ws_mixin, "_facade", lambda: _StallingConnectorFacade())
+
+    with pytest.raises(ProxyResponseError):
+        await service._open_upstream_websocket_with_budget(_stalling_account(service), {}, timeout_seconds=0.05)
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_falls_back_on_direct_5xx_connect_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A direct 5xx bridge connect preserves the upstream envelope, so the
+    # sanitized code is `upstream_error`, not `upstream_unavailable`. Gating
+    # the fallback on the code left the exact outage this PR targets stuck on
+    # the websocket bridge; the transport provenance must decide instead.
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+    retry_calls: list[dict[str, Any]] = []
+
+    async def failing_bridge(*_args: object, **_kwargs: object):
+        exc = _proxy_error(
+            503,
+            "upstream_error",
+            "Service Unavailable",
+            failure_phase="connect",
+            failure_detail=UPSTREAM_WEBSOCKET_TRANSPORT_FAILURE_DETAIL,
+        )
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+        raise exc
+        yield ""
+
+    async def record_stream_with_retry(*_args: object, **kwargs: object):
+        retry_calls.append(cast(dict[str, Any], kwargs))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", failing_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", record_stream_with_retry)
+
+    chunks = await _collect_bridge_stream(service)
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert retry_calls[0]["upstream_stream_transport_override"] == "http"
+    assert transport_health.upstream_websocket_transport_recently_failed() is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_routed_connect_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A routed bridge connect carries no transport provenance, so it keeps the
+    # account/route failover path instead of degrading the whole instance.
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+
+    async def routed_failing_bridge(*_args: object, **_kwargs: object):
+        exc = _proxy_error(502, "upstream_unavailable", "routed handshake failed", failure_phase="connect")
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+        raise exc
+        yield ""
+
+    async def fallback_must_not_run(*_args: object, **_kwargs: object):
+        raise AssertionError("fallback must not replay a route-scoped connect failure")
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", routed_failing_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", fallback_must_not_run)
+
+    with pytest.raises(ProxyResponseError):
+        await _collect_bridge_stream(service)
 
     assert transport_health.upstream_websocket_transport_recently_failed() is False

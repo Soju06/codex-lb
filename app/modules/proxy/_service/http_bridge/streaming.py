@@ -1074,15 +1074,24 @@ class _HTTPBridgeStreamingMixin:
                 # stage, but it is account evidence — retrying it over raw
                 # HTTP re-runs the same failing refresh and buries the
                 # actionable error under ``no_accounts``.
-                fallback_error_code, _fallback_error_message = _proxy_error_code_message(exc)
+                # Classify by the connect-site transport provenance, never by
+                # the sanitized code: the responses policy preserves the
+                # upstream handshake body, so a direct 5xx bridge connect
+                # surfaces as ``upstream_error`` or whatever the edge
+                # returned. The provenance also subsumes the phase and status
+                # gates — refresh transport errors, routed handshakes and
+                # credential-scoped rejections never carry it, so they keep
+                # their own handling instead of being replayed over raw HTTP.
+                transport_failure_code = websocket_connect_transport_failure_code(
+                    exc,
+                    confirmed_pre_dispatch=is_confirmed_pre_dispatch_transport_error(exc),
+                )
                 if (
                     bridge_yielded_any
                     or api_key_reservation is not None
                     or not getattr(exc, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, False)
                     or getattr(exc, _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR, False)
-                    or fallback_error_code != "upstream_unavailable"
-                    or exc.failure_phase != "connect"
-                    or (exc.status_code is not None and exc.status_code < 500)
+                    or transport_failure_code is None
                 ):
                     raise
                 # Bridge session creation runs its own pre-dispatch failover,
@@ -1091,14 +1100,7 @@ class _HTTPBridgeStreamingMixin:
                 # Without it every later HTTP request re-attempts the dead
                 # websocket bridge before falling back, and the next
                 # downstream handshake is accepted instead of denied with 426.
-                if (
-                    websocket_connect_transport_failure_code(
-                        exc,
-                        confirmed_pre_dispatch=is_confirmed_pre_dispatch_transport_error(exc),
-                    )
-                    is not None
-                ):
-                    mark_upstream_websocket_transport_failure()
+                mark_upstream_websocket_transport_failure()
                 bridge_transport_unavailable = True
         finally:
             with anyio.CancelScope(shield=True):

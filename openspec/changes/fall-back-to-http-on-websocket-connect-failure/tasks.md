@@ -11,8 +11,8 @@
       accounts, and keep everything else on the penalized failover path
 - [x] 1.2 Arm a bounded per-instance transport-failure marker on that surface
       path and when a websocket open exhausts the request budget after the
-      upstream connector began, and clear it on the next successful upstream
-      websocket connect
+      direct upstream connector began, and clear it on the next successful
+      upstream websocket connect
 - [x] 1.3 Deny responses websocket handshakes with HTTP 426 while the marker
       is armed or `upstream_stream_transport` is pinned to `"http"`
 - [x] 1.4 Bypass the HTTP responses bridge and pin the raw path's upstream
@@ -36,12 +36,13 @@
       direct and routed TLS verification failure, routed 5xx handshake
 - [x] 2.3 Handshake admission: 426 denial while armed or pinned, normal accept
       otherwise, marker TTL expiry and clear
-- [x] 2.4 Budget exhaustion: a stalled connector arms the marker, a budget
-      that expires in local admission does not
+- [x] 2.4 Budget exhaustion: a stalled direct connector arms the marker; a
+      budget that expires in local admission or in a routed connector does not
 - [x] 2.5 Bridge: pinned-http bypass, transient pre-stream fallback, marker
-      arming, the real bridge recording prepared-anchor provenance, and the
-      negative cases (prepared anchor, partial stream, API-key reservation,
-      refresh provenance, non-transient failure) at
+      arming, provenance-classified fallback for a direct 5xx connect code,
+      the real bridge recording prepared-anchor provenance, and the negative
+      cases (prepared anchor, routed connect, partial stream, API-key
+      reservation, refresh provenance, non-transient failure) at
       `_stream_http_bridge_or_retry`
 
 ## 3. Verification

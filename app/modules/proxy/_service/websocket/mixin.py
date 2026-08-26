@@ -521,15 +521,19 @@ _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_ACTION = "fail_closed_capability_rou
 
 @dataclass(slots=True)
 class _WebSocketConnectProgress:
-    """Whether an upstream websocket open reached the network connector.
+    """Whether an upstream websocket open reached the direct network connector.
 
     Local websocket-connect admission and the account's route resolution run
     inside the same request budget scope as the connector, so a budget
     timeout that fires before this flag is set is local-contention evidence,
-    not upstream websocket transport evidence.
+    not upstream websocket transport evidence. The flag is confined to the
+    direct connector for the same reason a routed handshake failure carries
+    no transport provenance: a stalled routed open proves only that one
+    account's proxy endpoint is unhealthy, and a cancelled open raises no
+    ``ProxyResponseError`` for the routed exclusion to act on.
     """
 
-    upstream_connect_started: bool = False
+    direct_upstream_connect_started: bool = False
 
 
 class _WebSocketReplaySequenceRegression(Exception):
@@ -4529,8 +4533,10 @@ class _WebSocketMixin:
                 # A budget shorter than the local admission wait expires
                 # before the connector ever runs; denying handshakes then
                 # would answer local contention by pushing every client onto
-                # HTTP, amplifying the overload it came from.
-                if connect_progress.upstream_connect_started:
+                # HTTP, amplifying the overload it came from. A stalled
+                # routed open is route-scoped for the same reason its
+                # handshake failures are, so it stays out of this too.
+                if connect_progress.direct_upstream_connect_started:
                     mark_upstream_websocket_transport_failure()
                 _raise_proxy_budget_exhausted()
 
@@ -4562,8 +4568,8 @@ class _WebSocketMixin:
                         error_type="server_error",
                     ),
                 ) from exc
-            if connect_progress is not None:
-                connect_progress.upstream_connect_started = True
+            if connect_progress is not None and route is None:
+                connect_progress.direct_upstream_connect_started = True
             upstream = await _facade()._call_with_supported_optional_kwargs(
                 _facade().connect_responses_websocket,
                 headers,

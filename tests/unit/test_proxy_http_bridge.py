@@ -32238,3 +32238,450 @@ async def test_admission_waiters_do_not_accumulate_callbacks_on_shared_inflight_
     remaining = await asyncio.gather(*waiters[25:], return_exceptions=True)
     assert all(isinstance(result, ProxyResponseError) and result.status_code == 429 for result in remaining)
     assert key not in service._http_bridge_inflight_sessions
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_precreated_usage_limit_defers_keyed_health_until_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keyed pre-created retry must queue the health write, not apply it while
+    the API-key reservation is still unsettled (settlement-ordering invariant)."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-keyed-precreated-limit",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=cast(Any, object()),
+        started_at=1.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"hello"}',
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-keyed-precreated-limit",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    handle_stream_error = AsyncMock()
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 429,
+                "error": {
+                    "type": "usage_limit_reached",
+                    "message": "The usage limit has been reached",
+                    "plan_type": "team",
+                    "resets_at": 1_778_790_595,
+                    "resets_in_seconds": 14_555,
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    handle_stream_error.assert_not_awaited()
+    retry_precreated.assert_awaited_once_with(session)
+    assert len(request_state.deferred_keyed_stream_health) == 1
+    penalty = request_state.deferred_keyed_stream_health[0]
+    assert penalty.account is session.account
+    assert penalty.code == "usage_limit_reached"
+    assert getattr(request_state, "account_health_error_handled", False) is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_model_capacity_retry_defers_keyed_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The model-capacity retry branch must not mutate account health while the
+    request's API-key reservation is open; the penalty settles later."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-keyed-model-capacity",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=cast(Any, object()),
+        started_at=time.monotonic(),
+        bridge_request_deadline=time.monotonic() + 60.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        propagate_http_errors=True,
+        capacity_startup_wait_event=asyncio.Event(),
+        capacity_startup_ready_event=asyncio.Event(),
+        request_text='{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}',
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="bridge-keyed-model-capacity",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    handle_stream_error = AsyncMock()
+    retry_precreated = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_wait_before_http_bridge_model_capacity_retry",
+        AsyncMock(return_value=True),
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "invalid_request_error",
+                    "message": "Selected model is at capacity. Please try a different model.",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    handle_stream_error.assert_not_awaited()
+    assert len(request_state.deferred_keyed_stream_health) == 1
+    penalty = request_state.deferred_keyed_stream_health[0]
+    assert penalty.account is session.account
+    assert getattr(request_state, "account_health_error_handled", False) is True
+
+
+@pytest.mark.asyncio
+async def test_release_reservation_drains_deferred_keyed_health_after_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deferred keyed health writes apply only after the reservation's fallback
+    release commits, in settle-then-health order."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    account = SimpleNamespace(id="acc-deferred-health")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-deferred-health-release",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=cast(Any, object()),
+        started_at=1.0,
+    )
+    request_state.deferred_keyed_stream_health.append(
+        proxy_support_module._DeferredKeyedStreamHealthPenalty(
+            account=cast(Any, account),
+            error={"message": "The usage limit has been reached"},
+            code="usage_limit_reached",
+        )
+    )
+    order: list[str] = []
+
+    async def record_release(reservation: Any) -> None:
+        del reservation
+        order.append("settle")
+
+    async def record_health(failed_account: Any, error: Any, code: str) -> None:
+        del error
+        assert failed_account is account
+        order.append(f"health:{code}")
+
+    monkeypatch.setattr(service, "_release_websocket_reservation", record_release)
+    monkeypatch.setattr(service, "_handle_stream_error", record_health)
+
+    await service._release_websocket_request_state_reservation(request_state)
+
+    assert order == ["settle", "health:usage_limit_reached"]
+    assert request_state.deferred_keyed_stream_health == []
+    assert request_state.api_key_reservation is None
+
+
+@pytest.mark.asyncio
+async def test_release_reservation_leaves_deferred_health_unapplied_when_release_fails() -> None:
+    """Unconfirmed settlement (release raises) must leave the deferred
+    account-health write unapplied and retained."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-deferred-health-release-failure",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=cast(Any, object()),
+        started_at=1.0,
+    )
+    request_state.deferred_keyed_stream_health.append(
+        proxy_support_module._DeferredKeyedStreamHealthPenalty(
+            account=cast(Any, SimpleNamespace(id="acc-unapplied")),
+            error={"message": "The usage limit has been reached"},
+            code="usage_limit_reached",
+        )
+    )
+    handle_stream_error = AsyncMock()
+    release = AsyncMock(side_effect=RuntimeError("release failed"))
+    service._release_websocket_reservation = release  # type: ignore[method-assign]
+    service._handle_stream_error = handle_stream_error  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="release failed"):
+        await service._release_websocket_request_state_reservation(request_state)
+
+    handle_stream_error.assert_not_awaited()
+    assert len(request_state.deferred_keyed_stream_health) == 1
+
+
+@pytest.mark.asyncio
+async def test_release_reservation_drains_deferred_health_when_backoff_drain_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backoffs and deferred stream-health penalties own independent lanes:
+    a failed backoff write must not orphan the deferred health write."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    account = SimpleNamespace(id="acc-independent-lanes")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-independent-lanes",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=cast(Any, object()),
+        started_at=1.0,
+    )
+    request_state.deferred_account_error_backoffs["acc-backoff"] = cast(Any, SimpleNamespace(id="acc-backoff"))
+    request_state.deferred_keyed_stream_health.append(
+        proxy_support_module._DeferredKeyedStreamHealthPenalty(
+            account=cast(Any, account),
+            error={"message": "The usage limit has been reached"},
+            code="usage_limit_reached",
+        )
+    )
+    handle_stream_error = AsyncMock()
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(
+        service,
+        "_load_balancer",
+        SimpleNamespace(record_error_backoff=AsyncMock(side_effect=RuntimeError("backoff failed"))),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="backoff failed"):
+        await service._release_websocket_request_state_reservation(request_state)
+
+    handle_stream_error.assert_awaited_once()
+    assert request_state.deferred_keyed_stream_health == []
+
+
+@pytest.mark.asyncio
+async def test_drain_deferred_keyed_health_drains_full_queue_under_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller cancellation must not abandon queued penalties for a later drain
+    to replay: every shielded attempt completes, the queue empties, and the
+    cancellation re-raises only afterwards."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-drain-cancelled",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    for index in ("first", "second"):
+        request_state.deferred_keyed_stream_health.append(
+            proxy_support_module._DeferredKeyedStreamHealthPenalty(
+                account=cast(Any, SimpleNamespace(id=f"acc-cancelled-{index}")),
+                error={"message": "The usage limit has been reached"},
+                code=f"usage_limit_reached_{index}",
+            )
+        )
+    attempt_started = asyncio.Event()
+    attempt_gate = asyncio.Event()
+    calls: list[str] = []
+
+    async def blocked_health(account: Any, error: Any, code: str) -> None:
+        del account, error
+        calls.append(code)
+        attempt_started.set()
+        await attempt_gate.wait()
+
+    monkeypatch.setattr(service, "_handle_stream_error", blocked_health)
+
+    drain = asyncio.create_task(service._drain_deferred_keyed_stream_health(request_state))
+    await attempt_started.wait()
+    drain.cancel()
+    await asyncio.sleep(0)
+    attempt_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await drain
+
+    assert calls == ["usage_limit_reached_first", "usage_limit_reached_second"]
+    assert request_state.deferred_keyed_stream_health == []
+
+
+@pytest.mark.asyncio
+async def test_drain_deferred_keyed_health_drops_failed_write_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A deferred health write that fails after settlement committed is logged
+    and dropped: it must not abort finalization or leak an unowned entry."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-drain-write-failure",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    for code in ("usage_limit_reached", "server_is_overloaded"):
+        request_state.deferred_keyed_stream_health.append(
+            proxy_support_module._DeferredKeyedStreamHealthPenalty(
+                account=cast(Any, SimpleNamespace(id=f"acc-{code}")),
+                error={"message": code},
+                code=code,
+            )
+        )
+    applied: list[str] = []
+
+    async def flaky_health(account: Any, error: Any, code: str) -> None:
+        del account, error
+        if code == "usage_limit_reached":
+            raise RuntimeError("health persistence failed")
+        applied.append(code)
+
+    monkeypatch.setattr(service, "_handle_stream_error", flaky_health)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.proxy.service"):
+        await service._drain_deferred_keyed_stream_health(request_state)
+
+    assert applied == ["server_is_overloaded"]
+    assert request_state.deferred_keyed_stream_health == []
+    assert any("dropping penalty" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_finalize_waits_for_settlement_when_keyed_health_penalties_are_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued pre-created penalty makes the terminal settle ordering-sensitive:
+    the finalizer must wait for settlement before the drain can write health,
+    even when account_health_error_handled suppressed the terminal health flags."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-wait-for-queued-penalty",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=cast(Any, object()),
+        started_at=1.0,
+        awaiting_response_created=False,
+        response_id="resp-wait-for-queued-penalty",
+        response_event_count=1,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create","model":"gpt-5.5","input":"hello"}',
+        transport="http",
+        enforce_openai_sdk_contract=False,
+        skip_request_log=True,
+    )
+    request_state.deferred_keyed_stream_health.append(
+        proxy_support_module._DeferredKeyedStreamHealthPenalty(
+            account=cast(Any, SimpleNamespace(id="acc-wait-queued")),
+            error={"message": "The usage limit has been reached"},
+            code="usage_limit_reached",
+        )
+    )
+    setattr(request_state, "account_health_error_handled", True)
+    session = _make_bridge_session(
+        key_value="bridge-wait-for-queued-penalty",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    settle_calls: list[dict[str, Any]] = []
+
+    async def record_settle(*args: Any, **kwargs: Any) -> bool:
+        settle_calls.append(kwargs)
+        return True
+
+    drained: list[str] = []
+
+    async def record_health(account: Any, error: Any, code: str) -> None:
+        del account, error
+        drained.append(code)
+
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", record_settle)
+    monkeypatch.setattr(service, "_handle_stream_error", record_health)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "error",
+                "error": {
+                    "type": "server_error",
+                    "code": "server_error",
+                    "message": "boom",
+                },
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert len(settle_calls) == 1
+    assert settle_calls[0].get("wait_for_settlement") is True
+    assert drained == ["usage_limit_reached"]
+    assert request_state.deferred_keyed_stream_health == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_drains_apply_each_deferred_penalty_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idempotent release path and the terminal finalizer can drain the
+    same request state concurrently: each entry is claimed atomically, so no
+    penalty applies twice and the queue never corrupts."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-concurrent-drains",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+    )
+    for code in ("usage_limit_reached", "server_is_overloaded"):
+        request_state.deferred_keyed_stream_health.append(
+            proxy_support_module._DeferredKeyedStreamHealthPenalty(
+                account=cast(Any, SimpleNamespace(id=f"acc-{code}")),
+                error={"message": code},
+                code=code,
+            )
+        )
+    first_started = asyncio.Event()
+    gate = asyncio.Event()
+    applied: list[str] = []
+
+    async def slow_health(account: Any, error: Any, code: str) -> None:
+        del account, error
+        applied.append(code)
+        first_started.set()
+        await gate.wait()
+
+    monkeypatch.setattr(service, "_handle_stream_error", slow_health)
+
+    drain_a = asyncio.create_task(service._drain_deferred_keyed_stream_health(request_state))
+    await first_started.wait()
+    drain_b = asyncio.create_task(service._drain_deferred_keyed_stream_health(request_state))
+    await asyncio.sleep(0)
+    gate.set()
+    await asyncio.gather(drain_a, drain_b)
+
+    assert sorted(applied) == ["server_is_overloaded", "usage_limit_reached"]
+    assert request_state.deferred_keyed_stream_health == []

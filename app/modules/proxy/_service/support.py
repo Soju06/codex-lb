@@ -1485,6 +1485,8 @@ def _record_response_event(request_state: _WebSocketRequestState | None, event_t
     request_state.last_upstream_activity_at = time.monotonic()
     if event_type in {"response.failed", "response.incomplete"}:
         return
+    if event_type.startswith("response.output_"):
+        request_state.upstream_model_output_seen = True
     request_state.response_event_count += 1
 
 

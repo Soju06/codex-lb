@@ -357,8 +357,8 @@ async def test_stream_model_capacity_top_level_response_id_surfaces_without_repl
 
 
 @pytest.mark.asyncio
-async def test_stream_empty_upstream_body_surfaces_without_replay(async_client, monkeypatch):
-    """An untyped empty upstream stream may be post-dispatch, so it is not replayed."""
+async def test_stream_anchored_empty_upstream_body_surfaces_without_replay(async_client, monkeypatch):
+    """An anchored empty upstream stream may be post-dispatch, so it is not replayed."""
     await _import_account(async_client, "acc_empty_body_no_replay", "empty-body-no-replay@example.com")
 
     call_count = 0
@@ -375,7 +375,13 @@ async def test_stream_empty_upstream_body_surfaces_without_replay(async_client, 
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "previous_response_id": "resp-empty-body-parent",
+        "stream": True,
+    }
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
@@ -986,6 +992,40 @@ async def test_v1_responses_non_streaming_500_preserves_http_status(async_client
     assert response.json()["error"]["code"] == "server_error"
     # Should have retried on same account before giving up
     assert call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_non_streaming_server_overload_status_retries_same_account(async_client, monkeypatch):
+    """OpenAI SDK non-streaming responses can receive overloaded status JSON.
+
+    The status may be non-500, but the normalized upstream code is still a
+    transient overload before any downstream response is visible.
+    """
+    await _import_account(async_client, "acc_prop_overload", "prop-overload@example.com")
+
+    call_count = 0
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        nonlocal call_count
+        call_count += 1
+        seen_account_ids.append(account_id)
+        if call_count == 1:
+            raise ProxyResponseError(
+                429,
+                openai_error("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
+                failure_phase="status",
+            )
+        yield _success_sse_event("resp_nonstream_overload_retry_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "input": "hi"}
+    response = await async_client.post("/v1/responses", json=payload)
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_nonstream_overload_retry_ok"
+    assert seen_account_ids == ["acc_prop_overload", "acc_prop_overload"]
 
 
 # ===========================================================================

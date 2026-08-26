@@ -302,6 +302,7 @@ from app.modules.proxy._service.support import (
     _RetryableStreamError,
     _StreamSettlement,
     _TerminalStreamError,
+    _TransientStreamError,
     _ttft_event_latency_ms,
     _verbatim_relay_event_type,
     _WebSocketUpstreamControl,
@@ -592,6 +593,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 terminal_event_seen = settlement.account_health_error = True
                 settlement.error = {"message": error_message}
+                if allow_transient_retry and payload.previous_response_id is None:
+                    raise _TransientStreamError(error_code, settlement.error)
                 yield format_sse_event(
                     response_failed_event(
                         error_code,
@@ -722,10 +725,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                         )
                     if allow_retry and _facade()._should_retry_stream_error(code):
                         raise _RetryableStreamError(code, upstream_error, exclude_account=True)
-                terminal_stream_error = _TerminalStreamError(
-                    error_code or code,
-                    upstream_error,
-                )
+                terminal_stream_error = _TerminalStreamError(error_code or code, upstream_error)
                 if allow_retry:
                     _facade().logger.info(
                         "Not retrying non-recoverable stream failure request_id=%s account_id=%s code=%s",

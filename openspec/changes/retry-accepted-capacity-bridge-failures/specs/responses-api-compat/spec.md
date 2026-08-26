@@ -1,0 +1,68 @@
+# responses-api-compat Delta
+
+## MODIFIED Requirements
+
+### Requirement: Upstream overload envelopes are classified as retryable transient failures
+
+When `classify_upstream_failure` observes an upstream error envelope whose `code` is `overloaded_error` or `server_is_overloaded`, the system MUST treat it as `retryable_transient` regardless of the accompanying HTTP status. Streamed Responses API traffic can deliver the overload envelope on a connection that has already returned HTTP 200, so a 5xx-only heuristic is insufficient to drive account fail-over and bounded retry.
+
+#### Scenario: `overloaded_error` without a 5xx status is retryable transient
+
+- **WHEN** `classify_upstream_failure` is called with `error_code="overloaded_error"` and `http_status` not in the 5xx range (including `None`)
+- **THEN** the returned `failure_class` is `retryable_transient`
+- **AND** the failover layer is eligible to retry the request or fail over to another account instead of returning a non-retryable error to the client
+
+#### Scenario: `overloaded_error` with a 5xx status remains retryable transient
+
+- **WHEN** `classify_upstream_failure` is called with `error_code="overloaded_error"` and `http_status` is 500, 502, 503, or 504
+- **THEN** the returned `failure_class` is `retryable_transient`
+- **AND** the result is the same as the no-status path, so the 5xx fallback heuristic is not the only signal driving the decision
+
+#### Scenario: `server_is_overloaded` without a 5xx status is retryable transient
+
+- **WHEN** `classify_upstream_failure` is called with `error_code="server_is_overloaded"` and `http_status` not in the 5xx range (including `None`)
+- **THEN** the returned `failure_class` is `retryable_transient`
+- **AND** the streaming retry layer is eligible to retry the request before surfacing the terminal overload event
+
+#### Scenario: Non-streaming Responses retries status-level overload JSON
+
+- **GIVEN** a non-streaming `/v1/responses` request has not emitted any downstream output
+- **WHEN** upstream returns an HTTP status error envelope with `code="server_is_overloaded"`
+- **THEN** the retry layer MUST treat the envelope as a transient overload even when the HTTP status is not 500
+- **AND** it MUST retry the same request within the bounded transient retry budget before returning the overload error to the client
+
+#### Scenario: Streaming Responses retries initial output-free EOF
+
+- **GIVEN** a streaming `/v1/responses` request is not anchored to a previous response
+- **WHEN** upstream closes before emitting the first SSE event
+- **THEN** the retry layer MUST treat the close as a transient output-free failure
+- **AND** it MUST retry the same request within the bounded transient retry budget before returning `stream_incomplete`
+- **AND** it MUST NOT perform this retry for anchored continuations, after any downstream-visible output, or after the retry budget is exhausted
+
+#### Scenario: HTTP bridge retries a pre-created overload event
+
+- **GIVEN** the HTTP responses session bridge is enabled
+- **WHEN** the first upstream `response.failed` or `error` event has `code="overloaded_error"` or `code="server_is_overloaded"`
+- **THEN** the bridge MUST retry the pre-created request before forwarding that terminal event
+- **AND** the bridge MUST preserve its existing no-replay behavior after downstream-visible output or for other fail-fast error codes
+
+#### Scenario: Native Codex bridge retries an accepted output-free overload
+
+- **GIVEN** the native Codex HTTP responses session bridge has accepted a continuation request on an account
+- **AND** upstream has emitted `response.created` and optionally `response.in_progress`, but no reasoning, text, item, or tool output
+- **WHEN** upstream terminates that response with `code="overloaded_error"` or `code="server_is_overloaded"`
+- **THEN** the bridge MUST wait for a bounded transient backoff and replay the unchanged request exactly once on the same account
+- **AND** the replay MUST preserve the original parent `previous_response_id`
+- **AND** the replay MUST keep the response identity the client is already reading: the replay's own `response.created` MUST be suppressed downstream and every later event MUST carry the accepted response's ID, so no client ever observes a second `response.created` or a changed response ID mid-stream
+- **AND** the bridge MUST expose the successful replay's actual `response.completed` ID so the next continuation anchors on the successful response
+- **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any model output, while another request is pending, or after the replay budget is exhausted
+
+#### Scenario: Native Codex bridge retries accepted output-free abrupt closes
+
+- **GIVEN** the native Codex HTTP responses session bridge has accepted a continuation request on an account
+- **AND** upstream has emitted only lifecycle events such as `response.created` or `response.in_progress`
+- **WHEN** the upstream websocket closes before `response.completed` without a terminal error event
+- **THEN** the bridge MUST wait for a bounded transient backoff and replay the unchanged request exactly once on the same account
+- **AND** the replay MUST preserve the original parent `previous_response_id` and the accepted response identity already delivered downstream
+- **AND** the bridge MUST NOT perform this accepted-response replay for public OpenAI SDK streams, after any reasoning, text, item, or tool output, after any frame carrying a finite integer `sequence_number` has reached the client, while another request is pending, or after the replay budget is exhausted
+- **AND** when an untyped transport close is not replayed because those safety gates block replay or the replay budget is exhausted, the bridge MUST fall through to the existing pre-created retry circuit and its close classification, unchanged

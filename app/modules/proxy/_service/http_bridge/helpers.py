@@ -3028,6 +3028,7 @@ def _log_http_bridge_event(
         "submit_on_closed",
         "send_failure",
         "retry_fresh_upstream",
+        "retry_accepted_capacity",
         "retry_precreated",
         "retry_precreated_clean_close",
         "reconnect",

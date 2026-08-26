@@ -54,6 +54,11 @@
       session was not the owner, which #1830's recovery handles by retrying the
       same anchor, so this is gated on the key being quarantined
 
+- [x] 1.12 Record the terminal strike only when the request has no safe replay.
+      A stale-anchor rejection that still holds a verified full resend is
+      recovered in band, and counting it charged the key for a failure it
+      recovered from and disturbed the circuit generation the replay claims
+
 ## 2. Regression coverage
 
 - [x] 2.1 Two `stream_incomplete` failures quarantine the key with the

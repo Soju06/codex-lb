@@ -17,11 +17,16 @@ pending request MUST NOT advance the circuit or cause a later request to be
 treated as a repeated failure. A pending request that has already emitted a
 response event MUST remain excluded from this pre-response circuit. An
 upstream terminal error frame that fails a pending request before any
-response event was observed MUST record one failure for that request
+response event was observed, and that leaves the request with no safe replay,
+MUST record one failure for that request
 lifecycle through the same attempt-scoped recorder, because that failure
 settles through the terminal path rather than a retirement and would
 otherwise never advance the circuit; a later retirement of the same lifecycle
-MUST NOT count it again. A native terminal failure envelope
+MUST NOT count it again. A failure the proxy can still replay safely MUST NOT
+advance the circuit: the request is not stranded, the verified stale-anchor
+replay that follows depends on the circuit generation it captured, and counting
+there both disturbs that fence and charges the key for a failure it recovered
+from in band. A native terminal failure envelope
 (`response.failed` or `response.incomplete`) MUST remain eligible for that
 recording even though it marks the `response.create` attempt as answered
 without counting a response event. The recording MUST complete before the

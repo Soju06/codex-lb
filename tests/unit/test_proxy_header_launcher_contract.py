@@ -44,6 +44,7 @@ def test_documented_launchers_delegate_to_app_cli(
     ("relative_path", "contract"),
     [
         ("Dockerfile", 'CMD ["/app/scripts/docker-entrypoint.sh"]'),
+        ("scripts/docker-entrypoint.sh", 'exec python "$(dirname "$0")/distroless-entrypoint.py"'),
         ("scripts/docker-entrypoint.sh", "exec python -m app.cli"),
         ("Dockerfile.distroless", 'CMD ["python", "/app/scripts/distroless-entrypoint.py"]'),
         ("scripts/distroless-entrypoint.py", '[sys.executable, "-m", "app.cli"'),

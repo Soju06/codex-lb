@@ -2,7 +2,7 @@
 set -eu
 
 if [ "${CODEX_LB_DATABASE_MIGRATE_ON_STARTUP:-true}" = "true" ]; then
-  python -m app.db.migrate upgrade
+  exec python "$(dirname "$0")/distroless-entrypoint.py"
 fi
 
 # Disable app-level startup migration so app/db/session.py init_db() does not

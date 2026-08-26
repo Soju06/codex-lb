@@ -37,12 +37,26 @@ When such a strike opens the circuit on a poison-class detail, the proxy MUST
 also clear the stored durable continuity anchor for that key. The quarantine
 armed with the strike only suppresses injection in this process and expires,
 so without the durable clear the same dead anchor is restored on the next
-reattach and re-poisons the key after every cooldown. This clear is gated on
-the circuit's own failure threshold rather than the configurable anchor-poison
-threshold: the configurable threshold governs the retirement and close funnels,
-where no circuit gates first, and is unreachable on this path by construction.
+reattach and re-poisons the key after every cooldown. On the terminal and grouped settlement
+paths the configured anchor-poison threshold MUST be capped at the circuit's own
+failure threshold. Above that threshold the key is refused for 60-600s per
+strike, so a higher value cannot be reached at any useful rate. A configured
+value below the circuit threshold MUST still be honoured. The retirement and
+close funnels keep the configured threshold unchanged, because no circuit gates
+those paths first.
+
+A grouped settlement whose strikes carry the circuit through that threshold
+MUST clear the anchor as well, after its grouped terminal frames are published.
+
 Unlike the strike, the durable clear MUST NOT precede the terminal frame; a
-resend arriving in that window is already covered by the quarantine.
+resend arriving in that window is already covered by the quarantine. Because
+the frame has already been published, a cancellation escaping the clear MUST
+NOT skip finalization of the settled request.
+
+A quarantine armed from a local opening MUST be re-armed against the merged
+cooldown when durable persistence returns a longer deadline, so its floor
+covers the cooldown actually in force rather than the local backoff it was
+first computed from.
 
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
@@ -138,6 +152,24 @@ and durable circuit state.
 - **WHEN** a terminal failure frame opens the retry circuit on a poison-class detail
 - **THEN** the durable continuity anchor for that key is cleared with its alias rows
 - **AND** the clear runs after the terminal frame reaches the client, not before it
+
+#### Scenario: grouped poison strikes clear the durable anchor
+
+- **GIVEN** a grouped continuity failure carrying two eventless requests on one hard key
+- **WHEN** the grouped strikes carry the circuit through its threshold
+- **THEN** the durable anchor is cleared after the grouped terminal frames are published
+
+#### Scenario: a cancelled anchor clear still finalizes the settled request
+
+- **GIVEN** a terminal poison strike whose durable clear is cancelled mid-write
+- **WHEN** the terminal frame has already been published to the client
+- **THEN** the request is still finalized and its session lease still released
+
+#### Scenario: a merged cooldown extends an already-armed quarantine
+
+- **GIVEN** a local opening that armed the poison quarantine from its own backoff
+- **WHEN** durable persistence merges in a longer cooldown deadline
+- **THEN** the quarantine floor is recomputed against the merged cooldown
 
 #### Scenario: midstream retirement does not consume a pre-response strike
 

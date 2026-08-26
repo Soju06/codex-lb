@@ -76,8 +76,8 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
-    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _http_bridge_anchor_poison_detail,
+    _http_bridge_effective_anchor_poison_threshold,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
@@ -2056,6 +2056,8 @@ class _HTTPBridgeUpstreamEventsMixin:
             # recorded for the same reason, and recording precedes the persist
             # and delivery machinery below for the same reason it does there: a
             # client resending on observed completion must not outrun it.
+            grouped_poison_strike_failures = 0
+            grouped_poison_detail: str | None = None
             for (
                 grouped_request_state,
                 _grouped_terminal_block,
@@ -2077,12 +2079,23 @@ class _HTTPBridgeUpstreamEventsMixin:
                 )
                 if grouped_terminal_detail is None:
                     continue
-                await self._record_http_bridge_retry_circuit_failure(
+                grouped_strike_failures = await self._record_http_bridge_retry_circuit_failure(
                     session,
                     detail=grouped_terminal_detail,
                     attempt=grouped_request_state.response_create_attempt,
                     terminal_pre_response_frame=True,
                 )
+                # A fan-out carrying two or more eventless requests advances the
+                # circuit through its threshold inside this loop, so the anchor
+                # that failed all of them is proven dead here just as it is on
+                # the single-request path. Keep the highest count and its poison
+                # detail; discarding them left the grouped branch returning with
+                # the durable anchor still stored.
+                grouped_poison_candidate = _http_bridge_anchor_poison_detail(grouped_terminal_detail)
+                if grouped_poison_candidate is not None and grouped_strike_failures is not None:
+                    if grouped_strike_failures > grouped_poison_strike_failures:
+                        grouped_poison_strike_failures = grouped_strike_failures
+                    grouped_poison_detail = grouped_poison_candidate
 
             append_terminal_batch = getattr(
                 getattr(self, "_http_bridge_operation_event_batcher", None),
@@ -2221,6 +2234,25 @@ class _HTTPBridgeUpstreamEventsMixin:
                 name=f"http-bridge-grouped-terminal-settlement-{session.durable_session_id}",
             )
             grouped_error, grouped_cancellation = await _await_task_deferring_cancellation(grouped_settlement_task)
+            if (
+                grouped_cancellation is None
+                and grouped_poison_detail is not None
+                and grouped_poison_strike_failures
+                >= _http_bridge_effective_anchor_poison_threshold(
+                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                )
+            ):
+                # The grouped frames have been published by here, so this mirrors
+                # the single-request ordering: the strikes precede delivery, the
+                # durable clear follows it. Skipped only under cancellation,
+                # where the reader is going down and the write would race the
+                # teardown; the clear is internally exception-safe otherwise, so
+                # a failed grouped finalization still gets the anchor cleared.
+                await _abandon_durable_http_bridge_continuity(
+                    self,
+                    session,
+                    detail=grouped_poison_detail,
+                )
             if grouped_cancellation is not None:
                 if grouped_error is not None:
                     logger.warning(
@@ -2983,6 +3015,23 @@ class _HTTPBridgeUpstreamEventsMixin:
 
         terminal_strike_failures: int | None = None
         terminal_poison_detail: str | None = None
+
+        async def _finalize_terminal_settlement(settled_request_state: _WebSocketRequestState) -> None:
+            try:
+                await self._finalize_websocket_request_state(
+                    settled_request_state,
+                    account=session.account,
+                    account_id_value=session.account.id,
+                    event=settlement_event,
+                    event_type=settlement_event_type,
+                    payload=settlement_payload,
+                    api_key=settled_request_state.api_key,
+                    upstream_control=session.upstream_control,
+                    response_create_gate=session.response_create_gate,
+                )
+            finally:
+                await self._maybe_release_idle_http_bridge_session_lease(session)
+
         if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
             error_code = None
             if settlement_event_type == "error":
@@ -3129,7 +3178,10 @@ class _HTTPBridgeUpstreamEventsMixin:
         if (
             terminal_poison_detail is not None
             and terminal_strike_failures is not None
-            and terminal_strike_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+            and terminal_strike_failures
+            >= _http_bridge_effective_anchor_poison_threshold(
+                _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+            )
         ):
             # The strike above opens the circuit, but the durable anchor that
             # failed is still stored. Only the retirement and close funnels ever
@@ -3154,23 +3206,19 @@ class _HTTPBridgeUpstreamEventsMixin:
             # A resend arriving in between is already covered by the quarantine
             # armed with the strike, so there is no reason to put a fenced
             # durable write in front of the client's own failure.
-            await _abandon_durable_http_bridge_continuity(
-                self,
-                session,
-                detail=terminal_poison_detail,
-            )
-
-        try:
-            await self._finalize_websocket_request_state(
-                terminal_request_state,
-                account=session.account,
-                account_id_value=session.account.id,
-                event=settlement_event,
-                event_type=settlement_event_type,
-                payload=settlement_payload,
-                api_key=terminal_request_state.api_key,
-                upstream_control=session.upstream_control,
-                response_create_gate=session.response_create_gate,
-            )
-        finally:
-            await self._maybe_release_idle_http_bridge_session_lease(session)
+            #
+            # The terminal frame is already on its way to the client, so this
+            # await must not be the last thing that runs. If the reader is
+            # cancelled while the fenced write is in contention, the cancellation
+            # would otherwise escape before the finalization below is entered and
+            # the request would never be finalized despite having been answered.
+            try:
+                await _abandon_durable_http_bridge_continuity(
+                    self,
+                    session,
+                    detail=terminal_poison_detail,
+                )
+            finally:
+                await _finalize_terminal_settlement(terminal_request_state)
+        else:
+            await _finalize_terminal_settlement(terminal_request_state)

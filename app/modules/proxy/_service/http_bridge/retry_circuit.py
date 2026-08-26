@@ -62,6 +62,21 @@ def _http_bridge_anchor_poison_detail(detail: str | None) -> str | None:
     return _HTTP_BRIDGE_ANCHOR_POISON_DETAILS.get(aliased)
 
 
+def _http_bridge_effective_anchor_poison_threshold(configured: int) -> int:
+    """Cap the configured anchor-poison threshold at the circuit's own threshold.
+
+    Once the circuit opens it refuses the key for 60-600s per strike, so a
+    higher poison threshold cannot be reached at any useful rate; that
+    unreachability is issue #1830/#1852 itself. Capping it here also makes the
+    decision replica-safe. The quarantine armed at the opening is process-local,
+    so between the circuit threshold and a higher configured one the durable
+    anchor would survive for another worker to plan. Clearing no later than the
+    opening is what stops that. A configured value below the circuit threshold
+    is still honoured, since clearing earlier is always safe.
+    """
+    return max(1, min(configured, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD))
+
+
 def _http_bridge_poison_quarantine_minimum_seconds(cooldown_remaining: float) -> float:
     """Keep a poison quarantine alive across the cooldown and its probe window.
 
@@ -634,9 +649,15 @@ class _HTTPBridgeRetryCircuitMixin:
                 # is the half-open probe: it needs the quarantine most, not
                 # least. Track the opening itself, and let a zero remainder fall
                 # through to the bare half-open lease.
-                merged_poison_opened = (
-                    not quarantine_poisoned_anchor and poison_class_failure and consecutive_failures >= threshold
-                )
+                #
+                # This deliberately does not skip keys quarantined from the
+                # local opening. A local open arms the floor from its own
+                # backoff, which can be 60s, and the merge can then replace
+                # `cooldown_until` with a deadline up to 600s out. Re-arming is
+                # idempotent because the entry keeps the later of the two
+                # deadlines, so recomputing against the merged cooldown can only
+                # extend a floor that would otherwise expire mid-cooldown.
+                merged_poison_opened = poison_class_failure and consecutive_failures >= threshold
                 if merged_poison_opened:
                     merged_cooldown_remaining = max(0.0, state.cooldown_until - time.monotonic())
             if merged_poison_opened:

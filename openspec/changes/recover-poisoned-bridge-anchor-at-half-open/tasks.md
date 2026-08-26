@@ -38,6 +38,11 @@
       circuit; the stored anchor survived every cooldown because neither poison
       clear sits on the terminal path, so quarantine masked the wedge until its
       entry expired and the same dead anchor came back
+- [x] 1.9 Cap the configured anchor-poison threshold at the circuit threshold on
+      every clear path, clear the anchor after grouped poison strikes too, keep
+      finalization reachable when the clear is cancelled, and re-arm the
+      quarantine floor against a merged cooldown
+
 
 ## 2. Regression coverage
 
@@ -59,6 +64,11 @@
       queue is still empty, and the terminal frame is published afterwards;
       a grouped multi-request continuity failure records one strike per
       eventless grouped request
+- [x] 2.9 Grouped poison strikes clear the anchor; a cancelled clear still
+      finalizes; a merged cooldown extends an armed quarantine; the effective
+      poison threshold is capped at the circuit threshold and honours lower
+      configured values
+
 - [x] 2.8 A terminal poison strike clears the durable anchor with
       `clear_continuity=True`, and does so after the terminal frame is published
       rather than in front of it

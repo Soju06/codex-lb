@@ -32257,3 +32257,142 @@ async def test_terminal_anchor_clear_runs_after_the_terminal_frame_is_published(
 
     assert depths.get("strike") == 0, "the strike must land before anything reaches the client"
     assert depths.get("clear", 0) > 0, "the durable clear must land after the terminal frame is published"
+
+
+@pytest.mark.asyncio
+async def test_grouped_poison_strikes_clear_the_durable_anchor() -> None:
+    # A fan-out carrying two eventless requests advances the circuit through its
+    # threshold inside the grouped loop. The grouped branch returns before the
+    # single-request clear, so discarding those counts left the dead anchor
+    # stored for another replica, or for reuse once quarantine expired.
+    service, session, first = _make_terminal_error_bridge_fixture(
+        request_id="req-grouped-clear-1",
+        key_value="sid-grouped-clear",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-grouped-clear"
+    session.durable_owner_epoch = 1
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    second = proxy_service._WebSocketRequestState(
+        request_id="req-grouped-clear-2",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.5,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    second.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    session.pending_requests.append(second)
+    session.queued_request_count = 2
+
+    rebind = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=rebind,
+    )
+    service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    rebind.assert_awaited_once()
+    assert rebind.await_args is not None
+    assert rebind.await_args.kwargs["clear_continuity"] is True
+    assert rebind.await_args.kwargs["session_id"] == "durable-grouped-clear"
+
+
+@pytest.mark.asyncio
+async def test_terminal_settlement_is_finalized_when_the_anchor_clear_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The terminal frame is already on its way to the client when the durable
+    # clear runs, so a cancellation escaping that fenced write must not leave the
+    # request unfinalized after it was answered.
+    service, session, _request_state = _make_terminal_error_bridge_fixture(
+        request_id="req-terminal-clear-cancel",
+        key_value="sid-terminal-clear-cancel",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-clear-cancel"
+    session.durable_owner_epoch = 1
+    finalized: list[str] = []
+
+    async def _record(*_args: Any, **_kwargs: Any) -> int:
+        return 99
+
+    async def _rebind(*_args: Any, **_kwargs: Any) -> bool:
+        raise asyncio.CancelledError
+
+    async def _finalize(*_args: Any, **_kwargs: Any) -> None:
+        finalized.append("finalized")
+
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", _record)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", _finalize)
+    monkeypatch.setattr(service, "_maybe_release_idle_http_bridge_session_lease", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+    service._durable_bridge = SimpleNamespace(rebind_session_account=_rebind)
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    assert finalized == ["finalized"], (
+        "a cancellation inside the durable clear must not skip finalization of an answered request"
+    )
+
+
+@pytest.mark.asyncio
+async def test_merged_cooldown_extends_an_already_armed_poison_quarantine() -> None:
+    # A local opening arms the quarantine floor from its own 60s backoff. The
+    # durable merge can then replace the deadline with one up to 600s out, so
+    # skipping recomputation for already-quarantined keys let the quarantine
+    # expire mid-cooldown and hand the probe the poisoned anchor again.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    hard_session = _make_bridge_session(key_value="bridge-merge-extends-quarantine")
+    now_wall = time.time()
+    merged = DurableBridgeRetryCircuitSnapshot(
+        session_key_kind="session_header",
+        session_key_hash="hash-merge-extend",
+        api_key_scope="none",
+        consecutive_failures=2,
+        cooldown_until_epoch=now_wall + 600.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=now_wall,
+    )
+    # No merge on the first strike, so the second one opens the circuit locally
+    # and arms the floor from its own 60s backoff. Only then does the merge
+    # arrive with the far longer deadline.
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(side_effect=[None, merged]),
+    )
+
+    now = time.monotonic()
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")
+    entry_before = http_bridge_quarantine_module._http_bridge_quarantine_registry(service).get(hard_session.key)
+    assert entry_before is None or entry_before.quarantined_until <= now, (
+        "the first strike is below the threshold and must not quarantine"
+    )
+    await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[hard_session.key]
+    lease = http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
+    assert entry.quarantined_until - now == pytest.approx(600.0 + lease, abs=2.0), (
+        "the quarantine floor must be recomputed against the merged 600s cooldown, not left at the local 60s opening"
+    )
+
+
+def test_effective_anchor_poison_threshold_is_capped_at_the_circuit_threshold() -> None:
+    # The quarantine armed at the circuit opening is process-local, so between
+    # the circuit threshold and a higher configured one the durable anchor would
+    # survive for another worker to plan. A lower configured value still wins.
+    effective = http_bridge_retry_circuit_module._http_bridge_effective_anchor_poison_threshold
+    circuit_threshold = http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+    assert effective(7) == circuit_threshold
+    assert effective(circuit_threshold) == circuit_threshold
+    assert effective(1) == 1
+    assert effective(0) == 1

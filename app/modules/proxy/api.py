@@ -9312,9 +9312,11 @@ def _looks_like_sse_data_block(event_block: str) -> bool:
     Inspects complete field lines instead of substring matching, so field
     values containing the literal ``data:`` (for example ``id: data:1``) do
     not count as data, while the valid empty-field form (a bare ``data``
-    line) does.
+    line) does. Lines are split only on the CR / LF / CRLF endings SSE
+    recognizes: ``str.splitlines`` would also split on Unicode separators
+    such as U+2028, which are legal inside field values.
     """
-    for line in event_block.splitlines():
+    for line in event_block.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         if line == "data" or line.startswith("data:"):
             return True
     return False

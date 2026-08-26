@@ -3286,6 +3286,29 @@ async def test_source_stream_data_substring_in_field_value_keeps_truncation_fail
 
 
 @pytest.mark.asyncio
+async def test_source_stream_unicode_separator_in_field_value_keeps_truncation_failure(monkeypatch):
+    """U+2028 inside a field value must not expose a false data line: SSE splits only on CR/LF/CRLF."""
+
+    async def unicode_field_then_truncated_body():
+        yield "id: metadata\u2028data:oops\n\n".encode("utf-8")
+        yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_u2028"}}\n\n'
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            unicode_field_then_truncated_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert "metadata\u2028data:oops" in joined
+    assert "resp_u2028" in joined
+    assert "response.failed" in joined
+
+@pytest.mark.asyncio
 async def test_source_stream_bare_data_field_suppresses_synthetic_terminal(monkeypatch):
     """The valid empty-field form (a bare 'data' line) counts as unparseable source data."""
 

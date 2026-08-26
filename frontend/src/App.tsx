@@ -2,6 +2,7 @@ import { lazy, Suspense, useState } from "react";
 import { Navigate, Outlet, Route, Routes } from "react-router-dom";
 
 import { AppHeader } from "@/components/layout/app-header";
+import { RouteScrollRestoration } from "@/components/layout/route-scroll-restoration";
 import {
   STATUS_BAR_DEFAULT_HEIGHT_PX,
   StatusBar,
@@ -48,6 +49,7 @@ function AppLayout() {
       data-time-format={timeFormat}
       style={{ paddingBottom: statusBarHeight }}
     >
+      <RouteScrollRestoration />
       <AppHeader
         onLogout={() => {
           void logout();

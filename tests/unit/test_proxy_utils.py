@@ -15170,6 +15170,1243 @@ async def test_stream_with_retry_post_refresh_transient_exhaustion_fails_over(
 
 
 @pytest.mark.asyncio
+async def test_stream_with_retry_keyed_refresh_connect_settles_before_account_health(monkeypatch):
+    """Keyed refresh/connect failover must settle before health writes.
+
+    Regression for CLB-20260820-06: the mid-loop refresh/connect failover path
+    used to call ``_handle_stream_error`` immediately, then ``continue`` while
+    the shared API-key reservation was still open.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_refresh_connect_a")
+    account_b = _make_account("acc_keyed_refresh_connect_b")
+    stream_account_ids: list[str] = []
+    settlement_order: list[str] = []
+    settlement_wait_flags: list[bool] = []
+    api_key = _make_api_key_data("key_keyed_refresh_connect")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_refresh_connect",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock()
+    record_success = AsyncMock()
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert stream_account_ids[-1] == account_b.id
+        stream_settlement.usage_settlement_transferred = True
+        settlement_wait_flags.append(bool(_kwargs.get("wait_for_settlement")))
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_account_ids.append(account.id)
+        assert account.id == account_b.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_refresh_connect_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-refresh-connect-settle"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["response"]["id"] == "resp_keyed_refresh_connect_ok"
+    assert stream_account_ids == [account_b.id]
+    assert settlement_wait_flags == [True]
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:upstream_unavailable",
+    ]
+    release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_keyed_queued_penalty_flushes_on_cancel(monkeypatch):
+    """Cancel after a queued keyed mid-loop penalty must still flush health.
+
+    Regression for CodeRabbit on CLB-20260820-06: queuing into
+    ``pending_post_refresh_transient_penalties`` then cancelling before the
+    replacement settles must still settle/flush the deferred health write in
+    cleanup, not drop the penalty when releasing the reservation.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_cancel_penalty_a")
+    account_b = _make_account("acc_keyed_cancel_penalty_b")
+    settlement_order: list[str] = []
+    api_key = _make_api_key_data("key_keyed_cancel_penalty")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_cancel_penalty",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock(return_value=True)
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(
+        service,
+        "_stream_once",
+        AsyncMock(side_effect=AssertionError("stream must not start after cancel")),
+    )
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-cancel-penalty"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            pass
+
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:upstream_unavailable",
+    ]
+    release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settlement_confirmed", [True, False])
+async def test_stream_with_retry_cancel_cleanup_flushes_queued_health_after_backoff_failure(
+    monkeypatch,
+    settlement_confirmed: bool,
+):
+    """A failed deferred route backoff must not orphan queued stream health."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_cancel_backoff_a")
+    account_b = _make_account("acc_keyed_cancel_backoff_b")
+    account_c = _make_account("acc_keyed_cancel_backoff_c")
+    settlement_order: list[str] = []
+    cancel_wait_started = asyncio.Event()
+    api_key = _make_api_key_data("key_keyed_cancel_backoff")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_cancel_backoff",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def release_unsettled(**_kwargs: object) -> bool:
+        settlement_order.append("release")
+        return True
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert kwargs["wait_for_settlement"] is True
+        if settlement_confirmed:
+            stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return settlement_confirmed
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def record_error_backoff(account: Account) -> None:
+        assert account is account_b
+        settlement_order.append(f"backoff:{account.id}")
+        raise RuntimeError("route backoff persistence unavailable")
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        if account_b.id in excluded:
+            return AccountSelection(account=account_c, error_message=None)
+        if account_a.id in excluded:
+            return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        if account.id == account_c.id:
+            cancel_wait_started.set()
+            await asyncio.Event().wait()
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        assert account is account_b
+        raise _pre_dispatch_proxy_connect_error("replacement route unavailable")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(
+        service,
+        "_release_unsettled_stream_api_key_usage",
+        AsyncMock(side_effect=release_unsettled),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service._load_balancer, "record_error_backoff", AsyncMock(side_effect=record_error_backoff))
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    async def _consume() -> None:
+        async for _ in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-cancel-backoff"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            pass
+
+    consumer = asyncio.create_task(_consume())
+    await asyncio.wait_for(cancel_wait_started.wait(), timeout=1)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+    expected_order = ["settle"]
+    if not settlement_confirmed:
+        expected_order.append("release")
+    expected_order.extend(
+        [
+            f"backoff:{account_b.id}",
+            f"health:{account_a.id}:upstream_unavailable",
+        ]
+    )
+    assert settlement_order == expected_order
+    release_mock = cast(AsyncMock, service._release_unsettled_stream_api_key_usage)
+    if settlement_confirmed:
+        release_mock.assert_not_awaited()
+    else:
+        release_mock.assert_awaited_once()
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_cancelled_multi_penalty_flush_survives_backoff_retry_failure(
+    monkeypatch,
+):
+    """A retained backoff must not block detached flush of later penalties."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_multi_cancel_a")
+    account_b = _make_account("acc_keyed_multi_cancel_b")
+    account_c = _make_account("acc_keyed_multi_cancel_c")
+    account_d = _make_account("acc_keyed_multi_cancel_d")
+    settlement_order: list[str] = []
+    first_health_started = asyncio.Event()
+    release_first_health = asyncio.Event()
+    api_key = _make_api_key_data("key_keyed_multi_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_multi_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert kwargs["wait_for_settlement"] is True
+        stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        if account is account_a:
+            first_health_started.set()
+            await release_first_health.wait()
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def record_error_backoff(account: Account) -> None:
+        assert account is account_c
+        settlement_order.append(f"backoff:{account.id}")
+        raise RuntimeError("route backoff persistence unavailable")
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        if account_c.id in excluded:
+            return AccountSelection(account=account_d, error_message=None)
+        if account_b.id in excluded:
+            return AccountSelection(account=account_c, error_message=None)
+        if account_a.id in excluded:
+            return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account in {account_a, account_b}:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        if account is account_c:
+            raise _pre_dispatch_proxy_connect_error("third account route unavailable")
+        assert account is account_d
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_multi_cancel_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 4)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service._load_balancer, "record_error_backoff", AsyncMock(side_effect=record_error_backoff))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    async def _consume() -> None:
+        async for _ in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-multi-cancel"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            pass
+
+    consumer = asyncio.create_task(_consume())
+    await asyncio.wait_for(first_health_started.wait(), timeout=1)
+    consumer.cancel()
+    release_first_health.set()
+    with pytest.raises(RuntimeError, match="route backoff persistence unavailable"):
+        await consumer
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+
+    assert settlement_order == [
+        "settle",
+        f"backoff:{account_c.id}",
+        f"health:{account_a.id}:upstream_unavailable",
+        f"backoff:{account_c.id}",
+        f"health:{account_b.id}:upstream_unavailable",
+    ]
+    assert service._background_cleanup_tasks == set()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_keyed_cancel_during_deferred_health_flush_still_applies(
+    monkeypatch,
+):
+    """Cancel during post-settle deferred health flush must still apply the penalty.
+
+    Codex P1: settlement can commit (``usage_settlement_transferred``) before the
+    enclosing ``settled = await ...`` assignment completes. If cancel lands while
+    the flush awaits ``_handle_stream_error``, cleanup must still see settled and
+    finish the retained deferred penalty.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_flush_cancel_a")
+    account_b = _make_account("acc_keyed_flush_cancel_b")
+    settlement_order: list[str] = []
+    flush_started = asyncio.Event()
+    release_flush = asyncio.Event()
+    api_key = _make_api_key_data("key_keyed_flush_cancel")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_flush_cancel",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock(return_value=True)
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        flush_started.set()
+        await release_flush.wait()
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        assert account.id == account_b.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_flush_cancel_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    async def _consume() -> None:
+        async for _ in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-flush-cancel"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            pass
+
+    task = asyncio.create_task(_consume())
+    await asyncio.wait_for(flush_started.wait(), timeout=1)
+    assert settlement_order == ["settle"]
+    task.cancel()
+    await asyncio.sleep(0)
+    release_flush.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    if cleanup_tasks:
+        await asyncio.wait_for(asyncio.gather(*cleanup_tasks), timeout=1)
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:upstream_unavailable",
+    ]
+    release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_keyed_cancel_mid_deferred_health_flush_does_not_double_count(
+    monkeypatch,
+):
+    """Cancel mid deferred health flush must not replay the same penalty.
+
+    Codex P2 on PR #1861: CancelledError after in-memory health update (or
+    during ``record_errors``) used to leave the queue entry in place, so cancel
+    cleanup replayed the tuple and double-incremented ``error_count``.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_flush_idempotent_a")
+    account_b = _make_account("acc_keyed_flush_idempotent_b")
+    settlement_order: list[str] = []
+    health_apply_count = 0
+    extra_error_total = 0
+    flush_started = asyncio.Event()
+    release_flush = asyncio.Event()
+    api_key = _make_api_key_data("key_keyed_flush_idempotent")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_flush_idempotent",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock(return_value=True)
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        nonlocal health_apply_count
+        del error, http_status
+        # Simulate in-memory health mutation before awaited persistence.
+        health_apply_count += 1
+        flush_started.set()
+        await release_flush.wait()
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable"}
+
+    async def record_errors(account: Account, count: int) -> None:
+        nonlocal extra_error_total
+        assert account is account_a
+        extra_error_total += count
+        settlement_order.append(f"extra:{count}")
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        if account.id == account_a.id:
+            raise proxy_service._TransientStreamError(
+                "invalid_request_error",
+                cast(
+                    UpstreamError,
+                    {
+                        "message": "Selected model is at capacity. Please try a different model.",
+                        "code": "invalid_request_error",
+                    },
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_flush_idempotent_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock(side_effect=record_errors))
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    async def _consume() -> None:
+        async for _ in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-flush-idempotent"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            pass
+
+    task = asyncio.create_task(_consume())
+    await asyncio.wait_for(flush_started.wait(), timeout=1)
+    assert settlement_order == ["settle"]
+    assert health_apply_count == 1
+    task.cancel()
+    await asyncio.sleep(0)
+    release_flush.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cleanup_tasks = tuple(service._background_cleanup_tasks)
+    if cleanup_tasks:
+        await asyncio.wait_for(asyncio.gather(*cleanup_tasks), timeout=1)
+    assert health_apply_count == 1
+    assert extra_error_total == 2
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:invalid_request_error",
+        "extra:2",
+    ]
+    release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_route_keyed_refresh_connect_settles_before_account_health(
+    monkeypatch,
+):
+    """Product ``_stream_responses`` path must settle before keyed mid-loop health.
+
+    Codex P1: helper-only ``_stream_with_retry`` coverage is insufficient; cover the
+    streaming Responses route entry that owns reservation lifecycle + cancel cleanup.
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_route_keyed_refresh_a")
+    account_b = _make_account("acc_route_keyed_refresh_b")
+    stream_account_ids: list[str] = []
+    settlement_order: list[str] = []
+    api_key = _make_api_key_data("key_route_keyed_refresh")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_route_keyed_refresh",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock()
+
+    async def skip_limits(*_args: object, **_kwargs: object) -> proxy_service.ApiKeyUsageReservationData:
+        return reservation
+
+    async def no_rate_limit_headers(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_account_ids.append(account.id)
+        assert account.id == account_b.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_route_keyed_refresh_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", no_rate_limit_headers)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": "hello", "stream": True}
+    )
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=api_key,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+    assert "resp_route_keyed_refresh_ok" in body
+    assert stream_account_ids == [account_b.id]
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:upstream_unavailable",
+    ]
+    release_unsettled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_route_failed_ordered_settlement_retries_release(monkeypatch):
+    """Transferred settlement must retain retrying reservation ownership."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_route_failed_settlement_a")
+    account_b = _make_account("acc_route_failed_settlement_b")
+    api_key = _make_api_key_data("key_route_failed_settlement")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_route_failed_settlement",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_attempts: list[str] = []
+    handle_stream_error = AsyncMock()
+
+    class FakeApiKeysService:
+        def __init__(self, api_keys_repository: object) -> None:
+            del api_keys_repository
+
+        async def release_usage_reservation(self, reservation_id: str) -> None:
+            assert reservation_id == reservation.reservation_id
+            release_attempts.append(reservation_id)
+            if len(release_attempts) <= 2:
+                raise RuntimeError("reservation persistence unavailable")
+
+    async def skip_limits(*_args: object, **_kwargs: object) -> proxy_service.ApiKeyUsageReservationData:
+        return reservation
+
+    async def no_rate_limit_headers(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id == account_a.id:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        assert account.id == account_b.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_route_failed_settlement"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(proxy_api, "_enforce_request_limits", skip_limits)
+    monkeypatch.setattr(proxy_api, "_rate_limit_headers_for_request", no_rate_limit_headers)
+    monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+
+    request = Request({"type": "http", "method": "POST", "path": "/v1/responses", "headers": []})
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": "hello", "stream": True}
+    )
+    response = await proxy_api._stream_responses(
+        request,
+        payload,
+        context=cast(proxy_api.ProxyContext, SimpleNamespace(service=service)),
+        api_key=api_key,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = "".join(chunk.decode() if isinstance(chunk, bytes) else str(chunk) for chunk in chunks)
+    assert "resp_route_failed_settlement" in body
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    assert release_attempts == [reservation.reservation_id] * 3
+    handle_stream_error.assert_not_awaited()
+    service._load_balancer.record_success.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_keyed_penalty_flush_keeps_later_entries_after_failure(monkeypatch):
+    """A failed deferred health write must not discard later queued penalties."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_flush_keep_a")
+    account_b = _make_account("acc_keyed_flush_keep_b")
+    account_c = _make_account("acc_keyed_flush_keep_c")
+    health_accounts: list[str] = []
+    api_key = _make_api_key_data("key_keyed_flush_keep")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_flush_keep",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        del settled_api_key, settled_reservation
+        stream_settlement.usage_settlement_transferred = True
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, code, http_status
+        health_accounts.append(account.id)
+        if account.id == account_a.id:
+            raise RuntimeError("health write failed")
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        if account_b.id in excluded:
+            return AccountSelection(account=account_c, error_message=None)
+        if account_a.id in excluded:
+            return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id in {account_a.id, account_b.id}:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        assert account.id == account_c.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_flush_keep_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-flush-keep"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["response"]["id"] == "resp_keyed_flush_keep_ok"
+    assert health_accounts == [account_a.id, account_b.id]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_cancel_safe_health_flush_is_drained_at_shutdown(monkeypatch):
+    """Shutdown drain must await a cancel-safe flush of later queued health."""
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_shutdown_flush_a")
+    account_b = _make_account("acc_keyed_shutdown_flush_b")
+    account_c = _make_account("acc_keyed_shutdown_flush_c")
+    health_accounts: list[str] = []
+    first_flush_started = asyncio.Event()
+    release_first_flush = asyncio.Event()
+    second_flush_started = asyncio.Event()
+    release_second_flush = asyncio.Event()
+    api_key = _make_api_key_data("key_keyed_shutdown_flush")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_shutdown_flush",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        stream_settlement.usage_settlement_transferred = True
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, code, http_status
+        if account.id == account_a.id:
+            first_flush_started.set()
+            await release_first_flush.wait()
+        else:
+            assert account.id == account_b.id
+            second_flush_started.set()
+            await release_second_flush.wait()
+        health_accounts.append(account.id)
+        return {"failure_class": "retryable_transient"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        if account_b.id in excluded:
+            return AccountSelection(account=account_c, error_message=None)
+        if account_a.id in excluded:
+            return AccountSelection(account=account_b, error_message=None)
+        return AccountSelection(account=account_a, error_message=None)
+
+    async def ensure_fresh(account: Account, **kwargs: object) -> Account:
+        del kwargs
+        if account.id in {account_a.id, account_b.id}:
+            raise aiohttp.ClientError("connection reset")
+        return account
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        assert account.id == account_c.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_shutdown_flush_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 3)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=ensure_fresh))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    async def _consume() -> None:
+        async for _ in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-shutdown-flush"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        ):
+            pass
+
+    consumer = asyncio.create_task(_consume())
+    await asyncio.wait_for(first_flush_started.wait(), timeout=1)
+    consumer.cancel()
+    release_first_flush.set()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    await asyncio.wait_for(second_flush_started.wait(), timeout=1)
+    drain = asyncio.create_task(service.drain_persistence_tasks(timeout_seconds=1))
+    await asyncio.sleep(0)
+    assert not drain.done()
+
+    release_second_flush.set()
+    assert await asyncio.wait_for(drain, timeout=1) is True
+    assert health_accounts == [account_a.id, account_b.id]
+
+
+@pytest.mark.asyncio
+async def test_stream_with_retry_keyed_transient_exhaustion_settles_before_account_health(
+    monkeypatch,
+):
+    """Keyed same-account transient exhaustion must settle before health writes.
+
+    Regression for CLB-20260820-01 / CLB-20260820-06: exhausting
+    ``_TransientStreamError`` retries used to call ``_handle_stream_error`` /
+    ``record_errors`` immediately, then ``break`` past the settle helper while
+    the shared reservation was still open. Completes the same deferral helper
+    used by other keyed mid-loop health sites (see open PR #1853).
+    """
+    settings = _make_proxy_settings()
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    account_a = _make_account("acc_keyed_transient_settle_a")
+    account_b = _make_account("acc_keyed_transient_settle_b")
+    stream_account_ids: list[str] = []
+    settlement_order: list[str] = []
+    settlement_wait_flags: list[bool] = []
+    api_key = _make_api_key_data("key_keyed_transient_settle")
+    reservation = proxy_service.ApiKeyUsageReservationData(
+        reservation_id="resv_keyed_transient_settle",
+        key_id=api_key.id,
+        model="gpt-5.1",
+    )
+    release_unsettled = AsyncMock()
+    record_success = AsyncMock()
+
+    async def record_retry_errors(account: Account, count: int) -> None:
+        assert account is account_a
+        settlement_order.append(f"extra:{count}")
+
+    record_errors = AsyncMock(side_effect=record_retry_errors)
+
+    async def settle_usage(
+        settled_api_key: ApiKeyData | None,
+        settled_reservation: proxy_service.ApiKeyUsageReservationData | None,
+        stream_settlement: proxy_service._StreamSettlement,
+        *_args: object,
+        **_kwargs: object,
+    ) -> bool:
+        assert settled_api_key is api_key
+        assert settled_reservation is reservation
+        assert stream_account_ids[-1] == account_b.id
+        stream_settlement.usage_settlement_transferred = True
+        settlement_wait_flags.append(bool(_kwargs.get("wait_for_settlement")))
+        settlement_order.append("settle")
+        return True
+
+    async def handle_stream_error(
+        account: Account,
+        error: UpstreamError,
+        code: str,
+        http_status: int | None = None,
+    ) -> object:
+        del error, http_status
+        settlement_order.append(f"health:{account.id}:{code}")
+        return {"failure_class": "retryable"}
+
+    async def select_account(_deadline: float, **kwargs: object) -> AccountSelection:
+        excluded = set(cast(set[str], kwargs["exclude_account_ids"]))
+        account = account_b if account_a.id in excluded else account_a
+        return AccountSelection(account=account, error_message=None)
+
+    async def fake_stream_once(account: Account, *_args: object, **_kwargs: object):
+        stream_account_ids.append(account.id)
+        if account.id == account_a.id:
+            raise proxy_service._TransientStreamError(
+                "invalid_request_error",
+                cast(
+                    UpstreamError,
+                    {
+                        "message": "Selected model is at capacity. Please try a different model.",
+                        "code": "invalid_request_error",
+                    },
+                ),
+            )
+        yield 'data: {"type":"response.completed","response":{"id":"resp_keyed_transient_settle_ok"}}\n\n'
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_STREAM_MAX_ACCOUNT_ATTEMPTS", 2)
+    monkeypatch.setattr(proxy_service, "_MAX_TRANSIENT_SAME_ACCOUNT_RETRIES", 3)
+    monkeypatch.setattr(streaming_retry_module.ProcessNetworkRecovery, "wait", AsyncMock(return_value=None))
+    monkeypatch.setattr(streaming_retry_module.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(side_effect=handle_stream_error))
+    monkeypatch.setattr(service, "_settle_stream_api_key_usage", settle_usage)
+    monkeypatch.setattr(service, "_release_unsettled_stream_api_key_usage", release_unsettled)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+    monkeypatch.setattr(service._load_balancer, "record_errors", record_errors)
+    monkeypatch.setattr(service._load_balancer, "record_success", record_success)
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.6-sol", "instructions": "hi", "input": [], "stream": True}
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_with_retry(
+            payload,
+            {"session_id": "sid-keyed-transient-settle"},
+            codex_session_affinity=False,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=False,
+            request_transport="http",
+            upstream_stream_transport_override="http",
+        )
+    ]
+
+    terminal = json.loads(chunks[-1].split("data: ", 1)[1])
+    assert terminal["response"]["id"] == "resp_keyed_transient_settle_ok"
+    assert stream_account_ids == [account_a.id, account_a.id, account_a.id, account_b.id]
+    assert settlement_wait_flags == [True]
+    assert settlement_order == [
+        "settle",
+        f"health:{account_a.id}:invalid_request_error",
+        "extra:2",
+    ]
+    release_unsettled.assert_not_awaited()
+    record_errors.assert_awaited_once_with(account_a, 2)
+
+
+@pytest.mark.asyncio
 async def test_stream_with_retry_post_refresh_ambiguous_connect_exhaustion_counts_every_retry(monkeypatch):
     settings = _make_proxy_settings()
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -25532,6 +26769,9 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
                 await release_fallback.wait()
                 order.append("fallback_committed")
                 return
+            if release_calls > 2:
+                order.append("retry_committed")
+                return
             if release_calls == 1:
                 if cancel_during == "primary":
                     order.append("primary_started")
@@ -25648,20 +26888,21 @@ async def test_finalize_websocket_health_waits_for_confirmed_settlement_fallback
     assert health_writes_while_fallback_pending == 0
     assert reconnect_while_fallback_pending is True
     assert retire_while_fallback_pending is True
-    assert release_calls == (1 if cancel_during == "pre_start" else 2)
+    retry_release_expected = fallback_fails
+    assert release_calls == (1 if cancel_during == "pre_start" else 2 + int(retry_release_expected))
     assert upstream_control.reconnect_requested is True
     assert upstream_control.retire_after_drain is True
     if cancel_during == "pre_start":
         assert order == ["fallback_started", "fallback_committed"]
         handle_stream_error.assert_not_awaited()
     elif cancel_during == "primary":
-        assert order == ["primary_started", "fallback_started", "fallback_committed"]
-        handle_stream_error.assert_not_awaited()
+        assert order == ["primary_started", "fallback_started", "fallback_committed", "health"]
+        handle_stream_error.assert_awaited_once()
     elif cancel_during == "fallback":
-        assert order == ["primary_failed", "fallback_started", "fallback_committed"]
-        handle_stream_error.assert_not_awaited()
+        assert order == ["primary_failed", "fallback_started", "fallback_committed", "health"]
+        handle_stream_error.assert_awaited_once()
     elif fallback_fails:
-        assert order == ["primary_failed", "fallback_started", "fallback_failed"]
+        assert order == ["primary_failed", "fallback_started", "fallback_failed", "retry_committed"]
         handle_stream_error.assert_not_awaited()
     else:
         assert order == ["primary_failed", "fallback_started", "fallback_committed", "health"]
@@ -30219,11 +31460,15 @@ async def test_stream_api_key_settlement_wait_option_blocks_until_finalized(monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("release_fails", "expected_result"), [(False, True), (True, False)])
+@pytest.mark.parametrize(
+    ("fallback_release_fails", "expected_result", "expected_release_attempts"),
+    [(False, True, 1), (True, False, 2)],
+)
 async def test_stream_api_key_settlement_wait_option_reports_fallback_release_result(
     monkeypatch,
-    release_fails: bool,
+    fallback_release_fails: bool,
     expected_result: bool,
+    expected_release_attempts: int,
 ):
     released: list[str] = []
     repo = SimpleNamespace(api_keys=object())
@@ -30242,7 +31487,7 @@ async def test_stream_api_key_settlement_wait_option_reports_fallback_release_re
 
         async def release_usage_reservation(self, reservation_id: str) -> None:
             released.append(reservation_id)
-            if release_fails:
+            if fallback_release_fails and len(released) == 1:
                 raise RuntimeError("release unavailable")
 
     monkeypatch.setattr(proxy_service, "ApiKeysService", FakeApiKeysService)
@@ -30282,7 +31527,7 @@ async def test_stream_api_key_settlement_wait_option_reports_fallback_release_re
     )
     assert result is expected_result
     assert await service.drain_persistence_tasks(timeout_seconds=1)
-    assert released == ["resv_stream_wait_failure"]
+    assert released == ["resv_stream_wait_failure"] * expected_release_attempts
 
 
 @pytest.mark.asyncio

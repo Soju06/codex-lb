@@ -1,10 +1,11 @@
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useState } from "react";
 import { Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useLocation } from "react-router-dom";
 
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
+import { Button } from "@/components/ui/button";
 import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
@@ -46,6 +47,7 @@ export function SettingsPage() {
   const expandAdvanced = shouldExpandAdvancedSettings(location.search, location.hash);
   const advancedScrollToId = location.hash.replace(/^#/, "") || undefined;
   const { settingsQuery, updateSettingsMutation } = useSettings();
+  const [initialRetryError, setInitialRetryError] = useState<string | null>(null);
   const { accountsQuery } = useAccounts();
   const {
     upstreamProxyQuery,
@@ -67,8 +69,15 @@ export function SettingsPage() {
     addPoolMemberMutation.isPending ||
     testEndpointMutation.isPending;
   const controlsDisabled = busy || !canWrite;
+  const settingsLoadError = getErrorMessageOrNull(
+    settingsQuery.error,
+    t("settings.toasts.loadFailed"),
+  );
+  const displayedSettingsLoadError = settingsLoadError || initialRetryError;
+  // With no settings loaded the failed-load branch below owns this message, so
+  // the page-level alert would otherwise render it a second time.
   const error =
-    getErrorMessageOrNull(settingsQuery.error) ||
+    (settings ? settingsLoadError : null) ||
     getErrorMessageOrNull(upstreamProxyQuery.error) ||
     getErrorMessageOrNull(updateSettingsMutation.error) ||
     getErrorMessageOrNull(createEndpointMutation.error) ||
@@ -91,8 +100,30 @@ export function SettingsPage() {
         <p className="mt-1 text-sm text-muted-foreground">{t("settings.page.subtitle")}</p>
       </div>
 
-      {!settings ? (
+      {settingsQuery.isPending && !settings && initialRetryError === null ? (
         <SettingsSkeleton />
+      ) : !settings ? (
+        <div className="space-y-3 rounded-xl border bg-card p-4">
+          <div role="alert">
+            <AlertMessage variant="error">
+              {displayedSettingsLoadError || t("settings.toasts.loadFailed")}
+            </AlertMessage>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setInitialRetryError(displayedSettingsLoadError || t("settings.toasts.loadFailed"));
+              void settingsQuery.refetch().finally(() => {
+                setInitialRetryError(null);
+              });
+            }}
+            disabled={settingsQuery.isFetching || initialRetryError !== null}
+          >
+            {t("common.actions.retry")}
+          </Button>
+        </div>
       ) : (
         <>
           {error ? <AlertMessage variant="error">{error}</AlertMessage> : null}
@@ -166,10 +197,14 @@ export function SettingsPage() {
                   settings.limitWarmupIdleThresholdPercent,
                   settings.limitWarmupCooldownSeconds,
                   settings.limitWarmupStaggeredIdleEnabled,
-                  settings.proxyAccountResponseCreateLimit,
-                  settings.proxyAccountStreamLimit,
-                  settings.proxyAccountStreamRecoveryReserve,
-                  settings.proxyApiKeyFairShareCongestionThresholdPct,
+                   settings.proxyAccountResponseCreateLimit,
+                   settings.proxyAccountResponseCreateLimitOverride,
+                   settings.proxyAccountStreamLimit,
+                   settings.proxyAccountStreamLimitOverride,
+                   settings.proxyAccountStreamRecoveryReserve,
+                   settings.proxyAccountStreamRecoveryReserveOverride,
+                   settings.proxyApiKeyFairShareCongestionThresholdPct,
+                   settings.proxyApiKeyFairShareCongestionThresholdPctOverride,
                 ].join(":")}
                 settings={settings}
                 accounts={accountsQuery.data ?? []}

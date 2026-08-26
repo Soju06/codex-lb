@@ -16,6 +16,9 @@ from app.core.openai.models import CompactResponsePayload
 from app.core.utils.request_id import get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import (
+    API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET,
     ApiKeyData,
     ApiKeyInvalidError,
     ApiKeyRateLimitExceededError,
@@ -89,6 +92,26 @@ def _service_tier_from_response(
     if not isinstance(extra, Mapping):
         return None
     return _normalize_service_tier_value(extra.get("service_tier"))
+
+
+def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
+    if budget is None:
+        return 0.0
+    input_tokens = _bounded_lease_token_estimate(
+        budget.input_tokens,
+        default=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
+    )
+    output_tokens = _bounded_lease_token_estimate(
+        budget.output_tokens,
+        default=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
+    )
+    return float(input_tokens + output_tokens)
+
+
+def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
+    if value is None:
+        return default
+    return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
 class _ApiKeyUsageMixin:
@@ -413,16 +436,15 @@ class _ApiKeyUsageMixin:
                 ),
                 name=f"proxy-stream-api-key-fallback-{request_id}",
             )
-            cancellation_pending = False
             while not fallback_task.done():
                 try:
                     await asyncio.shield(fallback_task)
                 except asyncio.CancelledError:
-                    cancellation_pending = True
-            settled = fallback_task.result()
-            if cancellation_pending:
-                return False
-            return settled
+                    # Keep waiting for the owned fallback. Cancellation is not
+                    # a failed release; retry only when the fallback itself is
+                    # unconfirmed.
+                    continue
+            return fallback_task.result()
 
         async def _settle_once() -> bool:
             try:
@@ -446,8 +468,7 @@ class _ApiKeyUsageMixin:
                 return True
             except asyncio.CancelledError:
                 if wait_for_settlement:
-                    await _release_ordering_sensitive_fallback()
-                    return False
+                    return await _release_ordering_sensitive_fallback()
                 raise
             except Exception:
                 logger.warning(
@@ -478,7 +499,10 @@ class _ApiKeyUsageMixin:
             api_key=api_key,
             api_key_reservation=api_key_reservation,
             request_id=request_id,
-            release_on_failure=not wait_for_settlement,
+            # Ordering-sensitive settlement performs one immediate fallback,
+            # but the tracker must still own retrying release if both attempts
+            # fail after ownership has transferred from the request finalizer.
+            release_on_failure=True,
         )
         if wait_for_settlement:
             # Ordering-sensitive callers (websocket account-health paths) must

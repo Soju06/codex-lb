@@ -128,6 +128,17 @@ async def source_upstream() -> AsyncIterator[Callable[[_UpstreamHandler], Awaita
         await runner.cleanup()
 
 
+def _embedding_success_response(model: str) -> web.Response:
+    return web.json_response(
+        {
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+            "model": model,
+            "usage": {"prompt_tokens": 21, "total_tokens": 21},
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_source_audio_transcription_routes_multipart_and_settles_usage(
     async_client,
@@ -3331,25 +3342,82 @@ async def test_codex_responses_payload_restores_declared_minimal_effort(async_cl
 
 
 @pytest.mark.asyncio
+async def test_source_embeddings_routes_explicit_null_fields(async_client, source_upstream) -> None:
+    captured: dict[str, object] = {}
+    model = "explicit-null-embedder"
+
+    async def embed(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return _embedding_success_response(model)
+
+    base_url = await source_upstream(embed)
+    await _create_model_source(
+        async_client,
+        name="explicit-null-embedder",
+        model=model,
+        base_url=base_url,
+        supports_embeddings=True,
+    )
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        json={
+            "model": model,
+            "input": "hello",
+            "dimensions": None,
+            "user": None,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "model": model,
+        "input": "hello",
+        "dimensions": None,
+        "user": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_source_embeddings_omits_unsent_fields(async_client, source_upstream) -> None:
+    captured: dict[str, object] = {}
+    model = "omitted-fields-embedder"
+
+    async def embed(request: web.Request) -> web.Response:
+        captured.update(await request.json())
+        return _embedding_success_response(model)
+
+    base_url = await source_upstream(embed)
+    await _create_model_source(
+        async_client,
+        name="omitted-fields-embedder",
+        model=model,
+        base_url=base_url,
+        supports_embeddings=True,
+    )
+
+    response = await async_client.post(
+        "/v1/embeddings",
+        json={"model": model, "input": "hello"},
+    )
+
+    assert response.status_code == 200
+    assert captured == {"model": model, "input": "hello"}
+
+
+@pytest.mark.asyncio
 async def test_source_embeddings_routes_payload_and_settles_usage(async_client, source_upstream) -> None:
     await _enable_api_key_auth(async_client)
     captured: dict[str, object] = {}
+    model = "all-minilm:latest"
 
     async def embed(request: web.Request) -> web.Response:
         captured["path"] = request.path
         captured["authorization"] = request.headers.get("authorization")
         captured["payload"] = await request.json()
-        return web.json_response(
-            {
-                "object": "list",
-                "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
-                "model": "all-minilm:latest",
-                "usage": {"prompt_tokens": 21, "total_tokens": 21},
-            }
-        )
+        return _embedding_success_response(model)
 
     base_url = await source_upstream(embed)
-    model = "all-minilm:latest"
     source_id = await _create_model_source(
         async_client,
         name="embedder",
@@ -3370,11 +3438,18 @@ async def test_source_embeddings_routes_payload_and_settles_usage(async_client, 
     )
     assert created.status_code == 200
     key = created.json()["key"]
+    key_id = created.json()["id"]
 
     response = await async_client.post(
         "/v1/embeddings",
         headers={"Authorization": f"Bearer {key}"},
-        json={"model": model, "input": ["hello", "world"], "encoding_format": "float"},
+        json={
+            "model": model,
+            "input": ["hello", "world"],
+            "encoding_format": "float",
+            "dimensions": 384,
+            "user": "client-1",
+        },
     )
 
     assert response.status_code == 200
@@ -3388,9 +3463,19 @@ async def test_source_embeddings_routes_payload_and_settles_usage(async_client, 
         "model": model,
         "input": ["hello", "world"],
         "encoding_format": "float",
+        "dimensions": 384,
+        "user": "client-1",
     }
 
     async with SessionLocal() as session:
+        limits = await ApiKeysRepository(session).get_limits_by_key(key_id)
+        assert len(limits) == 1
+        assert limits[0].current_value == 21
+        reservations = await session.execute(
+            select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved")
+        )
+        assert reservations.scalars().all() == []
+
         result = await session.execute(select(RequestLog).where(RequestLog.model == model))
         log = result.scalar_one()
         assert log.account_id is None
@@ -3399,6 +3484,72 @@ async def test_source_embeddings_routes_payload_and_settles_usage(async_client, 
         assert log.input_tokens == 21
         assert log.output_tokens == 0
         assert log.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_source_embeddings_cancellation_releases_reservation(async_client, source_upstream) -> None:
+    await _enable_api_key_auth(async_client)
+    forward_started = asyncio.Event()
+    allow_upstream_finish = asyncio.Event()
+
+    async def embed(_request: web.Request) -> web.Response:
+        forward_started.set()
+        await allow_upstream_finish.wait()
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": [0.1]}],
+                "model": "cancelled-embedder",
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+            }
+        )
+
+    base_url = await source_upstream(embed)
+    model = "cancelled-embedder"
+    source_id = await _create_model_source(
+        async_client,
+        name="cancelled-embedder-source",
+        model=model,
+        base_url=base_url,
+        supports_embeddings=True,
+    )
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "cancelled-embeddings-key",
+            "assignedSourceIds": [source_id],
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+    request_task = asyncio.create_task(
+        async_client.post(
+            "/v1/embeddings",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"model": model, "input": "hello"},
+        )
+    )
+    await asyncio.wait_for(forward_started.wait(), timeout=1)
+
+    request_task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+    finally:
+        allow_upstream_finish.set()
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ApiKeyUsageReservation).where(
+                ApiKeyUsageReservation.api_key_id == key_id,
+                ApiKeyUsageReservation.model == model,
+            )
+        )
+        assert result.scalar_one().status == "released"
 
 
 @pytest.mark.asyncio

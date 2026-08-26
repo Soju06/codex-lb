@@ -765,6 +765,65 @@ async def test_terminal_operation_event_exposes_failure_after_spooling(
 
 
 @pytest.mark.asyncio
+async def test_failed_operation_rebind_rollback_restores_row_instead_of_deleting(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-rebind-rollback", session_key_value="sid-rebind-rollback")
+        fingerprint = durable_bridge_hash("rebind-rollback")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        operation = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-rebind-rollback",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert operation is not None
+        assert await repository.append_terminal_operation_event(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-rollback",
+            owner_epoch=claim.owner_epoch,
+            event_text='data: {"type":"response.failed"}\n\n',
+            max_bytes=1024,
+            state="failed",
+        )
+
+        rebound = await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-rollback",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-rebind-rollback",
+            model="gpt-5.6",
+            parent_response_id="resp-parent",
+        )
+        assert rebound is not None
+        assert rebound.created is False
+        assert rebound.rebound is True
+        assert await repository.rollback_operation_before_dispatch(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-rebind-rollback",
+            owner_epoch=claim.owner_epoch,
+            restore_rebound=True,
+        )
+        restored = await repository.get_operation(operation_id=operation_id)
+        assert restored is not None
+        assert restored.state == "failed"
+        assert restored.event_spool_complete is False
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_failure_exposes_state_when_spool_overflows(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

@@ -927,6 +927,274 @@ def test_external_database_url_is_rendered_into_chart_managed_secret_when_postgr
     assert 'database-url: "postgresql+asyncpg://user:pass@db.example.com:5432/codexlb"' in rendered
 
 
+def test_network_policy_uses_external_database_port() -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set",
+        "externalDatabase.host=db.example.test",
+        "--set",
+        "externalDatabase.user=codexlb",
+        "--set",
+        "externalDatabase.database=codexlb",
+        "--set",
+        "externalDatabase.port=6432",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == "postgresql+asyncpg://codexlb@db.example.test:6432/codexlb"
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 6432, "protocol": "TCP"}]}
+
+
+def test_network_policy_uses_port_from_external_database_url() -> None:
+    database_url = "postgresql+asyncpg://codexlb@db.example.test:6432/codexlb"
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == database_url
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 6432, "protocol": "TCP"}]}
+
+
+def test_network_policy_uses_default_port_for_external_database_url_without_port() -> None:
+    database_url = "postgresql+asyncpg://codexlb@db.example.test/codexlb"
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+        "--set",
+        "externalDatabase.port=6432",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == database_url
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 5432, "protocol": "TCP"}]}
+
+
+@pytest.mark.parametrize(
+    ("database_url", "expected_ports"),
+    [
+        ("postgresql+asyncpg://codexlb@db.example.test:5432/codexlb?port=6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=db.example.test:6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=db.example.test%3A6432", (6432,)),
+        ("postgresql+asyncpg://codexlb@db.example.test:06432/codexlb", (6432,)),
+        ("postgresql+asyncpg://codexlb@db.example.test/codexlb?port=%36%34%33%32", (6432,)),
+        ("postgresql+asyncpg://codexlb@/codexlb?host=2001:db8::1", (5432,)),
+        (
+            "postgresql+asyncpg://codexlb@/codexlb?host=db1.example.test:6432&host=db2.example.test:7432",
+            (6432, 7432),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=2001:db8::a",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?port=7432&port=",
+            (7432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test:7432&host=",
+            (7432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:5432/codexlb?port=%096432%09",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:5432/codexlb?port=6_432",
+            (6432,),
+        ),
+        (
+            "postgresql+asyncpg://codexlb@primary.example.test:6432/codexlb?host=failover.example.test:%2D1",
+            (6432,),
+        ),
+    ],
+    ids=[
+        "query-port-override",
+        "query-host-port",
+        "encoded-query-host-port",
+        "leading-zero-port",
+        "encoded-query-port",
+        "portless-ipv6-query-host",
+        "multihost-query-ports",
+        "query-host-inherits-authority-port",
+        "portless-ipv6-query-host-inherits-authority-port",
+        "blank-query-port-is-ignored",
+        "blank-query-host-is-ignored",
+        "encoded-query-port-whitespace",
+        "underscored-query-port",
+        "signed-query-host-suffix-is-not-a-port",
+    ],
+)
+def test_network_policy_uses_effective_port_from_external_database_url(
+    database_url: str,
+    expected_ports: tuple[int, ...],
+) -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == database_url
+    assert network_policy["spec"]["egress"][1] == {
+        "ports": [{"port": port, "protocol": "TCP"} for port in expected_ports]
+    }
+
+
+@pytest.mark.parametrize(
+    "source_args",
+    [
+        ("--set", "externalDatabase.existingSecret=external-db-secret"),
+        ("--set", "auth.existingSecret=app-secret"),
+        (
+            "--set",
+            "externalSecrets.enabled=true",
+            "--set",
+            "externalSecrets.secretStoreRef.name=test-store",
+        ),
+    ],
+    ids=["external-database-secret", "auth-secret", "external-secrets"],
+)
+def test_network_policy_ignores_inactive_external_database_url(source_args: tuple[str, ...]) -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        "externalDatabase.url=postgresql+asyncpg://codexlb@stale.example.test:5432/codexlb",
+        "--set",
+        "externalDatabase.port=6432",
+        *source_args,
+    )
+
+    documents = _helm_documents(rendered)
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 6432, "protocol": "TCP"}]}
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+asyncpg://codexlb@db.example.test:0/codexlb",
+        "postgresql+asyncpg://codexlb@db.example.test:65536/codexlb",
+        "postgresql+asyncpg://codexlb@db.example.test/codexlb?port=-1",
+    ],
+    ids=["zero", "above-maximum", "negative-query-port"],
+)
+def test_network_policy_rejects_invalid_external_database_url_port(database_url: str) -> None:
+    failure = _helm_template_failure(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set-string",
+        f"externalDatabase.url={database_url}",
+    )
+
+    assert "externalDatabase.url port must be between 1 and 65535" in failure.stderr
+
+
+def test_network_policy_uses_default_external_database_port() -> None:
+    rendered = _helm_template(
+        "--set",
+        "postgresql.enabled=false",
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set",
+        "externalDatabase.host=db.example.test",
+        "--set",
+        "externalDatabase.user=codexlb",
+        "--set",
+        "externalDatabase.database=codexlb",
+    )
+
+    documents = _helm_documents(rendered)
+    (secret,) = [document for document in documents if document.get("kind") == "Secret"]
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert secret["stringData"]["database-url"] == "postgresql+asyncpg://codexlb@db.example.test:5432/codexlb"
+    assert network_policy["spec"]["egress"][1] == {"ports": [{"port": 5432, "protocol": "TCP"}]}
+
+
+def test_network_policy_keeps_bundled_postgresql_egress() -> None:
+    rendered = _helm_template(
+        "--set",
+        "networkPolicy.enabled=true",
+    )
+
+    documents = _helm_documents(rendered)
+    (network_policy,) = [
+        document
+        for document in documents
+        if document.get("kind") == "NetworkPolicy" and document["metadata"]["name"] == "codex-lb"
+    ]
+    assert network_policy["spec"]["egress"][1] == {
+        "to": [
+            {
+                "podSelector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "postgresql",
+                        "app.kubernetes.io/instance": "codex-lb",
+                    }
+                }
+            }
+        ],
+        "ports": [{"port": 5432, "protocol": "TCP"}],
+    }
+
+
 def test_network_policy_does_not_allow_http_ingress_from_all_namespaces_by_default() -> None:
     rendered = _helm_template(
         "-f",

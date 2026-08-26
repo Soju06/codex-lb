@@ -8,7 +8,8 @@ operation MAY transition to the terminal `abandoned` state only after its
 `updated_at` is older than `max(1800 seconds,
 http_responses_session_bridge_request_budget_seconds)`, no local canonical or
 detached bridge request is pending for that operation, and the durable owning
-session has no owner or an expired owner lease.
+session has no owner or an owner lease that has remained expired for at least
+one additional durable lease period.
 
 The transition MUST atomically compare the operation state, `updated_at`,
 durable event-spool progress, session owner instance, and owner epoch. A
@@ -60,6 +61,15 @@ be starved by a protected prefix.
 - **AND** its durable session has an unexpired owner lease
 - **WHEN** the bridge maintenance sweep runs
 - **THEN** the operation remains `unknown` or `acknowledged`
+
+#### Scenario: a brief owner-renewal lapse is not abandoned
+
+- **GIVEN** an ambiguous operation is older than the inactivity cutoff
+- **AND** its durable session owner lease expired less than one durable lease
+  period ago
+- **WHEN** another replica runs the bridge maintenance sweep
+- **THEN** the operation remains `unknown` or `acknowledged`
+- **AND** the original owner may still renew or finalize it
 
 #### Scenario: pending local work is not abandoned
 

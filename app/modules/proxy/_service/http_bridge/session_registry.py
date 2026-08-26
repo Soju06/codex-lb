@@ -104,7 +104,9 @@ class _HTTPBridgeSessionRegistryMixin:
         """
         settings = _service_get_settings()
         inactivity_seconds = max(30.0 * 60.0, _http_bridge_request_budget_seconds(settings))
-        cutoff = utcnow() - timedelta(seconds=inactivity_seconds)
+        maintenance_now = utcnow()
+        cutoff = maintenance_now - timedelta(seconds=inactivity_seconds)
+        lease_expired_before = maintenance_now - timedelta(seconds=_http_bridge_durable_lease_ttl_seconds())
         protected_operation_ids: set[str] = set()
         async with self._http_bridge_lock:
             local_sessions = [
@@ -136,6 +138,7 @@ class _HTTPBridgeSessionRegistryMixin:
         try:
             abandonments = await abandon_stale_operations(
                 cutoff=cutoff,
+                lease_expired_before=lease_expired_before,
                 protected_operation_ids=protected_operation_ids,
             )
         except Exception:
@@ -149,6 +152,7 @@ class _HTTPBridgeSessionRegistryMixin:
                 "Abandoned stale HTTP bridge operation",
                 extra={
                     "source_state": source_state,
+                    "reason": "stale_owner",
                     "age_seconds": round(float(abandonment.age_seconds), 3),
                     "owner_lease_outcome": abandonment.owner_lease_outcome,
                     "session_hash": abandonment.session_hash,

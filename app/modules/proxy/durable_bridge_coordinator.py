@@ -557,12 +557,14 @@ class DurableBridgeSessionCoordinator:
         self,
         *,
         cutoff: datetime,
+        lease_expired_before: datetime,
         protected_operation_ids: Collection[str] = (),
         batch_size: int = 500,
     ) -> list[DurableBridgeOperationAbandonment]:
         async with self._session() as session:
             sweep = await DurableBridgeRepository(session).abandon_stale_operations(
                 cutoff=cutoff,
+                lease_expired_before=lease_expired_before,
                 protected_operation_ids=protected_operation_ids,
                 batch_size=batch_size,
                 scan_cursor=self._operation_abandonment_scan_cursor,

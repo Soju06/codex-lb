@@ -18,6 +18,8 @@
       oversized protection snapshots without truncating them.
 - [x] 2.6 Bound each oversized-protection scan slice and resume from a
       coordinator-owned keyset cursor across heartbeats.
+- [x] 2.7 Add one durable lease period of cross-replica grace before an owned
+      operation becomes eligible, and emit the specified abandonment reason.
 
 ## 3. Verification
 
@@ -33,3 +35,4 @@
       unrelated stale operations.
 - [x] 3.6 Cover a protected prefix larger than the scan budget and prove that a
       later sweep resumes and cleans up a later unprotected operation.
+- [x] 3.7 Cover the lease-expiry grace and the structured abandonment reason.

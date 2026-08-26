@@ -703,8 +703,8 @@ async def test_stream_http_500_exhausts_then_failover(async_client, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_client, monkeypatch):
-    """Connect-phase 429/usage_limit_reached on A should fail over to B before any downstream event."""
+async def test_stream_inline_image_429_reallocates_prompt_cache_affinity(async_client, monkeypatch):
+    """A pre-visible image 429 must not keep its soft cache affinity on the failed account."""
     await _import_account(async_client, "acc_stream_429_a", "stream429a@example.com")
     await _import_account(async_client, "acc_stream_429_b", "stream429b@example.com")
 
@@ -722,7 +722,23 @@ async def test_stream_connect_phase_429_usage_limit_transparent_failover(async_c
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    payload = {
+        "model": "gpt-5.6-sol",
+        "instructions": "describe the image",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,iVBORw0KGgo=",
+                    }
+                ],
+            }
+        ],
+        "prompt_cache_key": "inline-image-rate-limit-retry",
+        "stream": True,
+    }
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]

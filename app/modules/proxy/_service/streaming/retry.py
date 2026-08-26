@@ -2364,6 +2364,7 @@ class _StreamingRetryMixin:
                                         account_id=account.id,
                                         outcome="owner_previsible_failure",
                                     )
+                                    affinity = replace(affinity, reallocate_sticky=True)
                                     break
                                 await proxy._handle_stream_error(
                                     account,

@@ -33,6 +33,17 @@ requests with synthetic terminal events and returns before that path, MUST
 record one failure for each grouped request that observed no response event,
 under the same ordering rule.
 
+When such a strike opens the circuit on a poison-class detail, the proxy MUST
+also clear the stored durable continuity anchor for that key. The quarantine
+armed with the strike only suppresses injection in this process and expires,
+so without the durable clear the same dead anchor is restored on the next
+reattach and re-poisons the key after every cooldown. This clear is gated on
+the circuit's own failure threshold rather than the configurable anchor-poison
+threshold: the configurable threshold governs the retirement and close funnels,
+where no circuit gates first, and is unreachable on this path by construction.
+Unlike the strike, the durable clear MUST NOT precede the terminal frame; a
+resend arriving in that window is already covered by the quarantine.
+
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
 using exponential backoff from sixty seconds up to ten minutes. Clean-close
@@ -120,6 +131,13 @@ and durable circuit state.
 - **WHEN** upstream reports `previous_response_not_found` and the grouped settlement fails them all with synthetic terminal events
 - **THEN** each grouped request that observed no response event records one attempt-scoped strike
 - **AND** the strikes are recorded before the grouped terminal events are persisted or delivered
+
+#### Scenario: a terminal poison strike clears the durable anchor
+
+- **GIVEN** a hard-affinity bridge key whose stored anchor upstream has rejected
+- **WHEN** a terminal failure frame opens the retry circuit on a poison-class detail
+- **THEN** the durable continuity anchor for that key is cleared with its alias rows
+- **AND** the clear runs after the terminal frame reaches the client, not before it
 
 #### Scenario: midstream retirement does not consume a pre-response strike
 

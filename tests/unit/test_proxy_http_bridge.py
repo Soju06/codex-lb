@@ -32164,3 +32164,96 @@ async def test_merged_poison_opening_quarantines_even_with_no_cooldown_left() ->
         http_bridge_retry_circuit_module._HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS,
         abs=1.0,
     ), "with no cooldown left the quarantine must still cover the half-open lease"
+
+
+@pytest.mark.asyncio
+async def test_terminal_poison_strike_clears_the_durable_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The strike opens the circuit, but only the retirement and close funnels
+    # ever reached the poison clear. A terminal frame settles through neither,
+    # so the dead anchor survived every cooldown and re-poisoned the key on the
+    # next reattach; quarantine only masked it until the entry expired.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-terminal-anchor-clear",
+        key_value="sid-terminal-anchor-clear",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-anchor-clear"
+    session.durable_owner_epoch = 1
+    rebind = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=rebind,
+    )
+    service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    assert rebind.await_count == 0, "one eventless failure has not opened the circuit yet"
+
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    second = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-anchor-clear-2",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=2.0,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    second.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    session.pending_requests.append(second)
+    session.queued_request_count = 1
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    rebind.assert_awaited_once()
+    assert rebind.await_args is not None
+    assert rebind.await_args.kwargs["clear_continuity"] is True, (
+        "the poisoned durable anchor must actually be cleared, not merely rebound"
+    )
+    assert rebind.await_args.kwargs["session_id"] == "durable-anchor-clear"
+
+
+@pytest.mark.asyncio
+async def test_terminal_anchor_clear_runs_after_the_terminal_frame_is_published(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The strike must precede publication so a resend cannot outrun the cooldown
+    # and quarantine. The durable clear must NOT: a resend in that window is
+    # already covered by the quarantine armed with the strike, and this instance
+    # has observed fenced writes holding the SQLite writer for 35-44s. Putting
+    # that in front of the client's own failure frame would stall the client.
+    service, session, request_state = _make_terminal_error_bridge_fixture(
+        request_id="req-terminal-clear-order",
+        key_value="sid-terminal-clear-order",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-clear-order"
+    session.durable_owner_epoch = 1
+    event_queue = request_state.event_queue
+    assert event_queue is not None
+    depths: dict[str, int] = {}
+
+    async def _record(*_args: Any, **_kwargs: Any) -> int:
+        depths["strike"] = event_queue.qsize()
+        return 99
+
+    async def _rebind(*_args: Any, **_kwargs: Any) -> bool:
+        depths["clear"] = event_queue.qsize()
+        return True
+
+    monkeypatch.setattr(service, "_record_http_bridge_retry_circuit_failure", _record)
+    service._durable_bridge = SimpleNamespace(rebind_session_account=_rebind)
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    assert depths.get("strike") == 0, "the strike must land before anything reaches the client"
+    assert depths.get("clear", 0) > 0, "the durable clear must land after the terminal frame is published"

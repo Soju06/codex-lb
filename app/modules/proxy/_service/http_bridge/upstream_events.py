@@ -76,6 +76,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _record_http_bridge_quarantine_wedged_pending,
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD,
     _http_bridge_anchor_poison_detail,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -2980,6 +2981,8 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if retried:
                         return
 
+        terminal_strike_failures: int | None = None
+        terminal_poison_detail: str | None = None
         if settlement_event_type in {"response.failed", "response.incomplete", "error"}:
             error_code = None
             if settlement_event_type == "error":
@@ -3017,12 +3020,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # quarantine have to already be visible to that resend rather
                 # than still awaiting durable I/O. Recovery paths that retry
                 # this request in place have all declined by here.
-                await self._record_http_bridge_retry_circuit_failure(
+                terminal_strike_failures = await self._record_http_bridge_retry_circuit_failure(
                     session,
                     detail=error_code,
                     attempt=terminal_request_state.response_create_attempt,
                     terminal_pre_response_frame=True,
                 )
+                terminal_poison_detail = _http_bridge_anchor_poison_detail(error_code)
 
         matched_event_queue = (
             completed_event_queue
@@ -3121,6 +3125,40 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # returns. A concurrent timeout may still be finishing
                     # awaited recovery work before it rechecks this scope.
                     completed_delivery_scope.terminal_enqueued = True
+
+        if (
+            terminal_poison_detail is not None
+            and terminal_strike_failures is not None
+            and terminal_strike_failures >= _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD
+        ):
+            # The strike above opens the circuit, but the durable anchor that
+            # failed is still stored. Only the retirement and close funnels ever
+            # reached the poison clear, and a terminal frame settles through
+            # neither, so the dead anchor survived every cooldown and re-poisoned
+            # the key on the next reattach. Quarantine suppresses the injection
+            # in the meantime, but it is process-local and expires; the durable
+            # row has to be cleared for the recovery to hold.
+            #
+            # This gates on the circuit's own threshold rather than the
+            # configurable anchor-poison threshold, and fires with the same
+            # evidence that already quarantines the key: one decision, the
+            # in-memory half suppressing the next injection and the durable half
+            # clearing the stored anchor. The configurable threshold governs the
+            # retirement and close funnels, where no circuit gates first. Here it
+            # is unreachable by construction, which is issue #1830/#1852 itself:
+            # the circuit opens at two failures and then refuses the key for
+            # 60-600s per strike, so its default of seven is tens of minutes of
+            # dead conversation away.
+            #
+            # Unlike the strike, this runs after the terminal frame is published.
+            # A resend arriving in between is already covered by the quarantine
+            # armed with the strike, so there is no reason to put a fenced
+            # durable write in front of the client's own failure.
+            await _abandon_durable_http_bridge_continuity(
+                self,
+                session,
+                detail=terminal_poison_detail,
+            )
 
         try:
             await self._finalize_websocket_request_state(

@@ -33,6 +33,12 @@
       applied per call (`minimum_seconds`); the shared default TTL is
       unchanged, so quarantines armed for other reasons keep their window
 
+- [x] 1.8 Clear the durable continuity anchor when a terminal-frame strike opens
+      the circuit on a poison-class detail. The strike alone only opened the
+      circuit; the stored anchor survived every cooldown because neither poison
+      clear sits on the terminal path, so quarantine masked the wedge until its
+      entry expired and the same dead anchor came back
+
 ## 2. Regression coverage
 
 - [x] 2.1 Two `stream_incomplete` failures quarantine the key with the
@@ -53,6 +59,10 @@
       queue is still empty, and the terminal frame is published afterwards;
       a grouped multi-request continuity failure records one strike per
       eventless grouped request
+- [x] 2.8 A terminal poison strike clears the durable anchor with
+      `clear_continuity=True`, and does so after the terminal frame is published
+      rather than in front of it
+
 - [x] 2.7 A durable merge that raises this worker to the threshold quarantines
       the key, including when the merged cooldown has already elapsed (that key
       is at its threshold with no cooldown left, so the next request is the

@@ -222,6 +222,7 @@ async def _proxy_repo_context() -> AsyncIterator[ProxyRepositories]:
             additional_usage=AdditionalUsageRepository(session),
             quota_planner=QuotaPlannerRepository(session),
             capability_lineage=CapabilityLineageRepository(session),
+            session=session,
         )
 
 

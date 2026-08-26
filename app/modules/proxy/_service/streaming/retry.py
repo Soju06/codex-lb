@@ -108,6 +108,7 @@ async def _await_task_deferring_cancellation(
                 if task.cancelled():
                     raise
                 cancellation = cancellation or exc
+    raise RuntimeError("unreachable shielded cancellation-deferral state")
 
 
 def _facade() -> Any:

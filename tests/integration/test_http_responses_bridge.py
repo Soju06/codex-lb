@@ -5214,6 +5214,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_injects_interrupted_custom_tool_output_on_followup(
     async_client,
+    app_instance,
     monkeypatch,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
@@ -5223,7 +5224,7 @@ async def test_v1_responses_http_bridge_injects_interrupted_custom_tool_output_o
         "http-bridge-custom-interrupt@example.com",
     )
     account = await _get_account(account_id)
-    fake_upstream = _InterruptedCustomToolUpstreamWebSocket()
+    fake_upstream = _InterruptedCustomToolUpstreamWebSocket(emit_added=True)
 
     async def fake_select_account_with_budget(
         self,
@@ -5303,6 +5304,18 @@ async def test_v1_responses_http_bridge_injects_interrupted_custom_tool_output_o
     assert first.status_code == 200
     first_body = first.json()
     assert first_body["id"] == "resp_bridge_custom_1"
+
+    service = get_proxy_service_for_app(app_instance)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    async with SessionLocal() as session:
+        request_logs = list(
+            (
+                await session.execute(
+                    select(RequestLog).where(RequestLog.account_id == account_id).order_by(RequestLog.requested_at)
+                )
+            ).scalars()
+        )
+    assert any(log.latency_first_token_ms is not None for log in request_logs)
 
     second = await async_client.post(
         "/v1/responses",

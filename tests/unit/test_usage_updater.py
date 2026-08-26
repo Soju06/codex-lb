@@ -6,7 +6,7 @@ from collections.abc import Collection
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -239,6 +239,8 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     account = _make_account("acc_owned_session", "workspace_owned")
+    stored_account = _make_account("acc_owned_session", "workspace_owned")
+    stored_account.status = AccountStatus.PAUSED
     refresh_started = asyncio.Event()
     allow_refresh_finish = asyncio.Event()
     non_owned_started = asyncio.Event()
@@ -283,26 +285,25 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
             return []
 
     class InnerUsageRepository(OuterUsageRepository):
-        def __init__(self, session) -> None:
-            self.session = session
+        pass
 
     class InnerAdditionalUsageRepository:
-        def __init__(self, session) -> None:
-            self.session = session
-
-    class InnerAccountsRepository:
-        def __init__(self, session) -> None:
-            self.session = session
-
-        async def get_by_id(self, account_id: str):
-            return account if account_id == account.id else None
+        pass
 
     @asynccontextmanager
-    async def recording_background_session():
+    async def owned_session_scope():
         try:
-            yield object()
+            yield
         finally:
             inner_session_closed.set()
+
+    class InnerAccountsRepository:
+        async def get_by_id(self, account_id: str):
+            async with owned_session_scope():
+                return account if account_id == account.id else None
+
+        async def get_by_id_fresh(self, account_id: str):
+            return stored_account if account_id == account.id else None
 
     async def fake_refresh_account_if_stale(
         self,
@@ -316,10 +317,9 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
         session_was_open_during_refresh.append(not inner_session_closed.is_set())
         return usage_updater_module.AccountRefreshResult(usage_written=True)
 
-    monkeypatch.setattr(usage_updater_module, "get_background_session", recording_background_session)
-    monkeypatch.setattr(usage_updater_module, "SessionAccountsRepository", InnerAccountsRepository)
-    monkeypatch.setattr(usage_updater_module, "SessionUsageRepository", InnerUsageRepository)
-    monkeypatch.setattr(usage_updater_module, "AdditionalUsageRepository", InnerAdditionalUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAccountsRepository", InnerAccountsRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundUsageRepository", InnerUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", InnerAdditionalUsageRepository)
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fake_refresh_account_if_stale)
     monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
 
@@ -348,6 +348,7 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
             [account],
             {},
             own_singleflight_sessions=True,
+            join_existing=True,
         )
     )
     await asyncio.wait_for(refresh_started.wait(), timeout=1)
@@ -357,13 +358,92 @@ async def test_refresh_accounts_owned_singleflight_session_outlives_caller_cance
         await task
     await asyncio.sleep(0)
 
-    assert not inner_session_closed.is_set()
+    assert inner_session_closed.is_set()
     allow_refresh_finish.set()
-    await asyncio.wait_for(inner_session_closed.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert session_was_open_during_refresh == [False]
     allow_non_owned_finish.set()
     await non_owned_task
     await prefixed_non_owned_task
-    assert session_was_open_during_refresh == [True]
+    assert session_was_open_during_refresh == [False]
+
+
+@pytest.mark.parametrize(
+    ("join_existing", "expected_calls"),
+    [(True, 1), (False, 2)],
+)
+@pytest.mark.asyncio
+async def test_refresh_accounts_owned_session_join_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    join_existing: bool,
+    expected_calls: int,
+) -> None:
+    account = _make_account("acc_owned_join_policy", "workspace_owned_join_policy")
+    stored_account = _make_account("acc_owned_join_policy", "workspace_owned_join_policy")
+    stored_account.status = AccountStatus.PAUSED
+    started = asyncio.Event()
+    release = asyncio.Event()
+    refresh_calls = 0
+
+    @dataclass(frozen=True, slots=True)
+    class Settings:
+        usage_refresh_enabled: bool = True
+        usage_refresh_interval_seconds: int = 0
+        usage_refresh_auth_failure_cooldown_seconds: int = 0
+
+    class AccountsRepo:
+        async def get_by_id(self, account_id: str):
+            return account if account_id == account.id else None
+
+        async def get_by_id_fresh(self, account_id: str):
+            return stored_account if account_id == account.id else None
+
+    async def fake_owned_refresh(
+        self: UsageUpdater,
+        account_id: str,
+        *,
+        interval_seconds: int,
+    ) -> usage_updater_module.AccountRefreshResult:
+        nonlocal refresh_calls
+        assert self is not None
+        assert account_id == account.id
+        assert interval_seconds == 0
+        refresh_calls += 1
+        started.set()
+        await release.wait()
+        return usage_updater_module.AccountRefreshResult(usage_written=False)
+
+    monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
+    monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale_with_owned_session", fake_owned_refresh)
+
+    updater = UsageUpdater(
+        StubUsageRepository(),
+        cast(usage_updater_module.AccountsRepositoryPort, AccountsRepo()),
+    )
+    first = asyncio.create_task(
+        updater.refresh_accounts(
+            [account],
+            {},
+            own_singleflight_sessions=True,
+            join_existing=join_existing,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    second = asyncio.create_task(
+        updater.refresh_accounts(
+            [account],
+            {},
+            own_singleflight_sessions=True,
+            join_existing=join_existing,
+        )
+    )
+
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert refresh_calls == expected_calls
+    if join_existing:
+        assert account.status == AccountStatus.PAUSED
 
 
 @pytest.mark.asyncio
@@ -410,23 +490,17 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
             return []
 
     class InnerUsageRepository(OuterUsageRepository):
-        def __init__(self, session) -> None:
-            self.session = session
+        pass
 
     class InnerAdditionalUsageRepository:
-        def __init__(self, session) -> None:
-            self.session = session
+        pass
 
     class InnerAccountsRepository:
-        def __init__(self, session) -> None:
-            self.session = session
-
         async def get_by_id(self, account_id: str):
             return account if account_id == account.id else None
 
-    @asynccontextmanager
-    async def background_session():
-        yield object()
+        async def get_by_id_fresh(self, account_id: str):
+            return account if account_id == account.id else None
 
     async def fail_if_refreshed(
         self,
@@ -439,10 +513,9 @@ async def test_owned_singleflight_reload_skips_account_that_became_ineligible(
         refresh_called = True
         return usage_updater_module.AccountRefreshResult(usage_written=True)
 
-    monkeypatch.setattr(usage_updater_module, "get_background_session", background_session)
-    monkeypatch.setattr(usage_updater_module, "SessionAccountsRepository", InnerAccountsRepository)
-    monkeypatch.setattr(usage_updater_module, "SessionUsageRepository", InnerUsageRepository)
-    monkeypatch.setattr(usage_updater_module, "AdditionalUsageRepository", InnerAdditionalUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAccountsRepository", InnerAccountsRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundUsageRepository", InnerUsageRepository)
+    monkeypatch.setattr(usage_updater_module, "BackgroundAdditionalUsageRepository", InnerAdditionalUsageRepository)
     monkeypatch.setattr(UsageUpdater, "_refresh_account_if_stale", fail_if_refreshed)
     monkeypatch.setattr(usage_updater_module, "get_settings", Settings)
 

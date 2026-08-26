@@ -56,7 +56,13 @@ _TTFT_EVENT_TYPES = frozenset(
         "response.reasoning_text.delta",
     }
 )
-_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset({"response.function_call_arguments.delta", "response.output_tool_call.delta"})
+_TTFT_TOOL_DELTA_EVENT_TYPES = frozenset(
+    {
+        "response.function_call_arguments.delta",
+        "response.output_tool_call.delta",
+        "response.custom_tool_call_input.delta",
+    }
+)
 _TTFT_REASONING_EVENT_TYPES = frozenset(
     {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}
 )
@@ -232,10 +238,16 @@ def _ttft_event_visible_at(
     if event_type in _TTFT_EVENT_TYPES:
         delta = payload.get("delta") if payload is not None else None
         return now if isinstance(delta, str) and bool(delta) else None
-    if event_type != "response.output_item.added" or not isinstance(payload, dict):
+    if event_type not in {"response.output_item.added", "response.output_item.done"} or not isinstance(payload, dict):
         return None
     item = payload.get("item")
-    return now if isinstance(item, dict) and item.get("type") in _TTFT_OUTPUT_ITEM_TYPES else None
+    if not isinstance(item, dict) or item.get("type") not in _TTFT_OUTPUT_ITEM_TYPES:
+        return None
+    if item.get("type") == "custom_tool_call":
+        meaningful = any(isinstance(item.get(key), str) and bool(item[key]) for key in ("input", "arguments"))
+    else:
+        meaningful = any(item.get(key) not in (None, "", {}) for key in ("operation", "patch", "input"))
+    return now if meaningful else None
 
 
 def _is_ttft_event(

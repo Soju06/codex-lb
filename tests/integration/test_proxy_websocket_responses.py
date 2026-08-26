@@ -2271,10 +2271,22 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
 
 
 @pytest.mark.parametrize(
-    ("output_event_type", "output_event_fields"),
+    ("output_event_type", "output_event_fields", "followup_events"),
     [
-        ("response.output_text.delta", {"delta": "hello"}),
-        ("response.function_call_arguments.delta", {"delta": "hello"}),
+        ("response.output_text.delta", {"delta": "hello"}, []),
+        ("response.function_call_arguments.delta", {"delta": "hello"}, []),
+        (
+            "response.output_item.added",
+            {
+                "item": {
+                    "type": "custom_tool_call",
+                    "call_id": "call_shell_1",
+                    "name": "shell",
+                    "input": "pwd",
+                }
+            },
+            [],
+        ),
         (
             "response.output_item.added",
             {
@@ -2285,11 +2297,28 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
                     "input": "",
                 }
             },
+            [
+                (
+                    "response.output_item.done",
+                    {
+                        "item": {
+                            "type": "custom_tool_call",
+                            "call_id": "call_shell_1",
+                            "name": "shell",
+                            "input": "pwd",
+                        }
+                    },
+                )
+            ],
         ),
     ],
 )
 def test_backend_responses_websocket_proxies_and_persists_conversation_id(
-    app_instance, monkeypatch, output_event_type: str, output_event_fields: dict[str, object]
+    app_instance,
+    monkeypatch,
+    output_event_type: str,
+    output_event_fields: dict[str, object],
+    followup_events: list[tuple[str, dict[str, object]]],
 ):
     upstream_messages = [
         _FakeUpstreamMessage(
@@ -2313,6 +2342,22 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
                 separators=(",", ":"),
             ),
         ),
+    ]
+    for followup_event_type, followup_event_fields in followup_events:
+        upstream_messages.append(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": followup_event_type,
+                        "response_id": "resp_ws_1",
+                        **followup_event_fields,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+    upstream_messages.append(
         _FakeUpstreamMessage(
             "text",
             text=json.dumps(
@@ -2328,8 +2373,8 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
                 },
                 separators=(",", ":"),
             ),
-        ),
-    ]
+        )
+    )
     fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
     seen: dict[str, object] = {}
     log_calls: list[dict[str, object]] = []
@@ -2433,13 +2478,16 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
             },
         ) as websocket:
             websocket.send_text(json.dumps(request_payload))
-            first = json.loads(websocket.receive_text())
-            second = json.loads(websocket.receive_text())
-            third = json.loads(websocket.receive_text())
+            events = [json.loads(websocket.receive_text()) for _ in range(3 + len(followup_events))]
 
-    assert first["type"] == "response.created"
-    assert second["type"] == output_event_type
-    assert third["type"] == "response.completed"
+    assert events[0]["type"] == "response.created"
+    expected_output_events = [(output_event_type, output_event_fields), *followup_events]
+    for event, (expected_type, expected_fields) in zip(events[1:-1], expected_output_events, strict=True):
+        assert event["type"] == expected_type
+        assert event["response_id"] == "resp_ws_1"
+        for field, expected_value in expected_fields.items():
+            assert event[field] == expected_value
+    assert events[-1]["type"] == "response.completed"
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"

@@ -3476,6 +3476,35 @@ async def test_select_account_returns_data_unavailable_error_for_mapped_model(mo
 
 
 @pytest.mark.asyncio
+async def test_expired_reauth_error_precedes_additional_quota_data_unavailable(monkeypatch) -> None:
+    account = _make_account("acc-gated-expired-reauth", "gated-expired-reauth@example.com")
+    account.plan_type = "pro"
+    account.status = AccountStatus.REAUTH_REQUIRED
+    account.access_token_encrypted = TokenEncryptor().encrypt("e30.eyJleHAiOjB9.")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    additional_usage_repo = StubAdditionalUsageRepository(primary={}, secondary={})
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_message == "All accounts require re-authentication"
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_allows_plus_plan_without_additional_quota_rows(monkeypatch) -> None:
     account = _make_account("acc-plus-no-gated-rows", "plus-no-gated-rows@example.com")
     now = utcnow()

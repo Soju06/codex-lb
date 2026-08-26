@@ -43,6 +43,7 @@ A permanent forced-refresh failure while serving a movable request MUST release 
 #### Scenario: All expired warning accounts report reauthentication
 
 - **GIVEN** every otherwise scoped account is `reauth_required` with a known-expired access token
+- **AND** an additional-quota evidence gate would otherwise reject those accounts first
 - **WHEN** account selection runs
 - **THEN** selection fails with an explicit message that all accounts require reauthentication
 

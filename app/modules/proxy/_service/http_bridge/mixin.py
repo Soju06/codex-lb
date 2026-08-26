@@ -48,7 +48,6 @@ from app.core.metrics.prometheus import (
 from app.core.utils.request_id import ensure_request_scope_id
 from app.core.utils.shared_future import wait_on_shared_future
 from app.db.models import (
-    AccountStatus,
     StickySessionKind,
 )
 from app.modules.api_keys.service import (
@@ -209,6 +208,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
+from app.modules.proxy.account_eligibility import ROUTABLE_STATUSES
 from app.modules.proxy.account_eligibility import account_access_token_expires_at as _token_expiry
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
@@ -776,10 +776,7 @@ class _HTTPBridgeMixin(
                     existing = None
                 if existing is not None and (
                     force_goal_restart_account_reselection
-                    or (
-                        not existing.closed
-                        and existing.account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
-                    )
+                    or (not existing.closed and existing.account.status in ROUTABLE_STATUSES)
                 ):
                     old_account_id = existing.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(existing)
@@ -1485,8 +1482,7 @@ class _HTTPBridgeMixin(
                         session.last_used_at = _service_time().monotonic()
                         return session
                 if force_goal_restart_account_reselection or (
-                    not session.closed
-                    and session.account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+                    not session.closed and session.account.status in ROUTABLE_STATUSES
                 ):
                     old_account_id = session.account.id
                     retiring_with_visible_requests = _http_bridge_session_retiring_with_visible_requests(session)

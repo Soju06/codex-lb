@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Collection
 
 from app.core.auth import token_expiry_epoch_ms
 from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus
+
+ROUTABLE_STATUSES = (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+"""Statuses whose sessions keep serving requests (reauth stays routable until expiry)."""
 
 
 def stored_access_token_expires_at(
@@ -39,4 +43,20 @@ def reauth_access_token_is_expired(
         status == AccountStatus.REAUTH_REQUIRED
         and access_token_expires_at is not None
         and access_token_expires_at <= (time.time() if now is None else now)
+    )
+
+
+def all_accounts_require_reauthentication(
+    accounts: Collection[Account],
+    encryptor: TokenEncryptor,
+) -> bool:
+    """Return whether every candidate is reauthentication-blocked by known expiry."""
+    now = time.time()
+    return bool(accounts) and all(
+        reauth_access_token_is_expired(
+            account.status,
+            account_access_token_expires_at(account, encryptor),
+            now=now,
+        )
+        for account in accounts
     )

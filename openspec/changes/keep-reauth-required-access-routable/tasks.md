@@ -12,6 +12,7 @@
 - [x] 2.3 Apply canonical eligibility to probes, warmup, automations, usage/reset credits, API-key pools, and dashboard projections.
 - [x] 2.4 Quiesce known-expired `REAUTH_REQUIRED` accounts in selection and bridge reuse while preserving hard-owner fail-closed behavior.
 - [x] 2.5 Restore explicit all-reauthentication messaging when every candidate has a known-expired access token.
+- [x] 2.6 Preserve all-reauthentication messaging ahead of additional-quota evidence rejection.
 
 ## 3. Verification
 

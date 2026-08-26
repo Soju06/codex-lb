@@ -134,7 +134,10 @@ from app.modules.proxy._load_balancer.unbound_selection import (
     run_unbound_selection_path,
 )
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
-from app.modules.proxy.account_eligibility import account_access_token_expires_at
+from app.modules.proxy.account_eligibility import (
+    account_access_token_expires_at,
+    all_accounts_require_reauthentication,
+)
 from app.modules.proxy.affinity import _CodexSessionSource
 from app.modules.proxy.cap_partitioning import (
     configured_account_concurrency_caps,
@@ -1260,8 +1263,9 @@ class LoadBalancer:
                 return selection_inputs
 
             if effective_limit_name:
+                additional_quota_candidates = accounts
                 additional_filter = await self._filter_accounts_for_additional_limit(
-                    accounts,
+                    additional_quota_candidates,
                     model=model,
                     limit_name=effective_limit_name,
                     explicit_limit=additional_limit_name is not None,
@@ -1269,7 +1273,12 @@ class LoadBalancer:
                     require_fresh_evidence_account_ids=model_catalog_omitted_account_ids,
                 )
                 accounts = additional_filter.accounts
-                if not accounts:
+                if not accounts and all_accounts_require_reauthentication(
+                    additional_quota_candidates,
+                    self._encryptor,
+                ):
+                    accounts = additional_quota_candidates
+                elif not accounts:
                     selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},

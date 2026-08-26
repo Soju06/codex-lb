@@ -3308,6 +3308,7 @@ async def test_source_stream_unicode_separator_in_field_value_keeps_truncation_f
     assert "resp_u2028" in joined
     assert "response.failed" in joined
 
+
 @pytest.mark.asyncio
 async def test_source_stream_bare_data_field_suppresses_synthetic_terminal(monkeypatch):
     """The valid empty-field form (a bare 'data' line) counts as unparseable source data."""
@@ -3328,6 +3329,38 @@ async def test_source_stream_bare_data_field_suppresses_synthetic_terminal(monke
     joined = "".join(chunks)
     assert "data\n\n" in joined
     assert "response.failed" not in joined
+
+
+@pytest.mark.asyncio
+async def test_wrap_source_responses_preserves_crlf_framing_of_unchanged_events(monkeypatch):
+    """An unchanged CRLF-framed standard event must pass through byte-identically."""
+    crlf_delta_block = (
+        "event: response.output_text.delta\r\n"
+        'data: {"type":"response.output_text.delta","item_id":"item_crlf","output_index":0,'
+        '"content_index":0,"delta":"hi"}\r\n\r\n'
+    )
+
+    async def crlf_framed_body():
+        yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_crlf_frame"}}\n\n'
+        yield crlf_delta_block.encode("utf-8")
+        yield (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_crlf_frame","output":[]}}\n\n'
+        )
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            crlf_framed_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert crlf_delta_block in joined
+    assert "resp_crlf_frame" in joined
 
 
 @pytest.mark.asyncio

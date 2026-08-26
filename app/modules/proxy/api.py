@@ -8882,12 +8882,18 @@ def _synthetic_pre_created_item_id(response_id: str | None) -> str:
 
 
 def _has_canonical_event_framing(event_block: str, event_type: JsonValue) -> bool:
-    """True when the block already carries the `event: <type>` line that
+    """True when the block already carries the ``event: <type>`` line that
     format_sse_event would emit (or the payload has no type, where canonical
-    framing is data-only)."""
+    framing is data-only). Any SSE line ending (LF, CRLF, or CR) after the
+    event line counts: unchanged-event pass-through must not depend on the
+    source's terminator style."""
     if not isinstance(event_type, str) or not event_type:
         return event_block.startswith("data: ")
-    return event_block.startswith(f"event: {event_type}\n")
+    prefix = f"event: {event_type}"
+    if not event_block.startswith(prefix):
+        return False
+    rest = event_block[len(prefix) :]
+    return rest.startswith(("\n", "\r"))
 
 
 def _normalize_public_stream_payload(

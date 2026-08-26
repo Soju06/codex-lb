@@ -1172,18 +1172,39 @@ def _find_sse_separator(buffer: bytes | bytearray, start: int = 0) -> tuple[int,
     A blank line is two consecutive SSE line endings (CR / LF / CRLF), including
     mixed pairs such as ``\\n\\r`` and ``\\n\\r\\n``. Returns
     ``(index, separator_len)`` where ``index`` is the start of the first ending.
+
+    Candidates are located with C-level ``bytes.find`` and endings are
+    classified only at candidate positions, so the account-backed SSE relay
+    hot path never scans byte-by-byte in Python.
     """
-    index = max(0, start)
     length = len(buffer)
+    index = max(0, start)
+    # Next CR / LF position at or after ``index``: -2 not yet searched,
+    # -1 absent in the rest of the buffer. Caching both keeps the scan O(n)
+    # when one ending byte is frequent and the other is far away.
+    cr = -2
+    lf = -2
     while index < length:
-        first = _sse_line_ending_len(buffer, index)
-        if first is None:
-            index += 1
-            continue
-        second = _sse_line_ending_len(buffer, index + first)
+        if cr != -1 and cr < index:
+            cr = buffer.find(b"\r", index)
+        if lf != -1 and lf < index:
+            lf = buffer.find(b"\n", index)
+        if cr == -1:
+            candidate = lf
+        elif lf == -1:
+            candidate = cr
+        else:
+            candidate = cr if cr < lf else lf
+        if candidate == -1:
+            return None
+        if buffer[candidate] == 0x0D and candidate + 1 < length and buffer[candidate + 1] == 0x0A:
+            first = 2
+        else:
+            first = 1
+        second = _sse_line_ending_len(buffer, candidate + first)
         if second is not None:
-            return (index, first + second)
-        index += first
+            return (candidate, first + second)
+        index = candidate + first
     return None
 
 

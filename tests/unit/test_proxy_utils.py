@@ -5228,6 +5228,58 @@ def test_find_sse_separator_accepts_mixed_lf_crlf_blank_line():
     assert event == buffer
 
 
+def test_find_sse_separator_reassembles_realistic_stream_without_per_byte_scan():
+    """Perf regression guard for the account-backed SSE relay hot path.
+
+    ``_find_sse_separator`` must locate line-ending candidates with C-level
+    ``bytes.find`` instead of stepping byte-by-byte in Python. A per-byte
+    rewrite measured roughly 70-100 ns/byte (about 50x slower than the
+    find-based scan), turning incremental reassembly of one mebibyte of
+    realistic 512-byte delta events into hundreds of milliseconds of
+    event-loop-blocking CPU. The bound below leaves an order of magnitude of
+    headroom for slow CI runners while still failing any per-byte scan.
+    """
+    delta = {
+        "type": "response.output_text.delta",
+        "item_id": "msg_0123456789abcdef",
+        "output_index": 0,
+        "content_index": 0,
+        "delta": "x" * 380,
+    }
+    event = b"event: response.output_text.delta\ndata: " + json.dumps(delta, separators=(",", ":")).encode() + b"\n\n"
+    event_count = 1024 * 1024 // len(event) + 1
+    payload = event * event_count
+
+    def reassemble() -> int:
+        buffer = bytearray()
+        scanned = 0
+        popped = 0
+        for offset in range(0, len(payload), 8192):
+            buffer.extend(payload[offset : offset + 8192])
+            while True:
+                separator = proxy_module._find_sse_separator(
+                    buffer, max(0, scanned - proxy_module._SSE_SEPARATOR_OVERLAP)
+                )
+                if separator is None:
+                    scanned = len(buffer)
+                    break
+                index, separator_len = separator
+                del buffer[: index + separator_len]
+                scanned = 0
+                popped += 1
+        assert not buffer
+        return popped
+
+    best = float("inf")
+    for _ in range(3):
+        started_at = time.perf_counter()
+        popped = reassemble()
+        best = min(best, time.perf_counter() - started_at)
+        assert popped == event_count
+
+    assert best < 0.05
+
+
 def test_pop_sse_event_returns_first_event_and_mutates_buffer():
     buffer = bytearray(b"data: one\n\ndata: two\n\n")
 

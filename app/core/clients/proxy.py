@@ -1238,6 +1238,7 @@ async def _iter_sse_events(
 
     buffer = bytearray()
     scanned = 0
+    swallow_lf = False
     chunk_iterator = resp.content.iter_chunked(_SSE_READ_CHUNK_SIZE)
     iterator = chunk_iterator.__aiter__()
 
@@ -1259,6 +1260,13 @@ async def _iter_sse_events(
             continue
 
         buffer.extend(chunk)
+        if swallow_lf:
+            swallow_lf = False
+            if buffer and buffer[0] == 0x0A:
+                # Residue of a CRLF ending whose CR closed the previous chunk:
+                # the separator was already dispatched with the bare CR, so
+                # this LF belongs to it, not to the next event.
+                del buffer[0]
         while True:
             # `scanned` marks the prefix already known to hold no separator,
             # so each new chunk only scans the new bytes (plus the straddle
@@ -1275,6 +1283,7 @@ async def _iter_sse_events(
             event_end = index + separator_len
             raw_event = bytes(buffer[:event_end])
             del buffer[:event_end]
+            swallow_lf = raw_event.endswith(b"\r") and not buffer
             scanned = 0
 
             if len(raw_event) > max_event_bytes:

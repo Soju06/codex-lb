@@ -5528,11 +5528,16 @@ async def _iter_source_sse_event_blocks(
 
     Detects LF, CRLF, and CR-only blank-line separators without rewriting the
     retained event's terminator bytes, so unmodified pass-through stays
-    byte-identical. Bounds reassembly with ``max_sse_event_bytes``.
+    byte-identical. Ignores one optional leading UTF-8 BOM, and swallows the
+    LF residue of a CRLF separator whose CR arrived at the end of the prior
+    chunk (CR-only dispatch must not wait for the disambiguating byte).
+    Bounds reassembly with ``max_sse_event_bytes``.
     """
     limit = max_event_bytes if max_event_bytes is not None else get_settings().max_sse_event_bytes
     buffer = bytearray()
     scanned = 0
+    bom_pending = True
+    swallow_lf = False
     iterator: AsyncIterator[bytes | str | memoryview[int]] | None = None
     try:
         iterator = stream.__aiter__()
@@ -5546,6 +5551,23 @@ async def _iter_source_sse_event_blocks(
             else:
                 raw = chunk
             buffer.extend(raw)
+            if bom_pending:
+                if len(buffer) >= 3:
+                    if buffer[:3] == b"\xef\xbb\xbf":
+                        del buffer[:3]
+                    bom_pending = False
+                elif bytes(buffer) in (b"\xef", b"\xef\xbb"):
+                    # Partial possible BOM: wait for the disambiguating bytes.
+                    continue
+                else:
+                    bom_pending = False
+            if swallow_lf:
+                swallow_lf = False
+                if buffer and buffer[0] == 0x0A:
+                    # Residue of a CRLF ending whose CR closed the previous
+                    # chunk: the separator was already dispatched with the
+                    # bare CR, so this LF belongs to it, not the next event.
+                    del buffer[0]
             while True:
                 separator = _find_sse_separator(buffer, max(0, scanned - _SSE_SEPARATOR_OVERLAP))
                 if separator is None:
@@ -5557,6 +5579,7 @@ async def _iter_source_sse_event_blocks(
                 event_end = index + separator_len
                 raw_event = bytes(buffer[:event_end])
                 del buffer[:event_end]
+                swallow_lf = raw_event.endswith(b"\r") and not buffer
                 scanned = 0
                 if len(raw_event) > limit:
                     raise StreamEventTooLargeError(len(raw_event), limit)

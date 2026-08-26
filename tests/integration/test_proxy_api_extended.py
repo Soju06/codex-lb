@@ -3051,6 +3051,47 @@ async def test_iter_source_sse_event_blocks_closes_owner_when_iterator_close_fai
 
 
 @pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_swallows_lf_residue_of_split_crlf():
+    """...\r\n\r | \n chunking dispatches at the bare CR and drops the LF residue."""
+
+    async def split_after_cr_body():
+        yield b'data: {"type":"response.created"}\r\n\r'
+        yield b'\ndata: {"type":"response.completed"}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._iter_source_sse_event_blocks(
+            split_after_cr_body(),
+            max_event_bytes=4096,
+        )
+    ]
+
+    assert blocks == [
+        'data: {"type":"response.created"}\r\n\r',
+        'data: {"type":"response.completed"}\n\n',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_ignores_leading_utf8_bom():
+    """One optional leading UTF-8 BOM is ignored, split across chunks or not."""
+
+    async def bom_body():
+        yield b"\xef\xbb"
+        yield b'\xbfdata: {"type":"response.completed","response":{"id":"resp_bom"}}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._iter_source_sse_event_blocks(
+            bom_body(),
+            max_event_bytes=4096,
+        )
+    ]
+
+    assert blocks == ['data: {"type":"response.completed","response":{"id":"resp_bom"}}\n\n']
+
+
+@pytest.mark.asyncio
 async def test_iter_source_sse_event_blocks_preserves_crlf_and_cr_terminators():
     async def body():
         yield b'event: response.completed\r\ndata: {"type":"response.completed"}\r\n\r\n'

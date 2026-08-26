@@ -6950,6 +6950,23 @@ async def test_iter_sse_events_separator_straddles_chunk_boundary():
 
 
 @pytest.mark.asyncio
+async def test_iter_sse_events_crlf_separator_split_after_final_cr_swallows_residual_lf():
+    """A \r\n\r\n delimiter split as ...\r\n\r | \n... dispatches at the bare CR
+    and swallows the residual LF so it does not prefix the next event."""
+    event = b'data: {"type":"response.completed"}\r\n\r\ndata: {"type":"next"}\n\n'
+    split = event.index(b"\r\n\r\n") + 3  # split immediately before the final LF
+    response = _DummyResponse([event[:split], event[split:]])
+    stream = proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 4096)
+
+    chunks = [chunk async for chunk in stream]
+
+    assert chunks == [
+        'data: {"type":"response.completed"}\r\n\r',
+        'data: {"type":"next"}\n\n',
+    ]
+
+
+@pytest.mark.asyncio
 async def test_iter_sse_events_multiple_events_in_one_chunk_after_large_partial():
     """After a large partial event completes, the residual buffer must be
     rescanned from the start (cursor reset) so following events pop."""

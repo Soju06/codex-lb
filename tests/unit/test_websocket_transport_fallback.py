@@ -1156,3 +1156,50 @@ async def test_http_bridge_routed_connect_failure_propagates(
         await _collect_bridge_stream(service)
 
     assert transport_health.upstream_websocket_transport_recently_failed() is False
+
+
+class _SucceedingConnectorFacade(_StallingConnectorFacade):
+    async def _call_with_supported_optional_kwargs(
+        self,
+        function: object,
+        *args: object,
+        optional_kwargs: dict[str, object],
+    ) -> object:
+        del function, args, optional_kwargs
+        return SimpleNamespace()
+
+
+@pytest.mark.asyncio
+async def test_direct_open_success_clears_transport_failure_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _StallingOpenService(stall_admission=False)
+    monkeypatch.setattr(ws_mixin, "_facade", lambda: _SucceedingConnectorFacade())
+    transport_health.mark_upstream_websocket_transport_failure()
+
+    await service._open_upstream_websocket(_stalling_account(service), {})
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is False
+
+
+@pytest.mark.asyncio
+async def test_routed_open_success_does_not_clear_transport_failure_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Clearing must be as route-scoped as arming: a healthy proxy endpoint for
+    # one account says nothing about the direct upstream the marker denied on,
+    # so it must not readmit handshakes mid-outage.
+    service = _StallingOpenService(
+        stall_admission=False,
+        route=ResolvedUpstreamRoute(
+            mode="account_bound",
+            pool_id="pool_1",
+            endpoint=ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080),
+        ),
+    )
+    monkeypatch.setattr(ws_mixin, "_facade", lambda: _SucceedingConnectorFacade())
+    transport_health.mark_upstream_websocket_transport_failure()
+
+    await service._open_upstream_websocket(_stalling_account(service), {})
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is True

@@ -12,7 +12,7 @@
 - [x] 1.2 Arm a bounded per-instance transport-failure marker on that surface
       path and when a websocket open exhausts the request budget after the
       direct upstream connector began, and clear it on the next successful
-      upstream websocket connect
+      direct upstream websocket connect
 - [x] 1.3 Deny responses websocket handshakes with HTTP 426 while the marker
       is armed or `upstream_stream_transport` is pinned to `"http"`
 - [x] 1.4 Bypass the HTTP responses bridge and pin the raw path's upstream
@@ -37,7 +37,8 @@
 - [x] 2.3 Handshake admission: 426 denial while armed or pinned, normal accept
       otherwise, marker TTL expiry and clear
 - [x] 2.4 Budget exhaustion: a stalled direct connector arms the marker; a
-      budget that expires in local admission or in a routed connector does not
+      budget that expires in local admission or in a routed connector does
+      not; a direct open success clears the marker and a routed one does not
 - [x] 2.5 Bridge: pinned-http bypass, transient pre-stream fallback, marker
       arming, provenance-classified fallback for a direct 5xx connect code,
       the real bridge recording prepared-anchor provenance, and the negative

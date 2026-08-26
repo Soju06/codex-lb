@@ -4582,7 +4582,14 @@ class _WebSocketMixin:
             )
             if request_state is not None:
                 _record_websocket_route_metadata(request_state, upstream=upstream, route=route)
-            clear_upstream_websocket_transport_failure()
+            if route is None:
+                # Symmetric with arming: a routed success proves only that one
+                # account's proxy endpoint is healthy, so it must not clear a
+                # denial state that direct-upstream evidence armed. Because a
+                # routed open can neither arm nor clear, an all-routed
+                # deployment simply never uses the marker, and a mixed one
+                # still falls back to the bounded TTL.
+                clear_upstream_websocket_transport_failure()
             return upstream
         finally:
             connect_lease.release()

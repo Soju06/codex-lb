@@ -82,8 +82,13 @@ transport. After a websocket connect failure carrying transport provenance,
 or after a websocket open consumes the request budget once the direct
 upstream connector itself has begun, the proxy MUST deny new Responses
 websocket handshakes with HTTP 426 for a bounded window (60 seconds), and
-MUST clear that denial state on the next successful upstream websocket
-connect so the websocket transport resumes automatically. A request budget
+MUST clear that denial state on the next successful direct upstream
+websocket connect so the websocket transport resumes automatically. Clearing
+is direct-scoped for the same reason arming is: a routed success proves only
+that one account's proxy endpoint is healthy and MUST NOT readmit handshakes
+during a direct-upstream outage. A deployment whose accounts are all routed
+therefore never arms or clears the state, and a mixed one still expires it on
+the bounded window. A request budget
 that expires before the direct connector begins MUST NOT arm the denial
 state: while the open is still waiting on local websocket-connect admission
 or resolving the account's route that is local contention, and forcing every
@@ -126,6 +131,12 @@ is distinct.
 - **GIVEN** the last connect-phase websocket transport failure is older than the denial window
 - **WHEN** a client opens a new Responses websocket handshake
 - **THEN** the handshake is accepted and the websocket transport is probed again
+
+#### Scenario: a routed success does not clear the denial state
+
+- **GIVEN** the transport-failure denial state is armed by direct-upstream evidence
+- **WHEN** an account whose route resolves to a proxy endpoint opens its upstream websocket successfully
+- **THEN** the denial state stays armed until a direct upstream connect succeeds or the bounded window expires
 
 #### Scenario: pinned HTTP upstream transport denies websocket handshakes
 

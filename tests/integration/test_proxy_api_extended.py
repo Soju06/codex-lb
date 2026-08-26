@@ -2930,7 +2930,11 @@ async def test_source_responses_stream_reassembles_crlf_event_blocks(monkeypatch
     assert isinstance(response, StreamingResponse)
     joined = "".join([cast(str, chunk) async for chunk in response.body_iterator])
     assert "resp_crlf" in joined
-    assert joined.find("response.created") < joined.find("response.completed")
+    created_at = joined.find("response.created")
+    completed_at = joined.find("response.completed")
+    assert created_at != -1
+    assert completed_at != -1
+    assert created_at < completed_at
 
 
 @pytest.mark.asyncio
@@ -3198,6 +3202,66 @@ async def test_wrap_source_responses_closes_source_on_early_error_and_client_clo
 
 
 @pytest.mark.asyncio
+async def test_wrap_source_responses_closes_raw_source_after_initial_heartbeat_disconnect(monkeypatch):
+    """A native client dropping right after the prefixed heartbeat must close the raw source."""
+
+    class _RawSource:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __aiter__(self) -> "_RawSource":
+            return self
+
+        async def __anext__(self) -> bytes:
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    raw_source = _RawSource()
+    stream = proxy_api_module._wrap_source_responses_public_stream(
+        raw_source,
+        enforce_openai_sdk_contract=False,
+        native_codex_heartbeat=True,
+    )
+    iterator = stream.__aiter__()
+    first = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first == CODEX_KEEPALIVE_FRAME
+    # None of the inner layers has started iterating yet; closing the wrapper
+    # must still release the eagerly opened source body.
+    await cast(Any, iterator).aclose()
+    assert raw_source.closed is True
+
+
+@pytest.mark.asyncio
+async def test_source_stream_retry_control_block_keeps_truncation_failure(monkeypatch):
+    """Valid non-data control blocks pass through without suppressing truncation synthesis."""
+
+    async def control_then_truncated_body():
+        yield b"retry: 1000\n\n"
+        yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_ctrl"}}\n\n'
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            control_then_truncated_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert "retry: 1000" in joined
+    assert "resp_ctrl" in joined
+    assert "response.failed" in joined
+
+
+@pytest.mark.asyncio
 async def test_source_responses_stream_preserves_split_utf8_and_crlf(monkeypatch):
     from app.db.models import ModelSource
     from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
@@ -3260,7 +3324,11 @@ async def test_source_responses_stream_preserves_split_utf8_and_crlf(monkeypatch
     joined = "".join([cast(str, chunk) async for chunk in response.body_iterator])
     assert "resp_caf" in joined
     assert "\\u00e9" in joined or "caf\u00e9" in joined
-    assert joined.find("response.created") < joined.find("response.completed")
+    created_at = joined.find("response.created")
+    completed_at = joined.find("response.completed")
+    assert created_at != -1
+    assert completed_at != -1
+    assert created_at < completed_at
 
 
 @pytest.mark.asyncio

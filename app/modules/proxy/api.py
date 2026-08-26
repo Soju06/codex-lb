@@ -5634,12 +5634,24 @@ async def _wrap_source_responses_public_stream(
                     try:
                         await _aclose_stream(normalized)
                     finally:
-                        await _aclose_stream(event_blocks)
+                        try:
+                            await _aclose_stream(event_blocks)
+                        finally:
+                            # ``aclose()`` on a never-started async generator
+                            # skips its ``finally`` blocks, so the eagerly
+                            # opened source body must be closed directly when
+                            # teardown happens before iteration starts (e.g. a
+                            # native client disconnecting right after the
+                            # initial heartbeat).
+                            await _aclose_stream(stream)
             else:
                 try:
                     await _aclose_stream(normalized)
                 finally:
-                    await _aclose_stream(event_blocks)
+                    try:
+                        await _aclose_stream(event_blocks)
+                    finally:
+                        await _aclose_stream(stream)
 
 
 async def _source_chat_stream_with_settlement(
@@ -8459,14 +8471,19 @@ async def _normalize_public_responses_stream(
             continue
         payload = _parse_sse_payload(event_block)
         if payload is None:
-            if _looks_like_sse_data_block(event_block):
+            is_unparseable_data = _looks_like_sse_data_block(event_block)
+            if is_unparseable_data:
                 contract_violation_kind = contract_violation_kind or "invalid_json"
             if forward_unparseable_data:
                 # Source-routed streams forward blocks the proxy cannot parse
                 # byte-identically instead of eating upstream data: the pre-wrap
                 # contract was raw passthrough, and merged model-source routing
                 # tests assert source bytes reach the client.
-                unparseable_forwarded = True
+                if is_unparseable_data:
+                    # Only unparseable *data* suppresses terminal synthesis;
+                    # valid non-data control blocks (e.g. ``retry:``) keep the
+                    # truncated-stream failure contract intact.
+                    unparseable_forwarded = True
                 yield event_block
             continue
         parsed_payload = payload

@@ -26,12 +26,12 @@ from app.core.plan_types import ACCOUNT_PLAN_TYPES, coerce_account_plan_type, no
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
 from app.core.utils.request_id import get_request_id
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
-from app.modules.accounts.repository import AccountsRepository as SessionAccountsRepository
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.background_repository import BackgroundAdditionalUsageRepository, BackgroundUsageRepository
@@ -42,7 +42,6 @@ from app.modules.usage.plan_downgrade_observations import (
     get_plan_downgrade_observation_store,
 )
 from app.modules.usage.repository import AdditionalUsageRepository, UsageWindowWrite
-from app.modules.usage.repository import UsageRepository as SessionUsageRepository
 
 logger = logging.getLogger(__name__)
 
@@ -199,14 +198,14 @@ class _UsageRefreshSingleflight:
             if wait_for_existing is None:
                 break
             try:
-                await asyncio.shield(wait_for_existing)
+                await wait_on_shared_future(wait_for_existing)
             except asyncio.CancelledError:
                 current_task = asyncio.current_task()
                 if current_task is not None and current_task.cancelling():
                     raise
             except Exception:
                 pass
-        return await asyncio.shield(task)
+        return await wait_on_shared_future(task)
 
     async def _run_factory(
         self,
@@ -276,11 +275,23 @@ class UsageUpdater:
         latest_usage: Mapping[str, UsageHistory],
         *,
         own_singleflight_sessions: bool = False,
+        join_existing: bool | None = None,
     ) -> bool:
-        """Refresh usage for all accounts. Returns True if usage rows were written."""
+        """Refresh usage for all accounts. Returns True if usage rows were written.
+
+        ``own_singleflight_sessions`` makes each detached singleflight refresh
+        acquire and release its own DB session instead of using this updater's
+        caller-bound repositories. ``join_existing`` controls whether a caller
+        joins an in-flight refresh for the same key (deduplication) or waits
+        and forces a fresh one; it defaults to the historical coupling
+        ``not own_singleflight_sessions`` so existing callers keep their
+        semantics.
+        """
         settings = get_settings()
         if not settings.usage_refresh_enabled:
             return False
+        if join_existing is None:
+            join_existing = not own_singleflight_sessions
 
         refreshed = False
         now = utcnow()
@@ -349,9 +360,9 @@ class UsageUpdater:
                         own_singleflight_session=own_singleflight_sessions,
                     ),
                     refresh_factory,
-                    join_existing=not own_singleflight_sessions,
+                    join_existing=join_existing,
                 )
-                if not own_singleflight_sessions:
+                if join_existing:
                     await self._sync_account_from_repo(account)
                 refreshed = refreshed or result.usage_written
                 # Only cache when the upstream fetch actually succeeded.
@@ -518,28 +529,26 @@ class UsageUpdater:
     ) -> AccountRefreshResult:
         @contextlib.asynccontextmanager
         async def refresh_repo_factory():
-            async with get_background_session() as refresh_session:
-                yield SessionAccountsRepository(refresh_session)
+            yield BackgroundAccountsRepository()
 
-        async with get_background_session() as session:
-            accounts_repo = SessionAccountsRepository(session)
-            usage_repo = SessionUsageRepository(session)
-            additional_usage_repo = AdditionalUsageRepository(session)
-            account = await accounts_repo.get_by_id(account_id)
-            if account is None:
-                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
-            if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
-                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
-            return await UsageUpdater(
-                usage_repo,
-                accounts_repo,
-                additional_usage_repo,
-                auth_manager=AuthManager(accounts_repo, refresh_repo_factory=refresh_repo_factory),
-            )._refresh_account_if_stale(
-                account,
-                usage_account_id=account.chatgpt_account_id,
-                interval_seconds=interval_seconds,
-            )
+        accounts_repo = BackgroundAccountsRepository()
+        usage_repo = BackgroundUsageRepository()
+        additional_usage_repo = BackgroundAdditionalUsageRepository()
+        account = await accounts_repo.get_by_id(account_id)
+        if account is None:
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+        if account.status in (AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED):
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+        return await UsageUpdater(
+            usage_repo,
+            accounts_repo,
+            additional_usage_repo,
+            auth_manager=AuthManager(accounts_repo, refresh_repo_factory=refresh_repo_factory),
+        )._refresh_account_if_stale(
+            account,
+            usage_account_id=account.chatgpt_account_id,
+            interval_seconds=interval_seconds,
+        )
 
     async def _refresh_account(
         self,
@@ -911,7 +920,9 @@ class UsageUpdater:
     async def _sync_account_from_repo(self, account: Account) -> None:
         if not self._accounts_repo:
             return
-        stored = await self._accounts_repo.get_by_id(account.id)
+        # Joined owned-session refreshes run in a different session.  A plain
+        # get_by_id() can return the caller session's stale identity-map row.
+        stored = await self._accounts_repo.get_by_id_fresh(account.id)
         if stored is None:
             return
         account.chatgpt_account_id = stored.chatgpt_account_id

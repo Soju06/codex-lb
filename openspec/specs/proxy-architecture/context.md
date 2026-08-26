@@ -97,3 +97,48 @@ current decomposition direction and prevent accidental regression:
 - CI can enforce architectural ratchets through `scripts/check_proxy_architecture.py`
 - The accepted thresholds are starting ratchets, not final goals; future PRs
   should lower them after major domain packages are extracted
+
+## ADR-0002: OpenSpec-owned architecture ratchets
+
+- **Date:** 2026-08-23
+- **Status:** Accepted
+- **Scope:** `openspec/specs/proxy-architecture/spec.md` and the required
+  architecture lint checker
+
+### Context
+
+The architecture checker originally duplicated numeric limits in Python. Later
+changes raised those constants while the normative OpenSpec values remained
+unchanged, allowing the required lint gate to approve a tree that violated its
+contract. A comparison test between two hard-coded copies would detect some
+drift but would still leave two editable sources of truth.
+
+### Decision
+
+The normative fitness-gate requirement owns one marked TOML block containing
+all numeric ratchets enforced by the checker. The checker loads that block once
+per run with the Python standard library, validates the exact key set and
+positive integer values, and passes those values directly to the limit checks.
+It keeps no numeric ratchet copies in Python source.
+
+The parser fails closed when the block is missing, duplicated, malformed,
+incomplete, or contains unknown or invalid values. A definition failure skips
+only checks that need the limits; independent AST, façade, package, shim, and
+import-boundary checks continue so one spec error cannot hide unrelated
+violations.
+
+For example, lowering `load_balancer_lines` in the marked block immediately
+changes the next checker run without a Python edit. If the current module then
+exceeds the new value, the checker reports the observed count and the new
+OpenSpec-owned limit and exits non-zero.
+
+### Constraints and consequences
+
+- Natural-language wording remains free to improve; only the stable markers,
+  TOML fence, exact keys, and values form the machine-readable interface.
+- Ratchet changes are normative OpenSpec changes and receive the same review as
+  any other proxy architecture contract change.
+- Invalid spec syntax blocks the required lint gate rather than silently
+  reverting to defaults.
+- The threshold block is intentionally visible beside the requirement so code
+  review sees policy and implementation changes together.

@@ -27,7 +27,6 @@ OLD_TO_NEW_REVISION_MAP: dict[str, str] = {
     ),
     "20260410_020000_restore_import_without_overwrite_default_false": "20260409_020000_fix_http_bridge_last_seen_index",
     "20260525_000000_merge_routing_settings_security_heads": "20260513_000000_add_accounts_alias",
-    "20260814_020000_merge_identity_and_warmup_heads": "20260816_000000_add_model_source_embeddings",
 }
 
 NEW_TO_OLD_REVISION_MAP: dict[str, str] = {new: old for old, new in OLD_TO_NEW_REVISION_MAP.items()}

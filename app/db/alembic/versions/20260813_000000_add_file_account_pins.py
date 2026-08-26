@@ -20,21 +20,16 @@ _TABLE = "file_account_pins"
 
 def upgrade() -> None:
     bind = op.get_bind()
-    inspector = sa.inspect(bind)
-    table_exists = inspector.has_table(_TABLE)
-    if not table_exists:
-        op.create_table(
-            _TABLE,
-            sa.Column("file_id", sa.String(), nullable=False),
-            sa.Column("account_id", sa.String(), nullable=False),
-            sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
-            sa.PrimaryKeyConstraint("file_id"),
-        )
-    index_exists = table_exists and "ix_file_account_pins_expires_at" in {
-        index["name"] for index in inspector.get_indexes(_TABLE) if index.get("name")
-    }
-    if not index_exists:
-        op.create_index("ix_file_account_pins_expires_at", _TABLE, ["expires_at"], unique=False)
+    if sa.inspect(bind).has_table(_TABLE):
+        return
+    op.create_table(
+        _TABLE,
+        sa.Column("file_id", sa.String(), nullable=False),
+        sa.Column("account_id", sa.String(), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint("file_id"),
+    )
+    op.create_index("ix_file_account_pins_expires_at", _TABLE, ["expires_at"], unique=False)
 
 
 def downgrade() -> None:

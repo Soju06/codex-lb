@@ -6054,7 +6054,7 @@ class _WebSocketMixin:
                 "account_health_error_handled",
                 False,
             )
-        if request_state.suppressed_duplicate_tool_call:
+        if request_state.suppressed_duplicate_tool_call and error_code == "stream_incomplete":
             settlement.account_health_error = False
         if (
             error_code == "stream_incomplete"

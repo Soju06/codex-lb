@@ -2155,6 +2155,7 @@ async def _await_result_deferring_cancellation(awaitable: Awaitable[_T]) -> tupl
                 if task.cancelled():
                     raise
                 cancellation_deferred = True
+    raise RuntimeError("unreachable shielded cancellation-deferral state")
 
 
 async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
@@ -4528,10 +4529,25 @@ async def _source_embeddings_response(
         request_model=model,
         request_service_tier=None,
     )
-    outbound = payload.model_dump(exclude_none=True)
+    outbound = payload.model_dump(exclude_unset=True)
     outbound["model"] = model
     try:
         result = await forward_source_embeddings(source, outbound)
+    except asyncio.CancelledError:
+        release_exc: BaseException | None = None
+        if reservation is not None:
+            try:
+                await _release_reservation_deferring_cancellation(reservation)
+            except BaseException as exc:
+                release_exc = exc
+        if release_exc is not None:
+            logger.warning(
+                "Failed to release source embeddings reservation after request cancellation source_id=%s model=%s",
+                source.id,
+                model,
+                exc_info=release_exc,
+            )
+        raise
     except ModelSourceForwardingError as exc:
         await _release_reservation(reservation)
         await _log_source_chat_completion(
@@ -5850,14 +5866,11 @@ async def _stream_responses(
         async def _retry() -> AsyncIterator[str]:
             retry_reservation = reservation
             if prefer_http_bridge and api_key is not None and reservation is not None:
+                retry_service_tier = dict(payload.to_payload()).get("service_tier")
                 retry_reservation = await _enforce_request_limits(
                     api_key,
                     request_model=payload.model,
-                    request_service_tier=(
-                        dict(payload.to_payload()).get("service_tier")
-                        if isinstance(dict(payload.to_payload()).get("service_tier"), str)
-                        else None
-                    ),
+                    request_service_tier=(retry_service_tier if isinstance(retry_service_tier, str) else None),
                     request_usage_budget=estimate_api_key_request_usage(payload),
                 )
             retry_stream = context.service.stream_http_responses(

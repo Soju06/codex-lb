@@ -275,6 +275,28 @@ class DurableBridgeSessionCoordinator:
                 expected_updated_at_epoch=expected_updated_at_epoch,
             )
 
+    async def claim_retry_circuit_generation(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+        expected_updated_at_epoch: float | None,
+        expected_admission_generation: int,
+        expected_consecutive_failures: int,
+        expected_cooldown_until_epoch: float,
+    ) -> DurableBridgeRetryCircuitSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).claim_retry_circuit_generation(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                expected_updated_at_epoch=expected_updated_at_epoch,
+                expected_admission_generation=expected_admission_generation,
+                expected_consecutive_failures=expected_consecutive_failures,
+                expected_cooldown_until_epoch=expected_cooldown_until_epoch,
+            )
+
     async def purge_retry_circuit(
         self,
         *,
@@ -754,6 +776,11 @@ class DurableBridgeSessionCoordinator:
         session_id: str,
         instance_id: str,
         owner_epoch: int,
+        restore_rebound: bool = False,
+        rebound_from_session_id: str | None = None,
+        rebound_from_account_id: str | None = None,
+        rebound_from_model: str | None = None,
+        rebound_from_parent_response_id: str | None = None,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).rollback_operation_before_dispatch(
@@ -761,6 +788,11 @@ class DurableBridgeSessionCoordinator:
                 session_id=session_id,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
+                restore_rebound=restore_rebound,
+                rebound_from_session_id=rebound_from_session_id,
+                rebound_from_account_id=rebound_from_account_id,
+                rebound_from_model=rebound_from_model,
+                rebound_from_parent_response_id=rebound_from_parent_response_id,
             )
 
     async def get_operation_by_fingerprint(

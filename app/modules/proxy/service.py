@@ -109,11 +109,7 @@ from app.db.models import (
 from app.db.session import SessionLocal as SessionLocal
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
 from app.modules.api_keys.service import (
-    API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
-    API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
-    API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET,
     ApiKeyData,
-    ApiKeyRequestUsageBudget,
     ApiKeyUsageReservationData,  # noqa: F401
 )
 from app.modules.api_keys.service import (
@@ -126,6 +122,12 @@ from app.modules.proxy._service.api_key_usage import (
     _STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY as _STREAM_API_KEY_RELEASE_RETRY_MAX_CONCURRENCY,
 )
 from app.modules.proxy._service.api_key_usage import _ApiKeyUsageMixin
+from app.modules.proxy._service.api_key_usage import (
+    _bounded_lease_token_estimate as _bounded_lease_token_estimate,
+)
+from app.modules.proxy._service.api_key_usage import (
+    _estimated_lease_tokens_from_request_usage_budget as _estimated_lease_tokens_from_request_usage_budget,
+)
 from app.modules.proxy._service.codex_control import _CodexControlMixin
 from app.modules.proxy._service.compact import _CompactMixin
 from app.modules.proxy._service.compact import (
@@ -168,6 +170,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_admission_timeout_seconds,
+    _http_bridge_is_explicit_previous_response_rejection,  # noqa: F401
     _http_bridge_should_attempt_local_previous_response_recovery,  # noqa: F401
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -220,9 +223,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_payload_without_previous_response_id as _http_bridge_payload_without_previous_response_id,
-)
-from app.modules.proxy._service.http_bridge.helpers import (
-    _http_bridge_pending_response_events_seen as _http_bridge_pending_response_events_seen,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_precreated_retry_failure_error as _http_bridge_precreated_retry_failure_error,
@@ -876,7 +876,6 @@ _WEBSOCKET_AUTH_INVALIDATED_FAILURE_CODE = "account_auth_invalidated"
 _SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE = (
     "Suppressed duplicate side-effect tool call; upstream response cannot be continued safely."
 )
-_SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE = "duplicate_tool_call_replay_suppressed"
 _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
 _SECURITY_WORK_AUTHORIZATION_REQUIRED_CODE = "security_work_authorization_required"
@@ -895,26 +894,6 @@ _SECURITY_WORK_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "security work. codex-lb is continuing with normal account selection; the upstream request may still fail until "
     "an account with Trusted Access for Cyber is marked as security-work-authorized."
 )
-
-
-def _estimated_lease_tokens_from_request_usage_budget(budget: ApiKeyRequestUsageBudget | None) -> float:
-    if budget is None:
-        return 0.0
-    input_tokens = _bounded_lease_token_estimate(
-        budget.input_tokens,
-        default=API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS,
-    )
-    output_tokens = _bounded_lease_token_estimate(
-        budget.output_tokens,
-        default=API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS,
-    )
-    return float(input_tokens + output_tokens)
-
-
-def _bounded_lease_token_estimate(value: int | None, *, default: int) -> int:
-    if value is None:
-        return default
-    return max(0, min(value, API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET))
 
 
 class ProxyService(
@@ -2598,11 +2577,19 @@ def _service_tier_from_event_payload(payload: dict[str, JsonValue] | None) -> st
 
 
 def _effective_service_tier(requested_service_tier: str | None, actual_service_tier: str | None) -> str | None:
-    return actual_service_tier if isinstance(actual_service_tier, str) else requested_service_tier
+    if isinstance(actual_service_tier, str):
+        return actual_service_tier
+    if isinstance(requested_service_tier, str):
+        return requested_service_tier
+    return None
 
 
 def _normalize_service_tier_value(value: JsonValue) -> str | None:
     if not isinstance(value, str):
         return None
     stripped = value.strip()
-    return "priority" if stripped.lower() == "fast" else stripped or None
+    if not stripped:
+        return None
+    if stripped.lower() == "fast":
+        return "priority"
+    return stripped

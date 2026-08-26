@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any, TypeVar, cast
 
@@ -49,7 +49,6 @@ from app.core.usage.live_hub import publish_live_usage
 from app.core.usage.live_snapshots import EVENT_MARKER, parse_rate_limit_event_text
 from app.core.utils.request_id import reset_request_id, set_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.core.utils.time import utcnow
 from app.modules.proxy._service.api_key_usage import (
     _API_KEY_RESERVATION_HEARTBEAT_SECONDS as _API_KEY_RESERVATION_HEARTBEAT_SECONDS,
 )
@@ -73,7 +72,6 @@ from app.modules.proxy._service.http_bridge.helpers import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _clear_http_bridge_quarantine,
-    _clear_http_bridge_quarantine_key,
     _record_http_bridge_quarantine_eventless_timeout,
     _record_http_bridge_quarantine_wedged_pending,
 )
@@ -197,7 +195,6 @@ from app.modules.proxy.affinity import (
     _extract_model_class,
 )
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
-from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 from app.modules.proxy.helpers import (
     _normalize_error_code,
     is_upstream_model_capacity_error,
@@ -211,74 +208,6 @@ from app.modules.proxy.tool_call_dedupe import (
 )
 
 logger = logging.getLogger("app.modules.proxy.service")
-
-
-async def _advance_http_bridge_quarantine_clear_key(
-    service: Any,
-    *,
-    key: Any,
-    api_key_id: str | None,
-    account_id: str,
-    response_id: str,
-    input_item_count: int | None,
-    input_full_fingerprint: str | None,
-    pending_tool_calls: Mapping[str, str] | None,
-) -> bool:
-    lookup = await service._durable_bridge.lookup_request_targets(
-        session_key_kind=key.affinity_kind,
-        session_key_value=key.affinity_key,
-        api_key_id=api_key_id,
-        turn_state=None,
-        session_header=None,
-        previous_response_id=None,
-    )
-    if lookup is None:
-        return False
-    settings = _service_get_settings()
-    instance_id = settings.http_responses_session_bridge_instance_id
-    active_lookup = lookup
-    if not active_lookup.lease_is_active(now=utcnow()) or active_lookup.owner_instance_id != instance_id:
-        claimed_lookup = await service._durable_bridge.claim_live_session(
-            session_key_kind=key.affinity_kind,
-            session_key_value=key.affinity_key,
-            api_key_id=api_key_id,
-            instance_id=instance_id,
-            lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-            account_id=active_lookup.account_id,
-            model=active_lookup.model,
-            service_tier=None,
-            latest_turn_state=active_lookup.latest_turn_state,
-            latest_response_id=active_lookup.latest_response_id,
-            allow_takeover=False,
-            owner_process_epoch=http_bridge_owner_process_epoch(),
-        )
-        if claimed_lookup.owner_instance_id != instance_id:
-            return False
-        active_lookup = claimed_lookup
-    if active_lookup.account_id != account_id:
-        rebound = await service._durable_bridge.rebind_session_account(
-            session_id=active_lookup.session_id,
-            api_key_id=api_key_id,
-            instance_id=instance_id,
-            owner_epoch=active_lookup.owner_epoch,
-            account_id=account_id,
-            clear_continuity=True,
-        )
-        if not rebound:
-            return False
-    advanced = await service._durable_bridge.renew_live_session(
-        session_id=active_lookup.session_id,
-        api_key_id=api_key_id,
-        instance_id=instance_id,
-        owner_epoch=active_lookup.owner_epoch,
-        lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
-        latest_response_id=response_id,
-        latest_input_item_count=input_item_count,
-        latest_input_full_fingerprint=input_full_fingerprint,
-        latest_pending_tool_calls=pending_tool_calls,
-    )
-    return advanced is not None
-
 
 _HTTP_BRIDGE_RECOVERY_SETTLEMENT_RETRY_DELAYS = (
     0.25,
@@ -430,6 +359,24 @@ async def _persist_http_bridge_operation_event(
     append_event = getattr(getattr(service, "_durable_bridge", None), "append_operation_event", None)
     if not operation_id or session_id is None or owner_epoch is None:
         return False
+    append_barrier_released = False
+    delivery_barrier_released = False
+    terminal_enqueued = False
+
+    async def release_terminal_append_barrier() -> None:
+        nonlocal append_barrier_released
+        if terminal_append_barrier is None or append_barrier_released:
+            return
+        append_barrier_released = True
+        await terminal_append_barrier()
+
+    async def release_terminal_delivery_barrier() -> None:
+        nonlocal delivery_barrier_released
+        if terminal_delivery_barrier is None or delivery_barrier_released:
+            return
+        delivery_barrier_released = True
+        await terminal_delivery_barrier()
+
     try:
         batcher = getattr(service, "_http_bridge_operation_event_batcher", None)
         append_terminal_batch = getattr(batcher, "append_terminal_event", None)
@@ -487,14 +434,16 @@ async def _persist_http_bridge_operation_event(
                 ),
                 name=f"http-bridge-terminal-append-{operation_id}",
             )
-            append_result, deferred_cancellation = await _await_task_deferring_cancellation(append_task)
-            if terminal_append_barrier is not None:
-                await terminal_append_barrier()
+            # Counted grouped siblings wait on this barrier; release it even when
+            # append raises so gather(..., return_exceptions=True) cannot strand them.
+            try:
+                append_result, deferred_cancellation = await _await_task_deferring_cancellation(append_task)
+            finally:
+                await release_terminal_append_barrier()
             persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
             settlement_required = bool(getattr(append_result, "settlement_required", False))
-            terminal_enqueued = False
             if settlement_required:
                 terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                 deferred_cancellation = deferred_cancellation or delivery_cancellation
@@ -502,7 +451,7 @@ async def _persist_http_bridge_operation_event(
                 if not terminal_enqueued:
                     terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
                     deferred_cancellation = deferred_cancellation or delivery_cancellation
-                await terminal_delivery_barrier()
+                await release_terminal_delivery_barrier()
             if settlement_required:
                 settle_terminal_batch = getattr(batcher, "settle_terminal_event", None)
 
@@ -581,7 +530,23 @@ async def _persist_http_bridge_operation_event(
         # when every event was durably persisted, so never fail a live stream
         # because the optional spool is unavailable.
         logger.warning("Failed to persist HTTP bridge operation event operation_id=%s", operation_id, exc_info=True)
-        return False
+        await release_terminal_append_barrier()
+        if terminal_event_queue is not None and terminal and not terminal_enqueued:
+            try:
+                await terminal_event_queue.put(event_block)
+                await terminal_event_queue.put(None)
+                if terminal_delivery_scope is not None:
+                    async with session.pending_lock:
+                        terminal_delivery_scope.terminal_enqueued = True
+                terminal_enqueued = True
+            except Exception:
+                logger.debug(
+                    "Failed to enqueue HTTP bridge terminal after spool error operation_id=%s",
+                    operation_id,
+                    exc_info=True,
+                )
+        await release_terminal_delivery_barrier()
+        return terminal_enqueued
 
 
 async def _wait_for_http_bridge_recovery_settlement_retry(
@@ -2852,40 +2817,14 @@ class _HTTPBridgeUpstreamEventsMixin:
             and terminal_request_state.request_kind != "prewarm"
             and not terminal_request_state.skip_request_log
         ):
-            await self._clear_http_bridge_retry_circuit(session)
-            _clear_http_bridge_quarantine(self, session)
-            if terminal_request_state.quarantine_clear_key is not None:
-                quarantine_advanced = False
-                if response_id is not None:
-                    try:
-                        quarantine_advanced = await _advance_http_bridge_quarantine_clear_key(
-                            self,
-                            key=terminal_request_state.quarantine_clear_key,
-                            api_key_id=session.key.api_key_id,
-                            account_id=session.account.id,
-                            response_id=response_id,
-                            input_item_count=(
-                                terminal_request_state.input_item_count
-                                if terminal_request_state.input_item_count > 0
-                                else None
-                            ),
-                            input_full_fingerprint=(
-                                terminal_request_state.input_full_fingerprint
-                                if terminal_request_state.input_item_count > 0
-                                else None
-                            ),
-                            pending_tool_calls=_durable_pending_tool_call_manifest(terminal_request_state, payload),
-                        )
-                    except Exception:
-                        logger.warning("Failed to advance quarantined HTTP bridge continuity", exc_info=True)
-                if quarantine_advanced:
-                    _clear_http_bridge_quarantine_key(
-                        self,
-                        terminal_request_state.quarantine_clear_key,
-                        account_id=session.account.id,
-                        model=session.request_model,
-                        generation=terminal_request_state.quarantine_clear_generation,
-                    )
+            if not terminal_request_state.verified_stale_anchor_replay:
+                await self._clear_http_bridge_retry_circuit(session)
+            _clear_http_bridge_quarantine(
+                self,
+                session,
+                additional_key=terminal_request_state.verified_stale_anchor_retry_circuit_key,
+                additional_key_generation=terminal_request_state.verified_stale_anchor_quarantine_generation,
+            )
 
         normalize_error_event = (
             terminal_request_state is None or terminal_request_state.enforce_openai_sdk_contract

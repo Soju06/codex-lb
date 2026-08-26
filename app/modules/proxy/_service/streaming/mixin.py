@@ -921,11 +921,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                         event_type,
                     ) = _facade()._build_rewritten_stream_response_failed_event(
                         response_id=response_id,
-                        error_code=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE,
+                        error_code="stream_incomplete",
                         error_message=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
                     )
                     status = "error"
-                    error_code = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE
+                    error_code = "stream_incomplete"
                     error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
                     settlement.record_success = False
                     settlement.account_health_error = False

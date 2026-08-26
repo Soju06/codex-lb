@@ -37,9 +37,17 @@ class DashboardSettingsResponse(DashboardModel):
     prohibit_fast_mode: bool
     http_downstream_transport_policy: str = Field(pattern=_HTTP_DOWNSTREAM_TRANSPORT_POLICY_PATTERN)
     proxy_account_response_create_limit: int = Field(ge=0)
+    proxy_account_response_create_limit_environment_value: int = Field(ge=0)
+    proxy_account_response_create_limit_override: int | None = Field(default=None, ge=0)
     proxy_account_stream_limit: int = Field(ge=0)
+    proxy_account_stream_limit_environment_value: int = Field(ge=0)
+    proxy_account_stream_limit_override: int | None = Field(default=None, ge=0)
     proxy_account_stream_recovery_reserve: int = Field(ge=0)
+    proxy_account_stream_recovery_reserve_environment_value: int = Field(ge=0)
+    proxy_account_stream_recovery_reserve_override: int | None = Field(default=None, ge=0)
     proxy_api_key_fair_share_congestion_threshold_pct: int = Field(ge=0, le=100)
+    proxy_api_key_fair_share_congestion_threshold_pct_environment_value: int = Field(ge=0, le=100)
+    proxy_api_key_fair_share_congestion_threshold_pct_override: int | None = Field(default=None, ge=0, le=100)
     upstream_proxy_routing_enabled: bool
     upstream_proxy_default_pool_id: str | None = None
     prefer_earlier_reset_accounts: bool

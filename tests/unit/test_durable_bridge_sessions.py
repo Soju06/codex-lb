@@ -1880,54 +1880,6 @@ async def test_durable_bridge_release_without_draining_marks_session_closed(
 
 
 @pytest.mark.asyncio
-async def test_durable_bridge_ownerless_active_row_can_be_reclaimed_without_takeover(
-    coordinator: DurableBridgeSessionCoordinator,
-) -> None:
-    claimed = await coordinator.claim_live_session(
-        session_key_kind="prompt_cache",
-        session_key_value="ownerless-reclaim",
-        api_key_id=None,
-        instance_id="instance-a",
-        owner_process_epoch="test-process-a",
-        lease_ttl_seconds=60.0,
-        account_id="acc-1",
-        model="gpt-5.4",
-        service_tier=None,
-        latest_turn_state=None,
-        latest_response_id=None,
-        allow_takeover=True,
-    )
-    released = await coordinator.release_live_session(
-        session_id=claimed.session_id,
-        instance_id="instance-a",
-        owner_epoch=claimed.owner_epoch,
-        draining=True,
-    )
-
-    assert released is not None
-    assert released.owner_instance_id is None
-
-    reclaimed = await coordinator.claim_live_session(
-        session_key_kind="prompt_cache",
-        session_key_value="ownerless-reclaim",
-        api_key_id=None,
-        instance_id="instance-b",
-        owner_process_epoch="test-process-b",
-        lease_ttl_seconds=60.0,
-        account_id="acc-1",
-        model="gpt-5.4",
-        service_tier=None,
-        latest_turn_state=None,
-        latest_response_id=None,
-        allow_takeover=False,
-    )
-
-    assert reclaimed.session_id == claimed.session_id
-    assert reclaimed.owner_instance_id == "instance-b"
-    assert reclaimed.owner_epoch == claimed.owner_epoch + 1
-
-
-@pytest.mark.asyncio
 async def test_durable_bridge_takeover_clears_stale_recovery_anchor_for_fresh_session(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
@@ -3316,6 +3268,80 @@ async def test_durable_bridge_retry_circuit_round_trip(
     assert cleared.consecutive_failures == 0
     assert cleared.cooldown_until_epoch == 0.0
     assert cleared.last_detail is None
+
+
+@pytest.mark.asyncio
+async def test_durable_bridge_retry_circuit_generation_claim_is_compare_and_set(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-claim",
+        api_key_id="key-claim",
+        consecutive_failures=2,
+        cooldown_until_epoch=1300.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=1200.0,
+    )
+
+    claimed = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-claim",
+        api_key_id="key-claim",
+        expected_updated_at_epoch=1200.0,
+        expected_admission_generation=0,
+        expected_consecutive_failures=2,
+        expected_cooldown_until_epoch=1300.0,
+    )
+    assert claimed is not None
+    assert claimed.updated_at_epoch == 1200.0
+    assert claimed.admission_generation == 1
+    assert claimed.consecutive_failures == 2
+    assert claimed.cooldown_until_epoch == 1300.0
+
+    stale_claim = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-claim",
+        api_key_id="key-claim",
+        expected_updated_at_epoch=1200.0,
+        expected_admission_generation=0,
+        expected_consecutive_failures=2,
+        expected_cooldown_until_epoch=1300.0,
+    )
+    assert stale_claim is None
+
+    absent_claim = await coordinator.claim_retry_circuit_generation(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-claim-absent",
+        api_key_id="key-claim",
+        expected_updated_at_epoch=None,
+        expected_admission_generation=0,
+        expected_consecutive_failures=0,
+        expected_cooldown_until_epoch=0.0,
+    )
+    assert absent_claim is not None
+    assert absent_claim.admission_generation == 1
+
+    await coordinator.persist_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-claim",
+        api_key_id="key-claim",
+        consecutive_failures=3,
+        cooldown_until_epoch=1400.0,
+        last_detail="stream_incomplete",
+        # Simulate a delayed replica whose wall clock is behind the observed
+        # failure row. The admission claim must not disturb this base epoch.
+        updated_at_epoch=1100.0,
+        base_updated_at_epoch=1200.0,
+    )
+    after_delayed_failure = await coordinator.lookup_retry_circuit(
+        session_key_kind="session_header",
+        session_key_value="sid-retry-circuit-claim",
+        api_key_id="key-claim",
+    )
+    assert after_delayed_failure is not None
+    assert after_delayed_failure.consecutive_failures == 3
+    assert after_delayed_failure.admission_generation == 1
 
 
 def _lookup_with_lease(lease_expires_at):

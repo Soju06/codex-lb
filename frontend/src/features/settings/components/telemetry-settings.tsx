@@ -11,6 +11,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
@@ -70,39 +71,39 @@ export function TelemetrySettings({ disabled }: TelemetrySettingsProps) {
               {t("settings.telemetry.collectedData.description")}
             </p>
           </div>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            className="h-8 text-xs"
-            disabled={!consent}
-            onClick={() => setPreviewOpen(true)}
-          >
-            {t("settings.telemetry.collectedData.view")}
-          </Button>
+          <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+            <DialogTrigger asChild>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs"
+                disabled={!consent}
+              >
+                {t("settings.telemetry.collectedData.view")}
+              </Button>
+            </DialogTrigger>
+            {previewOpen ? (
+              <DialogContent className="sm:max-w-2xl">
+                <DialogHeader>
+                  <DialogTitle>{t("settings.telemetry.previewDialog.title")}</DialogTitle>
+                  <DialogDescription>
+                    {t("settings.telemetry.previewDialog.description")}
+                  </DialogDescription>
+                </DialogHeader>
+                {previewEnvelope ? (
+                  <TelemetryPayloadPreview preview={previewEnvelope} />
+                ) : telemetryPreviewQuery.error ? (
+                  <AlertMessage variant="error">{telemetryPreviewQuery.error.message}</AlertMessage>
+                ) : (
+                  <Skeleton className="h-64 w-full rounded-lg" />
+                )}
+                <DialogFooter showCloseButton />
+              </DialogContent>
+            ) : null}
+          </Dialog>
         </div>
       </div>
-
-      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        {previewOpen ? (
-          <DialogContent className="sm:max-w-2xl">
-            <DialogHeader>
-              <DialogTitle>{t("settings.telemetry.previewDialog.title")}</DialogTitle>
-              <DialogDescription>
-                {t("settings.telemetry.previewDialog.description")}
-              </DialogDescription>
-            </DialogHeader>
-            {previewEnvelope ? (
-              <TelemetryPayloadPreview preview={previewEnvelope} />
-            ) : telemetryPreviewQuery.error ? (
-              <AlertMessage variant="error">{telemetryPreviewQuery.error.message}</AlertMessage>
-            ) : (
-              <Skeleton className="h-64 w-full rounded-lg" />
-            )}
-            <DialogFooter showCloseButton />
-          </DialogContent>
-        ) : null}
-      </Dialog>
     </section>
   );
 }

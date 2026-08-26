@@ -138,6 +138,7 @@ async def _await_result_deferring_cancellation(awaitable: Awaitable[object]) -> 
                 if task.cancelled():
                     raise
                 cancellation_deferred = True
+    raise RuntimeError("unreachable shielded cancellation-deferral state")
 
 
 async def forward_chat_completion(

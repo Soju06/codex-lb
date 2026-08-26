@@ -3362,7 +3362,38 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if retry_injected_input is not None:
                     retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
-                retry_previous_response_id = request_state.previous_response_id
+                if explicit_previous_response_rejection and _http_bridge_session_key_quarantined(
+                    self, bridge_session_key
+                ):
+                    # An explicit rejection alone does not prove the anchor is
+                    # dead: it can mean this session simply was not its owner,
+                    # which is why #1830's recovery rebinds and deliberately
+                    # retries the SAME anchor on the fresh session. Only once
+                    # the retry circuit has opened on repeated eventless
+                    # poison-class failures and quarantined the key is the
+                    # anchor proven dead rather than merely mis-bound.
+                    #
+                    # At that point re-attaching guarantees the retry repeats
+                    # the rejection. The fresh-replay branches above already
+                    # drop the anchor, but each additionally requires an
+                    # operation fence or a proven full-resend context, and a
+                    # rejection satisfying neither falls through to here. Live,
+                    # that produced a reattach loop against a dead anchor and a
+                    # burst of client-visible 503s while the circuit cooled on
+                    # failures it kept re-creating.
+                    #
+                    # This stays narrower than those branches: it keeps this
+                    # path's interrupted tool-output injection and its account
+                    # preference, and only stops the dead reference being sent
+                    # again. Gating on an explicit stale-anchor rejection is
+                    # the case #1863's non-goal names as the one where
+                    # converting a transport recovery to an unanchored replay
+                    # is permitted.
+                    retry_payload = _http_bridge_payload_without_previous_response_id(retry_payload)
+                    retry_previous_response_id = None
+                    recovery_path = "local_previous_response_error_unanchored"
+                else:
+                    retry_previous_response_id = request_state.previous_response_id
                 retry_request_stage = "reattach"
                 retry_preferred_account_id = request_state.preferred_account_id
                 allow_previous_response_recovery_rebind = True

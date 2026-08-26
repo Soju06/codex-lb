@@ -72,6 +72,14 @@ row that the next load rehydrates into a cooldown whose cause is gone. The
 fence MUST still apply to callers that merely observed the circuit rather than
 removing its cause.
 
+Once the key is quarantined for a poisoned anchor, the local previous-response
+rebind MUST NOT re-attach to the rejected anchor. An explicit rejection on its
+own does not prove the anchor dead, since it can mean the session was not its
+owner, so the rebind's existing same-anchor retry MUST be preserved until the
+circuit has opened on repeated eventless poison-class failures. After that the
+rebind MUST retry unanchored while keeping its interrupted tool-output
+injection, so the recovery it exists to perform is not lost.
+
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
 using exponential backoff from sixty seconds up to ten minutes. Clean-close
@@ -192,6 +200,13 @@ and durable circuit state.
 - **THEN** the retry circuit for that key is cleared rather than left cooling
 - **AND** a fenced or failed abandonment leaves the cooldown running
 - **AND** the durable row is deleted even when no version fence has been stamped for it
+
+#### Scenario: the local rebind drops an anchor the circuit has proven dead
+
+- **GIVEN** a key quarantined for a poisoned anchor after repeated eventless poison-class failures
+- **WHEN** an anchored request fails with an explicit previous-response rejection and enters local rebind
+- **THEN** the rebind retries with no `previous_response_id` rather than re-attaching
+- **AND** an explicit rejection on a key that is not quarantined still retries the same anchor
 
 #### Scenario: midstream retirement does not consume a pre-response strike
 

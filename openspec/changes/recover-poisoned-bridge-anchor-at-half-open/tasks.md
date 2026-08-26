@@ -49,6 +49,11 @@
       failed clear still leaves it running
 
 
+- [x] 1.11 Stop the local previous-response rebind re-attaching to an anchor the
+      circuit has already proven dead. An explicit rejection alone can mean the
+      session was not the owner, which #1830's recovery handles by retrying the
+      same anchor, so this is gated on the key being quarantined
+
 ## 2. Regression coverage
 
 - [x] 2.1 Two `stream_incomplete` failures quarantine the key with the

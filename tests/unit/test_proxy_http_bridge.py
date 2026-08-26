@@ -33254,3 +33254,113 @@ async def test_ordinary_circuit_clear_still_respects_the_version_fence() -> None
     await service._clear_http_bridge_retry_circuit(session)
 
     clear_retry_circuit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_local_rebind_drops_an_anchor_the_circuit_has_proven_dead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same #1830 recovery, but after the retry circuit has already opened on
+    # repeated eventless poison-class failures and quarantined the key. At that
+    # point the anchor is proven dead rather than merely mis-bound, so the
+    # rebind must NOT re-attach to it. Re-anchoring here produced a reattach
+    # loop against a dead anchor and a burst of client-visible 503s while the
+    # circuit cooled on failures it kept re-creating.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "previous_response_id": "resp_stale_anchor",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}],
+        }
+    )
+    session = _make_bridge_session(key_value="sid-proven-dead-anchor")
+    terse_rejection = ProxyResponseError(
+        400,
+        {
+            "error": {
+                "type": "invalid_request_error",
+                "message": "Invalid `previous_response_id`.",
+            }
+        },
+    )
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    get_or_create = AsyncMock(side_effect=[session, session])
+    stream_attempts: list[str | None] = []
+
+    async def fake_stream_events(
+        _session: proxy_service._HTTPBridgeSession,
+        *,
+        request_state: proxy_service._WebSocketRequestState,
+        text_data: str,
+        queue_limit: int,
+        propagate_http_errors: bool,
+        downstream_turn_state: str | None,
+        request_deadline: float | None = None,
+    ):
+        del queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
+        stream_attempts.append(request_state.previous_response_id)
+        del text_data
+        if len(stream_attempts) == 1:
+            raise terse_rejection
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_http_bridge_local_owner_account_id", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-owner"))
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_reset_http_bridge_session_after_local_terminal_error", AsyncMock())
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={"session_id": "sid-proven-dead-anchor"},
+            codex_session_affinity=True,
+            propagate_http_errors=True,
+            openai_cache_affinity=True,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert get_or_create.await_count == 2
+    recovery_call = get_or_create.await_args_list[1]
+    assert recovery_call.kwargs["allow_previous_response_recovery_rebind"] is True
+    assert recovery_call.kwargs["request_stage"] == "reattach"
+    assert stream_attempts == ["resp_stale_anchor", None], (
+        "once the circuit has proven the anchor dead, the rebind must retry unanchored"
+    )
+    assert recovery_call.kwargs["previous_response_id"] is None

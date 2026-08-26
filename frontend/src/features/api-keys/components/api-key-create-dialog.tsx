@@ -335,7 +335,7 @@ export function ApiKeyCreateDialog({ open, busy, onOpenChange, onSubmit }: ApiKe
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {open ? (
-        <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <DialogContent className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
           <DialogHeader className="px-6 pt-6 pr-12 pb-2">
             <DialogTitle>{t("apiKeys.createDialog.title")}</DialogTitle>
             <DialogDescription>{t("apiKeys.createDialog.description")}</DialogDescription>

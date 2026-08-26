@@ -19,7 +19,7 @@ The existing `AutomationJobDialog` already demonstrates the project pattern for 
 
 ## Decisions
 
-1. **Use the established viewport-bounded dialog shell.** `DialogContent` will use a flex column with `max-h-[calc(100vh-2rem)]`, `overflow-hidden`, zero outer padding, and the existing desktop width. The header receives explicit internal padding so it remains outside form scrolling. This matches `AutomationJobDialog` rather than introducing a second tall-dialog convention.
+1. **Use the established viewport-bounded dialog shell.** `DialogContent` will use a flex column with `max-h-[calc(100dvh-2rem)]`, `overflow-hidden`, zero outer padding, and the existing desktop width. The header receives explicit internal padding so it remains outside form scrolling. This keeps the `AutomationJobDialog` shell structure while following the account list's dynamic-viewport convention.
 
    Alternative: change the shared Dialog primitive. Rejected because only the API key create dialog has this proven layout failure, and global sizing changes could affect unrelated dialogs.
 

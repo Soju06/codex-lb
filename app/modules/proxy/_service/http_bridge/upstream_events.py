@@ -61,6 +61,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
+    _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_eventless_precreated_deadline,
     _http_bridge_request_budget_seconds,
@@ -1005,6 +1006,7 @@ async def _abandon_durable_http_bridge_continuity(
     session: "_HTTPBridgeSession",
     *,
     detail: str = "repeated_zero_event_idle_timeout",
+    settle_circuit: bool = False,
 ) -> bool:
     """Clear durable continuity before retiring a repeatedly poisoned bridge.
 
@@ -1045,6 +1047,16 @@ async def _abandon_durable_http_bridge_continuity(
         cache_key_family=session.key.affinity_kind,
         model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )
+    # Only the settlement paths this change added ask for the circuit to be
+    # settled. The retirement and close funnels that already called this
+    # function must keep their existing behaviour: a verified stale-anchor
+    # replay reaches them and depends on the circuit surviving, both as the
+    # generation fence it claims at dispatch (#1863) and because
+    # `response.completed` deliberately skips the clear for such a replay.
+    # Settling for every caller broke five variants of the stale-owner replay
+    # suite once #1886's routing reached those funnels in the same flow.
+    if not settle_circuit:
+        return True
     # The circuit was opened by failures against the anchor this call just
     # removed, so its cooldown is now backing off a cause that no longer
     # exists. Leaving it running refuses requests that carry no anchor at all:
@@ -2299,6 +2311,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     self,
                     session,
                     detail=grouped_poison_detail,
+                    settle_circuit=True,
                 )
             if grouped_cancellation is not None:
                 if grouped_error is not None:
@@ -3107,6 +3120,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 error_code is not None
                 and terminal_request_state is not None
                 and terminal_request_state.response_event_count == 0
+                and _http_bridge_continuity_bound_without_safe_replay(terminal_request_state)
             ):
                 # An upstream terminal frame that fails the request before any
                 # response event is the same pre-response failure the circuit
@@ -3270,6 +3284,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     self,
                     session,
                     detail=terminal_poison_detail,
+                    settle_circuit=True,
                 )
             finally:
                 await _finalize_terminal_settlement(terminal_request_state)

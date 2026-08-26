@@ -33148,6 +33148,7 @@ async def test_abandoning_the_anchor_resets_the_retry_circuit() -> None:
         service,
         session,
         detail="repeated_zero_event_stream_incomplete",
+        settle_circuit=True,
     )
 
     assert cleared is True
@@ -33180,6 +33181,7 @@ async def test_failed_anchor_abandonment_leaves_the_circuit_cooling() -> None:
         service,
         session,
         detail="repeated_zero_event_stream_incomplete",
+        settle_circuit=True,
     )
 
     assert cleared is False
@@ -33222,6 +33224,7 @@ async def test_abandonment_deletes_the_durable_circuit_opened_in_the_same_instan
         service,
         session,
         detail="repeated_zero_event_stream_incomplete",
+        settle_circuit=True,
     )
 
     assert cleared is True
@@ -33364,3 +33367,44 @@ async def test_local_rebind_drops_an_anchor_the_circuit_has_proven_dead(
         "once the circuit has proven the anchor dead, the rebind must retry unanchored"
     )
     assert recovery_call.kwargs["previous_response_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_abandonment_from_an_existing_funnel_leaves_the_circuit_alone() -> None:
+    # The retirement and close funnels called this before this change existed.
+    # A verified stale-anchor replay reaches them and depends on the circuit
+    # surviving: it claims the circuit generation at dispatch (#1863), and
+    # `response.completed` deliberately skips the clear for such a replay.
+    # Settling for every caller broke five variants of the stale-owner replay
+    # suite once #1886's routing reached those funnels in the same flow.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-funnel-keeps-circuit",
+        key_value="sid-funnel-keeps-circuit",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-funnel-keeps-circuit"
+    session.durable_owner_epoch = 1
+    clear_retry_circuit = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=clear_retry_circuit,
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    assert session.key in cast(Any, service)._http_bridge_retry_circuits
+
+    # Default call shape, i.e. every pre-existing caller.
+    cleared = await http_bridge_upstream_events_module._abandon_durable_http_bridge_continuity(
+        service,
+        session,
+        detail="repeated_zero_event_stream_incomplete",
+    )
+
+    assert cleared is True, "the anchor is still abandoned for these callers"
+    assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
+        "a caller that did not opt in must not have its circuit settled"
+    )
+    clear_retry_circuit.assert_not_awaited()

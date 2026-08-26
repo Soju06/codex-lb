@@ -863,6 +863,15 @@ def _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
     return _HTTPBridgeRetryCircuitAttemptSelection(kind="ineligible" if attempt_seen else "absent")
 
 
+def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
+    """Return whether retrying would require replaying an unsafe continuation."""
+    if request_state.previous_response_id is not None:
+        return not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text)
+    return request_state.hard_continuity_anchor and not (
+        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
+    )
+
+
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:
     """Keep a closed bridge registered while an unsent request owns its handoff."""
     return session is not None and bool(getattr(session, "admission_waiter_count", 0))

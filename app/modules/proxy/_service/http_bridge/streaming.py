@@ -73,6 +73,7 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge.helpers import (
     _effective_http_bridge_idle_ttl_seconds,
+    _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_durable_lookup_allows_turn_state_takeover,
     _http_bridge_is_context_overflow_error,
@@ -244,15 +245,6 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
-
-
-def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketRequestState) -> bool:
-    """Return whether retrying would require replaying an unsafe continuation."""
-    if request_state.previous_response_id is not None:
-        return not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text)
-    return request_state.hard_continuity_anchor and not (
-        request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
-    )
 
 
 def _http_bridge_durable_recovery_predecessor_proven(request_state: _WebSocketRequestState) -> bool:

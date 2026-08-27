@@ -17738,6 +17738,69 @@ async def test_stream_via_http_bridge_translates_retained_response_alias_before_
 
 
 @pytest.mark.asyncio
+async def test_stream_via_http_bridge_fails_closed_when_retained_alias_lookup_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    payload = proxy_service.ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hello",
+            "previous_response_id": "resp-retained-unavailable",
+        }
+    )
+    durable_lookup = proxy_service.DurableBridgeLookup(
+        session_id="sess-retained-alias-unavailable",
+        canonical_kind="session_header",
+        canonical_key="sid-retained-alias-unavailable",
+        api_key_scope="__anonymous__",
+        account_id="acc-1",
+        owner_instance_id="instance-a",
+        owner_epoch=1,
+        lease_expires_at=datetime.now(timezone.utc),
+        state=HttpBridgeSessionState.ACTIVE,
+        latest_turn_state="turn-retained-alias-unavailable",
+        latest_response_id="resp-replacement-unavailable",
+    )
+    alias_lookup = AsyncMock(side_effect=RuntimeError("database temporarily unavailable"))
+    session = _make_bridge_session(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-retained-alias-unavailable", None),
+        key_value="sid-retained-alias-unavailable",
+    )
+    monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(service._durable_bridge, "lookup_previous_response_id_target", alias_lookup)
+    monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _ in service._stream_via_http_bridge(
+            payload,
+            headers={"x-codex-session-id": "sid-retained-alias-unavailable"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        ):
+            pass
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "bridge_continuity_persistence_failed"
+    alias_lookup.assert_awaited_once_with(response_id="resp-retained-unavailable", api_key_id=None)
+
+
+@pytest.mark.asyncio
 async def test_stream_via_http_bridge_resolves_previous_response_owner_from_request_logs_when_durable_lookup_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

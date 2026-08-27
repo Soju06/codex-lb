@@ -1843,12 +1843,28 @@ class _HTTPBridgeStreamingMixin:
                             response_id=payload.previous_response_id,
                             api_key_id=bridge_session_key.api_key_id,
                         )
-                    except Exception:
+                    except ProxyResponseError:
+                        raise
+                    except Exception as exc:
                         logger.warning(
                             "Failed to resolve retained HTTP bridge response alias request_id=%s",
                             request_id,
                             exc_info=True,
                         )
+                        # The initial request lookup may have found the
+                        # retained alias's session without carrying its
+                        # immutable A-to-B target. Never continue with the
+                        # stale client anchor when this target read is
+                        # unavailable; that could replay an interrupted
+                        # response or create a duplicate turn.
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "bridge_continuity_persistence_failed",
+                                "HTTP responses retained response alias could not be resolved; retry the request.",
+                                error_type="server_error",
+                            ),
+                        ) from exc
                 if (
                     previous_response_alias_lookup is not None
                     and previous_response_alias_lookup.session_id == durable_lookup.session_id

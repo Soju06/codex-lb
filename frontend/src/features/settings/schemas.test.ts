@@ -68,9 +68,13 @@ describe("DashboardSettingsSchema", () => {
     expect(parsed.relativeAvailabilityTopK).toBe(5);
     expect(parsed.singleAccountId).toBe("acc-1");
     expect(parsed.proxyAccountResponseCreateLimit).toBe(6);
+    expect(parsed.proxyAccountResponseCreateLimitOverride).toBeNull();
     expect(parsed.proxyAccountStreamLimit).toBe(12);
+    expect(parsed.proxyAccountStreamLimitOverride).toBeNull();
     expect(parsed.proxyAccountStreamRecoveryReserve).toBe(2);
+    expect(parsed.proxyAccountStreamRecoveryReserveOverride).toBeNull();
     expect(parsed.proxyApiKeyFairShareCongestionThresholdPct).toBe(80);
+    expect(parsed.proxyApiKeyFairShareCongestionThresholdPctOverride).toBeNull();
     expect(parsed.weeklyPaceWorkingDays).toBe("0,1,2,3,4");
     expect(parsed.weeklyPaceSmoothingMinutes).toBe(60);
     expect(parsed.openaiCacheAffinityMaxAgeSeconds).toBe(300);
@@ -307,6 +311,20 @@ describe("SettingsUpdateRequestSchema", () => {
         }).success,
       ).toBe(false);
     }
+  });
+
+  it("accepts explicit null capacity override clears", () => {
+    const parsed = SettingsUpdateRequestSchema.parse({
+      proxyAccountResponseCreateLimit: null,
+      proxyAccountStreamLimit: null,
+      proxyAccountStreamRecoveryReserve: null,
+      proxyApiKeyFairShareCongestionThresholdPct: null,
+    });
+
+    expect(parsed.proxyAccountResponseCreateLimit).toBeNull();
+    expect(parsed.proxyAccountStreamLimit).toBeNull();
+    expect(parsed.proxyAccountStreamRecoveryReserve).toBeNull();
+    expect(parsed.proxyApiKeyFairShareCongestionThresholdPct).toBeNull();
   });
 
   it("rejects out-of-range and fractional fair-share congestion thresholds", () => {

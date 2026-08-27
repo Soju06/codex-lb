@@ -94,4 +94,34 @@ describe("TelemetrySettings", () => {
       telemetryRequests.filter((url) => url.searchParams.get("include_preview") === "true"),
     ).toHaveLength(1);
   });
+
+  it.each(["Escape", "Close"] as const)(
+    "returns focus to the exact preview invoker after %s dismissal",
+    async (dismissal) => {
+      const user = userEvent.setup();
+      renderWithProviders(<TelemetrySettings disabled={false} />);
+
+      const viewButton = await screen.findByRole("button", { name: "View collected data" });
+      await waitFor(() => expect(viewButton).toBeEnabled());
+
+      await user.click(viewButton);
+      const dialog = await screen.findByRole("dialog", { name: "Collected telemetry data" });
+
+      if (dismissal === "Escape") {
+        await user.keyboard("{Escape}");
+      } else {
+        const closeButton = within(dialog)
+          .getAllByRole("button", { name: "Close" })
+          .find((button) => button.textContent === "Close");
+        expect(closeButton).toBeDefined();
+        await user.click(closeButton!);
+      }
+
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog", { name: "Collected telemetry data" })).not.toBeInTheDocument(),
+      );
+      expect(viewButton).toHaveFocus();
+      expect(document.body).not.toHaveFocus();
+    },
+  );
 });

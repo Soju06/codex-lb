@@ -38,6 +38,27 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 |:---:|:---:|:---:|
 | ![dashboard-dark](screenshots/dashboard-dark.jpg) | ![accounts-dark](screenshots/accounts-dark.jpg) | ![settings-dark](screenshots/settings-dark.jpg) |
 
+## Community companions
+
+These independent projects consume the existing dashboard API and are
+maintained outside codex-lb:
+
+- [Codex LB Status Bar](https://github.com/sm1ee/codex-lb-statusbar) — a native
+  macOS app with account status, quota details, and authenticated account
+  controls.
+- [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — a
+  read-only SwiftBar/Bun monitor for account-pool status and quota headroom.
+
+Prefer a guest dashboard session for monitoring-only access when the companion
+supports it, and grant admin access only for Status Bar account controls.
+codex-lb SwiftBar is read-only; consult its compatibility table for the
+authentication modes supported by the current release. Review each project's
+repository and release notes before connecting it.
+
+OpenSpec: the [user-documentation capability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation)
+governs this listing, while [admin-auth](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth)
+defines the guest and admin access contracts.
+
 ---
 
 codex-lb is spec-driven: normative behavior lives in [OpenSpec capabilities](https://github.com/Soju06/codex-lb/tree/main/openspec/specs) in the repository. Docs pages describe how to use the project and link back to the specs that govern them.

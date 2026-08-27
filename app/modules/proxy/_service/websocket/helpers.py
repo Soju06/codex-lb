@@ -760,11 +760,15 @@ def _websocket_event_error_param(event_type: str | None, payload: dict[str, Json
     error = _websocket_event_error_payload(event_type, payload)
     if not isinstance(error, dict):
         return None
+    if "param" not in error:
+        return None
     param_value = error.get("param")
     if not isinstance(param_value, str):
-        return None
-    stripped = param_value.strip()
-    return stripped or None
+        # Preserve field presence as a fail-closed, non-matching value. The
+        # upstream classifier must distinguish an absent param from a present
+        # value with the wrong JSON type.
+        return ""
+    return param_value.strip()
 
 
 def _websocket_event_error_message(event_type: str | None, payload: dict[str, JsonValue] | None) -> str | None:
@@ -958,6 +962,8 @@ def _prepare_websocket_request_state_for_auth_replay(
     *,
     current_account_id: str | None = None,
 ) -> str | None:
+    if request_state.verified_stale_anchor_replay:
+        return None
     if request_state.last_downstream_sequence_number is not None:
         return None
     can_switch_account = _websocket_auth_request_can_switch_account(request_state)
@@ -1100,10 +1106,13 @@ def _websocket_top_level_error_payload(payload: dict[str, JsonValue]) -> dict[st
     if payload.get("type") != "error":
         return None
     error: dict[str, JsonValue] = {}
-    for error_field in ("code", "message", "param"):
+    for error_field in ("code", "message"):
         value = payload.get(error_field)
         if isinstance(value, str) and value.strip():
             error[error_field] = value.strip()
+    if "param" in payload:
+        param = payload.get("param")
+        error["param"] = param.strip() if isinstance(param, str) else ""
     error_type = payload.get("error_type")
     if isinstance(error_type, str) and error_type.strip():
         error["type"] = error_type.strip()

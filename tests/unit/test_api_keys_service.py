@@ -55,6 +55,7 @@ pytestmark = pytest.mark.unit
         "database is locked",
         "database table is locked",
         "database schema is locked",
+        "SQLITE_BUSY_SNAPSHOT",
     ],
 )
 def test_is_sqlite_database_locked_matches_transient_lock_messages(message: str) -> None:
@@ -222,7 +223,14 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             row.limits = self._limits[key_id]
         return self._limits[key_id]
 
-    async def upsert_limits(self, key_id: str, limits: list[ApiKeyLimit], *, commit: bool = True) -> list[ApiKeyLimit]:
+    async def upsert_limits(
+        self,
+        key_id: str,
+        limits: list[ApiKeyLimit],
+        *,
+        commit: bool = True,
+        preserve_matched_usage: bool = False,
+    ) -> list[ApiKeyLimit]:
         del commit
         existing = self._limits.get(key_id, [])
         existing_by_key = {(limit.limit_type, limit.limit_window, limit.model_filter): limit for limit in existing}
@@ -233,8 +241,9 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             matched = existing_by_key.get(key)
             if matched is not None:
                 matched.max_value = incoming.max_value
-                matched.current_value = incoming.current_value
-                matched.reset_at = incoming.reset_at
+                if not preserve_matched_usage:
+                    matched.current_value = incoming.current_value
+                    matched.reset_at = incoming.reset_at
                 updated.append(matched)
                 continue
             self._limit_id_seq += 1
@@ -1851,12 +1860,124 @@ async def test_update_key_normalizes_timezone_aware_expiry_to_utc_naive() -> Non
             expires_at_set=True,
         ),
     )
-
     assert updated.expires_at == datetime(2026, 4, 1, 12, 30, 0)
 
     stored = await repo.get_by_id(created.id)
     assert stored is not None
     assert stored.expires_at == datetime(2026, 4, 1, 12, 30, 0)
+
+
+@pytest.mark.asyncio
+async def test_update_key_limit_patch_preserves_matched_usage() -> None:
+    class _ConcurrentUsageRepo(_FakeApiKeysRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inject_after_read = False
+            self.concurrent_reset_at = datetime(2026, 8, 22, 12, 0, 0)
+
+        async def upsert_limits(
+            self,
+            key_id: str,
+            limits: list[ApiKeyLimit],
+            *,
+            commit: bool = True,
+            preserve_matched_usage: bool = False,
+        ) -> list[ApiKeyLimit]:
+            if self.inject_after_read:
+                existing = self._limits[key_id][0]
+                existing.current_value = 725
+                existing.reset_at = self.concurrent_reset_at
+            return await super().upsert_limits(
+                key_id,
+                limits,
+                commit=commit,
+                preserve_matched_usage=preserve_matched_usage,
+            )
+
+    repo = _ConcurrentUsageRepo()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="limit-preservation-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000)],
+        )
+    )
+    limits = await repo.get_limits_by_key(created.id)
+    limits[0].current_value = 275
+    original_reset_at = limits[0].reset_at
+    repo.inject_after_read = True
+
+    await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=2_000)],
+            limits_set=True,
+        ),
+    )
+
+    stored = await repo.get_limits_by_key(created.id)
+    assert stored[0].max_value == 2_000
+    assert stored[0].current_value == 725
+    assert stored[0].reset_at == repo.concurrent_reset_at
+    assert stored[0].reset_at != original_reset_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lock_message", ["database is locked", "SQLITE_BUSY_SNAPSHOT"])
+async def test_update_key_retries_after_sqlite_snapshot_conflict(lock_message: str) -> None:
+    class _BusyPatchRepo(_FakeApiKeysRepository):
+        fail_next_commit = False
+
+        async def commit(self) -> None:
+            if self.fail_next_commit:
+                self.fail_next_commit = False
+                raise OperationalError("UPDATE api_keys", {}, Exception(lock_message))
+            await super().commit()
+
+    repo = _BusyPatchRepo()
+    service = ApiKeysService(repo)
+    created = await service.create_key(ApiKeyCreateData(name="busy-key", allowed_models=None))
+    repo.fail_next_commit = True
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(name="retried-key", name_set=True),
+    )
+
+    assert updated.name == "retried-key"
+    assert repo.commit_calls == 2
+    assert repo.rollback_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_update_key_limit_reset_still_clears_matched_usage() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="limit-reset-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=1_000)],
+        )
+    )
+    limits = await repo.get_limits_by_key(created.id)
+    limits[0].current_value = 275
+
+    await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=2_000)],
+            limits_set=True,
+            reset_usage=True,
+        ),
+    )
+
+    stored = await repo.get_limits_by_key(created.id)
+    assert stored[0].max_value == 2_000
+    assert stored[0].current_value == 0
 
 
 @pytest.mark.asyncio

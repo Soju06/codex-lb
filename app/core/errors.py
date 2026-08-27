@@ -82,10 +82,8 @@ def is_previous_response_not_found_message(message: str | None) -> bool:
 def _is_invalid_previous_response_id_message(message: str | None) -> bool:
     if message is None:
         return False
-    normalized = " ".join(message.lower().split())
-    if normalized.endswith("."):
-        normalized = normalized[:-1]
-    return normalized == "invalid `previous_response_id`"
+    normalized = " ".join(message.casefold().replace("`", "").split()).removesuffix(".").rstrip()
+    return normalized == "invalid previous_response_id"
 
 
 def previous_response_id_from_not_found_message(message: str | None) -> str | None:
@@ -106,11 +104,13 @@ def previous_response_id_from_not_found_message(message: str | None) -> str | No
 def is_previous_response_not_found_error(
     *,
     code: str | None,
-    param: str | None,
+    param: object,
     message: str | None,
 ) -> bool:
     if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
         return True
+    if param is not None and not isinstance(param, str):
+        return False
     if code != "invalid_request_error":
         return False
     if param is None:
@@ -131,7 +131,7 @@ def response_failed_event(
     incomplete_details: dict[str, str] | None = None,
 ) -> ResponseFailedEvent:
     error = openai_error(code, message, error_type, resets_at=resets_at)["error"]
-    if error_param:
+    if error_param is not None:
         error["param"] = error_param
     if created_at is None:
         created_at = int(time.time())

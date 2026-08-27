@@ -89,7 +89,7 @@ frontend-playwright-chromium: frontend-install
 
 test-dashboard-browser-smoke: frontend-build frontend-playwright-chromium
 	uv sync --dev --frozen
-	uv run python scripts/run_dashboard_browser_smoke.py
+	uv run python scripts/run_dashboard_browser_smoke.py --frontend-built
 
 .PHONY: lint typecheck architecture-check
 lint: architecture-check

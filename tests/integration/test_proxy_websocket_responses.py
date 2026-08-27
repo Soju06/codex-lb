@@ -696,6 +696,137 @@ def _websocket_response_create(text: str) -> dict[str, object]:
     }
 
 
+def test_backend_responses_websocket_preserves_recorded_previous_response_account_owner(
+    app_instance,
+    monkeypatch,
+):
+    model = "external-ws-recorded-owner"
+    previous_response_id = "resp_c5ca4bbf04a26678c9ec342f00fe90fe69f3940780f7556092"
+    account = SimpleNamespace(id="acct_ws_recorded_previous_owner", security_work_authorized=False)
+    upstream = _FakeUpstreamWebSocket(_websocket_response_batch("resp_ws_recorded_owner_completed"))
+    owner_lookups: list[str] = []
+
+    async def recorded_owner(
+        self,
+        *,
+        previous_response_id,
+        api_key,
+        session_id=None,
+        surface,
+        request_state=None,
+        **kwargs,
+    ):
+        del self, api_key, session_id, surface, request_state, kwargs
+        owner_lookups.append(previous_response_id)
+        return account.id
+
+    async def fail_if_source_guard_runs(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("recorded subscription ownership must bypass the model-source WebSocket fallback")
+
+    async def select_recorded_owner(self, *args, request_state, preferred_account_id=None, **kwargs):
+        del self, args, kwargs
+        assert request_state.previous_response_owner_account_id == account.id
+        assert preferred_account_id == account.id
+        return account
+
+    async def open_recorded_owner(self, selected_account, headers, **kwargs):
+        del self, headers, kwargs
+        assert selected_account.id == account.id
+        return selected_account, upstream
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        recorded_owner,
+    )
+    monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", fail_if_source_guard_runs)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        select_recorded_owner,
+    )
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_try_open_websocket_connect_attempt",
+        open_recorded_owner,
+    )
+
+    response_create = _websocket_response_create("continue the recorded subscription turn")
+    response_create.update({"model": model, "previous_response_id": previous_response_id})
+
+    with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+        with client.websocket_connect("ws://localhost/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(response_create))
+            created = json.loads(websocket.receive_text())
+            completed = json.loads(websocket.receive_text())
+
+    assert created["type"] == "response.created"
+    assert completed["type"] == "response.completed"
+    assert owner_lookups
+    assert json.loads(upstream.sent_text[0])["previous_response_id"] == previous_response_id
+    assert not any("model_source_requires_http_transport" in event for event in upstream.sent_text)
+
+
+def test_backend_responses_websocket_canonical_source_previous_response_requires_http(
+    app_instance,
+    monkeypatch,
+):
+    model = "external-ws-canonical-source-owner"
+    previous_response_id = "resp_d6db5cc015b37789dafd453f11af01af70a4051891a8667103"
+    owner_lookups: list[str] = []
+    source_checks: list[str | None] = []
+
+    async def no_subscription_owner(
+        self,
+        *,
+        previous_response_id,
+        api_key,
+        session_id=None,
+        surface,
+        request_state=None,
+        **kwargs,
+    ):
+        del self, api_key, session_id, surface, request_state, kwargs
+        owner_lookups.append(previous_response_id)
+        return None
+
+    async def configured_source(source_model, api_key, *, raw_model=None):
+        del api_key, raw_model
+        source_checks.append(source_model)
+        return source_model == model
+
+    async def fail_before_subscription_selection(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("canonical source-owned continuation must not select a subscription account")
+
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_resolve_websocket_previous_response_owner",
+        no_subscription_owner,
+    )
+    monkeypatch.setattr(websocket_mixin_module, "responses_model_is_source_owned", configured_source)
+    monkeypatch.setattr(
+        proxy_module.ProxyService,
+        "_select_websocket_connect_account",
+        fail_before_subscription_selection,
+    )
+
+    response_create = _websocket_response_create("continue the canonical source turn")
+    response_create.update({"model": model, "previous_response_id": previous_response_id})
+
+    with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+        with client.websocket_connect("ws://localhost/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(response_create))
+            event = json.loads(websocket.receive_text())
+
+    assert event["type"] == "error"
+    assert event["status"] == 503
+    assert event["error"]["code"] == "model_source_requires_http_transport"
+    assert owner_lookups
+    assert source_checks == [model]
+
+
 def _codex_profile_provider(profile_name: str | None) -> tuple[str, str, dict[str, Any]]:
     base_config = tomllib.loads(_CODEX_CLIENT_CONFIG.read_text(encoding="utf-8"))
     profile_config = (
@@ -2271,10 +2402,22 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
 
 
 @pytest.mark.parametrize(
-    ("output_event_type", "output_event_fields"),
+    ("output_event_type", "output_event_fields", "followup_events"),
     [
-        ("response.output_text.delta", {"delta": "hello"}),
-        ("response.function_call_arguments.delta", {"delta": "hello"}),
+        ("response.output_text.delta", {"delta": "hello"}, []),
+        ("response.function_call_arguments.delta", {"delta": "hello"}, []),
+        (
+            "response.output_item.added",
+            {
+                "item": {
+                    "type": "custom_tool_call",
+                    "call_id": "call_shell_1",
+                    "name": "shell",
+                    "input": "pwd",
+                }
+            },
+            [],
+        ),
         (
             "response.output_item.added",
             {
@@ -2285,11 +2428,28 @@ def test_backend_responses_websocket_pinned_transient_refresh_claim_emits_retrya
                     "input": "",
                 }
             },
+            [
+                (
+                    "response.output_item.done",
+                    {
+                        "item": {
+                            "type": "custom_tool_call",
+                            "call_id": "call_shell_1",
+                            "name": "shell",
+                            "input": "pwd",
+                        }
+                    },
+                )
+            ],
         ),
     ],
 )
 def test_backend_responses_websocket_proxies_and_persists_conversation_id(
-    app_instance, monkeypatch, output_event_type: str, output_event_fields: dict[str, object]
+    app_instance,
+    monkeypatch,
+    output_event_type: str,
+    output_event_fields: dict[str, object],
+    followup_events: list[tuple[str, dict[str, object]]],
 ):
     upstream_messages = [
         _FakeUpstreamMessage(
@@ -2313,6 +2473,22 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
                 separators=(",", ":"),
             ),
         ),
+    ]
+    for followup_event_type, followup_event_fields in followup_events:
+        upstream_messages.append(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": followup_event_type,
+                        "response_id": "resp_ws_1",
+                        **followup_event_fields,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+    upstream_messages.append(
         _FakeUpstreamMessage(
             "text",
             text=json.dumps(
@@ -2328,8 +2504,8 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
                 },
                 separators=(",", ":"),
             ),
-        ),
-    ]
+        )
+    )
     fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
     seen: dict[str, object] = {}
     log_calls: list[dict[str, object]] = []
@@ -2433,13 +2609,16 @@ def test_backend_responses_websocket_proxies_and_persists_conversation_id(
             },
         ) as websocket:
             websocket.send_text(json.dumps(request_payload))
-            first = json.loads(websocket.receive_text())
-            second = json.loads(websocket.receive_text())
-            third = json.loads(websocket.receive_text())
+            events = [json.loads(websocket.receive_text()) for _ in range(3 + len(followup_events))]
 
-    assert first["type"] == "response.created"
-    assert second["type"] == output_event_type
-    assert third["type"] == "response.completed"
+    assert events[0]["type"] == "response.created"
+    expected_output_events = [(output_event_type, output_event_fields), *followup_events]
+    for event, (expected_type, expected_fields) in zip(events[1:-1], expected_output_events, strict=True):
+        assert event["type"] == expected_type
+        assert event["response_id"] == "resp_ws_1"
+        for field, expected_value in expected_fields.items():
+            assert event[field] == expected_value
+    assert events[-1]["type"] == "response.completed"
     seen_headers = cast(dict[str, str], seen["headers"])
     assert seen_headers["session_id"] == "thread-ws-1"
     assert seen_headers["openai-beta"] == "responses_websockets=2026-02-06"

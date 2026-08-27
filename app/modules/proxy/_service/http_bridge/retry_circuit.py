@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ from app.modules.proxy._service.support import (
     _HTTPBridgeResponseCreateAttempt,
     _HTTPBridgeRetryCircuitAttemptSelection,
     _HTTPBridgeSession,
+    _HTTPBridgeSessionKey,
 )
 from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
 
@@ -23,6 +25,7 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS = 60.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS = 30.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS = 600.0
+_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS = 5.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
     {
         "stream_incomplete",
@@ -100,6 +103,134 @@ def _record_http_bridge_retry_circuit_duplicate_suppressed(
 
 
 class _HTTPBridgeRetryCircuitMixin:
+    async def _http_bridge_retry_circuit_generation(
+        self: Any,
+        session: _HTTPBridgeSession,
+    ) -> tuple[bool, tuple[int, float, int, float, int, float, float] | None]:
+        return await self._http_bridge_retry_circuit_generation_for_key(session.key)
+
+    async def _http_bridge_retry_circuit_generation_for_key(
+        self: Any,
+        key: _HTTPBridgeSessionKey,
+    ) -> tuple[bool, tuple[int, float, int, float, int, float, float] | None]:
+        try:
+            persisted = await self._durable_bridge.lookup_retry_circuit(
+                session_key_kind=key.affinity_kind,
+                session_key_value=key.affinity_key,
+                api_key_id=key.api_key_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to inspect HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
+                key.affinity_kind,
+                _hash_identifier(key.affinity_key),
+                exc_info=True,
+            )
+            return False, None
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(key)
+            if state is None and persisted is None:
+                return True, None
+            persisted_updated_at_epoch = max(
+                state.persisted_updated_at_epoch if state is not None else 0.0,
+                persisted.updated_at_epoch if persisted is not None else 0.0,
+            )
+            persisted_consecutive_failures = persisted.consecutive_failures if persisted is not None else 0
+            durable_cooldown_until_epoch = persisted.cooldown_until_epoch if persisted is not None else 0.0
+            local_consecutive_failures = state.consecutive_failures if state is not None else 0
+            last_failure_monotonic = state.last_failure_monotonic if state is not None else 0.0
+            local_cooldown_until = state.cooldown_until if state is not None else 0.0
+            return True, (
+                getattr(persisted, "admission_generation", 0) if persisted is not None else 0,
+                persisted_updated_at_epoch,
+                persisted_consecutive_failures,
+                durable_cooldown_until_epoch,
+                local_consecutive_failures,
+                last_failure_monotonic,
+                local_cooldown_until,
+            )
+
+    async def _http_bridge_retry_circuit_generation_is_not_newer(
+        self: Any,
+        *,
+        key: _HTTPBridgeSessionKey,
+        captured: bool,
+        generation: tuple[int, float, int, float, int, float, float] | None,
+    ) -> bool:
+        if not captured:
+            return False
+        load_succeeded, current_generation = await self._http_bridge_retry_circuit_generation_for_key(key)
+        if not load_succeeded:
+            return False
+        if generation is None:
+            return current_generation is None
+        if current_generation is None:
+            return True
+        return all(
+            current <= captured_value for current, captured_value in zip(current_generation, generation, strict=True)
+        )
+
+    async def _claim_http_bridge_retry_circuit_generation(
+        self: Any,
+        *,
+        key: _HTTPBridgeSessionKey,
+        captured: bool,
+        generation: tuple[int, float, int, float, int, float, float] | None,
+    ) -> bool:
+        """Atomically linearize replay admission against the captured circuit."""
+        if not captured:
+            return False
+        expected_admission_generation = generation[0] if generation is not None else 0
+        expected_persisted_updated_at = generation[1] if generation is not None else 0.0
+        expected_persisted_failures = generation[2] if generation is not None else 0
+        expected_persisted_cooldown = generation[3] if generation is not None else 0.0
+        expected_local_failures = generation[4] if generation is not None else 0
+        expected_last_failure = generation[5] if generation is not None else 0.0
+        expected_local_cooldown = generation[6] if generation is not None else 0.0
+        claim_generation = getattr(self._durable_bridge, "claim_retry_circuit_generation", None)
+        if not callable(claim_generation):
+            return False
+
+        # Keep local failure recording behind the same lock until the durable
+        # CAS commits. Cross-replica failures serialize at the row CAS; local
+        # failures serialize here before they can mutate their in-memory base.
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(key)
+            if state is not None and (
+                state.consecutive_failures > expected_local_failures
+                or state.last_failure_monotonic > expected_last_failure
+                or state.cooldown_until > expected_local_cooldown
+            ):
+                return False
+            try:
+                claimed = await asyncio.wait_for(
+                    claim_generation(
+                        session_key_kind=key.affinity_kind,
+                        session_key_value=key.affinity_key,
+                        api_key_id=key.api_key_id,
+                        expected_updated_at_epoch=(
+                            expected_persisted_updated_at if expected_persisted_updated_at > 0 else None
+                        ),
+                        expected_admission_generation=expected_admission_generation,
+                        expected_consecutive_failures=expected_persisted_failures,
+                        expected_cooldown_until_epoch=expected_persisted_cooldown,
+                    ),
+                    timeout=_HTTP_BRIDGE_RETRY_CIRCUIT_CLAIM_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to claim HTTP bridge retry circuit generation bridge_kind=%s bridge_key=%s",
+                    key.affinity_kind,
+                    _hash_identifier(key.affinity_key),
+                    exc_info=True,
+                )
+                return False
+            if claimed is None:
+                return False
+            self._http_bridge_retry_circuit_loaded_keys.add(key)
+            self._http_bridge_retry_circuit_persisted_keys.add(key)
+            return True
+
     async def _http_bridge_retry_circuit_current_count(self: Any, session: _HTTPBridgeSession) -> int:
         async with self._http_bridge_retry_circuit_lock:
             current_state = self._http_bridge_retry_circuits.get(session.key)
@@ -458,6 +589,20 @@ class _HTTPBridgeRetryCircuitMixin:
             if state is None:
                 return 0.0
             return max(0.0, state.cooldown_until - now)
+
+    async def _http_bridge_retry_circuit_cooldown_seconds_for_key(
+        self: Any,
+        key: _HTTPBridgeSessionKey,
+    ) -> float:
+        """Return the source-key cooldown used to suppress a replacement."""
+        load_succeeded, generation = await self._http_bridge_retry_circuit_generation_for_key(key)
+        if not load_succeeded or generation is None:
+            return 0.0
+        return max(
+            0.0,
+            generation[3] - time.time(),
+            generation[6] - time.monotonic(),
+        )
 
     async def _record_http_bridge_retry_circuit_failure(
         self: Any,

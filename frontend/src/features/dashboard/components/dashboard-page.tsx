@@ -429,7 +429,7 @@ export function DashboardPage() {
 
           <section className="space-y-4">
             <div className="flex flex-wrap items-center gap-3">
-              <div className="flex min-w-0 items-center gap-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-3">
                 <h2 className="text-[13px] font-medium uppercase tracking-wider text-muted-foreground">{t("accounts.page.title")}</h2>
                 <AccountSummaryLine accounts={overview?.accounts ?? []} />
               </div>

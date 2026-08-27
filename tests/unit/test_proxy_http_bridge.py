@@ -3383,6 +3383,60 @@ async def test_previous_response_alias_can_retain_replacement_latest_response_id
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("durable_outcome", ["protected", "exception"])
+async def test_retained_response_alias_requires_durable_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    durable_outcome: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="retained-alias-durable-required")
+    session.durable_session_id = "durable-retained-alias"
+    session.durable_owner_epoch = 1
+    service._http_bridge_sessions[session.key] = session
+
+    async def register_alias(**_kwargs: Any) -> DurableBridgeAliasRegistration:
+        if durable_outcome == "exception":
+            raise RuntimeError("durable alias write failed")
+        return DurableBridgeAliasRegistration.ALIAS_PROTECTED
+
+    service._durable_bridge = SimpleNamespace(register_previous_response_id=register_alias)
+    monkeypatch.setattr(http_bridge_helpers_module, "get_settings", _make_app_settings)
+
+    registered = await service._register_http_bridge_previous_response_id(
+        session,
+        "resp-retained-required",
+        latest_response_id="resp-replacement",
+        retained_replay=True,
+    )
+
+    alias_key = proxy_service._http_bridge_previous_response_alias_key("resp-retained-required", session.key.api_key_id)
+    assert registered is False
+    assert "resp-retained-required" not in session.previous_response_ids
+    assert alias_key not in service._http_bridge_previous_response_index
+
+
+@pytest.mark.asyncio
+async def test_retained_response_alias_without_durable_identity_is_rejected() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="retained-alias-missing-durable")
+    service._http_bridge_sessions[session.key] = session
+
+    registered = await service._register_http_bridge_previous_response_id(
+        session,
+        "resp-retained-missing-durable",
+        latest_response_id="resp-replacement",
+        retained_replay=True,
+    )
+
+    alias_key = proxy_service._http_bridge_previous_response_alias_key(
+        "resp-retained-missing-durable", session.key.api_key_id
+    )
+    assert registered is False
+    assert "resp-retained-missing-durable" not in session.previous_response_ids
+    assert alias_key not in service._http_bridge_previous_response_index
+
+
+@pytest.mark.asyncio
 async def test_durable_alias_fence_rejection_preserves_new_local_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -6229,6 +6283,70 @@ async def test_recovery_completed_alias_persistence_failure_fails_response_and_r
 
     assert await service._retire_http_bridge_after_drain_if_ready(session) is True
     close_session.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_retained_replay_alias_persistence_failure_fails_normal_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-normal-retained-alias-failure",
+        response_id="resp-replacement-normal",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    request_state.replay_downstream_response_id = "resp-retained-normal"
+    session = _make_bridge_session(
+        key_value="normal-retained-alias-failure",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    register_previous = AsyncMock(side_effect=[True, False])
+    finalize = AsyncMock()
+    close_session = AsyncMock()
+    monkeypatch.setattr(service, "_register_http_bridge_previous_response_id", register_previous)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    monkeypatch.setattr(service, "_close_http_bridge_session", close_session)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-replacement-normal",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        ),
+    )
+
+    assert request_state.event_queue is not None
+    event_block = await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0)
+    assert isinstance(event_block, str)
+    failed = proxy_service.parse_sse_data_json(event_block)
+    assert failed is not None
+    assert failed["type"] == "response.failed"
+    failed_response = failed.get("response")
+    assert isinstance(failed_response, dict)
+    failed_error = failed_response.get("error")
+    assert isinstance(failed_error, dict)
+    assert failed_error["code"] == "bridge_continuity_persistence_failed"
+    assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
+    assert register_previous.await_count == 2
+    assert session.upstream_control.reconnect_requested is True
+    assert session.upstream_control.retire_after_drain is True
+    finalize.assert_awaited_once()
+    close_session.assert_not_awaited()
 
 
 @pytest.mark.asyncio

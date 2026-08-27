@@ -2781,6 +2781,29 @@ def _track_alias_registration(session: _HTTPBridgeSession, alias: str, *, turn_s
     return generation
 
 
+def _remove_http_bridge_previous_response_alias_locked(
+    service: _HTTPBridgeServiceProtocol,
+    session: _HTTPBridgeSession,
+    response_id: str,
+    registration_generation: int,
+) -> None:
+    """Remove a locally published response alias if this registration still owns it."""
+
+    if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
+        return
+    session.previous_response_alias_registration_generations.pop(response_id, None)
+    session.previous_response_ids.discard(response_id)
+    alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
+    current_session = service._http_bridge_sessions.get(session.key)
+    current_generation_owns_alias = (
+        current_session is not None
+        and current_session is not session
+        and response_id in current_session.previous_response_ids
+    )
+    if not current_generation_owns_alias and service._http_bridge_previous_response_index.get(alias_key) == session.key:
+        service._http_bridge_previous_response_index.pop(alias_key, None)
+
+
 async def _persist_http_bridge_turn_state_alias(
     service: _HTTPBridgeServiceProtocol,
     session: _HTTPBridgeSession,
@@ -2891,6 +2914,17 @@ async def _persist_http_bridge_previous_response_alias(
             async with service._http_bridge_lock:
                 if session.previous_response_alias_registration_generations.get(response_id) == registration_generation:
                     session.previous_response_alias_registration_generations.pop(response_id, None)
+        elif retained_replay:
+            # A retained client-visible ID is only safe when its replacement
+            # target survives in the durable alias table. Do not leave a
+            # local-only alias after an ambiguous write failure.
+            async with service._http_bridge_lock:
+                _remove_http_bridge_previous_response_alias_locked(
+                    service,
+                    session,
+                    response_id,
+                    registration_generation,
+                )
         return None
     if registered == DurableBridgeAliasRegistration.REGISTERED:
         return registered
@@ -2899,21 +2933,15 @@ async def _persist_http_bridge_previous_response_alias(
     async with service._http_bridge_lock:
         if session.previous_response_alias_registration_generations.get(response_id) != registration_generation:
             return
-        session.previous_response_alias_registration_generations.pop(response_id, None)
         if local_alias_was_published:
-            session.previous_response_ids.discard(response_id)
-            alias_key = _http_bridge_previous_response_alias_key(response_id, session.key.api_key_id)
-            current_session = service._http_bridge_sessions.get(session.key)
-            current_generation_owns_alias = (
-                current_session is not None
-                and current_session is not session
-                and response_id in current_session.previous_response_ids
+            _remove_http_bridge_previous_response_alias_locked(
+                service,
+                session,
+                response_id,
+                registration_generation,
             )
-            if (
-                not current_generation_owns_alias
-                and service._http_bridge_previous_response_index.get(alias_key) == session.key
-            ):
-                service._http_bridge_previous_response_index.pop(alias_key, None)
+        else:
+            session.previous_response_alias_registration_generations.pop(response_id, None)
         if registered == DurableBridgeAliasRegistration.OWNER_FENCED:
             fenced_out_session = _evict_fenced_out_http_bridge_session_locked(
                 service,

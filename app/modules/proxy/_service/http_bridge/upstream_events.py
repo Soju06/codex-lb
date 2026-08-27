@@ -4848,9 +4848,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 await self._http_bridge_restore_poison_row_after_failed_registration(
                     session, completion_pre_settle_poison_detail
                 )
-            if not alias_registered and is_http_bridge_account_neutral_replay(
-                kind=session.key.affinity_kind,
-                key=session.key.affinity_key,
+            retained_replay_alias = retained_response_id is not None and retained_response_id != response_id
+            if not alias_registered and (
+                retained_replay_alias
+                or is_http_bridge_account_neutral_replay(
+                    kind=session.key.affinity_kind,
+                    key=session.key.affinity_key,
+                )
             ):
                 session.upstream_control.reconnect_requested = True
                 session.upstream_control.retire_after_drain = True

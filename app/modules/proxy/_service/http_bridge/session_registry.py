@@ -31,6 +31,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _reconcile_durable_http_bridge_ownership,
     _record_bridge_reattach,
     _register_http_bridge_turn_state_aliases_locked,
+    _remove_http_bridge_previous_response_alias_locked,
     _renew_durable_http_bridge_lease,
     _track_alias_registration,
 )
@@ -373,6 +374,15 @@ class _HTTPBridgeSessionRegistryMixin:
                 self._http_bridge_previous_response_index[alias_key] = session.key
                 session.previous_response_ids.add(stripped_response_id)
         if session.durable_session_id is None or session.durable_owner_epoch is None:
+            if retained_replay:
+                async with self._http_bridge_lock:
+                    _remove_http_bridge_previous_response_alias_locked(
+                        self,
+                        session,
+                        stripped_response_id,
+                        registration_generation,
+                    )
+                return False
             return True
         durable_result = await _persist_http_bridge_previous_response_alias(
             self,

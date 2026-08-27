@@ -120,6 +120,22 @@
       the pending set does not leave the cooldown running against a cause it
       just removed
 
+- [x] 2.15 Both retirement funnels use the capped poison threshold, and one
+      episode abandons its anchor once, retrying only when the clear failed
+
+- [x] 2.16 An active poison quarantine keeps its reason when a weaker
+      session-scoped fence arms the same key
+
+- [x] 2.17 One circuit opening advances the quarantine generation once, and the
+      post-persist arm is skipped when a concurrent completion already cleared
+      the circuit this strike loaded
+
+- [x] 2.18 The grouped anchor clear completes under reader cancellation and
+      re-raises the original cancellation afterwards
+
+- [x] 2.19 Every client-facing suppression 503 reports the timer actually
+      refusing the request, not only the pre-created submission gate
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

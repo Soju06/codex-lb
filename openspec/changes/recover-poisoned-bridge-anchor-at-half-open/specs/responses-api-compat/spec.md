@@ -123,6 +123,11 @@ the cooldown it leaves: a merge can adopt a cooldown that has already elapsed,
 and such a key is at its threshold with no cooldown left, so the next request
 is the half-open probe the quarantine exists to protect. A `clean_close` opening MUST NOT quarantine the key.
 
+Every client-facing suppression MUST report this, not only the pre-created
+submission gate: the stream-idle fail-closed paths and the stale-anchor
+generation-claim suppression return the same `upstream_request_timeout` 503 and
+MUST describe the same timer.
+
 When the proxy suppresses a submission, the `retry_after_seconds` it returns
 and the detail it logs MUST reflect the timer that is actually refusing the
 request: the cooldown while the cooldown is active (`hard_key_cooldown`), and
@@ -354,6 +359,10 @@ When an HTTP bridge session proves silent/wedged, the proxy MUST quarantine its 
 While a session key is quarantined: an existing session under that key MUST NOT be selected for reuse (a new request detaches it and proceeds on a fresh session), and for durable-anchor selection a quarantined session that is still open MUST count as absent, exactly as if it were already gone. The quarantine registry verdict is authoritative for the key: any session under the key while the quarantine window is active — including a freshly created replacement whose own completion has not yet cleared the quarantine — is equally excluded from reuse and equally absent for anchor selection. A fresh reattach whose incoming payload already looks like a full conversation resend MUST NOT receive a proxy-injected durable anchor through any injection point — the fresh-reattach injection, session-state hydration of the durable anchor, or the session-level injection — so the dispatch goes upstream genuinely unanchored with the client's own untrimmed payload. A payload that does not look like a full resend (a genuine delta-only continuation) MUST still receive the durable anchor, because it has no other way to convey prior conversation state.
 
 Quarantine state MUST be bounded and self-recovering: it is in-memory and session-scoped, expires by TTL (a live session that outlives its quarantine window MUST become reusable again), is cleared when a response completes on the same session key, and MUST NOT write account health or alter account selection.
+
+A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST NOT have that reason replaced by a weaker session-scoped fence while it is still active: the registry holds one entry per key, and the wedged-reattach and repeated-eventless fences carry no evidence about the anchor, so letting either overwrite the reason erases the only record that the anchor was proven dead.
+
+The durable anchor abandonment MUST use the same capped threshold as the rest of this capability, in every funnel that can reach it. Comparing the raw configured setting in the retirement funnels leaves the poisoned anchor stored while the circuit is already cooling on it, which is the unreachability this change exists to remove. One poisoned anchor MUST be abandoned once per episode; a fenced or failed abandonment leaves it owed so the next strike retries.
 
 A quarantine armed for reason `retry_circuit_poisoned_anchor` MUST remain in force for at least the remaining cooldown of the circuit that armed it plus that circuit's half-open lease, because the probe it exists to protect is only admitted once that cooldown expires and may then be admitted anywhere inside the lease that follows. The default TTL alone MUST NOT be relied on for this: it equals the circuit's maximum cooldown, so at that cooldown the quarantine would otherwise lapse in the same instant the cooldown does and hand the poisoned anchor back to the very request the cooldown was holding.
 

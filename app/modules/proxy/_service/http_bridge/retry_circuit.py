@@ -93,6 +93,24 @@ def _http_bridge_poison_quarantine_minimum_seconds(cooldown_remaining: float) ->
     return max(0.0, cooldown_remaining) + _HTTP_BRIDGE_RETRY_CIRCUIT_HALF_OPEN_LEASE_SECONDS
 
 
+def _http_bridge_retry_circuit_suppression_message(block_reason: str, retry_after_seconds: int) -> str:
+    """Describe the timer that is actually refusing a suppressed submission.
+
+    Naming the cooldown while the half-open lease is what refuses the request
+    tells the client to come back in about a second when it is barred for the
+    rest of the lease, which turns one wedged key into a retry storm.
+    """
+    if block_reason == "hard_key_half_open":
+        return (
+            "HTTP responses session bridge is probing recovery for this conversation; "
+            f"retry after {retry_after_seconds}s."
+        )
+    return (
+        "HTTP responses session bridge is recovering from repeated upstream failures; "
+        f"retry after {retry_after_seconds}s."
+    )
+
+
 @dataclass(slots=True)
 class _HTTPBridgeRetryCircuitState:
     consecutive_failures: int = 0
@@ -103,6 +121,11 @@ class _HTTPBridgeRetryCircuitState:
     last_failure_monotonic: float = 0.0
     last_durable_load_monotonic: float = 0.0
     half_open_until: float = 0.0
+    # One poisoned anchor is abandoned once. Capping the poison threshold at
+    # the circuit threshold makes every later strike in the same episode meet
+    # it too, so without this marker each one re-issues the durable clear. A
+    # failed clear leaves it unset, which is what lets the next strike retry.
+    poison_anchor_cleared: bool = False
 
 
 def _initialize_http_bridge_retry_circuit(service: Any, reset_transient_cache: Any = None) -> None:
@@ -610,6 +633,37 @@ class _HTTPBridgeRetryCircuitMixin:
             )
             return False
 
+    async def _http_bridge_poison_anchor_clear_owed(
+        self: Any,
+        session: _HTTPBridgeSession,
+        *,
+        consecutive_failures: int | None,
+        configured_threshold: int,
+    ) -> bool:
+        """Whether this strike still owes the poisoned anchor an abandonment.
+
+        Capping the poison threshold at the circuit threshold is what makes the
+        clear reachable at all, but it also means every later strike in the
+        same episode meets the threshold too. Only the first successful
+        abandonment settles the anchor; a failed one leaves the marker unset so
+        the next strike retries it, which is the contract the retirement
+        funnels already advertise in their failure telemetry.
+        """
+        if consecutive_failures is None:
+            return False
+        if consecutive_failures < _http_bridge_effective_anchor_poison_threshold(configured_threshold):
+            return False
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(session.key)
+            return state is None or not state.poison_anchor_cleared
+
+    async def _http_bridge_mark_poison_anchor_cleared(self: Any, session: _HTTPBridgeSession) -> None:
+        """Record that this episode's poisoned anchor has been abandoned."""
+        async with self._http_bridge_retry_circuit_lock:
+            state = self._http_bridge_retry_circuits.get(session.key)
+            if state is not None:
+                state.poison_anchor_cleared = True
+
     async def _http_bridge_precreated_retry_block(
         self: Any,
         session: _HTTPBridgeSession,
@@ -802,9 +856,26 @@ class _HTTPBridgeRetryCircuitMixin:
                 # idempotent because the entry keeps the later of the two
                 # deadlines, so recomputing against the merged cooldown can only
                 # extend a floor that would otherwise expire mid-cooldown.
-                merged_poison_opened = poison_class_failure and consecutive_failures >= threshold
-                if merged_poison_opened:
+                #
+                # Only when the registry still maps this key to this state. A
+                # multiplexed sibling that completed while the persist was in
+                # flight clears the circuit and drops this object, and it also
+                # advanced the anchor; re-arming off the detached state would
+                # resurrect a poisoned key whose anchor is now valid and let a
+                # later explicit rejection discard it. Nor is there anything to
+                # re-arm when this call already quarantined the key from its own
+                # opening and the merge did not move the deadline: that arm is a
+                # no-op except for the generation bump, which is the fence the
+                # verified stale-anchor replay claims at dispatch (#1863).
+                if self._http_bridge_retry_circuits.get(session.key) is state:
                     merged_cooldown_remaining = max(0.0, state.cooldown_until - time.monotonic())
+                    merged_poison_opened = (
+                        poison_class_failure
+                        and consecutive_failures >= threshold
+                        and (
+                            not quarantine_poisoned_anchor or merged_cooldown_remaining > quarantine_cooldown_remaining
+                        )
+                    )
             if merged_poison_opened:
                 _quarantine_http_bridge_session(
                     self,

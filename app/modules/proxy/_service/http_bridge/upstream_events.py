@@ -1252,9 +1252,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                     if (
                         poison_candidate_detail is not None
                         and observed_response_events == 0
-                        and consecutive_failures is not None
-                        and consecutive_failures
-                        >= _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                        and await self._http_bridge_poison_anchor_clear_owed(
+                            session,
+                            consecutive_failures=consecutive_failures,
+                            configured_threshold=(
+                                _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                            ),
+                        )
                     ):
                         poison_detail = poison_candidate_detail
                 if poison_detail is not None:
@@ -1265,6 +1269,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
                     )
                     if durable_cleared:
+                        await self._http_bridge_mark_poison_anchor_cleared(session)
                         await self._retire_stale_pending_http_bridge_session(
                             session,
                             detail=poison_detail,
@@ -2340,8 +2345,7 @@ class _HTTPBridgeUpstreamEventsMixin:
             )
             grouped_error, grouped_cancellation = await _await_task_deferring_cancellation(grouped_settlement_task)
             if (
-                grouped_cancellation is None
-                and grouped_poison_detail is not None
+                grouped_poison_detail is not None
                 and grouped_poison_strike_failures
                 >= _http_bridge_effective_anchor_poison_threshold(
                     _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
@@ -2349,16 +2353,30 @@ class _HTTPBridgeUpstreamEventsMixin:
             ):
                 # The grouped frames have been published by here, so this mirrors
                 # the single-request ordering: the strikes precede delivery, the
-                # durable clear follows it. Skipped only under cancellation,
-                # where the reader is going down and the write would race the
-                # teardown; the clear is internally exception-safe otherwise, so
-                # a failed grouped finalization still gets the anchor cleared.
-                await _abandon_durable_http_bridge_continuity(
-                    self,
-                    session,
-                    detail=grouped_poison_detail,
-                    settle_circuit=True,
+                # durable clear follows it.
+                #
+                # This runs under cancellation too. `_await_task_deferring_
+                # cancellation` has already waited for every grouped frame and
+                # finalization, so the requests this anchor failed are gone and
+                # no later retirement can retry the clear for them; skipping it
+                # here left the poisoned anchor stored for another replica or
+                # for reuse once the local quarantine expired. Defer the
+                # cancellation across the write the same way, then re-raise it
+                # below unchanged. The clear is internally exception-safe.
+                grouped_clear_task = asyncio.create_task(
+                    _abandon_durable_http_bridge_continuity(
+                        self,
+                        session,
+                        detail=grouped_poison_detail,
+                        settle_circuit=True,
+                    ),
+                    name=f"http-bridge-grouped-anchor-clear-{session.durable_session_id}",
                 )
+                _grouped_clear_error, grouped_clear_cancellation = await _await_task_deferring_cancellation(
+                    grouped_clear_task
+                )
+                if grouped_cancellation is None:
+                    grouped_cancellation = grouped_clear_cancellation
             if grouped_cancellation is not None:
                 if grouped_error is not None:
                     logger.warning(

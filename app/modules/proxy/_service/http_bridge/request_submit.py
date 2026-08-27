@@ -98,6 +98,7 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
     _http_bridge_anchor_poison_detail,
+    _http_bridge_retry_circuit_suppression_message,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _call_with_supported_optional_kwargs,
@@ -1910,11 +1911,18 @@ class _HTTPBridgeRequestSubmitMixin:
                             )
                         )
                         if not generation_claimed:
+                            (
+                                suppressed_block_seconds,
+                                suppressed_block_reason,
+                            ) = await self._http_bridge_precreated_retry_block(session)
                             suppressed_retry_after_seconds = max(
                                 1,
                                 math.ceil(
-                                    await self._http_bridge_retry_circuit_cooldown_seconds_for_key(
-                                        circuit_key or session.key,
+                                    max(
+                                        suppressed_block_seconds,
+                                        await self._http_bridge_retry_circuit_cooldown_seconds_for_key(
+                                            circuit_key or session.key,
+                                        ),
                                     )
                                 ),
                             )
@@ -1933,8 +1941,9 @@ class _HTTPBridgeRequestSubmitMixin:
                                 503,
                                 openai_error(
                                     "upstream_request_timeout",
-                                    "HTTP responses session bridge is cooling down after repeated upstream "
-                                    "timeouts; retry shortly.",
+                                    _http_bridge_retry_circuit_suppression_message(
+                                        suppressed_block_reason, suppressed_retry_after_seconds
+                                    ),
                                 ),
                                 retry_after_seconds=suppressed_retry_after_seconds,
                             )
@@ -2924,11 +2933,12 @@ class _HTTPBridgeRequestSubmitMixin:
                 selection=retry_circuit_attempt_selection,
             )
             poison_detail = _http_bridge_anchor_poison_detail(retry_circuit_detail or detail)
-            if (
-                poison_detail is not None
-                and consecutive_failures is not None
-                and consecutive_failures
-                >= _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+            if poison_detail is not None and await self._http_bridge_poison_anchor_clear_owed(
+                session,
+                consecutive_failures=consecutive_failures,
+                configured_threshold=(
+                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                ),
             ):
                 # Consecutive eventless failures on one bridge key are
                 # same-anchor failures (the anchor only advances on a
@@ -2944,6 +2954,8 @@ class _HTTPBridgeRequestSubmitMixin:
                     detail=poison_detail,
                     settle_circuit=_http_bridge_abandonment_may_settle_circuit(retired_request_states),
                 )
+                if durable_cleared:
+                    await self._http_bridge_mark_poison_anchor_cleared(session)
                 if not durable_cleared and session.durable_session_id is not None:
                     # Keep failed waiterless clears visible in the same
                     # poison-clear telemetry the admission-waiter path emits;

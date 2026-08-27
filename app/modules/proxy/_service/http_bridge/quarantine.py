@@ -166,7 +166,18 @@ def _quarantine_http_bridge_session(
         ttl_seconds = max(ttl_seconds, minimum_seconds)
     entry.quarantined_until = max(entry.quarantined_until, now + ttl_seconds)
     entry.last_touched_monotonic = now
-    entry.reason = reason
+    # The registry holds one entry per key, so a wedged-reattach or
+    # repeated-eventless quarantine arriving while a poison quarantine is still
+    # active would otherwise overwrite the only record that the anchor was
+    # proven dead. Callers that drop a continuity anchor test this reason, and
+    # losing it re-attaches the poisoned anchor. The weaker fence still extends
+    # the deadline above; it just cannot downgrade the evidence.
+    if not (
+        entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+        and already_quarantined
+        and reason != _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+    ):
+        entry.reason = reason
     _prune_http_bridge_quarantine_registry(registry, now)
     session.quarantined = True
     if already_quarantined:

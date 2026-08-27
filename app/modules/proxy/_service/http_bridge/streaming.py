@@ -115,6 +115,9 @@ from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
 )
+from app.modules.proxy._service.http_bridge.retry_circuit import (
+    _http_bridge_retry_circuit_suppression_message,
+)
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _build_rewritten_stream_response_failed_event,
     _codex_keepalive_frame,
@@ -3921,15 +3924,16 @@ class _HTTPBridgeStreamingMixin:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
                         previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
                     )
+                block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
+                suppressed_retry_after = max(1, math.ceil(max(block_seconds, retry_cooldown_seconds)))
                 raise ProxyResponseError(
                     503,
                     openai_error(
                         "upstream_request_timeout",
-                        "HTTP responses session bridge is cooling down after repeated upstream "
-                        "timeouts; retry shortly.",
+                        _http_bridge_retry_circuit_suppression_message(block_reason, suppressed_retry_after),
                         error_type="server_error",
                     ),
-                    retry_after_seconds=max(1, math.ceil(retry_cooldown_seconds)),
+                    retry_after_seconds=suppressed_retry_after,
                 )
             return format_sse_event(
                 cast(
@@ -4099,15 +4103,16 @@ class _HTTPBridgeStreamingMixin:
                     raise _http_bridge_dead_owner_previous_response_not_found_proxy_error(
                         previous_response_id=_http_bridge_dead_owner_previous_response_id(request_state),
                     )
+                block_seconds, block_reason = await self._http_bridge_precreated_retry_block(session)
+                suppressed_retry_after = max(1, math.ceil(max(block_seconds, initial_retry_cooldown_seconds)))
                 raise ProxyResponseError(
                     503,
                     openai_error(
                         "upstream_request_timeout",
-                        "HTTP responses session bridge is cooling down after repeated upstream "
-                        "timeouts; retry shortly.",
+                        _http_bridge_retry_circuit_suppression_message(block_reason, suppressed_retry_after),
                         error_type="server_error",
                     ),
-                    retry_after_seconds=max(1, math.ceil(initial_retry_cooldown_seconds)),
+                    retry_after_seconds=suppressed_retry_after,
                 )
             yield terminal_event
             return

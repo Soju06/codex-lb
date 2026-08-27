@@ -29352,13 +29352,16 @@ async def test_http_bridge_repeated_zero_event_idle_timeouts_poison_anchor_with_
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
     monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
 
-    for failure_number in range(1, 8):
+    # The poison threshold is capped at the circuit's failure threshold
+    # (2), so the anchor is proven dead on the second eventless failure;
+    # a configured 7 is unreachable behind a circuit that gates at 2.
+    for failure_number in range(1, 3):
         retired = await service._fail_http_bridge_reader_and_maybe_retire(
             session,
             error_code="stream_idle_timeout",
             error_message="idle timeout",
         )
-        assert retired is (failure_number == 7)
+        assert retired is (failure_number == 2)
 
     durable_bridge.rebind_session_account.assert_awaited_once_with(
         session_id="durable-anchor-poison",
@@ -29403,13 +29406,16 @@ async def test_http_bridge_repeated_zero_event_stream_incompletes_poison_anchor_
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
     monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
 
-    for failure_number in range(1, 8):
+    # The poison threshold is capped at the circuit's failure threshold
+    # (2), so the anchor is proven dead on the second eventless failure;
+    # a configured 7 is unreachable behind a circuit that gates at 2.
+    for failure_number in range(1, 3):
         retired = await service._fail_http_bridge_reader_and_maybe_retire(
             session,
             error_code="stream_incomplete",
             error_message="Upstream websocket closed before response.completed",
         )
-        assert retired is (failure_number == 7)
+        assert retired is (failure_number == 2)
 
     durable_bridge.rebind_session_account.assert_awaited_once_with(
         session_id="durable-anchor-poison-stream-incomplete",
@@ -29483,8 +29489,10 @@ async def test_http_bridge_retire_stale_pending_reattempts_failed_poison_clear(
     service._durable_bridge = durable_bridge
     monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
 
+    # Strikes 2 and 3 each reach the capped poison threshold, and neither
+    # clears, so both attempt the abandonment and both report the failure.
     with caplog.at_level(logging.INFO):
-        for _failure_number in range(8):
+        for _failure_number in range(3):
             session = _make_bridge_session(
                 key_value="bridge-anchor-poison-clear-retry",
                 pending_requests=deque([_make_eventless_http_bridge_owner()]),
@@ -29663,8 +29671,10 @@ async def test_http_bridge_anchor_poisoning_waits_when_durable_clear_fails(
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
     monkeypatch.setattr(service, "_retire_stale_pending_http_bridge_session", retire)
 
+    # The capped poison threshold is reached on the second strike; a failed or
+    # fenced clear leaves the anchor owed, so stop at that first attempt.
     with caplog.at_level("WARNING"):
-        for _failure_number in range(1, 8):
+        for _failure_number in range(1, 3):
             retired = await service._fail_http_bridge_reader_and_maybe_retire(
                 session,
                 error_code="stream_idle_timeout",
@@ -34036,7 +34046,10 @@ async def test_poison_clear_settles_the_circuit_when_the_deque_was_already_drain
     service._durable_bridge = durable_bridge
     monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
 
-    for _failure_number in range(7):
+    # Two eventless strikes reach the capped poison threshold; the settle that
+    # follows resets the circuit, so a third strike would legitimately begin a
+    # fresh episode rather than repeat this one.
+    for _failure_number in range(2):
         session = _make_bridge_session(
             key_value="bridge-anchor-poison-drained",
             pending_requests=deque(),
@@ -34057,3 +34070,97 @@ async def test_poison_clear_settles_the_circuit_when_the_deque_was_already_drain
         durable_bridge.clear_retry_circuit.assert_awaited(),
         ("the abandonment removed the cooldown's cause, so the circuit must settle with it"),
     )
+
+
+@pytest.mark.asyncio
+async def test_waiterless_funnel_clears_the_anchor_at_the_capped_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The configured poison threshold defaults above the circuit's own
+    # threshold, and the circuit refuses the key for 60-600s per strike once it
+    # opens. Comparing the raw setting here left the durable anchor stored
+    # while the circuit was already cooling on it, so another replica (or this
+    # one after the quarantine lapsed) could inject it again.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(),
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+    service._durable_bridge = durable_bridge
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+    assert proxy_service.get_settings().http_responses_session_bridge_anchor_poison_failure_threshold > 2, (
+        "this regression only means anything while the configured threshold is above the circuit threshold"
+    )
+
+    for _failure_number in range(2):
+        session = _make_bridge_session(
+            key_value="bridge-capped-threshold-funnel",
+            pending_requests=deque([_make_eventless_http_bridge_owner()]),
+            queued_request_count=1,
+        )
+        session.durable_session_id = "durable-capped-threshold-funnel"
+        session.durable_owner_epoch = 9
+        await service._retire_stale_pending_http_bridge_session(session, detail="stream_incomplete")
+
+    durable_bridge.rebind_session_account.assert_awaited_once()
+    assert durable_bridge.rebind_session_account.await_args is not None
+    assert durable_bridge.rebind_session_account.await_args.kwargs["clear_continuity"] is True
+
+
+def test_weaker_quarantine_reason_cannot_downgrade_active_poison_evidence() -> None:
+    # One registry entry per key: a wedged-reattach quarantine arriving while
+    # the poison quarantine is still active used to overwrite the only record
+    # that the anchor was proven dead, so the unanchored rebind re-attached it.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="bridge-reason-downgrade")
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+    )
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True
+
+    http_bridge_quarantine_module._quarantine_http_bridge_session(
+        service,
+        session,
+        reason=http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_WEDGED_REATTACH_REASON,
+    )
+
+    assert http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined(service, session.key) is True, (
+        "a session-scoped fence must not erase the circuit's proof that the anchor is dead"
+    )
+
+
+@pytest.mark.asyncio
+async def test_one_circuit_opening_advances_the_quarantine_generation_once() -> None:
+    # The generation is the fence a verified stale-anchor replay captures before
+    # dispatch and claims at dispatch (#1863). Arming the same opening twice
+    # advanced it past a capture taken between the two arms, so a legitimate
+    # replay was suppressed for a circuit that had not actually moved.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    session = _make_bridge_session(key_value="bridge-generation-once")
+
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+
+    entry = http_bridge_quarantine_module._http_bridge_quarantine_registry(service)[session.key]
+    assert entry.reason == http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+    assert entry.generation == 1, "one opening is one quarantine episode"
+
+
+def test_suppression_message_names_the_timer_that_is_refusing_the_request() -> None:
+    # The spec requires the message and retry_after to describe the timer that
+    # is actually blocking. Saying "cooling down" during the half-open lease
+    # advertises ~1s while the caller is barred for the rest of the lease.
+    message = http_bridge_retry_circuit_module._http_bridge_retry_circuit_suppression_message
+    half_open = message("hard_key_half_open", 480)
+    cooldown = message("hard_key_cooldown", 42)
+
+    assert "cooling down" not in half_open
+    assert "480s" in half_open
+    assert "42s" in cooldown

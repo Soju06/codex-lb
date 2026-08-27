@@ -103,6 +103,18 @@
       probe); a quarantine armed at the maximum cooldown stays active through
       that cooldown and the half-open lease that follows
 
+- [x] 2.11 The unanchored rebind tests the recorded quarantine reason, so an
+      explicit rejection arriving during a wedged-reattach or
+      repeated-eventless fence keeps its anchor
+
+- [x] 2.12 The grouped-fan-out strike loop applies the same no-safe-replay
+      admission test as the single-request settlement path
+
+- [x] 2.13 The unanchored rebind keeps its distinct telemetry label without
+      falling out of the local previous-response recovery machinery, so it
+      still consumes the one server-side replay and resets the recovery
+      operation spool
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

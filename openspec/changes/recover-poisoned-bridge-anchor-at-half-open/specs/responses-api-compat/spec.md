@@ -26,7 +26,9 @@ MUST NOT count it again. A failure the proxy can still replay safely MUST NOT
 advance the circuit: the request is not stranded, the verified stale-anchor
 replay that follows depends on the circuit generation it captured, and counting
 there both disturbs that fence and charges the key for a failure it recovered
-from in band. A native terminal failure envelope
+from in band. This exclusion MUST apply identically when one terminal frame
+settles a grouped fan-out of requests, so a group whose members can each still
+replay safely cannot advance the circuit between them. A native terminal failure envelope
 (`response.failed` or `response.incomplete`) MUST remain eligible for that
 recording even though it marks the `response.create` attempt as answered
 without counting a response event. The recording MUST complete before the
@@ -82,7 +84,12 @@ fence MUST still apply to callers that merely observed the circuit rather than
 removing its cause.
 
 Once the key is quarantined for a poisoned anchor, the local previous-response
-rebind MUST NOT re-attach to the rejected anchor. An explicit rejection on its
+rebind MUST NOT re-attach to the rejected anchor. The quarantine registry is
+shared with the wedged-reattach and repeated-eventless fences, which fence the
+session without evidence about its anchor, so this rebind MUST test the
+recorded quarantine reason rather than the presence of an active quarantine
+window; an explicit rejection arriving during either of the other two fences
+MUST keep the anchor. An explicit rejection on its
 own does not prove the anchor dead, since it can mean the session was not its
 owner, so the rebind's existing same-anchor retry MUST be preserved until the
 circuit has opened on repeated eventless poison-class failures. After that the

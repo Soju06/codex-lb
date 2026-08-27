@@ -105,6 +105,28 @@ def _http_bridge_session_key_quarantined(service: Any, key: _HTTPBridgeSessionKe
     return entry is not None and entry.quarantined_until > now
 
 
+def _http_bridge_session_key_poison_quarantined(service: Any, key: _HTTPBridgeSessionKey) -> bool:
+    """Return whether the key is fenced because its anchor was proven dead.
+
+    The registry is shared with the wedged-reattach and repeated-eventless
+    quarantines, which fence the *session* and say nothing about the anchor it
+    carried. Only the retry circuit's poison quarantine records that the anchor
+    itself kept failing, so callers that drop a continuity anchor must ask for
+    the reason rather than for an active window: dropping it on either of the
+    other two turns a valid delta-only continuation into a context-free
+    request.
+    """
+    registry = _http_bridge_quarantine_registry(service)
+    now = time.monotonic()
+    _prune_http_bridge_quarantine_registry(registry, now)
+    entry = registry.get(key)
+    return (
+        entry is not None
+        and entry.quarantined_until > now
+        and entry.reason == _HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON
+    )
+
+
 def _http_bridge_quarantine_generation(service: Any, key: _HTTPBridgeSessionKey) -> int | None:
     """Return the active quarantine generation observed for one recovery."""
     registry = _http_bridge_quarantine_registry(service)

@@ -33877,3 +33877,137 @@ async def test_concurrent_drains_apply_each_deferred_penalty_exactly_once(
 
     assert sorted(applied) == ["server_is_overloaded", "usage_limit_reached"]
     assert request_state.deferred_keyed_stream_health == []
+
+
+def test_only_a_poison_quarantine_proves_the_bridge_anchor_dead() -> None:
+    # The quarantine registry is shared by three unrelated fences. Two of them
+    # say the *session* is wedged and say nothing about the anchor; only the
+    # retry circuit's poison quarantine carries the proof that the anchor
+    # itself is dead. A caller that drops a continuity anchor must ask for the
+    # reason, because dropping it on a wedged-reattach or repeated-eventless
+    # window turns a valid delta-only continuation into a context-free request.
+    quarantined = http_bridge_quarantine_module._http_bridge_session_key_quarantined
+    poison_quarantined = http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    # Reason 1: a retired pending request with the #1534 wedge shape.
+    wedged_session = _make_bridge_session(key_value="bridge-quarantine-wedged")
+    wedged_state = proxy_service._WebSocketRequestState(
+        request_id="req-wedged",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    wedged_state.proxy_injected_previous_response_id = True
+    wedged_state.previous_response_id = "resp_wedged"
+    wedged_state.response_create_sent_at = time.monotonic() - 1.0
+    wedged_state.response_event_count = 3
+    assert (
+        http_bridge_quarantine_module._record_http_bridge_quarantine_wedged_pending(
+            service, wedged_session, [wedged_state]
+        )
+        is True
+    )
+
+    # Reason 2: two consecutive eventless missing-response.created timeouts.
+    eventless_session = _make_bridge_session(key_value="bridge-quarantine-eventless")
+    for _ in range(http_bridge_quarantine_module._HTTP_BRIDGE_QUARANTINE_EVENTLESS_TIMEOUT_THRESHOLD):
+        http_bridge_quarantine_module._record_http_bridge_quarantine_eventless_timeout(service, eventless_session)
+
+    assert quarantined(service, wedged_session.key) is True
+    assert quarantined(service, eventless_session.key) is True
+    assert poison_quarantined(service, wedged_session.key) is False, (
+        "a wedged reattach fences the session; it never proved the anchor dead"
+    )
+    assert poison_quarantined(service, eventless_session.key) is False, (
+        "repeated eventless timeouts fence the session; they never proved the anchor dead"
+    )
+
+
+@pytest.mark.asyncio
+async def test_poison_quarantine_is_the_one_reason_that_proves_the_anchor_dead() -> None:
+    # The other half of the contract: the retry circuit opening on repeated
+    # eventless poison-class failures must satisfy the same predicate, or the
+    # unanchored retry it exists to enable never fires.
+    poison_quarantined = http_bridge_quarantine_module._http_bridge_session_key_poison_quarantined
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+    )
+    poisoned_session = _make_bridge_session(key_value="bridge-quarantine-poisoned")
+
+    await service._record_http_bridge_retry_circuit_failure(poisoned_session, detail="stream_incomplete")
+    await service._record_http_bridge_retry_circuit_failure(poisoned_session, detail="stream_incomplete")
+
+    assert poison_quarantined(service, poisoned_session.key) is True
+
+
+@pytest.mark.asyncio
+async def test_grouped_strike_skips_requests_that_still_have_a_safe_replay() -> None:
+    # Parity with the single-request settlement path: a request holding a
+    # verified full resend is about to be replayed and claims the circuit
+    # generation at dispatch, so it must not consume a strike. Counting it let
+    # two safely replayable grouped requests open the circuit and clear the
+    # anchor both of them could still have used.
+    service, session, first = _make_terminal_error_bridge_fixture(
+        request_id="req-grouped-safe-1",
+        key_value="sid-grouped-safe",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-grouped-safe"
+    session.durable_owner_epoch = 1
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    second = proxy_service._WebSocketRequestState(
+        request_id="req-grouped-safe-2",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.5,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    second.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    session.pending_requests.append(second)
+    session.queued_request_count = 2
+    for state in (first, second):
+        state.fresh_upstream_request_is_retry_safe = True
+        state.fresh_upstream_request_text = '{"type":"response.create","model":"gpt-5.4","input":"hi"}'
+
+    rebind = AsyncMock(return_value=True)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=rebind,
+    )
+    service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    rebind.assert_not_awaited()
+    assert http_bridge_quarantine_module._http_bridge_session_key_quarantined(service, session.key) is False, (
+        "two safely replayable requests must not open the circuit between them"
+    )
+
+
+def test_unanchored_local_recovery_stays_a_local_previous_response_error_recovery() -> None:
+    # The unanchored variant carries its own telemetry label so the reattach
+    # metric can tell the two apart, but it is the same bounded local recovery:
+    # it must still consume the one server-side replay and reset the recovery
+    # operation spool. Letting the distinct label fall out of that machinery
+    # handed the unanchored retry a second free cooldown bypass.
+    paths = http_bridge_streaming_module._LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS
+    assert "local_previous_response_error" in paths
+    assert "local_previous_response_error_unanchored" in paths

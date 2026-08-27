@@ -112,6 +112,7 @@ from app.modules.proxy._service.http_bridge.owner_forwarding import (
 )
 from app.modules.proxy._service.http_bridge.quarantine import (
     _http_bridge_quarantine_generation,
+    _http_bridge_session_key_poison_quarantined,
     _http_bridge_session_key_quarantined,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
@@ -244,6 +245,18 @@ from app.modules.proxy.replay_safety import (
 logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
+
+# The local previous-response rebind reports two telemetry labels so the
+# reattach metric can tell an anchored recovery from one that dropped a
+# proven-dead anchor. They are the same bounded local recovery: both consume
+# the one server-side replay and both reset the recovery operation spool, so
+# every behavioural check keys off this set rather than a single label.
+_LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS = frozenset(
+    {
+        "local_previous_response_error",
+        "local_previous_response_error_unanchored",
+    }
+)
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
@@ -3354,7 +3367,7 @@ class _HTTPBridgeStreamingMixin:
                 )
                 if retry_injected_input is not None:
                     retry_payload = retry_payload.model_copy(update={"input": retry_injected_input})
-                if explicit_previous_response_rejection and _http_bridge_session_key_quarantined(
+                if explicit_previous_response_rejection and _http_bridge_session_key_poison_quarantined(
                     self, bridge_session_key
                 ):
                     # An explicit rejection alone does not prove the anchor is
@@ -3363,7 +3376,11 @@ class _HTTPBridgeStreamingMixin:
                     # retries the SAME anchor on the fresh session. Only once
                     # the retry circuit has opened on repeated eventless
                     # poison-class failures and quarantined the key is the
-                    # anchor proven dead rather than merely mis-bound.
+                    # anchor proven dead rather than merely mis-bound. The
+                    # quarantine registry is shared with the wedged-reattach
+                    # and repeated-eventless fences, which say nothing about
+                    # the anchor, so this asks for the poison reason and not
+                    # merely for an active window.
                     #
                     # At that point re-attaching guarantees the retry repeats
                     # the rejection. The fresh-replay branches above already
@@ -3484,12 +3501,14 @@ class _HTTPBridgeStreamingMixin:
                     retry_payload,
                     reservation=retry_api_key_reservation,
                 )
-                local_previous_response_recovery = recovery_path in {
-                    "local_previous_response_error",
-                    "local_previous_response_fresh_replay",
-                    "local_previous_response_same_owner_fresh_replay",
-                }
-                if recovery_path == "local_previous_response_error":
+                local_previous_response_recovery = recovery_path in (
+                    _LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS
+                    | {
+                        "local_previous_response_fresh_replay",
+                        "local_previous_response_same_owner_fresh_replay",
+                    }
+                )
+                if recovery_path in _LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS:
                     await reset_previous_response_recovery_operation_spool(
                         session,
                         request_state,

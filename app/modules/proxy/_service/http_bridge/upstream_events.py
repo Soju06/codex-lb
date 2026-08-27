@@ -2163,7 +2163,15 @@ class _HTTPBridgeUpstreamEventsMixin:
                 _grouped_terminal_event_type,
                 _grouped_terminal_operation_state,
             ) in grouped_terminal_events:
-                if grouped_request_state.response_event_count != 0:
+                # Same admission test the single-request settlement path
+                # applies: a request still holding a verified full resend is
+                # about to be replayed and claims the circuit generation at
+                # dispatch, so charging it here would let two safely
+                # replayable requests open the circuit between them and clear
+                # the anchor both of them could still have used.
+                if grouped_request_state.response_event_count != 0 or not (
+                    _http_bridge_continuity_bound_without_safe_replay(grouped_request_state)
+                ):
                     continue
                 grouped_terminal_error = (
                     grouped_terminal_event.response.error

@@ -71,6 +71,10 @@ class _ApiKeyUsageServiceProtocol(Protocol):
     _stream_api_key_release_retry_semaphore: asyncio.Semaphore
     _load_balancer: Any
 
+    async def _handle_stream_error(
+        self, account: Account, error: Any, code: str, http_status: int | None = None
+    ) -> Any: ...
+
 
 def _normalize_service_tier_value(value: Any) -> str | None:
     if not isinstance(value, str):
@@ -168,8 +172,15 @@ class _ApiKeyUsageMixin:
         pending_backoffs = (
             lifecycle.pending_backoffs if lifecycle is not None else request_state.deferred_account_error_backoffs
         )
-        if pending_backoffs:
-            await self._drain_deferred_account_error_backoffs(pending_backoffs)
+        try:
+            if pending_backoffs:
+                await self._drain_deferred_account_error_backoffs(pending_backoffs)
+        finally:
+            # Backoffs and queued stream-health penalties own independent
+            # post-settlement lanes: a failed backoff write must not orphan
+            # the deferred health write.
+            if request_state.deferred_keyed_stream_health:
+                await self._drain_deferred_keyed_stream_health(request_state)
 
     async def _drain_deferred_account_error_backoffs(
         self,
@@ -185,6 +196,67 @@ class _ApiKeyUsageMixin:
             except BaseException:
                 pending_backoffs.setdefault(account_id, account)
                 raise
+
+    async def _drain_deferred_keyed_stream_health(
+        self,
+        request_state: _WebSocketRequestState,
+    ) -> None:
+        """Apply health writes deferred until reservation settlement.
+
+        Each entry is claimed atomically (popped without an intervening
+        await), so the idempotent release and terminal-finalize paths can
+        drain the same request state concurrently without applying a penalty
+        twice or corrupting the queue.
+
+        Each attempt runs as an owned task awaited through ``asyncio.shield``
+        (the ``_await_task_deferring_cancellation`` pattern; importing it from
+        ``http_bridge.helpers`` would cycle through that module's import of
+        this one). Caller cancellation therefore cannot abandon a
+        half-applied penalty for a later drain to replay: every claimed entry
+        is drained to completion first — no later path owns the queue once
+        terminal ownership is relinquished — and the cancellation re-raises
+        only after the queue is empty.
+
+        An attempt that raises is logged and dropped rather than retained or
+        re-raised: settlement has already committed, and the
+        settlement-ordering contract only requires an unconfirmed settlement
+        to leave health unapplied — a failed health write must not abort the
+        remaining terminal finalization (request-log write, retirement).
+        """
+        proxy = cast(_ApiKeyUsageServiceProtocol, self)
+        deferred_cancellation: asyncio.CancelledError | None = None
+        penalties = request_state.deferred_keyed_stream_health
+        # The anyio shield keeps a level-cancelled Starlette scope from
+        # re-raising into every ``await``, which would otherwise busy-spin
+        # this loop until the owned task completes; the inner asyncio.shield
+        # loop defers edge task cancellation the same way.
+        with anyio.CancelScope(shield=True):
+            while penalties:
+                penalty = penalties.pop(0)
+                apply_task = asyncio.create_task(
+                    proxy._handle_stream_error(penalty.account, penalty.error, penalty.code)
+                )
+                while True:
+                    try:
+                        await asyncio.shield(apply_task)
+                        break
+                    except asyncio.CancelledError as exc:
+                        if apply_task.cancelled():
+                            penalties.insert(0, penalty)
+                            raise
+                        deferred_cancellation = deferred_cancellation or exc
+                    except Exception:
+                        logger.warning(
+                            "Deferred keyed stream-health write failed after settlement; dropping penalty "
+                            "account_id=%s code=%s request_id=%s",
+                            penalty.account.id,
+                            penalty.code,
+                            get_request_id(),
+                            exc_info=True,
+                        )
+                        break
+        if deferred_cancellation is not None:
+            raise deferred_cancellation
 
     async def _maybe_touch_api_key_reservation(
         self,

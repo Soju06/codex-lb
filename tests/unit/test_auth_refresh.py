@@ -13,7 +13,9 @@ from app.core.auth.refresh import (
     refresh_contention_kind,
     should_refresh,
 )
+from app.core.balancer import account_status_for_permanent_failure
 from app.core.utils.time import utcnow
+from app.db.models import AccountStatus
 
 pytestmark = pytest.mark.unit
 
@@ -91,6 +93,7 @@ def test_classify_refresh_error_permanent():
     assert classify_refresh_error("account_deactivated") is True
     assert classify_refresh_error("invalid_grant") is True
     assert classify_refresh_error("app_session_terminated") is True
+    assert classify_refresh_error("invalid_refresh_token") is True
 
 
 def test_classify_refresh_error_token_expired_is_permanent():
@@ -100,6 +103,10 @@ def test_classify_refresh_error_token_expired_is_permanent():
     # the load balancer deactivates the account instead of looping retries.
     # Regression for #383.
     assert classify_refresh_error("token_expired") is True
+
+
+def test_invalid_refresh_token_requires_reauthentication():
+    assert account_status_for_permanent_failure("invalid_refresh_token") == AccountStatus.REAUTH_REQUIRED
 
 
 def test_classify_refresh_error_temporary():

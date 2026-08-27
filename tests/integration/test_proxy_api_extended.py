@@ -2781,6 +2781,781 @@ async def test_stream_responses_starts_sse_keepalive_before_first_upstream_event
 
 
 @pytest.mark.asyncio
+async def test_source_responses_stream_starts_sse_keepalive_before_first_upstream_event(monkeypatch):
+    """Source-routed /v1/responses must keep SSE alive like account streams."""
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
+
+    release_upstream = asyncio.Event()
+    keepalives: list[str] = []
+
+    async def delayed_body():
+        await release_upstream.wait()
+        # Split across chunk boundaries so reassembly is required.
+        event = _sse_event({"type": "response.completed", "response": {"id": "resp_source_delayed"}})
+        mid = max(1, len(event) // 2)
+        yield event[:mid].encode("utf-8")
+        yield event[mid:].encode("utf-8")
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=delayed_body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0.01)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+    monkeypatch.setattr(
+        proxy_api_module,
+        "_record_stream_keepalive",
+        lambda surface: keepalives.append(surface),
+    )
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.9", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_keepalive",
+        name="keepalive-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    iterator = response.body_iterator.__aiter__()
+    first_chunk = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first_chunk == SSE_KEEPALIVE_FRAME
+    assert keepalives == ["responses_source"]
+    release_upstream.set()
+    remaining: list[str] = []
+    while True:
+        try:
+            remaining.append(cast(str, await asyncio.wait_for(iterator.__anext__(), timeout=0.2)))
+        except StopAsyncIteration:
+            break
+    joined = "".join(remaining)
+    assert "resp_source_delayed" in joined
+    created_at = joined.find("response.created")
+    completed_at = joined.find("response.completed")
+    assert created_at != -1
+    assert completed_at != -1
+    assert created_at < completed_at
+
+
+@pytest.mark.asyncio
+async def test_source_responses_stream_reassembles_crlf_event_blocks(monkeypatch):
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
+
+    async def crlf_split_body():
+        event = 'data: {"type":"response.completed","response":{"id":"resp_crlf"}}\r\n\r\n'
+        mid = max(1, len(event) // 2)
+        yield event[:mid].encode("utf-8")
+        yield event[mid:].encode("utf-8")
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=crlf_split_body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.11", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_crlf",
+        name="crlf-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+    assert isinstance(response, StreamingResponse)
+    joined = "".join([cast(str, chunk) async for chunk in response.body_iterator])
+    assert "resp_crlf" in joined
+    created_at = joined.find("response.created")
+    completed_at = joined.find("response.completed")
+    assert created_at != -1
+    assert completed_at != -1
+    assert created_at < completed_at
+
+
+@pytest.mark.asyncio
+async def test_source_responses_forwards_unparseable_blocks_without_synthetic_terminal(monkeypatch):
+    """Unparseable source data passes through verbatim instead of becoming response.failed."""
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
+
+    malformed_block = 'data: {"type":"response.completed","response":{"id":"resp_unparseable"}\n\n'
+
+    async def malformed_body():
+        yield malformed_block.encode("utf-8")
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=malformed_body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.9", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_unparseable",
+        name="unparseable-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    chunks = [cast(str, chunk) async for chunk in response.body_iterator]
+    joined = "".join(chunks)
+    assert malformed_block in joined
+    assert "response.failed" not in joined
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_closes_owner_when_aiter_fails():
+    closed: list[str] = []
+
+    class _Owner:
+        def __aiter__(self):
+            closed.append("aiter")
+            raise RuntimeError("aiter failed")
+
+        async def aclose(self) -> None:
+            closed.append("owner")
+
+    with pytest.raises(RuntimeError, match="aiter failed"):
+        async for _ in proxy_api_module._iter_source_sse_event_blocks(_Owner()):
+            pass
+
+    assert closed == ["aiter", "owner"]
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_closes_owner_when_iterator_close_fails():
+    closed: list[str] = []
+
+    class _Iterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            closed.append("iterator")
+            raise RuntimeError("iterator close failed")
+
+    class _Owner:
+        def __aiter__(self):
+            return _Iterator()
+
+        async def aclose(self) -> None:
+            closed.append("owner")
+
+    with pytest.raises(RuntimeError, match="iterator close failed"):
+        async for _ in proxy_api_module._iter_source_sse_event_blocks(_Owner()):
+            pass
+
+    assert closed == ["iterator", "owner"]
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_swallows_lf_residue_of_split_crlf():
+    """...\r\n\r | \n chunking dispatches at the bare CR and drops the LF residue."""
+
+    async def split_after_cr_body():
+        yield b'data: {"type":"response.created"}\r\n\r'
+        yield b'\ndata: {"type":"response.completed"}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._iter_source_sse_event_blocks(
+            split_after_cr_body(),
+            max_event_bytes=4096,
+        )
+    ]
+
+    assert blocks == [
+        'data: {"type":"response.created"}\r\n\r',
+        'data: {"type":"response.completed"}\n\n',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_ignores_leading_utf8_bom():
+    """One optional leading UTF-8 BOM is ignored, split across chunks or not."""
+
+    async def bom_body():
+        yield b"\xef\xbb"
+        yield b'\xbfdata: {"type":"response.completed","response":{"id":"resp_bom"}}\n\n'
+
+    blocks = [
+        block
+        async for block in proxy_api_module._iter_source_sse_event_blocks(
+            bom_body(),
+            max_event_bytes=4096,
+        )
+    ]
+
+    assert blocks == ['data: {"type":"response.completed","response":{"id":"resp_bom"}}\n\n']
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_preserves_crlf_and_cr_terminators():
+    async def body():
+        yield b'event: response.completed\r\ndata: {"type":"response.completed"}\r\n\r\n'
+        yield b'event: response.failed\rdata: {"type":"response.failed"}\r\r'
+
+    blocks = [block async for block in proxy_api_module._iter_source_sse_event_blocks(body())]
+    assert blocks == [
+        'event: response.completed\r\ndata: {"type":"response.completed"}\r\n\r\n',
+        'event: response.failed\rdata: {"type":"response.failed"}\r\r',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_preserves_mixed_lf_cr_terminators():
+    async def body():
+        yield b'data: {"type":"response.completed","response":{"id":"resp_lf_cr"}}\n\r'
+        yield b'data: {"type":"response.failed"}\n\r\n'
+
+    blocks = [block async for block in proxy_api_module._iter_source_sse_event_blocks(body())]
+    assert blocks == [
+        'data: {"type":"response.completed","response":{"id":"resp_lf_cr"}}\n\r',
+        'data: {"type":"response.failed"}\n\r\n',
+    ]
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_dispatches_cr_only_without_waiting():
+    release_next = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def body():
+        try:
+            yield b'data: {"type":"response.completed","response":{"id":"resp_cr"}}\r\r'
+            await release_next.wait()
+            yield b'data: {"type":"response.failed"}\r\r'
+        finally:
+            closed.set()
+
+    iterator = proxy_api_module._iter_source_sse_event_blocks(body()).__aiter__()
+    first = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first == 'data: {"type":"response.completed","response":{"id":"resp_cr"}}\r\r'
+    release_next.set()
+    second = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert second.endswith("\r\r")
+    with pytest.raises(StopAsyncIteration):
+        await iterator.__anext__()
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_iter_source_sse_event_blocks_rejects_oversize_event():
+    from app.core.clients.proxy import StreamEventTooLargeError
+
+    async def body():
+        yield b"data: " + (b"x" * 64) + b"\n\n"
+
+    with pytest.raises(StreamEventTooLargeError):
+        async for _ in proxy_api_module._iter_source_sse_event_blocks(body(), max_event_bytes=32):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_wrap_source_responses_native_codex_preserves_codex_events_and_keepalive(monkeypatch):
+    keepalives: list[str] = []
+    release_upstream = asyncio.Event()
+
+    async def delayed_body():
+        await release_upstream.wait()
+        yield (
+            b'data: {"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"allowed":true}}\n\n'
+            b'data: {"type":"response.completed","response":{"id":"resp_codex_src","output":[]}}\n\n'
+        )
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0.01, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        proxy_api_module,
+        "_record_stream_keepalive",
+        lambda surface: keepalives.append(surface),
+    )
+
+    stream = proxy_api_module._wrap_source_responses_public_stream(
+        delayed_body(),
+        enforce_openai_sdk_contract=False,
+        native_codex_heartbeat=True,
+    )
+    iterator = stream.__aiter__()
+    first = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first == CODEX_KEEPALIVE_FRAME
+    # Prefixed heartbeat does not record metrics; wait for an injected idle frame.
+    second = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert second == CODEX_KEEPALIVE_FRAME
+    assert keepalives == ["responses_source"]
+    release_upstream.set()
+    remaining = [chunk async for chunk in iterator]
+    joined = "".join(remaining)
+    assert "codex.rate_limits" in joined
+    assert "response.created" not in joined
+    assert "resp_codex_src" in joined
+
+
+@pytest.mark.asyncio
+async def test_wrap_source_responses_closes_source_on_early_error_and_client_close(monkeypatch):
+    closed: list[str] = []
+
+    async def error_body():
+        try:
+            yield b'data: {"type":"error","error":{"message":"boom","code":"server_error"}}\n\n'
+            yield b'data: {"type":"response.completed","response":{"id":"resp_skip"}}\n\n'
+        finally:
+            closed.append("source")
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            error_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert "response.failed" in joined
+    assert "resp_skip" not in joined
+    assert closed == ["source"]
+
+    closed.clear()
+    hold = asyncio.Event()
+
+    async def held_body():
+        try:
+            yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_hold"}}\n\n'
+            await hold.wait()
+            yield b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_hold"}}\n\n'
+        finally:
+            closed.append("source")
+
+    stream = proxy_api_module._wrap_source_responses_public_stream(
+        held_body(),
+        enforce_openai_sdk_contract=True,
+    )
+    iterator = stream.__aiter__()
+    first = await iterator.__anext__()
+    assert "response.created" in first
+    await cast(Any, iterator).aclose()
+    assert closed == ["source"]
+    hold.set()
+
+
+@pytest.mark.asyncio
+async def test_wrap_source_responses_closes_raw_source_after_initial_heartbeat_disconnect(monkeypatch):
+    """A native client dropping right after the prefixed heartbeat must close the raw source."""
+
+    class _RawSource:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __aiter__(self) -> "_RawSource":
+            return self
+
+        async def __anext__(self) -> bytes:
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    raw_source = _RawSource()
+    stream = proxy_api_module._wrap_source_responses_public_stream(
+        raw_source,
+        enforce_openai_sdk_contract=False,
+        native_codex_heartbeat=True,
+    )
+    iterator = stream.__aiter__()
+    first = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+    assert first == CODEX_KEEPALIVE_FRAME
+    # None of the inner layers has started iterating yet; closing the wrapper
+    # must still release the eagerly opened source body.
+    await cast(Any, iterator).aclose()
+    assert raw_source.closed is True
+
+
+@pytest.mark.asyncio
+async def test_source_stream_retry_control_block_keeps_truncation_failure(monkeypatch):
+    """Valid non-data control blocks pass through without suppressing truncation synthesis."""
+
+    async def control_then_truncated_body():
+        yield b"retry: 1000\n\n"
+        yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_ctrl"}}\n\n'
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            control_then_truncated_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert "retry: 1000" in joined
+    assert "resp_ctrl" in joined
+    assert "response.failed" in joined
+
+
+@pytest.mark.asyncio
+async def test_source_stream_data_substring_in_field_value_keeps_truncation_failure(monkeypatch):
+    """A field value containing the literal 'data:' is not a data block and must not suppress failures."""
+
+    async def id_field_then_truncated_body():
+        yield b"id: data:1\n\n"
+        yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_idfield"}}\n\n'
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            id_field_then_truncated_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert "id: data:1" in joined
+    assert "resp_idfield" in joined
+    assert "response.failed" in joined
+
+
+@pytest.mark.asyncio
+async def test_source_stream_unicode_separator_in_field_value_keeps_truncation_failure(monkeypatch):
+    """U+2028 inside a field value must not expose a false data line: SSE splits only on CR/LF/CRLF."""
+
+    async def unicode_field_then_truncated_body():
+        yield "id: metadata\u2028data:oops\n\n".encode("utf-8")
+        yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_u2028"}}\n\n'
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            unicode_field_then_truncated_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert "metadata\u2028data:oops" in joined
+    assert "resp_u2028" in joined
+    assert "response.failed" in joined
+
+
+@pytest.mark.asyncio
+async def test_source_stream_bare_data_field_suppresses_synthetic_terminal(monkeypatch):
+    """The valid empty-field form (a bare 'data' line) counts as unparseable source data."""
+
+    async def bare_data_body():
+        yield b"data\n\n"
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            bare_data_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert "data\n\n" in joined
+    assert "response.failed" not in joined
+
+
+@pytest.mark.asyncio
+async def test_wrap_source_responses_preserves_crlf_framing_of_unchanged_events(monkeypatch):
+    """An unchanged CRLF-framed standard event must pass through byte-identically."""
+    crlf_delta_block = (
+        "event: response.output_text.delta\r\n"
+        'data: {"type":"response.output_text.delta","item_id":"item_crlf","output_index":0,'
+        '"content_index":0,"delta":"hi"}\r\n\r\n'
+    )
+
+    async def crlf_framed_body():
+        yield b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_crlf_frame"}}\n\n'
+        yield crlf_delta_block.encode("utf-8")
+        yield (
+            b"event: response.completed\n"
+            b'data: {"type":"response.completed","response":{"id":"resp_crlf_frame","output":[]}}\n\n'
+        )
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0, max_sse_event_bytes=16 * 1024 * 1024)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+
+    chunks = [
+        chunk
+        async for chunk in proxy_api_module._wrap_source_responses_public_stream(
+            crlf_framed_body(),
+            enforce_openai_sdk_contract=True,
+        )
+    ]
+    joined = "".join(chunks)
+    assert crlf_delta_block in joined
+    assert "resp_crlf_frame" in joined
+
+
+@pytest.mark.asyncio
+async def test_source_responses_stream_preserves_split_utf8_and_crlf(monkeypatch):
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsageHolder
+
+    async def split_boundary_body():
+        # "é" is UTF-8 C3 A9; split after C3. Also split CRLF after CR.
+        prefix = b'data: {"type":"response.completed","response":{"id":"resp_'
+        mid = "caf\u00e9".encode("utf-8")
+        yield prefix + mid[:4]  # ends mid UTF-8 sequence for é
+        yield mid[4:] + b'"}}\r'
+        yield b"\n\r\n"
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=split_boundary_body(),
+            usage_holder=SourceUsageHolder(),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.12", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_utf8_crlf",
+        name="utf8-crlf-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+    assert isinstance(response, StreamingResponse)
+    joined = "".join([cast(str, chunk) async for chunk in response.body_iterator])
+    assert "resp_caf" in joined
+    assert "\\u00e9" in joined or "caf\u00e9" in joined
+    created_at = joined.find("response.created")
+    completed_at = joined.find("response.completed")
+    assert created_at != -1
+    assert completed_at != -1
+    assert created_at < completed_at
+
+
+@pytest.mark.asyncio
+async def test_source_responses_normalize_error_still_settles_reservation(monkeypatch):
+    """Normalize early-return must not aclose settlement as client_disconnected."""
+    from app.db.models import ModelSource
+    from app.modules.model_sources.forwarding import SourceResponsesStream, SourceUsage, SourceUsageHolder
+
+    settle_calls: list[object] = []
+    log_statuses: list[str] = []
+
+    async def error_then_completed_body():
+        yield b'data: {"type":"error","error":{"message":"boom","code":"server_error"}}\n\n'
+        yield b'data: {"type":"response.completed","response":{"id":"resp_should_not_matter"}}\n\n'
+
+    async def fake_stream_source_responses(_source, _payload):
+        return SourceResponsesStream(
+            body=error_then_completed_body(),
+            usage_holder=SourceUsageHolder(usage=SourceUsage(input_tokens=1, output_tokens=1)),
+            upstream_status_code=200,
+        )
+
+    async def allow_request_limits(*args, **kwargs):
+        del args, kwargs
+        return object()
+
+    async def record_settle(reservation, **kwargs):
+        del kwargs
+        settle_calls.append(reservation)
+        return True
+
+    async def record_log(*args, **kwargs):
+        del args
+        log_statuses.append(str(kwargs.get("status")))
+
+    settings = SimpleNamespace(sse_keepalive_interval_seconds=0)
+    monkeypatch.setattr(proxy_api_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_api_module, "stream_source_responses", fake_stream_source_responses)
+    monkeypatch.setattr(proxy_api_module, "_enforce_request_limits", allow_request_limits)
+    monkeypatch.setattr(proxy_api_module, "_settle_source_reservation", record_settle)
+    monkeypatch.setattr(proxy_api_module, "_log_source_chat_completion", record_log)
+    monkeypatch.setattr(proxy_api_module, "_reservation_requires_usage", lambda _reservation: False)
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/responses",
+            "headers": [],
+            "client": ("203.0.113.10", 54321),
+        }
+    )
+    payload = proxy_api_module.ResponsesRequest.model_validate(
+        {"model": "src-model", "instructions": "hi", "input": [], "stream": True}
+    )
+    source = ModelSource(
+        id="src_normalize_error",
+        name="normalize-error-source",
+        kind="openai_compatible",
+        base_url="http://127.0.0.1:9/v1",
+        is_enabled=True,
+        supports_chat_completions=False,
+        supports_responses=True,
+    )
+
+    response = await proxy_api_module._source_responses_response(
+        request,
+        payload,
+        source=source,
+        api_key=None,
+        rate_limit_headers={},
+        pre_normalization_effort=None,
+    )
+    assert isinstance(response, StreamingResponse)
+    chunks = [cast(str, chunk) async for chunk in response.body_iterator]
+    joined = "".join(chunks)
+    assert "response.created" in joined
+    assert "response.failed" in joined
+    assert "resp_should_not_matter" not in joined
+    assert settle_calls, "normalize early-return must still settle the outer reservation"
+    assert "cancelled" not in log_statuses
+
+
+@pytest.mark.asyncio
 async def test_backend_desktop_openai_shape_uses_codex_heartbeat_with_sdk_normalization(
     async_client,
     monkeypatch,

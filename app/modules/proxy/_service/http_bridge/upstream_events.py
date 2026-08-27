@@ -63,7 +63,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
-    _http_bridge_abandonment_strands_requests,
+    _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_eventless_precreated_deadline,
@@ -1262,7 +1262,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         self,
                         session,
                         detail=poison_detail,
-                        settle_circuit=_http_bridge_abandonment_strands_requests(pending_request_states),
+                        settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
                     )
                     if durable_cleared:
                         await self._retire_stale_pending_http_bridge_session(

@@ -78,7 +78,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
-    _http_bridge_abandonment_strands_requests,
+    _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_is_previous_response_owner_unavailable,
     _http_bridge_key_strength,
@@ -2942,7 +2942,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     self,
                     session,
                     detail=poison_detail,
-                    settle_circuit=_http_bridge_abandonment_strands_requests(retired_request_states),
+                    settle_circuit=_http_bridge_abandonment_may_settle_circuit(retired_request_states),
                 )
                 if not durable_cleared and session.durable_session_id is not None:
                     # Keep failed waiterless clears visible in the same

@@ -115,6 +115,11 @@
       still consumes the one server-side replay and resets the recovery
       operation spool
 
+- [x] 2.14 An abandonment that covers no live request state settles the
+      circuit, so a poison clear reached after terminal notification drained
+      the pending set does not leave the cooldown running against a cause it
+      just removed
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

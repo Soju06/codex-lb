@@ -33410,11 +33410,12 @@ async def test_abandonment_from_an_existing_funnel_leaves_the_circuit_alone() ->
     clear_retry_circuit.assert_not_awaited()
 
 
-def test_abandonment_strands_requests_only_without_a_safe_replay() -> None:
+def test_abandonment_settles_the_circuit_unless_a_safe_replay_holds_it() -> None:
     # The predicate that decides whether an abandonment may settle the circuit.
     # A request still holding a verified full resend is about to be replayed and
     # claims the circuit generation at dispatch, so the circuit must survive it.
-    strands = http_bridge_helpers_module._http_bridge_abandonment_strands_requests
+    # Everything else is a cooldown backing off a cause that is already gone.
+    may_settle = http_bridge_helpers_module._http_bridge_abandonment_may_settle_circuit
 
     def _state(*, safe_replay: bool) -> Any:
         return SimpleNamespace(
@@ -33424,10 +33425,10 @@ def test_abandonment_strands_requests_only_without_a_safe_replay() -> None:
             hard_continuity_anchor=True,
         )
 
-    assert strands([]) is False, "nothing to strand means nothing to settle"
-    assert strands([_state(safe_replay=True)]) is False
-    assert strands([_state(safe_replay=False)]) is True
-    assert strands([_state(safe_replay=False), _state(safe_replay=True)]) is False, (
+    assert may_settle([]) is True, "no state is holding the generation, so nothing blocks the settle"
+    assert may_settle([_state(safe_replay=True)]) is False
+    assert may_settle([_state(safe_replay=False)]) is True
+    assert may_settle([_state(safe_replay=False), _state(safe_replay=True)]) is False, (
         "one replayable request is enough to keep the circuit"
     )
 
@@ -34011,3 +34012,48 @@ def test_unanchored_local_recovery_stays_a_local_previous_response_error_recover
     paths = http_bridge_streaming_module._LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS
     assert "local_previous_response_error" in paths
     assert "local_previous_response_error_unanchored" in paths
+
+
+@pytest.mark.asyncio
+async def test_poison_clear_settles_the_circuit_when_the_deque_was_already_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Production shape (observed live): terminal notification empties
+    # ``pending_requests`` before retirement, so the reader-failure funnel hands
+    # this boundary a pre-drain count with an *empty* state list. Nothing in
+    # that list means nothing holds the circuit generation this abandonment
+    # would disturb, so the settle must fire. Requiring a non-empty stranded
+    # list instead left the circuit cooling for its full 60s after the anchor
+    # was already gone, refusing every unanchored request that arrived behind
+    # it with `retry_circuit_cooldown_continuity_bound`.
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=AsyncMock(return_value=True),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+    service._durable_bridge = durable_bridge
+    monkeypatch.setattr(service, "_close_http_bridge_session_bounded", AsyncMock())
+
+    for _failure_number in range(7):
+        session = _make_bridge_session(
+            key_value="bridge-anchor-poison-drained",
+            pending_requests=deque(),
+            queued_request_count=0,
+        )
+        session.durable_session_id = "durable-anchor-poison-drained"
+        session.durable_owner_epoch = 5
+        await service._retire_stale_pending_http_bridge_session(
+            session,
+            detail="stream_incomplete",
+            retired_request_count=1,
+        )
+
+    durable_bridge.rebind_session_account.assert_awaited_once()
+    assert durable_bridge.rebind_session_account.await_args is not None
+    assert durable_bridge.rebind_session_account.await_args.kwargs["clear_continuity"] is True
+    (
+        durable_bridge.clear_retry_circuit.assert_awaited(),
+        ("the abandonment removed the cooldown's cause, so the circuit must settle with it"),
+    )

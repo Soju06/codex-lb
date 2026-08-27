@@ -872,18 +872,24 @@ def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketR
     )
 
 
-def _http_bridge_abandonment_strands_requests(request_states: Iterable[Any]) -> bool:
-    """Return whether every request this abandonment covers is left stranded.
+def _http_bridge_abandonment_may_settle_circuit(request_states: Iterable[Any]) -> bool:
+    """Return whether this abandonment may settle the retry circuit with it.
 
-    A request that still holds a safe replay is about to be retried, and that
-    replay claims the retry circuit's generation at dispatch, so the circuit
-    must survive for it. Only when nothing can be replayed is the cooldown
-    backing off a cause that the abandonment already removed.
+    The circuit must survive exactly one thing: a request that still holds a
+    safe replay. That replay claims the circuit's generation at dispatch
+    (#1863), so clearing the circuit under it removes the fence it depends on.
+    Every other case is a cooldown backing off a cause this abandonment just
+    removed.
+
+    An empty set therefore settles. Terminal notification drains
+    ``pending_requests`` before retirement, so the funnels routinely reach here
+    with a pre-drain count and no states at all; nothing is holding the
+    generation, and refusing to settle there left the circuit cooling for its
+    full backoff after the anchor was already gone.
     """
-    states = [state for state in request_states if state is not None]
-    if not states:
-        return False
-    return all(_http_bridge_continuity_bound_without_safe_replay(state) for state in states)
+    return all(
+        _http_bridge_continuity_bound_without_safe_replay(state) for state in request_states if state is not None
+    )
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:

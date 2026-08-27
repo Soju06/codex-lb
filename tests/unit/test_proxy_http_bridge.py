@@ -6940,6 +6940,10 @@ async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-recovery-rebind-dispatch-fails",
         model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
         request_text='{"type":"response.create","previous_response_id":"resp-stale","input":[]}',
         previous_response_id="resp-stale",
         operation_id="op-stale",

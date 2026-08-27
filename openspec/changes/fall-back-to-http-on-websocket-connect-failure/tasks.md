@@ -16,7 +16,8 @@
 - [x] 1.3 Deny responses websocket handshakes with HTTP 426 while the marker
       is armed or `upstream_stream_transport` is pinned to `"http"`, except
       for capability-bearing handshakes, and reject a capability signal
-      carried in `client_metadata` on the HTTP responses path
+      carried in `client_metadata` on every HTTP route that parses a
+      Responses-shaped body (native, v1, both compact, internal bridge)
 - [x] 1.4 Bypass the HTTP responses bridge and pin the raw path's upstream
       transport to `"http"` while the marker is armed or the upstream
       transport is pinned to `"http"`
@@ -45,7 +46,8 @@
       direct and routed TLS verification failure, routed 5xx handshake
 - [x] 2.3 Handshake admission: 426 denial while armed or pinned, normal accept
       otherwise, marker TTL expiry and clear; a capability handshake connects
-      while armed, and a metadata-only capability signal is rejected on HTTP
+      while armed, and a metadata-only capability signal is rejected on
+      every HTTP responses-shaped route while benign metadata keeps routing
 - [x] 2.4 Budget exhaustion: a stalled direct connector arms the marker; a
       budget that expires in local admission or in a routed connector does
       not; a direct open success clears the marker and a routed one does not

@@ -1255,7 +1255,7 @@ async def v1_responses(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     raw_trigger_error = _raw_compaction_trigger_error(request)
@@ -1369,7 +1369,7 @@ async def internal_bridge_responses(
     api_key, auth_error = await _validate_internal_bridge_api_key(request)
     if auth_error is not None:
         return auth_error
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     if forwarded_request_context.context.signature_version is None:
@@ -6207,7 +6207,7 @@ async def responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     raw_trigger_error = _raw_compaction_trigger_error(request)
@@ -6234,7 +6234,7 @@ async def v1_responses_compact(
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> JSONResponse:
-    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
+    capability_transport_denial = await _required_capability_http_transport_denial(request, api_key, payload=payload)
     if capability_transport_denial is not None:
         return capability_transport_denial
     try:
@@ -7690,19 +7690,30 @@ async def _validate_proxy_websocket_request(
     return api_key, None
 
 
-def _required_capability_metadata_values(payload: Mapping[str, JsonValue] | None) -> tuple[JsonValue, ...]:
-    """Capability values carried in a request body's ``client_metadata``."""
+def _required_capability_metadata_values(
+    payload: Mapping[str, JsonValue] | BaseModel | None,
+) -> tuple[JsonValue, ...]:
+    """Capability values carried in a request body's ``client_metadata``.
+
+    The Responses-shaped payload models allow extra fields, so a typed
+    payload carries ``client_metadata`` as a Pydantic extra attribute rather
+    than a mapping key.
+    """
 
     if payload is None:
         return ()
-    return required_capability_metadata_values(payload.get("client_metadata"))
+    if isinstance(payload, Mapping):
+        client_metadata = payload.get("client_metadata")
+    else:
+        client_metadata = getattr(payload, "client_metadata", None)
+    return required_capability_metadata_values(client_metadata)
 
 
 async def _required_capability_http_transport_denial(
     request: Request,
     api_key: ApiKeyData | None,
     *,
-    payload: Mapping[str, JsonValue] | None = None,
+    payload: Mapping[str, JsonValue] | BaseModel | None = None,
 ) -> JSONResponse | None:
     """Authenticate capability intent and reject unsupported HTTP routing.
 

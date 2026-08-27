@@ -18047,6 +18047,21 @@ async def test_stream_via_http_bridge_fails_closed_when_retained_alias_lookup_er
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=session))
     monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
     monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings_cache",
+        lambda: cast(
+            Any,
+            SimpleNamespace(
+                get=AsyncMock(
+                    return_value=SimpleNamespace(
+                        http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
+                        http_responses_session_bridge_gateway_safe_mode=False,
+                    )
+                )
+            ),
+        ),
+    )
 
     with pytest.raises(ProxyResponseError) as exc_info:
         async for _ in service._stream_via_http_bridge(
@@ -29973,7 +29988,11 @@ async def test_http_bridge_eventless_timeout_does_not_mark_or_clear_after_late_r
     )
     await asyncio.wait_for(reader_task, timeout=1.0)
 
-    process_text.assert_awaited_once_with(session, "late response")
+    process_text.assert_awaited_once_with(
+        session,
+        "late response",
+        operation_attempt_generations={"req-late-response": 0},
+    )
     retry_precreated.assert_not_awaited()
     clear_anchor.assert_not_awaited()
     assert owner.failure_phase_override is None

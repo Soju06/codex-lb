@@ -18055,8 +18055,11 @@ async def test_stream_via_http_bridge_fails_closed_when_retained_alias_lookup_er
             SimpleNamespace(
                 get=AsyncMock(
                     return_value=SimpleNamespace(
+                        sticky_threads_enabled=False,
+                        openai_cache_affinity_max_age_seconds=1800,
                         http_responses_session_bridge_prompt_cache_idle_ttl_seconds=3600,
                         http_responses_session_bridge_gateway_safe_mode=False,
+                        openai_prompt_cache_key_derivation_enabled=True,
                     )
                 )
             ),

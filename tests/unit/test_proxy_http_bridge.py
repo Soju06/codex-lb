@@ -33405,6 +33405,28 @@ async def test_abandonment_from_an_existing_funnel_leaves_the_circuit_alone() ->
 
     assert cleared is True, "the anchor is still abandoned for these callers"
     assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
-        "a caller that did not opt in must not have its circuit settled"
+        "a caller that did not report stranded requests must not have its circuit settled"
     )
     clear_retry_circuit.assert_not_awaited()
+
+
+def test_abandonment_strands_requests_only_without_a_safe_replay() -> None:
+    # The predicate that decides whether an abandonment may settle the circuit.
+    # A request still holding a verified full resend is about to be replayed and
+    # claims the circuit generation at dispatch, so the circuit must survive it.
+    strands = http_bridge_helpers_module._http_bridge_abandonment_strands_requests
+
+    def _state(*, safe_replay: bool) -> Any:
+        return SimpleNamespace(
+            previous_response_id="resp_anchor",
+            fresh_upstream_request_is_retry_safe=safe_replay,
+            fresh_upstream_request_text="{}" if safe_replay else None,
+            hard_continuity_anchor=True,
+        )
+
+    assert strands([]) is False, "nothing to strand means nothing to settle"
+    assert strands([_state(safe_replay=True)]) is False
+    assert strands([_state(safe_replay=False)]) is True
+    assert strands([_state(safe_replay=False), _state(safe_replay=True)]) is False, (
+        "one replayable request is enough to keep the circuit"
+    )

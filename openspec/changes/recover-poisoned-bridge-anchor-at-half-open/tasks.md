@@ -59,6 +59,11 @@
       recovered in band, and counting it charged the key for a failure it
       recovered from and disturbed the circuit generation the replay claims
 
+- [x] 1.13 Settle the circuit on abandonment only when every request the
+      abandonment covers is stranded. Settling for every caller broke the
+      stale-owner replay suite; settling for none left the production wedge
+      cooling after its anchor was already gone
+
 ## 2. Regression coverage
 
 - [x] 2.1 Two `stream_incomplete` failures quarantine the key with the

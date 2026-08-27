@@ -68,7 +68,11 @@ key. The circuit was opened by failures against the anchor the abandonment
 removed, so its cooldown would otherwise back off a cause that no longer
 exists and refuse requests that carry no anchor at all. The abandonment is the
 same proof of recovery a completed response carries. An abandonment that was
-fenced or failed proves nothing and MUST leave the cooldown running.
+fenced or failed proves nothing and MUST leave the cooldown running, and so
+does one whose requests can still be replayed safely: such a request is about
+to be retried and claims the circuit's generation at dispatch, so the circuit
+must survive for it. Only an abandonment that leaves every request it covers
+stranded may settle.
 
 That settle MUST remove the durable row even when this worker holds no version
 fence for it. A circuit opened and remediated in the same instant has not been

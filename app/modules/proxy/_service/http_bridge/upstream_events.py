@@ -61,6 +61,7 @@ from app.modules.proxy._service.compact import (
 from app.modules.proxy._service.http_bridge.helpers import (
     _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
     _await_task_deferring_cancellation,
+    _http_bridge_abandonment_strands_requests,
     _http_bridge_continuity_bound_without_safe_replay,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_eventless_precreated_deadline,
@@ -1047,14 +1048,14 @@ async def _abandon_durable_http_bridge_continuity(
         cache_key_family=session.key.affinity_kind,
         model_class=_extract_model_class(session.request_model) if session.request_model else None,
     )
-    # Only the settlement paths this change added ask for the circuit to be
-    # settled. The retirement and close funnels that already called this
-    # function must keep their existing behaviour: a verified stale-anchor
-    # replay reaches them and depends on the circuit surviving, both as the
-    # generation fence it claims at dispatch (#1863) and because
-    # `response.completed` deliberately skips the clear for such a replay.
-    # Settling for every caller broke five variants of the stale-owner replay
-    # suite once #1886's routing reached those funnels in the same flow.
+    # Settle only when the requests this abandonment covers are actually
+    # stranded. A stale-anchor rejection that still holds a verified full
+    # resend is about to be replayed, and that replay claims the circuit
+    # generation at dispatch (#1863); clearing the circuit under it removes the
+    # fence it depends on, which is why `response.completed` also skips its
+    # clear for such a replay. Settling unconditionally broke five variants of
+    # the stale-owner replay suite, and settling for no funnel caller left the
+    # production wedge cooling for 60s after its anchor was already gone.
     if not settle_circuit:
         return True
     # The circuit was opened by failures against the anchor this call just
@@ -1254,7 +1255,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     ):
                         poison_detail = poison_candidate_detail
                 if poison_detail is not None:
-                    durable_cleared = await _abandon_durable_http_bridge_continuity(self, session, detail=poison_detail)
+                    durable_cleared = await _abandon_durable_http_bridge_continuity(
+                        self,
+                        session,
+                        detail=poison_detail,
+                        settle_circuit=_http_bridge_abandonment_strands_requests(pending_request_states),
+                    )
                     if durable_cleared:
                         await self._retire_stale_pending_http_bridge_session(
                             session,

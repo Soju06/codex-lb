@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
@@ -870,6 +870,20 @@ def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketR
     return request_state.hard_continuity_anchor and not (
         request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text
     )
+
+
+def _http_bridge_abandonment_strands_requests(request_states: Iterable[Any]) -> bool:
+    """Return whether every request this abandonment covers is left stranded.
+
+    A request that still holds a safe replay is about to be retried, and that
+    replay claims the retry circuit's generation at dispatch, so the circuit
+    must survive for it. Only when nothing can be replayed is the cooldown
+    backing off a cause that the abandonment already removed.
+    """
+    states = [state for state in request_states if state is not None]
+    if not states:
+        return False
+    return all(_http_bridge_continuity_bound_without_safe_replay(state) for state in states)
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:

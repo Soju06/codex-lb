@@ -142,6 +142,8 @@ from app.modules.proxy._service.http_bridge.service_stubs import (
 )
 from app.modules.proxy._service.http_bridge.upstream_events import (
     _abandon_durable_http_bridge_continuity,
+    _try_complete_transcript_recovery,
+    _try_unsafe_partial_transcript_recovery,
 )
 from app.modules.proxy._service.observability import (
     _hash_identifier as _hash_identifier,
@@ -341,16 +343,74 @@ def _http_bridge_operation_fence_for_hard_continuity_enabled(request_state: _Web
     ) in {"server_anchored_replay_once", "server_indefinite_recovery"}
 
 
+def _http_bridge_complete_transcript_root_recovery_candidate(
+    request_state: _WebSocketRequestState,
+    text_data: str,
+) -> bool:
+    """Return whether the explicit transcript flag can fence a full replay.
+
+    A resumed hard turn can arrive either without ``previous_response_id`` or
+    with a proxy-injected anchor even though the client sent its complete local
+    history. If the prior send died before any response event, the operation
+    row is still the only duplicate-suppression proof available. Keep this
+    opt-in and require a durable predecessor plus a non-empty self-contained
+    input list before allowing its UNKNOWN row to be claimed once. The raw
+    Codex payload is sanitized only after transcript reconstruction.
+    """
+    if not bool(
+        getattr(
+            _service_get_settings(),
+            "http_responses_session_bridge_complete_transcript_recovery_enabled",
+            False,
+        )
+    ):
+        return False
+    if not request_state.complete_transcript_recovery_anchor:
+        return False
+    if request_state.proxy_injected_previous_response_id and not request_state.fresh_upstream_request_is_retry_safe:
+        # A proxy-injected anchor means the raw body may be only the next
+        # delta.  Do not mistake its non-empty ``input`` list for a complete
+        # transcript: the safety flag is set only after the durable prefix /
+        # fingerprint proof and recovery journal admission have succeeded.
+        # Keeping the anchor here preserves the only upstream context until
+        # the transcript builder can produce a validated root replay.
+        return False
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    # The client sends a complete, unanchored history for this recovery form.
+    # Do not apply the account-neutral classifier to the raw Codex payload: it
+    # intentionally contains Codex metadata and provider-owned input fields
+    # that the durable transcript sanitizer removes after the operation fence
+    # has proven the replay is for the same account.
+    return bool(
+        request_state.hard_continuity_anchor
+        and (request_state.previous_response_id is None or request_state.proxy_injected_previous_response_id)
+        and request_state.response_id is None
+        and request_state.response_event_count == 0
+        and request_state.replay_count == 0
+        and not request_state.upstream_model_output_seen
+        and not request_state.downstream_visible
+        and payload.get("previous_response_id") in (None, "")
+        and isinstance(payload.get("input"), list)
+        and bool(payload.get("input"))
+    )
+
+
 def _http_bridge_operation_fingerprint(
     *,
     session_id: str,
     api_key_scope: str,
     request_state: _WebSocketRequestState,
     text_data: str,
+    scope_root_to_session: bool = False,
 ) -> str:
     fingerprint_text = _text_without_account_installation_id(text_data)
-    if request_state.previous_response_id is None and _http_bridge_operation_fence_for_hard_continuity_enabled(
-        request_state
+    if request_state.previous_response_id is None and (
+        scope_root_to_session or _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
     ):
         # Hard turn-state requests do not carry previous_response_id. Scope
         # their operation identity to the durable session so identical prompts
@@ -1081,6 +1141,99 @@ class _HTTPBridgeRequestSubmitMixin:
     ) -> None:
         recovery_attempt_consumed = False
         allow_operation_fenced_continuity_replay = False
+        request_state.complete_transcript_recovery_anchor = (
+            request_state.complete_transcript_recovery_anchor or session.last_completed_response_id
+        )
+        # Session-level reattach may have injected an anchor into ``text_data``
+        # even though the client originally sent a complete, unanchored
+        # history. Keep the original body available for the explicit recovery
+        # gate; otherwise the gate sees only its own stale anchor and never
+        # arms transcript replay.
+        root_recovery_request_text = (
+            request_state.fresh_upstream_request_text or request_state.request_text or text_data
+        )
+        try:
+            root_recovery_payload = json.loads(root_recovery_request_text)
+        except (TypeError, json.JSONDecodeError):
+            root_recovery_payload = None
+        root_recovery_input = root_recovery_payload.get("input") if isinstance(root_recovery_payload, dict) else None
+        root_recovery_body = bool(
+            isinstance(root_recovery_payload, dict)
+            and root_recovery_payload.get("previous_response_id") in (None, "")
+            and isinstance(root_recovery_input, list)
+            and bool(root_recovery_input)
+            and request_state.replay_count == 0
+            and request_state.response_event_count == 0
+        )
+        if (
+            root_recovery_body
+            and session.key.strength == "hard"
+            and session.durable_session_id is not None
+            and bool(
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_complete_transcript_recovery_enabled",
+                    False,
+                )
+            )
+        ):
+            # The streaming admission path normally supplies the durable
+            # lookup. A post-deploy old session can nevertheless arrive with
+            # a hydrated local owner but no matching full-input fingerprint;
+            # in that case the lookup was deliberately dropped before submit.
+            # Re-read the exact durable session by ID so root/full-history
+            # recovery is not lost merely because the client compacted or
+            # trimmed its local copy of the transcript.
+            lookup_sessions = getattr(self._durable_bridge, "lookup_sessions", None)
+            if callable(lookup_sessions):
+                try:
+                    durable_sessions = await lookup_sessions(session_ids=[session.durable_session_id])
+                except Exception:
+                    durable_sessions = []
+                if len(durable_sessions) == 1:
+                    durable_session = durable_sessions[0]
+                    session_account_id = getattr(session.account, "id", None)
+                    durable_account_id = getattr(durable_session, "account_id", None)
+                    durable_owner_epoch = getattr(durable_session, "owner_epoch", None)
+                    if (
+                        getattr(durable_session, "session_id", None) == session.durable_session_id
+                        and isinstance(getattr(durable_session, "latest_response_id", None), str)
+                        and durable_session.latest_response_id
+                        and durable_account_id == session_account_id
+                        and (
+                            session.durable_owner_epoch is None
+                            or durable_owner_epoch is None
+                            or durable_owner_epoch == session.durable_owner_epoch
+                        )
+                    ):
+                        request_state.hard_continuity_anchor = True
+                        request_state.complete_transcript_recovery_anchor = durable_session.latest_response_id
+                        _log_http_bridge_event(
+                            "complete_transcript_root_recovery_armed",
+                            session.key,
+                            account_id=durable_account_id,
+                            model=request_state.model,
+                            detail=(f"response_id={durable_session.latest_response_id}, source=durable_session_id"),
+                            cache_key_family=session.key.affinity_kind,
+                            model_class=_extract_model_class(request_state.model) if request_state.model else None,
+                            owner_check_applied=True,
+                        )
+        allow_complete_transcript_root_recovery = _http_bridge_complete_transcript_root_recovery_candidate(
+            request_state,
+            root_recovery_request_text if root_recovery_body else text_data,
+        )
+        if allow_complete_transcript_root_recovery:
+            # Preserve the durable predecessor while this self-contained root
+            # replay is being admitted.  The recovery helper can then rebuild
+            # a complete body if this fenced attempt closes before an event.
+            request_state.complete_transcript_recovery_anchor = (
+                request_state.complete_transcript_recovery_anchor or session.last_completed_response_id
+            )
+            request_state.fresh_upstream_request_text = root_recovery_request_text
+            # The raw client body may contain Codex/provider-owned fields. It
+            # becomes retry-safe only after the durable transcript builder has
+            # produced the sanitized unanchored body.
+            request_state.fresh_upstream_request_is_retry_safe = False
         if _http_bridge_operation_fence_for_hard_continuity_enabled(request_state):
             retry_cooldown_seconds = await self._http_bridge_precreated_retry_cooldown_seconds(session)
             if retry_cooldown_seconds > 0:
@@ -1091,6 +1244,9 @@ class _HTTPBridgeRequestSubmitMixin:
                         text_data=text_data,
                     )
                 )
+        allow_operation_fenced_continuity_replay = (
+            allow_operation_fenced_continuity_replay or allow_complete_transcript_root_recovery
+        )
         # Eventless upstream timeouts retire the current socket.  A client
         # reconnect can otherwise create a fresh socket for the same hard key
         # and submit the identical request repeatedly while the retry circuit
@@ -1292,11 +1448,40 @@ class _HTTPBridgeRequestSubmitMixin:
         # Account installation metadata is part of the final upstream frame.
         # Apply and size-check it before recording the operation so a local
         # payload-too-large rejection cannot leave a submitted retry fence.
+        if allow_complete_transcript_root_recovery and request_state.fresh_upstream_request_text:
+            # The client supplied a complete, account-neutral body.  A
+            # session-level anchor may have been injected only to locate the
+            # stale owner; dispatch the verified unanchored body instead so a
+            # dead upstream response id cannot block the fenced recovery.
+            if request_state.previous_response_id is not None:
+                request_state.complete_transcript_recovery_anchor = request_state.previous_response_id
+            request_state.previous_response_id = None
+            request_state.proxy_injected_previous_response_id = False
+            request_state.request_text = request_state.fresh_upstream_request_text
+            text_data = request_state.fresh_upstream_request_text
         text_data = self._http_bridge_text_with_account_installation_id(session, request_state, text_data)
         operation_ledger_enabled = bool(
             getattr(_service_get_settings(), "http_responses_session_bridge_operation_ledger_enabled", True)
         )
         operation_ledger_for_hard_continuity = _http_bridge_operation_fence_for_hard_continuity_enabled(request_state)
+        persist_root_replay_operation = bool(
+            (
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_complete_transcript_recovery_enabled",
+                    False,
+                )
+                or getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_unsafe_partial_replay_enabled",
+                    False,
+                )
+            )
+            and session.codex_session
+            and request_state.previous_response_id is None
+            and not request_state.operation_rebind_required
+            and not recovery_attempt_consumed
+        )
         record_operation = getattr(self._durable_bridge, "record_operation", None)
         if (
             operation_ledger_enabled
@@ -1304,6 +1489,7 @@ class _HTTPBridgeRequestSubmitMixin:
             and (
                 request_state.previous_response_id is not None
                 or operation_ledger_for_hard_continuity
+                or persist_root_replay_operation
                 or request_state.operation_rebind_required
                 or recovery_attempt_consumed
             )
@@ -1321,6 +1507,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     api_key_scope=api_key_scope,
                     request_state=request_state,
                     text_data=text_data,
+                    scope_root_to_session=persist_root_replay_operation,
                 )
             )
             operation_id = (
@@ -1555,7 +1742,9 @@ class _HTTPBridgeRequestSubmitMixin:
                     "fail_closed",
                 )
                 indefinite_recovery = recovery_mode == "server_indefinite_recovery"
-                one_shot_recovery = recovery_mode == "server_anchored_replay_once" and request_state.replay_count == 0
+                one_shot_recovery = (
+                    recovery_mode == "server_anchored_replay_once" or allow_complete_transcript_root_recovery
+                ) and request_state.replay_count == 0
                 async with session.pending_lock:
                     same_operation_pending = any(
                         pending_request is not request_state
@@ -3574,6 +3763,13 @@ class _HTTPBridgeRequestSubmitMixin:
         )
         retry_text_data = text_data
         using_fresh_replay = False
+        complete_transcript_retry = bool(request_state.complete_transcript_recovery_retry_authorized)
+        unsafe_partial_replay = bool(getattr(request_state, "unsafe_partial_replay_retry_authorized", False))
+        if (complete_transcript_retry or unsafe_partial_replay) and send_request:
+            if not request_state.fresh_upstream_request_text:
+                return False
+            retry_text_data = request_state.fresh_upstream_request_text
+            using_fresh_replay = True
         if request_state.previous_response_id is not None and send_request:
             # After an ambiguous websocket send failure we cannot prove whether
             # upstream already accepted the continuation. Re-sending the same
@@ -3590,11 +3786,49 @@ class _HTTPBridgeRequestSubmitMixin:
                 return False
             retry_text_data = request_state.fresh_upstream_request_text
             using_fresh_replay = True
-        if request_state.replay_count >= 1:
+        if (
+            request_state.verified_stale_anchor_replay
+            and request_state.verified_stale_anchor_retry_circuit_generation_captured
+        ):
+            circuit_key = request_state.verified_stale_anchor_retry_circuit_key
+            claim_generation = getattr(self, "_claim_http_bridge_retry_circuit_generation", None)
+            generation_claimed = bool(
+                circuit_key is not None
+                and callable(claim_generation)
+                and await claim_generation(
+                    key=circuit_key,
+                    captured=True,
+                    generation=request_state.verified_stale_anchor_retry_circuit_generation,
+                )
+            )
+            if not generation_claimed:
+                _log_http_bridge_event(
+                    "stale_anchor_replay_generation_suppressed",
+                    circuit_key or session.key,
+                    account_id=session.account.id,
+                    model=session.request_model,
+                    detail="circuit_generation_advanced_before_direct_retry_claim",
+                    cache_key_family=(circuit_key or session.key).affinity_kind,
+                    model_class=_extract_model_class(session.request_model) if session.request_model else None,
+                )
+                return False
+        if request_state.replay_count >= 1 and not (complete_transcript_retry or unsafe_partial_replay):
             return False
-        if request_state.response_event_count > 0:
+        if request_state.response_event_count > 0 and not unsafe_partial_replay:
             return False
-        request_state.replay_count += 1
+        if complete_transcript_retry:
+            # The durable operation recovery claim is the idempotency fence
+            # for this one post-replay attempt.  Do not reset or increment the
+            # ordinary replay counter: doing so would make a later reconnect
+            # look like a fresh request and could reopen an unbounded loop.
+            request_state.complete_transcript_recovery_retry_authorized = False
+        elif unsafe_partial_replay:
+            # Partial replay is explicitly at-least-once. Consume the durable
+            # one-shot authorization before reconnecting so a second close can
+            # never create an automatic replay loop.
+            request_state.unsafe_partial_replay_retry_authorized = False
+        else:
+            request_state.replay_count += 1
         _log_http_bridge_event(
             "retry_fresh_upstream",
             session.key,
@@ -3619,6 +3853,10 @@ class _HTTPBridgeRequestSubmitMixin:
                     retry_text_data,
                 )
                 if using_fresh_replay:
+                    if request_state.previous_response_id is not None:
+                        request_state.complete_transcript_recovery_anchor = request_state.previous_response_id
+                    elif request_state.complete_transcript_recovery_anchor is None:
+                        request_state.complete_transcript_recovery_anchor = session.last_completed_response_id
                     _bind_http_bridge_proxy_injected_anchor(
                         self,
                         request_state,
@@ -3627,6 +3865,7 @@ class _HTTPBridgeRequestSubmitMixin:
                     )
                     request_state.request_text = retry_text_data
                 await _send_http_bridge_request_text_with_archive_id(session, request_state, retry_text_data)
+                request_state.operation_dispatched = request_state.operation_id is not None
             _clear_websocket_request_error_overrides(request_state)
             session.last_used_at = _service_time().monotonic()
             return True
@@ -3650,6 +3889,7 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
+        allow_complete_transcript_recovery: bool = False,
     ) -> bool:
         # The admitted body's admission gate can claim the half-open probe;
         # any exit that never advances a send attempt past its baseline must
@@ -3663,6 +3903,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 session,
                 request_state=request_state,
                 restart_reader=restart_reader,
+                allow_complete_transcript_recovery=allow_complete_transcript_recovery,
                 admission_claimed_leases=admission_claimed_leases,
                 retry_send_baselines=retry_send_baselines,
             )
@@ -3688,9 +3929,101 @@ class _HTTPBridgeRequestSubmitMixin:
         *,
         request_state: _WebSocketRequestState | None = None,
         restart_reader: bool = False,
+        allow_complete_transcript_recovery: bool = False,
         admission_claimed_leases: list[float] | None = None,
         retry_send_baselines: list[tuple[_WebSocketRequestState, int]] | None = None,
     ) -> bool:
+        if allow_complete_transcript_recovery and bool(
+            getattr(
+                _service_get_settings(),
+                "http_responses_session_bridge_unsafe_partial_replay_enabled",
+                False,
+            )
+        ):
+            async with session.pending_lock:
+                partial_recovery_candidates = [
+                    candidate
+                    for candidate in session.pending_requests
+                    if not candidate.draining_until_terminal
+                    and candidate.response_event_count > 0
+                    and candidate.request_text
+                    and candidate.operation_id is not None
+                    and candidate.operation_registered
+                    and candidate.operation_dispatched
+                    and getattr(candidate, "unsafe_partial_replay_count", 0) == 0
+                    and not candidate.pending_function_call_ids
+                    and not candidate.pending_tool_call_types
+                    and not candidate.added_tool_call_types
+                    and not candidate.tool_call_manifest_invalid
+                    and not getattr(candidate, "response_output_items_event_invalid", False)
+                    and not getattr(candidate, "suppressed_duplicate_tool_call", False)
+                    and not getattr(candidate, "suppressed_downstream_tool_call", False)
+                ]
+            if request_state is not None:
+                partial_recovery_candidates = [
+                    candidate for candidate in partial_recovery_candidates if candidate is request_state
+                ]
+            if len(partial_recovery_candidates) == 1:
+                try:
+                    if await _try_unsafe_partial_transcript_recovery(self, session, partial_recovery_candidates[0]):
+                        return True
+                except UpstreamWebSocketTransportError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "HTTP bridge unsafe partial transcript recovery after transport close failed",
+                        exc_info=True,
+                    )
+        if allow_complete_transcript_recovery and bool(
+            getattr(
+                _service_get_settings(),
+                "http_responses_session_bridge_complete_transcript_recovery_enabled",
+                False,
+            )
+        ):
+            async with session.pending_lock:
+                recovery_candidates = [
+                    candidate
+                    for candidate in session.pending_requests
+                    if not candidate.draining_until_terminal
+                    and (
+                        (candidate.previous_response_id is not None and candidate.hard_continuity_anchor)
+                        or (
+                            candidate.previous_response_id is None
+                            and getattr(candidate, "complete_transcript_recovery_anchor", None)
+                            and candidate.request_text
+                            and candidate.replay_count in {0, 1}
+                            and candidate.operation_id is not None
+                            and candidate.operation_registered
+                            and candidate.operation_dispatched
+                        )
+                    )
+                    and candidate.response_event_count == 0
+                    and getattr(candidate, "unsafe_partial_replay_count", 0) == 0
+                    and (
+                        candidate.replay_count == 0
+                        or (
+                            candidate.previous_response_id is None
+                            and candidate.replay_count == 1
+                            and getattr(candidate, "complete_transcript_recovery_count", 0) == 0
+                        )
+                    )
+                    and not candidate.upstream_model_output_seen
+                    and not candidate.downstream_visible
+                ]
+            if request_state is not None:
+                recovery_candidates = [candidate for candidate in recovery_candidates if candidate is request_state]
+            if len(recovery_candidates) == 1:
+                try:
+                    if await _try_complete_transcript_recovery(self, session, recovery_candidates[0]):
+                        return True
+                except UpstreamWebSocketTransportError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "HTTP bridge complete transcript recovery after transport close failed",
+                        exc_info=True,
+                    )
         clean_close_retry_max_count = self._http_bridge_clean_close_retry_max_count()
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=session.key.affinity_kind,
@@ -4236,6 +4569,11 @@ class _HTTPBridgeRequestSubmitMixin:
         request_state.replay_count += 1
         request_state.response_id = None
         request_state.response_event_count = 0
+        request_state.response_output_items = []
+        request_state.response_output_items_by_index = {}
+        request_state.response_output_item_added_indexes = set()
+        request_state.response_output_items_event_invalid = False
+        request_state.response_output_items_complete = False
         request_state.upstream_model_output_seen = False
         request_state.deferred_reasoning_downstream_texts = []
         request_state.awaiting_response_created = True

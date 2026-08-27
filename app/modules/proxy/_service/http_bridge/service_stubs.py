@@ -420,6 +420,10 @@ def _match_websocket_request_state_for_anonymous_event(*args: Any, **kwargs: Any
     return _service_global("_match_websocket_request_state_for_anonymous_event")(*args, **kwargs)
 
 
+def _match_websocket_request_state_for_precreated_terminal_event(*args: Any, **kwargs: Any) -> Any:
+    return _service_global("_match_websocket_request_state_for_precreated_terminal_event")(*args, **kwargs)
+
+
 def _service_tier_from_event_payload(*args: Any, **kwargs: Any) -> Any:
     return _service_global("_service_tier_from_event_payload")(*args, **kwargs)
 

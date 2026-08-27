@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +32,12 @@ from app.modules.proxy.durable_bridge_repository import (
 
 _DURABLE_TURN_STATE_ALIAS = "turn_state"
 _DURABLE_PREVIOUS_RESPONSE_ALIAS = "previous_response_id"
+_DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS = "retained_previous_response_id"
 _DURABLE_SESSION_HEADER_ALIAS = "session_header"
+_DURABLE_RESPONSE_ALIAS_KINDS = (
+    _DURABLE_PREVIOUS_RESPONSE_ALIAS,
+    _DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +92,7 @@ class DurableBridgeSessionCoordinator:
             for alias_kind, alias_value in (
                 (_DURABLE_TURN_STATE_ALIAS, turn_state),
                 (_DURABLE_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
+                (_DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS, previous_response_id),
                 (_DURABLE_SESSION_HEADER_ALIAS, session_header),
             ):
                 if alias_value is None:
@@ -114,7 +120,7 @@ class DurableBridgeSessionCoordinator:
                         (
                             snapshot
                             for alias_kind, snapshot in resolved_aliases
-                            if alias_kind == _DURABLE_PREVIOUS_RESPONSE_ALIAS and snapshot.account_id == account_id
+                            if alias_kind in _DURABLE_RESPONSE_ALIAS_KINDS and snapshot.account_id == account_id
                         ),
                         None,
                     )
@@ -199,6 +205,27 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=api_key_scope,
             )
             return _to_lookup(snapshot) if snapshot is not None else None
+
+    async def lookup_previous_response_id_target(
+        self,
+        *,
+        response_id: str,
+        api_key_id: str | None,
+    ) -> DurableBridgeLookup | None:
+        """Resolve only a previously registered response-id continuity alias."""
+
+        api_key_scope = durable_bridge_api_key_scope(api_key_id)
+        async with self._session() as session:
+            repository = DurableBridgeRepository(session)
+            retained_alias = await repository.resolve_retained_response_alias(
+                alias_kind=_DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS,
+                alias_value=response_id,
+                api_key_scope=api_key_scope,
+            )
+            if retained_alias is None:
+                return None
+            snapshot, target_response_id = retained_alias
+            return replace(_to_lookup(snapshot), latest_response_id=target_response_id)
 
     async def lookup_sessions(self, *, session_ids: Sequence[str]) -> list[DurableBridgeLookup]:
         """Batch-load durable session snapshots for ownership reconciliation."""
@@ -640,6 +667,32 @@ class DurableBridgeSessionCoordinator:
                 recovery_attempt_consumed=recovery_attempt_consumed,
             )
 
+    async def rebind_operation_for_complete_transcript(
+        self,
+        *,
+        operation_id: str,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+        account_id: str | None,
+        model: str | None,
+        request_text: str,
+        allow_acknowledged: bool = False,
+        expected_recovery_dispatch_count: int | None = None,
+    ) -> DurableBridgeOperationSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).rebind_operation_for_complete_transcript(
+                operation_id=operation_id,
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                account_id=account_id,
+                model=model,
+                request_text=request_text,
+                allow_acknowledged=allow_acknowledged,
+                expected_recovery_dispatch_count=expected_recovery_dispatch_count,
+            )
+
     async def get_operation_events(self, *, operation_id: str) -> list[str]:
         async with self._session() as session:
             return await DurableBridgeRepository(session).get_operation_events(
@@ -655,7 +708,7 @@ class DurableBridgeSessionCoordinator:
         self,
         *,
         response_id: str,
-        max_turns: int = 128,
+        max_turns: int = 256,
         max_bytes: int = 8 * 1024 * 1024,
     ) -> list[DurableBridgeTranscriptTurn] | None:
         async with self._session() as session:
@@ -663,6 +716,22 @@ class DurableBridgeSessionCoordinator:
                 response_id=response_id,
                 max_turns=max_turns,
                 max_bytes=max_bytes,
+            )
+
+    async def get_complete_transcript(
+        self,
+        *,
+        response_id: str,
+        max_turns: int = 256,
+        max_bytes: int = 8 * 1024 * 1024,
+        api_key_scope: str | None = None,
+    ) -> list[DurableBridgeTranscriptTurn] | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).get_complete_transcript(
+                response_id=response_id,
+                max_turns=max_turns,
+                max_bytes=max_bytes,
+                api_key_scope=api_key_scope,
             )
 
     async def purge_operation_spool(
@@ -832,6 +901,10 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         state: str,
         response_id: str | None = None,
+        response_output_items_json: str | None = None,
+        response_output_items_complete: bool = False,
+        response_replay_input_json: str | None = None,
+        response_replay_input_complete: bool = False,
     ) -> bool:
         async with self._session() as session:
             return await DurableBridgeRepository(session).update_operation(
@@ -841,6 +914,10 @@ class DurableBridgeSessionCoordinator:
                 owner_epoch=owner_epoch,
                 state=state,
                 response_id=response_id,
+                response_output_items_json=response_output_items_json,
+                response_output_items_complete=response_output_items_complete,
+                response_replay_input_json=response_replay_input_json,
+                response_replay_input_complete=response_replay_input_complete,
             )
 
     async def get_operation(self, *, operation_id: str) -> DurableBridgeOperationSnapshot | None:
@@ -1046,9 +1123,11 @@ class DurableBridgeSessionCoordinator:
         owner_epoch: int,
         response_id: str,
         lease_ttl_seconds: float,
+        latest_response_id: str | None = None,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
         pending_tool_calls: Mapping[str, str] | None = None,
+        retained_replay: bool = False,
     ) -> DurableBridgeAliasRegistration:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
@@ -1057,13 +1136,16 @@ class DurableBridgeSessionCoordinator:
                 api_key_scope=api_key_scope,
                 instance_id=instance_id,
                 owner_epoch=owner_epoch,
-                alias_kind=_DURABLE_PREVIOUS_RESPONSE_ALIAS,
+                alias_kind=(
+                    _DURABLE_RETAINED_PREVIOUS_RESPONSE_ALIAS if retained_replay else _DURABLE_PREVIOUS_RESPONSE_ALIAS
+                ),
                 alias_value=response_id,
                 lease_ttl_seconds=lease_ttl_seconds,
-                latest_response_id=response_id,
+                latest_response_id=latest_response_id or response_id,
                 latest_input_item_count=input_item_count,
                 latest_input_full_fingerprint=input_full_fingerprint,
                 latest_pending_tool_calls=pending_tool_calls,
+                target_response_id=latest_response_id if retained_replay else None,
             )
 
     async def register_session_header(

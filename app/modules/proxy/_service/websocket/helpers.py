@@ -455,7 +455,13 @@ def _prepare_websocket_request_state_for_visible_output_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_item_added_indexes = set()
+    request_state.response_output_items_event_invalid = False
+    request_state.response_output_items_complete = False
     request_state.replay_downstream_response_id = downstream_response_id
+    request_state.replay_downstream_sequence_offset = None
     request_state.suppress_next_created_downstream = downstream_response_id is not None
     _clear_websocket_request_error_overrides(request_state)
     return request_text
@@ -996,6 +1002,11 @@ def _prepare_websocket_request_state_for_auth_replay(
     request_state.awaiting_response_created = True
     request_state.response_id = None
     request_state.response_event_count = 0
+    request_state.response_output_items = []
+    request_state.response_output_items_by_index = {}
+    request_state.response_output_item_added_indexes = set()
+    request_state.response_output_items_event_invalid = False
+    request_state.response_output_items_complete = False
     _clear_websocket_request_error_overrides(request_state)
     return request_text
 
@@ -1709,11 +1720,15 @@ def _match_websocket_request_state_for_anonymous_event(
 
 def _match_websocket_request_state_for_precreated_terminal_event(
     pending_requests: deque[_WebSocketRequestState],
+    *,
+    require_replay_downstream_response_id: bool = False,
 ) -> _WebSocketRequestState | None:
     unresolved_requests = [
         request_state
         for request_state in pending_requests
-        if request_state.response_id is None and request_state.awaiting_response_created
+        if request_state.response_id is None
+        and request_state.awaiting_response_created
+        and (not require_replay_downstream_response_id or request_state.replay_downstream_response_id is not None)
     ]
     if len(unresolved_requests) == 1:
         return unresolved_requests[0]

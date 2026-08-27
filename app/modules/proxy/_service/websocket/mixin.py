@@ -5800,6 +5800,11 @@ class _WebSocketMixin:
                 request_state.awaiting_response_created = True
                 request_state.response_id = None
                 request_state.response_event_count = 0
+                request_state.response_output_items = []
+                request_state.response_output_items_by_index = {}
+                request_state.response_output_item_added_indexes = set()
+                request_state.response_output_items_event_invalid = False
+                request_state.response_output_items_complete = False
                 upstream_control.reconnect_requested = True
                 upstream_control.suppress_downstream_event = True
                 upstream_control.replay_request_state = request_state

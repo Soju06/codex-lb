@@ -999,6 +999,17 @@ class _WebSocketRequestState:
     # replay when the replacement upstream socket also closes cleanly before
     # producing any response event.
     clean_close_replay_count: int = 0
+    # Complete-transcript recovery may run once after an initial fresh replay
+    # has already been attempted.  Keep this separate from ``replay_count`` so
+    # the ordinary retry budget remains visible to the existing safety gates.
+    complete_transcript_recovery_count: int = 0
+    complete_transcript_recovery_anchor: str | None = None
+    complete_transcript_recovery_retry_authorized: bool = False
+    # Explicitly opt-in partial-turn recovery may replace one interrupted
+    # response with a fresh root built from completed durable turns. Keep its
+    # one-shot fence separate from safe complete-transcript recovery.
+    unsafe_partial_replay_count: int = 0
+    unsafe_partial_replay_retry_authorized: bool = False
     clean_close_retry_in_progress: bool = False
     clean_close_retry_result: bool | None = None
     clean_close_retry_close_generation: int | None = None
@@ -1184,6 +1195,18 @@ class _WebSocketRequestState:
     pending_tool_call_types: dict[str, str] = field(default_factory=dict)
     added_tool_call_types: dict[str, str] = field(default_factory=dict)
     tool_call_manifest_invalid: bool = False
+    # The terminal response output is retained independently of the SSE event
+    # spool.  It is the assistant side of the durable replay transcript.
+    response_output_items: list[JsonValue] = field(default_factory=list)
+    # Some Codex streams put the canonical output only on output_item.done
+    # events and leave response.completed.response.output empty. Keep the
+    # completed items keyed by output_index until the terminal event arrives.
+    response_output_items_by_index: dict[int, JsonValue] = field(default_factory=dict)
+    # Keep output_item.added indexes so a missing output_item.done cannot be
+    # mistaken for a complete replay transcript at response.completed.
+    response_output_item_added_indexes: set[int] = field(default_factory=set)
+    response_output_items_event_invalid: bool = False
+    response_output_items_complete: bool = False
     seen_tool_call_keys: dict[ToolCallDedupeKey, None] = field(default_factory=dict)
     input_item_count: int = 0
     input_full_fingerprint: str | None = None
@@ -1222,6 +1245,7 @@ class _WebSocketRequestState:
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None
+    replay_downstream_sequence_offset: int | None = None
     draining_until_terminal: bool = False
     completed_delivery_scope: _HTTPBridgeCompletedDeliveryScope | None = None
     # Exactly-once reservation settlement for terminal HTTP bridge events

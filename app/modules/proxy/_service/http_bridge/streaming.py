@@ -275,7 +275,16 @@ T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
-
+def _http_bridge_request_text_without_previous_response_id(text_data: str) -> str:
+    """Remove a retained response alias from a serialized fresh-retry body."""
+    try:
+        payload = json.loads(text_data)
+    except (TypeError, json.JSONDecodeError):
+        return text_data
+    if not isinstance(payload, dict) or "previous_response_id" not in payload:
+        return text_data
+    payload.pop("previous_response_id", None)
+    return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
 def _http_bridge_durable_recovery_predecessor_proven(request_state: _WebSocketRequestState) -> bool:
     """Return whether the operation has a durable predecessor anchor."""
@@ -1510,6 +1519,7 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_required_context_cache: bool | None = None
+        durable_recovery_attempt_journal_available = True
         durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
@@ -1625,15 +1635,27 @@ class _HTTPBridgeStreamingMixin:
                             )
                     except ProxyResponseError:
                         raise
-                    except Exception:
-                        logger.warning("Failed to inspect HTTP bridge recovery attempt", exc_info=True)
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "bridge_continuity_persistence_failed",
-                                "HTTP responses recovery state could not be claimed; retry the request.",
-                            ),
-                        )
+                    except Exception as exc:
+                        if _is_missing_durable_bridge_table_error(exc):
+                            # Older deployments may not have the optional
+                            # recovery-attempt table yet. Treat that one
+                            # migration gap as an empty journal; every other
+                            # lookup failure remains fail-closed because the
+                            # recovery state is then unknown.
+                            logger.warning(
+                                "HTTP bridge recovery-attempt table missing; using migration fallback",
+                                exc_info=True,
+                            )
+                            durable_recovery_attempt_journal_available = False
+                        else:
+                            logger.warning("Failed to inspect HTTP bridge recovery attempt", exc_info=True)
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "bridge_continuity_persistence_failed",
+                                    "HTTP responses recovery state could not be claimed; retry the request.",
+                                ),
+                            ) from exc
         durable_anchor_trimmable = durable_full_resend_anchor_count is not None
         durable_model_transition_lookup = (
             durable_lookup
@@ -1802,6 +1824,55 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
+            if payload.previous_response_id is not None:
+                # A partial replay can retain the client's response ID as an
+                # alias while the completed replacement response becomes the
+                # durable session anchor. Rewrite only after an exact
+                # response-alias lookup proves that the explicit ID belongs to
+                # this same session; a broad session-header lookup is not
+                # sufficient evidence to alter a client-provided anchor.
+                lookup_previous_response_id_target = getattr(
+                    self._durable_bridge,
+                    "lookup_previous_response_id_target",
+                    None,
+                )
+                previous_response_alias_lookup = None
+                if callable(lookup_previous_response_id_target):
+                    try:
+                        previous_response_alias_lookup = await lookup_previous_response_id_target(
+                            response_id=payload.previous_response_id,
+                            api_key_id=bridge_session_key.api_key_id,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to resolve retained HTTP bridge response alias request_id=%s",
+                            request_id,
+                            exc_info=True,
+                        )
+                if (
+                    previous_response_alias_lookup is not None
+                    and previous_response_alias_lookup.session_id == durable_lookup.session_id
+                    and previous_response_alias_lookup.latest_response_id is not None
+                    and payload.previous_response_id != previous_response_alias_lookup.latest_response_id
+                ):
+                    retained_response_target = previous_response_alias_lookup.latest_response_id
+                    effective_payload = payload.model_copy(update={"previous_response_id": retained_response_target})
+                    proxy_injected_previous_response_id = True
+                    _fresh_request_state, fresh_upstream_request_text = prepare_bridge_request(payload)
+                    del _fresh_request_state
+                    _log_http_bridge_event(
+                        "previous_response_alias_translated",
+                        bridge_session_key,
+                        account_id=durable_lookup.account_id,
+                        model=payload.model,
+                        detail=(
+                            f"retained_response_id={payload.previous_response_id}, "
+                            f"replacement_response_id={retained_response_target}"
+                        ),
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                        owner_check_applied=True,
+                    )
         account_neutral_recovery = is_http_bridge_account_neutral_replay(
             kind=bridge_session_key.affinity_kind,
             key=bridge_session_key.affinity_key,
@@ -1895,6 +1966,43 @@ class _HTTPBridgeStreamingMixin:
             )
             else request_state.preferred_account_id
         )
+        if (
+            bool(
+                getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_complete_transcript_recovery_enabled",
+                    False,
+                )
+                or getattr(
+                    _service_get_settings(),
+                    "http_responses_session_bridge_unsafe_partial_replay_enabled",
+                    False,
+                )
+            )
+            and durable_lookup is not None
+            and durable_lookup.latest_response_id is not None
+            and request_state.previous_response_id is None
+            and (request_state.hard_continuity_anchor or bridge_session_key.strength == "hard")
+            and isinstance(effective_payload.input, list)
+            and effective_payload.input
+        ):
+            # A hard Codex request may carry a complete local history without
+            # previous_response_id. Preserve the durable predecessor even when
+            # the stored full-input fingerprint no longer matches (for
+            # example, after client compaction); the transcript recovery path
+            # will prove and sanitize the replay before it is dispatched.
+            request_state.hard_continuity_anchor = True
+            request_state.complete_transcript_recovery_anchor = durable_lookup.latest_response_id
+            _log_http_bridge_event(
+                "complete_transcript_root_recovery_armed",
+                bridge_session_key,
+                account_id=durable_lookup.account_id,
+                model=effective_payload.model,
+                detail=f"response_id={durable_lookup.latest_response_id}",
+                cache_key_family=bridge_session_key.affinity_kind,
+                model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                owner_check_applied=True,
+            )
         if (
             request_state.preferred_account_id is None
             and durable_model_transition_lookup is not None
@@ -2007,7 +2115,7 @@ class _HTTPBridgeStreamingMixin:
             )
             del _fresh_state
             request_state.fresh_upstream_request_text = client_full_resend_fresh_upstream_request_text
-            request_state.fresh_upstream_request_is_retry_safe = True
+            request_state.fresh_upstream_request_is_retry_safe = durable_recovery_attempt_journal_available
         settings = _service_get_settings()
         request_deadline = request_state.started_at + _http_bridge_request_budget_seconds(settings)
         session_creation_headers = (
@@ -2049,7 +2157,11 @@ class _HTTPBridgeStreamingMixin:
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
 
-            if rewritten_file_account_id is not None or not durable_full_resend_retains_required_context():
+            if (
+                not durable_recovery_attempt_journal_available
+                or rewritten_file_account_id is not None
+                or not durable_full_resend_retains_required_context()
+            ):
                 return False
             if durable_full_resend_fresh_payload is None:
                 assert isinstance(payload.input, list)
@@ -3088,7 +3200,15 @@ class _HTTPBridgeStreamingMixin:
                 request_state.proxy_injected_anchor_had_full_resend_payload = (
                     previous_request_state.proxy_injected_anchor_had_full_resend_payload
                 )
-                request_state.fresh_upstream_request_text = fresh_upstream_request_text
+                # Alias translation can leave the retained client ID in
+                # ``fresh_upstream_request_text`` (the durable replacement
+                # anchor is only present in ``effective_payload``).  Remove
+                # that field before marking the text safe: reusing the raw
+                # serialized body after a trim would retry against stale
+                # response A instead of creating replacement response B.
+                request_state.fresh_upstream_request_text = _http_bridge_request_text_without_previous_response_id(
+                    fresh_upstream_request_text or text_data
+                )
                 # The trim branch only fires when the untrimmed payload
                 # is a true full resend whose prefix exactly matches the
                 # already-stored context, so the unanchored request text
@@ -3098,13 +3218,14 @@ class _HTTPBridgeStreamingMixin:
                 # keep the replay-safety decision made when the anchor was
                 # injected.
                 request_state.fresh_upstream_request_is_retry_safe = (
-                    (durable_full_resend_anchor_count is None or durable_full_resend_has_safe_fresh_context)
+                    durable_recovery_attempt_journal_available
+                    and (durable_full_resend_anchor_count is None or durable_full_resend_has_safe_fresh_context)
                     if store_context_trim_applied
                     else previous_request_state.fresh_upstream_request_is_retry_safe
                 )
             elif client_full_resend_fresh_upstream_request_text is not None:
                 request_state.fresh_upstream_request_text = client_full_resend_fresh_upstream_request_text
-                request_state.fresh_upstream_request_is_retry_safe = True
+                request_state.fresh_upstream_request_is_retry_safe = durable_recovery_attempt_journal_available
         initial_handoff_session = session
         initial_handoff_scope_id = ensure_request_scope_id() if original_request_unanchored else None
         if initial_handoff_scope_id is not None:
@@ -4111,11 +4232,30 @@ class _HTTPBridgeStreamingMixin:
                 if request_state.clean_close_retry_result is True:
                     return True, None
             try:
-                return (
-                    await self._retry_http_bridge_precreated_request(
+                settings = _service_get_settings()
+                transcript_recovery_enabled = bool(
+                    getattr(
+                        settings,
+                        "http_responses_session_bridge_complete_transcript_recovery_enabled",
+                        False,
+                    )
+                )
+                unsafe_partial_replay_enabled = bool(
+                    getattr(settings, "http_responses_session_bridge_unsafe_partial_replay_enabled", False)
+                )
+                if transcript_recovery_enabled or unsafe_partial_replay_enabled:
+                    retried = await self._retry_http_bridge_precreated_request(
                         session,
                         restart_reader=True,
-                    ),
+                        allow_complete_transcript_recovery=True,
+                    )
+                else:
+                    retried = await self._retry_http_bridge_precreated_request(
+                        session,
+                        restart_reader=True,
+                    )
+                return (
+                    retried,
                     None,
                 )
             except UpstreamWebSocketTransportError as exc:

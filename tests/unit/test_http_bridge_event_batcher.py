@@ -69,6 +69,7 @@ async def _enqueue(
     text: str,
     *,
     terminal: bool = False,
+    recovery_dispatch_count: int = 0,
 ) -> None:
     await batcher.enqueue(
         operation_id="op-1",
@@ -77,6 +78,7 @@ async def _enqueue(
         owner_epoch=1,
         event_text=text,
         terminal=terminal,
+        recovery_dispatch_count=recovery_dispatch_count,
     )
 
 
@@ -340,6 +342,27 @@ async def test_discard_operation_releases_partial_nonterminal_context() -> None:
         assert batcher._pending_bytes == 0
         assert durable.batches == []
         assert durable.finalized == []
+    finally:
+        await batcher.close()
+
+
+@pytest.mark.asyncio
+async def test_fence_operation_drops_late_events_from_interrupted_generation() -> None:
+    durable = _FakeDurableBridge()
+    batcher = HttpBridgeOperationEventBatcher(
+        durable,
+        max_bytes=1024,
+        batch_size=8,
+        flush_interval_seconds=60.0,
+        max_pending_events=32,
+    )
+    try:
+        await _enqueue(batcher, "old-before-rebind")
+        await batcher.fence_operation(operation_id="op-1", recovery_dispatch_count=1)
+        await _enqueue(batcher, "old-after-rebind")
+        await _enqueue(batcher, "replacement", recovery_dispatch_count=1)
+        assert await batcher.flush_pending_operation(operation_id="op-1") is True
+        assert durable.batches == [["replacement"]]
     finally:
         await batcher.close()
 

@@ -1415,6 +1415,74 @@ async def test_durable_bridge_turn_state_lookup_does_not_fall_back_to_canonical_
 
 
 @pytest.mark.asyncio
+async def test_durable_bridge_previous_response_alias_lookup_returns_replacement_anchor(
+    coordinator: DurableBridgeSessionCoordinator,
+) -> None:
+    claimed = await coordinator.claim_live_session(
+        session_key_kind="session_header",
+        session_key_value="sid-response-alias",
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="test-process",
+        lease_ttl_seconds=120.0,
+        account_id="acc-1",
+        model="gpt-5.4",
+        service_tier=None,
+        latest_turn_state=None,
+        latest_response_id="resp-replacement",
+        allow_takeover=True,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp-retained",
+        latest_response_id="resp-replacement",
+        retained_replay=True,
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp-retained",
+        latest_response_id="resp-newer-replacement",
+        retained_replay=True,
+        lease_ttl_seconds=120.0,
+    )
+    await coordinator.register_previous_response_id(
+        session_id=claimed.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=claimed.owner_epoch,
+        response_id="resp-normal",
+        latest_response_id="resp-replacement",
+        lease_ttl_seconds=120.0,
+    )
+
+    resolved = await coordinator.lookup_previous_response_id_target(
+        response_id="resp-retained",
+        api_key_id=None,
+    )
+    ordinary = await coordinator.lookup_previous_response_id_target(
+        response_id="resp-normal",
+        api_key_id=None,
+    )
+    unknown = await coordinator.lookup_previous_response_id_target(
+        response_id="resp-unknown",
+        api_key_id=None,
+    )
+
+    assert resolved is not None
+    assert resolved.session_id == claimed.session_id
+    assert resolved.latest_response_id == "resp-replacement"
+    assert ordinary is None
+    assert unknown is None
+
+
+@pytest.mark.asyncio
 async def test_durable_bridge_turn_state_proof_does_not_accept_latest_state_without_alias(
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:

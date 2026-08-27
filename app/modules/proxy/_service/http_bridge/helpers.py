@@ -7,11 +7,11 @@ import logging
 import math
 import sys
 import time
-from collections.abc import Callable, Coroutine, Iterable, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from ipaddress import ip_address
-from typing import Any, Literal, Mapping, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 from urllib.parse import urlparse
 
 from app.core import shutdown as shutdown_state
@@ -2631,7 +2631,14 @@ def _record_bridge_drain_recovery_allowed() -> None:
 
 def _is_missing_durable_bridge_table_error(exc: Exception) -> bool:
     message = str(exc).lower()
-    if "http_bridge_sessions" not in message and "http_bridge_session_aliases" not in message:
+    if not any(
+        table_name in message
+        for table_name in (
+            "http_bridge_sessions",
+            "http_bridge_session_aliases",
+            "http_bridge_recovery_attempts",
+        )
+    ):
         return False
     return "no such table" in message or "does not exist" in message or "undefinedtable" in message
 
@@ -2853,6 +2860,8 @@ async def _persist_http_bridge_previous_response_alias(
     session: _HTTPBridgeSession,
     *,
     response_id: str,
+    latest_response_id: str | None = None,
+    retained_replay: bool = False,
     registration_generation: int,
     input_item_count: int | None,
     input_full_fingerprint: str | None,
@@ -2869,6 +2878,8 @@ async def _persist_http_bridge_previous_response_alias(
             instance_id=instance_id,
             owner_epoch=owner_epoch,
             response_id=response_id,
+            latest_response_id=latest_response_id or response_id,
+            retained_replay=retained_replay,
             lease_ttl_seconds=lease_ttl_seconds,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
@@ -3358,6 +3369,23 @@ def _http_bridge_reconnect_connect_failure(
     if isinstance(exc, ProxyResponseError):
         return exc
     raise exc
+
+
+def _http_bridge_previous_response_rejection_fields(
+    error: Mapping[str, Any],
+) -> tuple[str, str | None, str | None] | None:
+    code_value = error.get("code")
+    raw_code = code_value.strip() if isinstance(code_value, str) and code_value.strip() else None
+    type_value = error.get("type")
+    error_type = type_value.strip() if isinstance(type_value, str) and type_value.strip() else None
+    code = _normalize_error_code(raw_code, error_type)
+    param_value = error.get("param")
+    if "param" in error and not isinstance(param_value, str):
+        return None
+    param = param_value.strip() if isinstance(param_value, str) else None
+    message_value = error.get("message")
+    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
+    return code, param, message
 
 
 def _http_bridge_should_attempt_local_previous_response_recovery(exc: ProxyResponseError) -> bool:

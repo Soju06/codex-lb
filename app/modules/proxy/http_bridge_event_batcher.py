@@ -19,6 +19,7 @@ class _PendingOperationEvent:
     instance_id: str
     owner_epoch: int
     event_text: str
+    recovery_dispatch_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +94,10 @@ class HttpBridgeOperationEventBatcher:
         self._spool_format = spool_format
         self._pending: dict[str, list[_PendingOperationEvent]] = {}
         self._contexts: dict[str, _PendingOperationEvent] = {}
+        # A successful recovery rebind advances this in-memory generation.
+        # Late events from the interrupted upstream attempt are then dropped
+        # instead of being flushed into the replacement operation.
+        self._operation_generations: dict[str, int] = {}
         self._dropped_operations: set[str] = set()
         self._closing_operations: set[str] = set()
         self._pending_count = 0
@@ -113,17 +118,29 @@ class HttpBridgeOperationEventBatcher:
         owner_epoch: int,
         event_text: str,
         terminal: bool = False,
+        recovery_dispatch_count: int = 0,
     ) -> None:
         self._ensure_task()
+        recovery_dispatch_count = max(0, int(recovery_dispatch_count))
         pending = _PendingOperationEvent(
             operation_id=operation_id,
             session_id=session_id,
             instance_id=instance_id,
             owner_epoch=owner_epoch,
             event_text=event_text,
+            recovery_dispatch_count=recovery_dispatch_count,
         )
         async with self._lock:
-            self._contexts.setdefault(operation_id, pending)
+            current_generation = self._operation_generations.get(operation_id, 0)
+            if recovery_dispatch_count < current_generation:
+                # A late event from the interrupted attempt must not be
+                # appended after a recovery rebind has claimed the operation.
+                return
+            if recovery_dispatch_count > current_generation:
+                self._operation_generations[operation_id] = recovery_dispatch_count
+            current_context = self._contexts.get(operation_id)
+            if current_context is None or current_context.recovery_dispatch_count < recovery_dispatch_count:
+                self._contexts[operation_id] = pending
             if terminal:
                 self._closing_operations.add(operation_id)
             if operation_id not in self._dropped_operations:
@@ -187,6 +204,10 @@ class HttpBridgeOperationEventBatcher:
             async with self._lock:
                 if operation_id in self._dropped_operations:
                     return
+                current_generation = self._operation_generations.get(operation_id, 0)
+                batch = [item for item in batch if item.recovery_dispatch_count >= current_generation]
+                if not batch:
+                    return
             try:
                 events = [
                     DurableBridgeOperationEventInput(
@@ -195,6 +216,7 @@ class HttpBridgeOperationEventBatcher:
                         instance_id=item.instance_id,
                         owner_epoch=item.owner_epoch,
                         event_text=item.event_text,
+                        recovery_dispatch_count=item.recovery_dispatch_count,
                     )
                     for item in batch
                 ]
@@ -233,6 +255,7 @@ class HttpBridgeOperationEventBatcher:
             context = self._contexts.get(operation_id)
             self._closing_operations.discard(operation_id)
             self._contexts.pop(operation_id, None)
+            self._operation_generations.pop(operation_id, None)
             self._dropped_operations.discard(operation_id)
         if dropped or context is None:
             return
@@ -272,7 +295,15 @@ class HttpBridgeOperationEventBatcher:
         response_id: str | None = None,
     ) -> TerminalOperationEventAppendResult:
         """Drain queued events and atomically append the terminal outcome."""
+        expected_recovery_dispatch_count = max(0, int(expected_recovery_dispatch_count))
         async with self._lock:
+            current_generation = self._operation_generations.get(operation_id, 0)
+            if expected_recovery_dispatch_count < current_generation:
+                # A terminal event from a superseded upstream attempt must not
+                # settle the replacement operation.
+                return TerminalOperationEventAppendResult(persisted=False)
+            if expected_recovery_dispatch_count > current_generation:
+                self._operation_generations[operation_id] = expected_recovery_dispatch_count
             self._contexts.setdefault(
                 operation_id,
                 _PendingOperationEvent(
@@ -281,6 +312,7 @@ class HttpBridgeOperationEventBatcher:
                     instance_id=instance_id,
                     owner_epoch=owner_epoch,
                     event_text=event_text,
+                    recovery_dispatch_count=expected_recovery_dispatch_count,
                 ),
             )
             self._closing_operations.add(operation_id)
@@ -340,6 +372,7 @@ class HttpBridgeOperationEventBatcher:
             async with self._lock:
                 self._closing_operations.discard(operation_id)
                 self._contexts.pop(operation_id, None)
+                self._operation_generations.pop(operation_id, None)
                 self._dropped_operations.discard(operation_id)
 
     async def settle_terminal_event(
@@ -399,7 +432,27 @@ class HttpBridgeOperationEventBatcher:
                 self._pending_count -= len(pending)
                 self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
                 self._contexts.pop(operation_id, None)
+                self._operation_generations.pop(operation_id, None)
                 self._closing_operations.discard(operation_id)
+                self._dropped_operations.discard(operation_id)
+
+    async def fence_operation(self, *, operation_id: str, recovery_dispatch_count: int) -> None:
+        """Drop queued events from an attempt after its operation is rebound.
+
+        The flush lock makes the drain atomic with respect to the background
+        writer. The durable append path also checks the generation, covering
+        the small window between the database rebind and this in-memory drain.
+        """
+        recovery_dispatch_count = max(0, int(recovery_dispatch_count))
+        async with self._flush_lock:
+            async with self._lock:
+                current_generation = self._operation_generations.get(operation_id, 0)
+                if recovery_dispatch_count <= current_generation:
+                    return
+                self._operation_generations[operation_id] = recovery_dispatch_count
+                pending = self._pending.pop(operation_id, [])
+                self._pending_count -= len(pending)
+                self._pending_bytes -= sum(len(item.event_text.encode("utf-8")) for item in pending)
                 self._dropped_operations.discard(operation_id)
 
     async def close(self) -> None:

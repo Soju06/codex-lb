@@ -28,6 +28,16 @@ Load balancer for ChatGPT accounts. Pool multiple accounts, track usage, manage 
 - [Deployment](deployment/docker.md) — Docker, [Kubernetes](deployment/kubernetes.md), [remote access](deployment/remote.md)
 - [Troubleshooting](troubleshooting.md)
 
+## Screenshots
+
+| Settings | Login |
+|:---:|:---:|
+| ![settings](screenshots/settings.jpg) | ![login](screenshots/login.jpg) |
+
+| Dashboard (dark) | Accounts (dark) | Settings (dark) |
+|:---:|:---:|:---:|
+| ![dashboard-dark](screenshots/dashboard-dark.jpg) | ![accounts-dark](screenshots/accounts-dark.jpg) | ![settings-dark](screenshots/settings-dark.jpg) |
+
 ## Community companions
 
 These independent projects consume the existing dashboard API and are
@@ -48,16 +58,6 @@ repository and release notes before connecting it.
 OpenSpec: the [user-documentation capability](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/user-documentation)
 governs this listing, while [admin-auth](https://github.com/Soju06/codex-lb/tree/main/openspec/specs/admin-auth)
 defines the guest and admin access contracts.
-
-## Screenshots
-
-| Settings | Login |
-|:---:|:---:|
-| ![settings](screenshots/settings.jpg) | ![login](screenshots/login.jpg) |
-
-| Dashboard (dark) | Accounts (dark) | Settings (dark) |
-|:---:|:---:|:---:|
-| ![dashboard-dark](screenshots/dashboard-dark.jpg) | ![accounts-dark](screenshots/accounts-dark.jpg) | ![settings-dark](screenshots/settings-dark.jpg) |
 
 ---
 

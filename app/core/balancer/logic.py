@@ -29,6 +29,10 @@ PERMANENT_FAILURE_CODES = {
     "app_session_terminated": "ChatGPT session ended - re-login required",
     "account_session_expired": "ChatGPT session ended - re-login required",
     "account_auth_invalidated": "Authentication failed after token refresh - re-login required",
+    # The OAuth endpoint uses this code for an invalid/revoked refresh token.
+    # Keep it in the permanent set so the account is surfaced for re-auth
+    # instead of remaining active while every request retries the dead token.
+    "invalid_refresh_token": "Refresh token invalid - re-login required",
     "account_deactivated": "Account has been deactivated",
     "account_suspended": "Account has been suspended",
     "account_deleted": "Account has been deleted",
@@ -45,6 +49,7 @@ REAUTH_REQUIRED_FAILURE_CODES = frozenset(
         "app_session_terminated",
         "account_session_expired",
         "account_auth_invalidated",
+        "invalid_refresh_token",
     }
 )
 

@@ -6082,6 +6082,7 @@ class _WebSocketMixin:
                 or settlement.account_health_error
                 or settlement.record_success
                 or bool(request_state.deferred_account_error_backoffs)
+                or bool(request_state.deferred_keyed_stream_health)
             ),
         )
         # Settlement responsibility has transferred (the settle path tracks
@@ -6096,8 +6097,15 @@ class _WebSocketMixin:
             pending_backoffs = (
                 lifecycle.pending_backoffs if lifecycle is not None else request_state.deferred_account_error_backoffs
             )
-            if pending_backoffs:
-                await proxy._drain_deferred_account_error_backoffs(pending_backoffs)
+            try:
+                if pending_backoffs:
+                    await proxy._drain_deferred_account_error_backoffs(pending_backoffs)
+            finally:
+                # Backoffs and queued stream-health penalties own independent
+                # post-settlement lanes: a failed backoff write must not
+                # orphan the deferred health write.
+                if request_state.deferred_keyed_stream_health:
+                    await proxy._drain_deferred_keyed_stream_health(request_state)
         latency_ms = int((time.monotonic() - request_state.started_at) * 1000)
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else None
         reasoning_tokens = (

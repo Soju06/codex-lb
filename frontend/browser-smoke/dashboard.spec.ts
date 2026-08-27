@@ -172,3 +172,77 @@ test("mobile top-level navigation opens the destination heading at the top", asy
   await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeInViewport();
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
 });
+
+test("the API key create dialog stays inside supported viewports", async ({ page }) => {
+  const viewportCases = [
+    { size: { width: 320, height: 568 }, columns: 1 },
+    { size: { width: 390, height: 844 }, columns: 1 },
+    { size: { width: 1440, height: 900 }, columns: 2 },
+  ] as const;
+
+  await page.goto("/apis", { waitUntil: "networkidle" });
+
+  const consentDialog = page.getByRole("dialog", { name: "Anonymous telemetry" });
+  if (await consentDialog.isVisible()) {
+    await consentDialog.getByRole("button", { name: "Keep enabled" }).click();
+    await expect(consentDialog).toBeHidden();
+  }
+
+  await expect(page.getByRole("heading", { name: "APIs", exact: true })).toBeVisible();
+  const openDialogButton = page.getByRole("button", { name: "Create API Key" });
+  const dialog = page.getByRole("dialog", { name: "Create API key" });
+  const title = dialog.getByRole("heading", { name: "Create API key" });
+  const closeButton = dialog.getByRole("button", { name: "Close" });
+  const createButton = dialog.getByRole("button", { name: "Create" });
+
+  for (const viewportCase of viewportCases) {
+    await page.setViewportSize(viewportCase.size);
+    await openDialogButton.click();
+
+    for (const element of [dialog, title, closeButton, createButton]) {
+      const box = await element.boundingBox();
+      expect(box).not.toBeNull();
+      if (!box) {
+        throw new Error("Expected dialog element to have a bounding box");
+      }
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.y).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(viewportCase.size.width);
+      expect(box.y + box.height).toBeLessThanOrEqual(viewportCase.size.height);
+    }
+
+    const scrollRegion = dialog.getByTestId("api-key-create-scroll-region");
+    await expect(scrollRegion).toHaveCount(1);
+    const initialScrollState = await scrollRegion.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      overflowY: getComputedStyle(element).overflowY,
+      scrollHeight: element.scrollHeight,
+    }));
+    expect(initialScrollState.overflowY).toBe("auto");
+    expect(initialScrollState.scrollHeight).toBeGreaterThan(initialScrollState.clientHeight);
+
+    const columnCount = await scrollRegion.locator(":scope > div").evaluate((element) =>
+      getComputedStyle(element).gridTemplateColumns.split(" ").filter(Boolean).length,
+    );
+    expect(columnCount).toBe(viewportCase.columns);
+
+    const finalField = dialog.getByRole("spinbutton", { name: "Weekly cost limit ($)" });
+    await finalField.scrollIntoViewIfNeeded();
+    await expect(finalField).toBeInViewport();
+    await expect(title).toBeInViewport();
+    await expect(closeButton).toBeInViewport();
+    await expect(createButton).toBeInViewport();
+    if (viewportCase.columns === 1) {
+      expect(await scrollRegion.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    }
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+  }
+
+  await page.setViewportSize(viewportCases[0].size);
+  await openDialogButton.click();
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(8, Math.floor(viewportCases[0].size.height / 2));
+  await expect(dialog).toBeHidden();
+});

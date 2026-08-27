@@ -5,7 +5,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -47,10 +47,13 @@ from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
 from app.core.clients.proxy import (
+    _SSE_SEPARATOR_OVERLAP,
     CODEX_LB_REQUIRED_CAPABILITY_HEADER,
     CodexControlRequestPrivacyPolicy,
     CodexControlResponse,
     ProxyResponseError,
+    StreamEventTooLargeError,
+    _find_sse_separator,
     _is_native_codex_request,
 )
 from app.core.clients.proxy_websocket import (
@@ -302,6 +305,7 @@ from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+_SourceStreamChunkT = TypeVar("_SourceStreamChunkT", bytes, str)
 
 _REASONING_SUMMARY_DELTA_TYPES = frozenset({"response.reasoning_summary_text.delta"})
 _REASONING_SUMMARY_DONE_TYPES = frozenset(
@@ -1150,6 +1154,8 @@ async def responses(
             api_key=api_key,
             rate_limit_headers=rate_limit_headers,
             pre_normalization_effort=pre_normalization_effort,
+            enforce_openai_sdk_contract=openai_sdk_request,
+            native_codex_heartbeat=native_codex_heartbeat,
         )
 
     apply_enforced_service_tier_model_fallback(
@@ -4733,6 +4739,8 @@ async def _source_responses_response(
     api_key: ApiKeyData | None,
     rate_limit_headers: Mapping[str, str],
     pre_normalization_effort: str | None,
+    enforce_openai_sdk_contract: bool = True,
+    native_codex_heartbeat: bool = False,
 ) -> Response:
     # This is the first point where the request is known to be served by a
     # model source rather than a subscription account, so it is the only place
@@ -4805,7 +4813,7 @@ async def _source_responses_response(
             )
             return _logged_error_json_response(request, exc.status_code, exc.payload, headers=rate_limit_headers)
         if _reservation_requires_usage(reservation):
-            return await _buffered_limited_source_chat_stream_response(
+            response = await _buffered_limited_source_chat_stream_response(
                 request,
                 source=source,
                 api_key=api_key,
@@ -4815,8 +4823,28 @@ async def _source_responses_response(
                 usage_holder=stream.usage_holder,
                 rate_limit_headers=rate_limit_headers,
             )
+            # Limited keys stay fail-closed: usage must be present before any
+            # body bytes reach the client. Public normalize still applies to the
+            # replayed body; keepalives cannot precede upstream completion while
+            # that buffer gate remains.
+            if isinstance(response, StreamingResponse):
+                return StreamingResponse(
+                    _wrap_source_responses_public_stream(
+                        response.body_iterator,
+                        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                        native_codex_heartbeat=native_codex_heartbeat,
+                    ),
+                    media_type=response.media_type,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                )
+            return response
         body = _source_chat_stream_with_settlement(
-            stream.body,
+            _wrap_source_responses_public_stream(
+                stream.body,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                native_codex_heartbeat=native_codex_heartbeat,
+            ),
             usage_holder=stream.usage_holder,
             request=request,
             source=source,
@@ -5491,8 +5519,166 @@ async def _buffered_limited_source_chat_stream_response(
     )
 
 
+async def _iter_source_sse_event_blocks(
+    stream: AsyncIterable[bytes | str | memoryview[int]],
+    *,
+    max_event_bytes: int | None = None,
+) -> AsyncIterator[str]:
+    """Reassemble chunked source bytes into SSE event blocks for public shaping.
+
+    Detects LF, CRLF, and CR-only blank-line separators without rewriting the
+    retained event's terminator bytes, so unmodified pass-through stays
+    byte-identical. Ignores one optional leading UTF-8 BOM, and swallows the
+    LF residue of a CRLF separator whose CR arrived at the end of the prior
+    chunk (CR-only dispatch must not wait for the disambiguating byte).
+    Bounds reassembly with ``max_sse_event_bytes``.
+    """
+    limit = max_event_bytes if max_event_bytes is not None else get_settings().max_sse_event_bytes
+    buffer = bytearray()
+    scanned = 0
+    bom_pending = True
+    swallow_lf = False
+    iterator: AsyncIterator[bytes | str | memoryview[int]] | None = None
+    try:
+        iterator = stream.__aiter__()
+        async for chunk in iterator:
+            if not chunk:
+                continue
+            if isinstance(chunk, memoryview):
+                raw = chunk.tobytes()
+            elif isinstance(chunk, str):
+                raw = chunk.encode("utf-8")
+            else:
+                raw = chunk
+            buffer.extend(raw)
+            if bom_pending:
+                if len(buffer) >= 3:
+                    if buffer[:3] == b"\xef\xbb\xbf":
+                        del buffer[:3]
+                    bom_pending = False
+                elif bytes(buffer) in (b"\xef", b"\xef\xbb"):
+                    # Partial possible BOM: wait for the disambiguating bytes.
+                    continue
+                else:
+                    bom_pending = False
+            if swallow_lf:
+                swallow_lf = False
+                if buffer and buffer[0] == 0x0A:
+                    # Residue of a CRLF ending whose CR closed the previous
+                    # chunk: the separator was already dispatched with the
+                    # bare CR, so this LF belongs to it, not the next event.
+                    del buffer[0]
+            while True:
+                separator = _find_sse_separator(buffer, max(0, scanned - _SSE_SEPARATOR_OVERLAP))
+                if separator is None:
+                    scanned = len(buffer)
+                    if len(buffer) > limit:
+                        raise StreamEventTooLargeError(len(buffer), limit)
+                    break
+                index, separator_len = separator
+                event_end = index + separator_len
+                raw_event = bytes(buffer[:event_end])
+                del buffer[:event_end]
+                swallow_lf = raw_event.endswith(b"\r") and not buffer
+                scanned = 0
+                if len(raw_event) > limit:
+                    raise StreamEventTooLargeError(len(raw_event), limit)
+                if raw_event.strip():
+                    yield raw_event.decode("utf-8", errors="replace")
+        if buffer:
+            if len(buffer) > limit:
+                raise StreamEventTooLargeError(len(buffer), limit)
+            if buffer.strip():
+                yield bytes(buffer).decode("utf-8", errors="replace")
+    finally:
+        try:
+            if iterator is not None:
+                await _aclose_stream(iterator)
+        finally:
+            if iterator is not stream:
+                await _aclose_stream(stream)
+
+
+async def _wrap_source_responses_public_stream(
+    stream: AsyncIterable[bytes | str | memoryview[int]],
+    *,
+    enforce_openai_sdk_contract: bool = True,
+    native_codex_heartbeat: bool = False,
+) -> AsyncIterator[str]:
+    """Normalize and keep source-routed Responses SSE proxy-timeout friendly.
+
+    Account-backed ``_stream_responses`` already reassembles, normalizes, and
+    injects keepalives. Source-routed Responses previously forwarded raw
+    upstream byte chunks and could idle out through front-door proxies.
+
+    Transport-aware: public OpenAI SDK clients get contract enforcement and
+    comment keepalives; native Codex clients keep ``codex.*`` events and
+    ``codex.keepalive`` framing like the subscription path.
+    """
+    use_codex_keepalive = native_codex_heartbeat or not enforce_openai_sdk_contract
+    keepalive_frame = CODEX_KEEPALIVE_FRAME if use_codex_keepalive else SSE_KEEPALIVE_FRAME
+    settings = get_settings()
+    event_blocks = _iter_source_sse_event_blocks(
+        stream,
+        max_event_bytes=getattr(settings, "max_sse_event_bytes", 16 * 1024 * 1024),
+    )
+    normalized = _normalize_public_responses_stream(
+        event_blocks,
+        enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+        forward_unparseable_data=True,
+    )
+    keepalive_stream = inject_sse_keepalives(
+        normalized,
+        settings.sse_keepalive_interval_seconds,
+        keepalive_frame=keepalive_frame,
+        on_keepalive=lambda: _record_stream_keepalive("responses_source"),
+    )
+    outbound: AsyncIterator[str] = keepalive_stream
+    if use_codex_keepalive:
+        outbound = _prepend_initial_sse_heartbeat(
+            keepalive_stream,
+            keepalive_frame,
+            request_id=get_request_id(),
+            route_family="responses_source",
+        )
+    try:
+        async for chunk in outbound:
+            yield chunk
+    finally:
+        # Deterministic cascade: outer stream first, then any layers it may not
+        # have closed when the client disconnects mid-flight.
+        try:
+            await _aclose_stream(outbound)
+        finally:
+            if outbound is not keepalive_stream:
+                try:
+                    await _aclose_stream(keepalive_stream)
+                finally:
+                    try:
+                        await _aclose_stream(normalized)
+                    finally:
+                        try:
+                            await _aclose_stream(event_blocks)
+                        finally:
+                            # ``aclose()`` on a never-started async generator
+                            # skips its ``finally`` blocks, so the eagerly
+                            # opened source body must be closed directly when
+                            # teardown happens before iteration starts (e.g. a
+                            # native client disconnecting right after the
+                            # initial heartbeat).
+                            await _aclose_stream(stream)
+            else:
+                try:
+                    await _aclose_stream(normalized)
+                finally:
+                    try:
+                        await _aclose_stream(event_blocks)
+                    finally:
+                        await _aclose_stream(stream)
+
+
 async def _source_chat_stream_with_settlement(
-    stream: AsyncIterator[bytes],
+    stream: AsyncIterator[_SourceStreamChunkT],
     *,
     usage_holder: SourceUsageHolder,
     request: Request,
@@ -5500,7 +5686,7 @@ async def _source_chat_stream_with_settlement(
     api_key: ApiKeyData | None,
     model: str,
     reservation: ApiKeyUsageReservationData | None,
-) -> AsyncIterator[bytes]:
+) -> AsyncIterator[_SourceStreamChunkT]:
     status = "success"
     error_code: str | None = None
     error_message: str | None = None
@@ -8026,7 +8212,7 @@ async def _log_source_chat_completion(
         )
 
 
-async def _aclose_stream(stream: AsyncIterator[object]) -> None:
+async def _aclose_stream(stream: object) -> None:
     aclose = getattr(stream, "aclose", None)
     if aclose is not None:
         await aclose()
@@ -8199,6 +8385,7 @@ async def _normalize_public_responses_stream(
     stream: AsyncIterator[str],
     *,
     enforce_openai_sdk_contract: bool = True,
+    forward_unparseable_data: bool = False,
 ) -> AsyncIterator[str]:
     stream = _normalize_reasoning_summary_stream(stream)
     """Normalize the upstream SSE event stream for the public /v1 surface.
@@ -8217,6 +8404,7 @@ async def _normalize_public_responses_stream(
     """
     terminal_seen = False
     done_seen = False
+    unparseable_forwarded = False
     contract_violation_kind: str | None = None
     next_sequence_number = 0
     seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
@@ -8306,8 +8494,20 @@ async def _normalize_public_responses_stream(
             continue
         payload = _parse_sse_payload(event_block)
         if payload is None:
-            if _looks_like_sse_data_block(event_block):
+            is_unparseable_data = _looks_like_sse_data_block(event_block)
+            if is_unparseable_data:
                 contract_violation_kind = contract_violation_kind or "invalid_json"
+            if forward_unparseable_data:
+                # Source-routed streams forward blocks the proxy cannot parse
+                # byte-identically instead of eating upstream data: the pre-wrap
+                # contract was raw passthrough, and merged model-source routing
+                # tests assert source bytes reach the client.
+                if is_unparseable_data:
+                    # Only unparseable *data* suppresses terminal synthesis;
+                    # valid non-data control blocks (e.g. ``retry:``) keep the
+                    # truncated-stream failure contract intact.
+                    unparseable_forwarded = True
+                yield event_block
             continue
         parsed_payload = payload
         raw_event_type = payload.get("type")
@@ -8434,6 +8634,12 @@ async def _normalize_public_responses_stream(
     if terminal_seen:
         if not done_seen and not enforce_openai_sdk_contract:
             yield "data: [DONE]\n\n"
+        return
+    if unparseable_forwarded:
+        # Raw source blocks already reached the client. Synthesizing a
+        # terminal here would mislabel a stream the proxy could not
+        # interpret (for example a successful source stream whose terminal
+        # event was not valid JSON) as a failure.
         return
     error_kind = contract_violation_kind or (
         "upstream_stream_truncated" if enforce_openai_sdk_contract else "stream_incomplete"
@@ -8699,12 +8905,18 @@ def _synthetic_pre_created_item_id(response_id: str | None) -> str:
 
 
 def _has_canonical_event_framing(event_block: str, event_type: JsonValue) -> bool:
-    """True when the block already carries the `event: <type>` line that
+    """True when the block already carries the ``event: <type>`` line that
     format_sse_event would emit (or the payload has no type, where canonical
-    framing is data-only)."""
+    framing is data-only). Any SSE line ending (LF, CRLF, or CR) after the
+    event line counts: unchanged-event pass-through must not depend on the
+    source's terminator style."""
     if not isinstance(event_type, str) or not event_type:
         return event_block.startswith("data: ")
-    return event_block.startswith(f"event: {event_type}\n")
+    prefix = f"event: {event_type}"
+    if not event_block.startswith(prefix):
+        return False
+    rest = event_block[len(prefix) :]
+    return rest.startswith(("\n", "\r"))
 
 
 def _normalize_public_stream_payload(
@@ -9124,7 +9336,19 @@ def _extract_public_output_item_text(item: Mapping[str, JsonValue]) -> str | Non
 
 
 def _looks_like_sse_data_block(event_block: str) -> bool:
-    return "data:" in event_block
+    """True when the block contains an SSE ``data`` field line.
+
+    Inspects complete field lines instead of substring matching, so field
+    values containing the literal ``data:`` (for example ``id: data:1``) do
+    not count as data, while the valid empty-field form (a bare ``data``
+    line) does. Lines are split only on the CR / LF / CRLF endings SSE
+    recognizes: ``str.splitlines`` would also split on Unicode separators
+    such as U+2028, which are legal inside field values.
+    """
+    for line in event_block.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line == "data" or line.startswith("data:"):
+            return True
+    return False
 
 
 def _looks_like_sse_comment_block(event_block: str) -> bool:

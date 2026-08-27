@@ -111,6 +111,15 @@ Full docs live at **<https://soju06.github.io/codex-lb/>**:
 - [Deployment](https://soju06.github.io/codex-lb/deployment/docker/) — [Docker](https://soju06.github.io/codex-lb/deployment/docker/), [Kubernetes](https://soju06.github.io/codex-lb/deployment/kubernetes/), [remote access](https://soju06.github.io/codex-lb/deployment/remote/)
 - [Troubleshooting](https://soju06.github.io/codex-lb/troubleshooting/)
 
+### Community companions
+
+Independent projects that consume the dashboard API, maintained outside codex-lb
+(see [the docs listing](https://soju06.github.io/codex-lb/#community-companions)
+for access guidance):
+
+- [Codex LB Status Bar](https://github.com/sm1ee/codex-lb-statusbar) — native macOS app: account status, quota details, account controls
+- [codex-lb SwiftBar](https://github.com/joschi655/codex-lb-swiftbar) — read-only SwiftBar/Bun monitor for pool status and quota headroom
+
 ## Development
 
 ```bash

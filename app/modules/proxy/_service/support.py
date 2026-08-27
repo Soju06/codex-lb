@@ -884,6 +884,15 @@ class _DeferredAccountBackoffTracker:
     current_lifecycle: _DeferredAccountBackoffLifecycle | None = None
 
 
+@dataclass(slots=True)
+class _DeferredKeyedStreamHealthPenalty:
+    """Classified account-health write deferred until reservation settlement."""
+
+    account: Account
+    error: UpstreamError
+    code: str
+
+
 @dataclass(eq=False, slots=True)
 class _HTTPBridgeResponseCreateAttempt:
     ordinal: int
@@ -1157,6 +1166,12 @@ class _WebSocketRequestState:
     deferred_account_error_backoffs: dict[str, Account] = field(default_factory=dict)
     deferred_account_backoff_tracker: _DeferredAccountBackoffTracker | None = None
     deferred_account_backoff_lifecycle: _DeferredAccountBackoffLifecycle | None = None
+    # Classified health writes (mark_rate_limit / mark_quota_exceeded /
+    # record_error) deferred by keyed pre-created retry branches until this
+    # request's API-key reservation settles or its fallback release commits
+    # (settlement-ordering invariant). Entries drop unapplied when neither
+    # confirms.
+    deferred_keyed_stream_health: list[_DeferredKeyedStreamHealthPenalty] = field(default_factory=list)
     deferred_reasoning_downstream_texts: list[str] = field(default_factory=list)
     suppress_next_created_downstream: bool = False
     replay_downstream_response_id: str | None = None

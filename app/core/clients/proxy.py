@@ -1150,13 +1150,62 @@ def _remaining_total_timeout(timeout_seconds: float | None, started_at: float, n
     return max(0.001, timeout_seconds - max(0.0, now - started_at))
 
 
-def _find_sse_separator(buffer: bytes | bytearray, start: int = 0) -> tuple[int, int] | None:
-    separators = (b"\r\n\r\n", b"\n\n", b"\r\r")
-    positions = [(buffer.find(separator, start), len(separator)) for separator in separators]
-    valid_positions = [position for position in positions if position[0] >= 0]
-    if not valid_positions:
+def _sse_line_ending_len(buffer: bytes | bytearray, index: int) -> int | None:
+    """Return the length of an SSE line ending at ``index``, or ``None``.
+
+    Only CR, LF, and CRLF count as line boundaries. CRLF is one ending.
+    """
+    if index >= len(buffer):
         return None
-    return min(valid_positions, key=lambda item: item[0])
+    if buffer[index] == 0x0D:
+        if index + 1 < len(buffer) and buffer[index + 1] == 0x0A:
+            return 2
+        return 1
+    if buffer[index] == 0x0A:
+        return 1
+    return None
+
+
+def _find_sse_separator(buffer: bytes | bytearray, start: int = 0) -> tuple[int, int] | None:
+    """Find the earliest SSE blank-line separator in ``buffer``.
+
+    A blank line is two consecutive SSE line endings (CR / LF / CRLF), including
+    mixed pairs such as ``\\n\\r`` and ``\\n\\r\\n``. Returns
+    ``(index, separator_len)`` where ``index`` is the start of the first ending.
+
+    Candidates are located with C-level ``bytes.find`` and endings are
+    classified only at candidate positions, so the account-backed SSE relay
+    hot path never scans byte-by-byte in Python.
+    """
+    length = len(buffer)
+    index = max(0, start)
+    # Next CR / LF position at or after ``index``: -2 not yet searched,
+    # -1 absent in the rest of the buffer. Caching both keeps the scan O(n)
+    # when one ending byte is frequent and the other is far away.
+    cr = -2
+    lf = -2
+    while index < length:
+        if cr != -1 and cr < index:
+            cr = buffer.find(b"\r", index)
+        if lf != -1 and lf < index:
+            lf = buffer.find(b"\n", index)
+        if cr == -1:
+            candidate = lf
+        elif lf == -1:
+            candidate = cr
+        else:
+            candidate = cr if cr < lf else lf
+        if candidate == -1:
+            return None
+        if buffer[candidate] == 0x0D and candidate + 1 < length and buffer[candidate + 1] == 0x0A:
+            first = 2
+        else:
+            first = 1
+        second = _sse_line_ending_len(buffer, candidate + first)
+        if second is not None:
+            return (candidate, first + second)
+        index = candidate + first
+    return None
 
 
 def _pop_sse_event(buffer: bytearray) -> bytes | None:
@@ -1189,6 +1238,7 @@ async def _iter_sse_events(
 
     buffer = bytearray()
     scanned = 0
+    swallow_lf = False
     chunk_iterator = resp.content.iter_chunked(_SSE_READ_CHUNK_SIZE)
     iterator = chunk_iterator.__aiter__()
 
@@ -1210,6 +1260,13 @@ async def _iter_sse_events(
             continue
 
         buffer.extend(chunk)
+        if swallow_lf:
+            swallow_lf = False
+            if buffer and buffer[0] == 0x0A:
+                # Residue of a CRLF ending whose CR closed the previous chunk:
+                # the separator was already dispatched with the bare CR, so
+                # this LF belongs to it, not to the next event.
+                del buffer[0]
         while True:
             # `scanned` marks the prefix already known to hold no separator,
             # so each new chunk only scans the new bytes (plus the straddle
@@ -1226,6 +1283,7 @@ async def _iter_sse_events(
             event_end = index + separator_len
             raw_event = bytes(buffer[:event_end])
             del buffer[:event_end]
+            swallow_lf = raw_event.endswith(b"\r") and not buffer
             scanned = 0
 
             if len(raw_event) > max_event_bytes:

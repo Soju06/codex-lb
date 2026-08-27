@@ -98,6 +98,35 @@ async def test_validate_proxy_websocket_request_returns_firewall_denial(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_websocket_upstream_transport_denial_uses_426_only_in_auto_mode(monkeypatch):
+    monkeypatch.setattr(proxy_api_module, "upstream_websocket_transport_recently_failed", lambda: True)
+
+    class AutoSettings:
+        upstream_stream_transport = "auto"
+
+    class AutoSettingsCache:
+        async def get(self):
+            return AutoSettings()
+
+    monkeypatch.setattr(proxy_api_module, "get_settings_cache", lambda: AutoSettingsCache())
+    denial = await proxy_api_module._websocket_upstream_transport_denial()
+    assert denial is not None
+    assert denial.status_code == 426
+    payload = json.loads(cast(bytes, denial.body).decode("utf-8"))
+    assert payload["error"]["code"] == "websocket_upstream_transport_unavailable"
+
+    class ForcedSettings:
+        upstream_stream_transport = "websocket"
+
+    class ForcedSettingsCache:
+        async def get(self):
+            return ForcedSettings()
+
+    monkeypatch.setattr(proxy_api_module, "get_settings_cache", lambda: ForcedSettingsCache())
+    assert await proxy_api_module._websocket_upstream_transport_denial() is None
+
+
+@pytest.mark.asyncio
 async def test_validate_proxy_websocket_request_maps_auth_error(monkeypatch):
     async def fake_denial(_websocket):
         return None

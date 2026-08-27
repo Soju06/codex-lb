@@ -15,6 +15,7 @@ import aiohttp
 import anyio
 from fastapi import WebSocket
 from pydantic import ValidationError
+from starlette.websockets import WebSocketDisconnect
 
 from app.core import shutdown as shutdown_state
 from app.core.auth.refresh import (
@@ -33,6 +34,7 @@ from app.core.clients.files import finalize_file as core_finalize_file  # noqa: 
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
 from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     CODEX_RESPONSES_LITE_WEBSOCKET_METADATA_KEY,
+    UPSTREAM_EDGE_CHALLENGE_FAILURE_DETAIL,
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -317,6 +319,10 @@ from app.modules.proxy._service.observability import (
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
 )
+from app.modules.proxy._service.streaming.transport_health import (
+    clear_upstream_websocket_transport_failure,
+    mark_upstream_websocket_transport_failure,
+)
 from app.modules.proxy._service.support import (
     _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
     _HARD_HTTP_BRIDGE_AFFINITY_KINDS,  # noqa: F401
@@ -509,6 +515,7 @@ _WEBSOCKET_PINNED_REFRESH_UNAVAILABLE_MESSAGE = "Account refresh is temporarily 
 # Scope teardown coordinates several request/lease finalizers; keep its normal
 # observation budget separate from the short generic child-task cancel bound.
 _WEBSOCKET_SCOPE_CLEANUP_TIMEOUT_SECONDS = 5.0
+_DOWNSTREAM_WEBSOCKET_CLOSED_SEND_ERROR = 'Cannot call "send" once a close message has been sent.'
 _CAPABILITY_REQUIRED_NO_AUTHORIZED_ACCOUNTS_MESSAGE = (
     "This request requires Trusted Access for Cyber, but no eligible account is marked as "
     "security-work-authorized. codex-lb did not fall back to an ordinary account."
@@ -3631,14 +3638,32 @@ class _WebSocketMixin:
                 selected_stream_lease = None
                 if confirmed_pre_dispatch:
                     await _record_or_defer_confirmed_route_backoff(account)
+                if exc.failure_detail == UPSTREAM_EDGE_CHALLENGE_FAILURE_DETAIL and not require_preferred_account:
+                    # The downstream websocket is already accepted, so the
+                    # Codex client cannot react to a raw upstream 403 as a
+                    # transport switch. A 503 error event prompts the client
+                    # to reconnect; the next handshake is denied with 426 by
+                    # the route guard, which activates Codex's HTTP fallback.
+                    mark_upstream_websocket_transport_failure()
+                    status_code = 503
+                    error_code = "upstream_websocket_challenge"
+                    error_message = "Upstream websocket was blocked by an edge challenge; retry over HTTP."
+                    error_payload = openai_error(
+                        error_code,
+                        error_message,
+                        error_type="server_error",
+                    )
+                else:
+                    status_code = exc.status_code
+                    error_payload = exc.payload
                 await proxy._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,
                     account_id=account.id,
                     api_key=api_key,
                     request_state=request_state,
-                    status_code=exc.status_code,
-                    payload=exc.payload,
+                    status_code=status_code,
+                    payload=error_payload,
                     error_code=error_code or "upstream_error",
                     error_message=error_message or "Upstream error",
                 )
@@ -3650,6 +3675,7 @@ class _WebSocketMixin:
             if connect_result is None:
                 await proxy._load_balancer.release_account_lease(selected_stream_lease)
                 return None, None
+            clear_upstream_websocket_transport_failure()
             request_state.websocket_stream_lease = selected_stream_lease
             _clear_websocket_precreated_replay_fallback(request_state)
             return connect_result
@@ -4355,6 +4381,14 @@ class _WebSocketMixin:
     ) -> str:
         proxy = cast(_WebSocketServiceProtocol, self)
         _ = proxy
+        if exc.failure_detail == UPSTREAM_EDGE_CHALLENGE_FAILURE_DETAIL and not require_preferred_account:
+            mark_upstream_websocket_transport_failure()
+            _facade().logger.info(
+                "Websocket upstream edge challenge will steer Codex to HTTP request_id=%s account_id=%s",
+                request_state.request_log_id or request_state.request_id,
+                account.id,
+            )
+            return "surface"
         confirmed_pre_dispatch = is_confirmed_pre_dispatch_transport_error(exc)
         if confirmed_pre_dispatch:
             # A proven pre-dispatch proxy connect failure is account-local
@@ -6702,7 +6736,20 @@ class _WebSocketMixin:
         async with client_send_lock:
             if downstream_activity is not None:
                 downstream_activity.mark()
-            await websocket.send_text(text)
+            try:
+                await websocket.send_text(text)
+            except (WebSocketDisconnect, OSError):
+                if downstream_activity is not None:
+                    downstream_activity.mark_disconnected()
+                _facade().logger.debug("Downstream websocket disconnected while sending text")
+                return
+            except RuntimeError as exc:
+                if _DOWNSTREAM_WEBSOCKET_CLOSED_SEND_ERROR not in str(exc):
+                    raise
+                if downstream_activity is not None:
+                    downstream_activity.mark_disconnected()
+                _facade().logger.debug("Downstream websocket was already closed while sending text")
+                return
             if downstream_activity is not None:
                 downstream_activity.mark()
 
@@ -6721,6 +6768,19 @@ class _WebSocketMixin:
         async with client_send_lock:
             if downstream_activity is not None:
                 downstream_activity.mark()
-            await websocket.send_bytes(data)
+            try:
+                await websocket.send_bytes(data)
+            except (WebSocketDisconnect, OSError):
+                if downstream_activity is not None:
+                    downstream_activity.mark_disconnected()
+                _facade().logger.debug("Downstream websocket disconnected while sending bytes")
+                return
+            except RuntimeError as exc:
+                if _DOWNSTREAM_WEBSOCKET_CLOSED_SEND_ERROR not in str(exc):
+                    raise
+                if downstream_activity is not None:
+                    downstream_activity.mark_disconnected()
+                _facade().logger.debug("Downstream websocket was already closed while sending bytes")
+                return
             if downstream_activity is not None:
                 downstream_activity.mark()

@@ -215,6 +215,9 @@ from app.modules.model_sources.selection import (
 from app.modules.proxy import affinity as proxy_affinity_module
 from app.modules.proxy import images_service as images_service_module
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy._service.streaming.transport_health import (
+    upstream_websocket_transport_recently_failed,
+)
 from app.modules.proxy._service.support import (
     _bind_propagated_capacity_startup_ready,
     _bind_propagated_capacity_startup_wait,
@@ -1201,6 +1204,10 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
+    transport_denial = await _websocket_upstream_transport_denial()
+    if transport_denial is not None:
+        await websocket.send_denial_response(transport_denial)
+        return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
     await websocket.accept(headers=proxy_affinity_module.build_downstream_turn_state_accept_headers(turn_state))
@@ -1532,6 +1539,10 @@ async def v1_responses_websocket(
     )
     if denial is not None:
         await websocket.send_denial_response(denial)
+        return
+    transport_denial = await _websocket_upstream_transport_denial()
+    if transport_denial is not None:
+        await websocket.send_denial_response(transport_denial)
         return
     client_turn_state = proxy_affinity_module._sticky_key_from_turn_state_header(websocket.headers)
     turn_state = proxy_affinity_module.ensure_downstream_turn_state(websocket.headers)
@@ -7715,6 +7726,25 @@ async def _validate_internal_bridge_api_key(
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),
         )
     return api_key, None
+
+
+async def _websocket_upstream_transport_denial() -> JSONResponse | None:
+    if not upstream_websocket_transport_recently_failed():
+        return None
+    dashboard_settings = await get_settings_cache().get()
+    configured_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
+    if configured_transport == "default":
+        configured_transport = getattr(get_settings(), "upstream_stream_transport", "auto")
+    if configured_transport != "auto":
+        return None
+    return JSONResponse(
+        status_code=426,
+        content=openai_error(
+            "websocket_upstream_transport_unavailable",
+            "Upstream websocket transport is temporarily unavailable; retry over HTTP.",
+            error_type="server_error",
+        ),
+    )
 
 
 async def _websocket_firewall_denial_response(websocket: WebSocket) -> JSONResponse | None:

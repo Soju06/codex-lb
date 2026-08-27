@@ -13,8 +13,8 @@ import anyio
 
 from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
-from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import (  # noqa: F401
+    UPSTREAM_EDGE_CHALLENGE_FAILURE_DETAIL,
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -31,6 +31,7 @@ from app.core.clients.proxy import (  # noqa: F401
     push_stream_timeout_overrides,
     push_transcribe_timeout_overrides,
 )
+from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
 from app.core.clients.proxy import codex_control_request as core_codex_control_request  # noqa: F401
 from app.core.clients.proxy import compact_responses as core_compact_responses  # noqa: F401
 from app.core.clients.proxy import transcribe_audio as core_transcribe_audio  # noqa: F401
@@ -154,6 +155,10 @@ from app.modules.proxy._service.observability import (
 )
 from app.modules.proxy._service.observability import (
     _truncate_identifier as _truncate_identifier,
+)
+from app.modules.proxy._service.streaming.transport_health import (
+    mark_upstream_websocket_transport_failure,
+    upstream_websocket_transport_recently_failed,
 )
 from app.modules.proxy._service.support import (
     _ACCOUNT_SELECTION_RECOVERY_HEARTBEAT_SECONDS,
@@ -962,6 +967,16 @@ class _HTTPBridgeStreamingMixin:
                 request_id,
             )
             runtime_config = dataclasses.replace(runtime_config, enabled=False)
+        configured_upstream_transport = getattr(dashboard_settings, "upstream_stream_transport", "default")
+        if configured_upstream_transport == "default":
+            configured_upstream_transport = getattr(_service_get_settings(), "upstream_stream_transport", "auto")
+        if upstream_websocket_transport_recently_failed() and configured_upstream_transport == "auto":
+            logger.info(
+                "stream_responses forcing HTTP upstream after recent websocket edge challenge request_id=%s",
+                request_id,
+            )
+            force_upstream_stream_transport = "http"
+            runtime_config = dataclasses.replace(runtime_config, enabled=False)
         if not runtime_config.enabled:
             stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
             async for line in stream_with_retry(
@@ -985,36 +1000,57 @@ class _HTTPBridgeStreamingMixin:
 
         request_scope_id = ensure_request_scope_id()
         deferred_account_backoff_tracker = _DeferredAccountBackoffTracker()
+        bridge_yielded_any = False
+        bridge_edge_challenge = False
         try:
-            async for line in self._stream_via_http_bridge(
-                payload,
-                headers,
-                codex_session_affinity=codex_session_affinity,
-                propagate_http_errors=propagate_http_errors,
-                openai_cache_affinity=openai_cache_affinity,
-                api_key=api_key,
-                api_key_reservation=api_key_reservation,
-                suppress_text_done_events=suppress_text_done_events,
-                idle_ttl_seconds=runtime_config.idle_ttl_seconds,
-                codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
-                max_sessions=runtime_config.max_sessions,
-                queue_limit=runtime_config.queue_limit,
-                prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
-                downstream_turn_state=downstream_turn_state,
-                forwarded_request=forwarded_request,
-                forwarded_original_request_unanchored=forwarded_original_request_unanchored,
-                forwarded_legacy_signature=forwarded_legacy_signature,
-                proxy_api_authorization=proxy_api_authorization,
-                forwarded_affinity_kind=forwarded_affinity_kind,
-                forwarded_affinity_key=forwarded_affinity_key,
-                rewritten_file_account_id=rewritten_file_account_id,
-                client_ip=client_ip,
-                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
-                capacity_startup_wait_event=capacity_startup_wait_event,
-                capacity_startup_ready_event=capacity_startup_ready_event,
-                deferred_account_backoff_tracker=deferred_account_backoff_tracker,
-            ):
-                yield line
+            try:
+                async for line in self._stream_via_http_bridge(
+                    payload,
+                    headers,
+                    codex_session_affinity=codex_session_affinity,
+                    propagate_http_errors=propagate_http_errors,
+                    openai_cache_affinity=openai_cache_affinity,
+                    api_key=api_key,
+                    api_key_reservation=api_key_reservation,
+                    suppress_text_done_events=suppress_text_done_events,
+                    idle_ttl_seconds=runtime_config.idle_ttl_seconds,
+                    codex_idle_ttl_seconds=runtime_config.codex_idle_ttl_seconds,
+                    max_sessions=runtime_config.max_sessions,
+                    queue_limit=runtime_config.queue_limit,
+                    prompt_cache_idle_ttl_seconds=runtime_config.prompt_cache_idle_ttl_seconds,
+                    downstream_turn_state=downstream_turn_state,
+                    forwarded_request=forwarded_request,
+                    forwarded_original_request_unanchored=forwarded_original_request_unanchored,
+                    forwarded_legacy_signature=forwarded_legacy_signature,
+                    proxy_api_authorization=proxy_api_authorization,
+                    forwarded_affinity_kind=forwarded_affinity_kind,
+                    forwarded_affinity_key=forwarded_affinity_key,
+                    rewritten_file_account_id=rewritten_file_account_id,
+                    client_ip=client_ip,
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    capacity_startup_wait_event=capacity_startup_wait_event,
+                    capacity_startup_ready_event=capacity_startup_ready_event,
+                    deferred_account_backoff_tracker=deferred_account_backoff_tracker,
+                ):
+                    bridge_yielded_any = True
+                    yield line
+            except ProxyResponseError as exc:
+                # Bridge creation opens the upstream websocket before sending
+                # response.create. A narrowly classified edge challenge is
+                # therefore safe to retry once over raw HTTP, but only for an
+                # unanchored request without an unsettled reservation.
+                bridge_edge_challenge = (
+                    not bridge_yielded_any
+                    and exc.failure_detail == UPSTREAM_EDGE_CHALLENGE_FAILURE_DETAIL
+                    and api_key_reservation is None
+                    and payload.previous_response_id is None
+                    and downstream_turn_state is None
+                    and forwarded_file_owner_account_id is None
+                    and not forwarded_request
+                )
+                if not bridge_edge_challenge:
+                    raise
+                mark_upstream_websocket_transport_failure()
         finally:
             with anyio.CancelScope(shield=True):
                 try:
@@ -1046,6 +1082,29 @@ class _HTTPBridgeStreamingMixin:
                         self,
                         request_scope_id=request_scope_id,
                     )
+        if bridge_edge_challenge:
+            logger.warning(
+                "HTTP bridge upstream edge challenge; retrying over raw HTTP request_id=%s",
+                request_id,
+            )
+            stream_with_retry = cast(Callable[..., AsyncIterator[str]], self._stream_with_retry)
+            async for line in stream_with_retry(
+                payload,
+                headers,
+                codex_session_affinity=codex_session_affinity,
+                propagate_http_errors=propagate_http_errors,
+                openai_cache_affinity=openai_cache_affinity,
+                api_key=api_key,
+                api_key_reservation=api_key_reservation,
+                suppress_text_done_events=suppress_text_done_events,
+                request_transport=_REQUEST_TRANSPORT_HTTP,
+                rewritten_file_account_id=rewritten_file_account_id,
+                file_account_resolution_complete=True,
+                upstream_stream_transport_override="http",
+                client_ip=client_ip,
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            ):
+                yield line
 
     async def _stream_via_http_bridge(
         self: Any,

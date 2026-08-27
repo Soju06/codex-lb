@@ -34,8 +34,10 @@ from app.core.clients.proxy import (
     _CHATGPT_ACCOUNT_ID_HEADER,
     _HOP_BY_HOP_HEADER_NAMES,
     CODEX_INSTALLATION_ID_HEADER,
+    UPSTREAM_EDGE_CHALLENGE_FAILURE_DETAIL,
     ProxyResponseError,
     _is_native_codex_request,
+    _is_upstream_edge_challenge,
     _normalize_non_native_upstream_fingerprint,
     filter_inbound_headers,
 )
@@ -950,6 +952,11 @@ async def _connect_upstream_websocket(
         ) from exc
     except InvalidStatus as exc:
         response = exc.response
+        is_edge_challenge = _is_upstream_edge_challenge(
+            response.status_code,
+            headers=response.headers,
+            body=response.body,
+        )
         if policy.credential_safe_connect_errors:
             status_code = response.status_code if 400 <= response.status_code <= 599 else 502
             payload = openai_error(
@@ -965,6 +972,7 @@ async def _connect_upstream_websocket(
             status_code,
             payload,
             failure_phase="connect",
+            failure_detail=UPSTREAM_EDGE_CHALLENGE_FAILURE_DETAIL if is_edge_challenge else None,
         ) from exc
     except InvalidProxy as exc:
         message = (

@@ -3437,7 +3437,7 @@ async def test_retained_response_alias_without_durable_identity_is_rejected() ->
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_event_spool_uses_generation_captured_at_receive_start(
+async def test_http_bridge_event_spool_uses_generation_for_current_receive_attempt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
@@ -3450,7 +3450,7 @@ async def test_http_bridge_event_spool_uses_generation_captured_at_receive_start
         started_at=time.monotonic(),
         response_id=None,
         operation_id="op-receive-generation",
-        operation_attempt_generation=1,
+        operation_attempt_generation=0,
         event_queue=asyncio.Queue(),
         transport="http",
         skip_request_log=True,

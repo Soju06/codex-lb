@@ -776,3 +776,53 @@ def test_headerless_live_websocket_keeps_existing_owner_lookup_behavior(app_inst
 
     assert denial.value.status_code == 404
     assert denial.value.json()["error"]["code"] != "required_capability_transport_unsupported"
+
+
+def test_websocket_transport_downgrade_never_applies_to_capability_handshakes(app_instance) -> None:
+    # The websocket-outage 426 is a session-scoped switch to HTTP in codex-rs,
+    # but capability routing resolves only on this transport: downgrading a
+    # capability handshake sends it to an HTTP path that rejects the same
+    # capability with 400, and the client never comes back.
+    from app.modules.proxy._service import support as transport_health
+
+    connected = False
+    transport_health.mark_upstream_websocket_transport_failure()
+    try:
+        with TestClient(app_instance, client=("127.0.0.1", 50000)) as client:
+            assert client.portal is not None
+            key = client.portal.call(_create_api_key, "Capability handshake during outage")
+            # Guard against a vacuous pass: the denial state must still be
+            # armed at the moment the handshake runs.
+            assert transport_health.upstream_websocket_transport_recently_failed() is True
+
+            with client.websocket_connect(
+                "/backend-api/codex/responses",
+                headers={"Authorization": f"Bearer {key}", **_CAPABILITY_HEADERS},
+            ):
+                connected = True
+    finally:
+        transport_health.clear_upstream_websocket_transport_failure()
+
+    assert connected, "a capability handshake must not be downgraded by the websocket-outage denial"
+
+
+@pytest.mark.asyncio
+async def test_capability_signal_in_client_metadata_is_rejected_over_http(async_client: AsyncClient) -> None:
+    # The websocket path resolves a required capability from client_metadata as
+    # well as the header and fails closed to security-work-authorized accounts.
+    # Nothing on the HTTP path applies that constraint, so a metadata-only
+    # signal must be rejected rather than entering ordinary account selection.
+    key = await _create_api_key("Metadata-only capability signal")
+
+    response = await async_client.post(
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "gpt-5.6-sol",
+            "input": "hello",
+            "client_metadata": {CODEX_LB_REQUIRED_CAPABILITY_HEADER: "trusted_cyber"},
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == _TRANSPORT_DENIAL

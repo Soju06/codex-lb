@@ -261,6 +261,12 @@ def _http_bridge_cooldown_suppression_is_replay_safe(request_state: _WebSocketRe
     ambiguous continuations keep the bounded 503 because a replay could
     execute the turn twice.
 
+    A non-empty payload ``conversation`` counts as continuation identity even
+    though it is neither an anchor nor a turn-state key: it binds the turn to
+    the bridge session's account, and unlike a response anchor it has no owner
+    index, so a raw-HTTP replay cannot prove that owner in a multi-account
+    pool and would fail the turn closed instead of letting the cooldown expire.
+
     ``response_create_attempt_count`` is the send marker rather than
     ``awaiting_response_created``: the latter is set optimistically when the
     request state is built and is only cleared after a submission is torn
@@ -279,6 +285,7 @@ def _http_bridge_cooldown_suppression_is_replay_safe(request_state: _WebSocketRe
         and request_state.replay_count == 0
         and request_state.last_downstream_sequence_number is None
         and not request_state.downstream_visible
+        and not request_state.payload_conversation_bound
         and request_state.response_create_attempt_count == 0
     )
 
@@ -720,6 +727,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 payload.previous_response_id is not None
                 or _sticky_key_from_turn_state_header(headers or {}) is not None
             ),
+            payload_conversation_bound=bool(payload.conversation),
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
             request_kind=request_kind,

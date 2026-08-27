@@ -175,6 +175,12 @@ def parse_routing_intent(
     return RoutingIntent.requiring(capability)
 
 
+def required_capability_metadata_values(client_metadata: JsonValue | None) -> tuple[JsonValue, ...]:
+    """Required-capability values carried in a request's ``client_metadata``."""
+
+    return _metadata_values(client_metadata, REQUIRED_CAPABILITY_HEADER)
+
+
 def reject_capability_signal_outside_response_create(
     *,
     api_key: ApiKeyData | None,

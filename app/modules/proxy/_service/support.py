@@ -1122,6 +1122,11 @@ class _WebSocketRequestState:
     useragent: str | None = None
     useragent_group: str | None = None
     conversation_id: str | None = None
+    # The Responses payload's own ``conversation``, distinct from the client
+    # log's ``conversation_id`` above. It is account-scoped continuity with no
+    # dedicated owner index, so the raw path cannot prove the bridge session's
+    # owner for it.
+    payload_conversation_bound: bool = False
     client_ip: str | None = None
     downstream_visible: bool = False
     last_downstream_sequence_number: int | None = None

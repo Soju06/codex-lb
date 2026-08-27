@@ -98,7 +98,18 @@ is, with no error for the routed exclusion to act on because the budget
 cancels the open rather than failing it. While `upstream_stream_transport` is pinned to `"http"`, the
 proxy MUST deny Responses websocket handshakes with HTTP 426 unconditionally.
 The denial MUST NOT apply to the realtime websocket surfaces, whose upstream
-is distinct.
+is distinct, nor to a handshake carrying a required-capability header:
+capability routing resolves only on this transport, so the downgrade would
+send the session to an HTTP path that rejects the same capability, and the
+client treats the switch as session-scoped and never returns.
+
+Because a required capability may also be carried in a `response.create`
+`client_metadata` field, which no handshake can observe, the HTTP responses
+path MUST reject a capability signal found there with the same
+transport-unsupported error it returns for the header. Capability resolution
+fails closed to security-work-authorized accounts on the websocket path and
+has no equivalent constraint on the HTTP path, so a metadata-only signal that
+reached HTTP would otherwise enter ordinary account selection unconstrained.
 
 #### Scenario: handshake denied while the transport-failure marker is armed
 
@@ -144,6 +155,18 @@ is distinct.
 - **WHEN** a client opens a Responses websocket handshake
 - **THEN** the handshake is denied with HTTP 426
 
+#### Scenario: capability handshakes are never downgraded
+
+- **GIVEN** the transport-failure denial state is armed
+- **WHEN** a client opens a Responses websocket handshake carrying a required-capability header
+- **THEN** the handshake is accepted rather than denied with 426, because capability routing exists only on this transport
+
+#### Scenario: a metadata-only capability signal is rejected over HTTP
+
+- **GIVEN** a Responses request arrives on the HTTP path carrying a required capability only in `client_metadata`
+- **WHEN** the request is admitted
+- **THEN** it is rejected with the transport-unsupported error rather than entering ordinary account selection without the authorization constraint
+
 ### Requirement: HTTP responses paths degrade to raw HTTP while the websocket transport is unavailable
 
 The HTTP responses bridge holds upstream websocket sessions, so a pinned
@@ -183,9 +206,10 @@ settlement owns that path), and MUST NOT absorb non-transient failures.
 
 When the bridge retry circuit's pre-dispatch submission gate suppresses a
 request whose state is provably undispatched — no client or proxy-injected
-continuation identity, no file account pin, no send attempt recorded for the
-request, and none of the unambiguous-boundary markers (`response_id`,
-response events, downstream visibility, or a prior replay) — the resulting
+continuation identity, no payload `conversation`, no file account pin, no
+send attempt recorded for the request, and none of the unambiguous-boundary
+markers (`response_id`, response events, downstream visibility, or a prior
+replay) — the resulting
 cooldown failure MUST carry the same pre-submit provenance and degrade to the
 raw-HTTP fallback instead of a bounded 503. That undispatched proof MUST come
 from state that is false before an actual send; a marker set optimistically
@@ -270,6 +294,12 @@ evidence.
 - **GIVEN** the bridge retry circuit is cooling down and a continuation whose delivery is ambiguous is suppressed
 - **WHEN** the cooldown failure reaches the bridge wrapper
 - **THEN** the bounded 503 with its retry hint propagates without an HTTP replay
+
+#### Scenario: a conversation-scoped suppression keeps the bounded 503
+
+- **GIVEN** a suppressed request carries a non-empty payload `conversation` but no anchor, turn-state key, file pin, or dispatch marker
+- **WHEN** the cooldown failure reaches the bridge wrapper
+- **THEN** the bounded 503 propagates, because `conversation` has no owner index and a raw-HTTP replay could not prove the bridge session's owner
 
 #### Scenario: post-submit transient failures are not replayed
 

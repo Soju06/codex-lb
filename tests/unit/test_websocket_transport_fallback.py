@@ -1216,6 +1216,7 @@ def _cooldown_request_state(**overrides: Any) -> Any:
         replay_count=0,
         last_downstream_sequence_number=None,
         downstream_visible=False,
+        payload_conversation_bound=False,
         response_create_attempt_count=0,
     )
     for name, value in overrides.items():
@@ -1241,6 +1242,7 @@ def test_cooldown_suppression_replay_safety_predicate() -> None:
         _cooldown_request_state(last_downstream_sequence_number=3),
         _cooldown_request_state(downstream_visible=True),
         _cooldown_request_state(response_create_attempt_count=1),
+        _cooldown_request_state(payload_conversation_bound=True),
     ]
     for state in ambiguous_states:
         assert _http_bridge_cooldown_suppression_is_replay_safe(state) is False
@@ -1396,3 +1398,47 @@ async def test_http_bridge_marked_cooldown_suppression_still_falls_back(
     assert retry_calls[0]["upstream_stream_transport_override"] == "http"
     # A bridge cooldown is not websocket-transport evidence.
     assert transport_health.upstream_websocket_transport_recently_failed() is False
+
+
+@pytest.mark.asyncio
+async def test_conversation_scoped_request_state_is_not_replay_safe() -> None:
+    # A payload `conversation` binds the turn to the bridge session's account
+    # but has no owner index, so a raw-HTTP replay cannot prove that owner in a
+    # multi-account pool and would fail the turn closed rather than letting the
+    # cooldown expire. It must count as continuation identity.
+    from app.modules.proxy._service.http_bridge.request_submit import (
+        _http_bridge_cooldown_suppression_is_replay_safe,
+    )
+
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+
+    def _state(payload: Any) -> Any:
+        state, _text = service._prepare_response_bridge_request_state(
+            payload,
+            api_key=None,
+            api_key_reservation=None,
+            include_type_field=True,
+            attach_event_queue=True,
+            transport="http",
+            client_metadata=None,
+            headers={},
+            request_id="req-conversation-scoped",
+        )
+        return state
+
+    fresh = _state(_bridge_payload())
+    assert fresh.payload_conversation_bound is False
+    assert _http_bridge_cooldown_suppression_is_replay_safe(fresh) is True
+
+    conversation_bound = _state(
+        proxy_service.ResponsesRequest.model_validate(
+            {
+                "model": "gpt-5.6-sol",
+                "instructions": "test",
+                "input": "hello",
+                "conversation": "conv_abc123",
+            }
+        )
+    )
+    assert conversation_bound.payload_conversation_bound is True
+    assert _http_bridge_cooldown_suppression_is_replay_safe(conversation_bound) is False

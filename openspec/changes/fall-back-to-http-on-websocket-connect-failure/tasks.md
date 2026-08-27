@@ -14,7 +14,9 @@
       direct upstream connector began, and clear it on the next successful
       direct upstream websocket connect
 - [x] 1.3 Deny responses websocket handshakes with HTTP 426 while the marker
-      is armed or `upstream_stream_transport` is pinned to `"http"`
+      is armed or `upstream_stream_transport` is pinned to `"http"`, except
+      for capability-bearing handshakes, and reject a capability signal
+      carried in `client_metadata` on the HTTP responses path
 - [x] 1.4 Bypass the HTTP responses bridge and pin the raw path's upstream
       transport to `"http"` while the marker is armed or the upstream
       transport is pinned to `"http"`
@@ -30,7 +32,8 @@
       marker plus the shared pre-submit provenance, and admit them to the
       wrapper's raw-HTTP fallback on that marker rather than the shared
       `upstream_request_timeout` code, which pre-submit budget exhaustion
-      also emits; ambiguous continuations keep the bounded 503
+      also emits; ambiguous continuations, including a payload-scoped
+      `conversation`, keep the bounded 503
 
 ## 2. Regression coverage
 
@@ -41,7 +44,8 @@
       5xx handshake, direct connect timeout, direct credential rejection,
       direct and routed TLS verification failure, routed 5xx handshake
 - [x] 2.3 Handshake admission: 426 denial while armed or pinned, normal accept
-      otherwise, marker TTL expiry and clear
+      otherwise, marker TTL expiry and clear; a capability handshake connects
+      while armed, and a metadata-only capability signal is rejected on HTTP
 - [x] 2.4 Budget exhaustion: a stalled direct connector arms the marker; a
       budget that expires in local admission or in a routed connector does
       not; a direct open success clears the marker and a routed one does not

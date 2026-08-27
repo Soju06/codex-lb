@@ -138,9 +138,17 @@ def test_runstate_write_failure_clears_a_stale_clean_marker(monkeypatch: pytest.
     def _explode(*_args: object, **_kwargs: object) -> None:
         raise OSError("read-only filesystem")
 
+    directory_syncs: list[Path] = []
+
+    def _record_directory(directory: Path) -> bool:
+        directory_syncs.append(directory)
+        return True
+
     monkeypatch.setattr(os, "replace", _explode)
+    monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", _record_directory)
 
     assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+    assert directory_syncs == [tmp_path]
 
     monkeypatch.undo()
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
@@ -234,12 +242,40 @@ def test_runstate_write_fails_closed_when_the_directory_sync_fails(
 
     monkeypatch.setattr(sqlite_utils_module, "_fsync_directory", lambda _directory: False)
 
-    assert sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING) is False
+    with pytest.raises(OSError, match="persist removal"):
+        sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING)
 
     monkeypatch.undo()
     assert sqlite_utils_module.read_sqlite_runstate(db_path) is None
     assert not sqlite_utils_module.sqlite_runstate_path(db_path).exists()
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_runstate_write_aborts_when_the_failed_marker_cannot_be_removed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A locked stale marker must stop startup instead of remaining trusted."""
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+    sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.CLEAN)
+    target = sqlite_utils_module.sqlite_runstate_path(db_path)
+    real_unlink = Path.unlink
+
+    def _fail_target_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path == target:
+            raise OSError("sidecar is locked")
+        real_unlink(path, missing_ok=missing_ok)
+
+    def _fail_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(os, "replace", _fail_replace)
+    monkeypatch.setattr(Path, "unlink", _fail_target_unlink)
+
+    with pytest.raises(OSError, match="remove failed SQLite run-state files"):
+        sqlite_utils_module.write_sqlite_runstate(db_path, sqlite_utils_module.SqliteRunState.RUNNING)
+
+    assert sqlite_utils_module.read_sqlite_runstate(db_path) is sqlite_utils_module.SqliteRunState.CLEAN
 
 
 def test_fsync_directory_reports_success_where_directory_handles_do_not_exist(

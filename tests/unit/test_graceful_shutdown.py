@@ -207,7 +207,7 @@ async def test_release_leader_lease_within_returns_when_release_wedged(
 
     loop = asyncio.get_running_loop()
     start = loop.time()
-    await _release_leader_lease_within(0.2)
+    assert await _release_leader_lease_within(0.2) is False
     elapsed = loop.time() - start
 
     assert 0.2 <= elapsed < 1.0
@@ -232,7 +232,7 @@ async def test_release_leader_lease_within_awaits_quick_release(
     election = _FastElection()
     monkeypatch.setattr(app_main, "get_leader_election", lambda: election)
 
-    await _release_leader_lease_within(5)
+    assert await _release_leader_lease_within(5) is True
 
     assert election.released is True
 
@@ -248,7 +248,7 @@ async def test_release_leader_lease_within_swallows_release_error(
     monkeypatch.setattr(app_main, "get_leader_election", lambda: _BrokenElection())
 
     # Must not raise: a failed release must never fail shutdown.
-    await _release_leader_lease_within(5)
+    assert await _release_leader_lease_within(5) is True
 
 
 @pytest.fixture(autouse=True)
@@ -1135,6 +1135,27 @@ async def test_clean_shutdown_is_not_recorded_when_wedged_teardown_was_abandoned
     monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
 
     await app_main._close_db_and_record_clean_shutdown()
+
+    assert marked is False
+
+
+@pytest.mark.asyncio
+async def test_clean_shutdown_is_not_recorded_when_leader_release_was_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marked = False
+
+    async def _close_db() -> bool:
+        return True
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    await app_main._close_db_and_record_clean_shutdown(leader_lease_release_completed=False)
 
     assert marked is False
 

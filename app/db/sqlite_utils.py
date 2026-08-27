@@ -249,6 +249,20 @@ def read_sqlite_runstate(db_path: Path) -> SqliteRunState | None:
     return state
 
 
+def _invalidate_failed_sqlite_runstate(target: Path, tmp: Path) -> None:
+    """Remove an untrusted run-state write and persist that removal."""
+    cleanup_error: OSError | None = None
+    for cleanup in (tmp, target):
+        try:
+            cleanup.unlink(missing_ok=True)
+        except OSError as exc:
+            cleanup_error = cleanup_error or exc
+    if cleanup_error is not None:
+        raise OSError(f"could not remove failed SQLite run-state files for {target}") from cleanup_error
+    if not _fsync_directory(target.parent):
+        raise OSError(f"could not persist removal of failed SQLite run-state files for {target}")
+
+
 def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
     """Record ``state`` atomically. Returns ``False`` if it could not be recorded.
 
@@ -262,8 +276,10 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
 
     A failed write must never leave a stale ``clean`` sidecar behind, because
     that would tell the next startup to skip the integrity check for a store
-    this process may have left mid-write. The fallback is to remove the
-    sidecar entirely, which reads back as unknown and forces the check.
+    this process may have left mid-write. The fallback removes both the
+    temporary and target files, then syncs the directory entry. If that
+    invalidation cannot be confirmed, the error is raised so startup cannot
+    continue with an untrusted marker.
     """
     target = sqlite_runstate_path(db_path)
     tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
@@ -278,9 +294,5 @@ def write_sqlite_runstate(db_path: Path, state: SqliteRunState) -> bool:
             raise OSError("could not sync the run-state directory entry")
         return True
     except OSError:
-        for cleanup in (tmp, target):
-            try:
-                cleanup.unlink(missing_ok=True)
-            except OSError:
-                pass
+        _invalidate_failed_sqlite_runstate(target, tmp)
         return False

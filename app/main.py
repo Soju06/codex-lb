@@ -181,7 +181,7 @@ def _log_abandoned_lease_release(task: asyncio.Task[None]) -> None:
         logger.warning("Abandoned scheduler leader lease release finished with error", exc_info=exc)
 
 
-async def _release_leader_lease_within(timeout: float) -> None:
+async def _release_leader_lease_within(timeout: float) -> bool:
     """Release the scheduler leader lease without ever pinning shutdown.
 
     ``release()`` uses a background DB session whose rollback/close shield and
@@ -201,10 +201,11 @@ async def _release_leader_lease_within(timeout: float) -> None:
             timeout,
         )
         release_task.add_done_callback(_log_abandoned_lease_release)
-        return
+        return False
     exc = release_task.exception()
     if exc is not None:
         logger.warning("Failed to release scheduler leader lease during shutdown", exc_info=exc)
+    return True
 
 
 async def _drain_proxy_persistence_tasks(
@@ -322,15 +323,16 @@ def _log_non_multiproc_metrics_bind_conflict(port: int) -> None:
     )
 
 
-async def _close_db_and_record_clean_shutdown() -> None:
+async def _close_db_and_record_clean_shutdown(*, leader_lease_release_completed: bool = True) -> None:
     """Dispose the database engines, then record the shutdown as clean.
 
-    The record is only reached once disposal returns. A cancellation or a
-    failed dispose must leave the run state unclean, because that is exactly
-    the incomplete shutdown the next startup's integrity scan is for.
+    The record is only reached once disposal returns and no database-using
+    leader-lease release task was abandoned. A cancellation, failed dispose,
+    or abandoned release must leave the run state unclean, because that is
+    exactly the incomplete shutdown the next startup's integrity scan is for.
     """
     sqlite_teardown_drained = await close_db()
-    if sqlite_teardown_drained:
+    if sqlite_teardown_drained and leader_lease_release_completed:
         mark_sqlite_shutdown_clean()
 
 
@@ -774,7 +776,7 @@ async def lifespan(app: FastAPI):
         # release path shields and awaits its own session teardown — is
         # enforced by abandoning the release task rather than awaiting a
         # potentially wedged cancellation, so shutdown always proceeds.
-        await _release_leader_lease_within(10)
+        leader_lease_release_completed = await _release_leader_lease_within(10)
         try:
             await close_http_client()
         finally:
@@ -788,7 +790,9 @@ async def lifespan(app: FastAPI):
             finally:
                 mark_process_dead()
                 try:
-                    await _close_db_and_record_clean_shutdown()
+                    await _close_db_and_record_clean_shutdown(
+                        leader_lease_release_completed=leader_lease_release_completed,
+                    )
                 finally:
                     shutdown_state.mark_lifespan_completed()
 

@@ -1827,6 +1827,34 @@ async def test_init_db_records_running_state_even_when_check_is_disabled(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_init_db_aborts_when_running_state_invalidation_cannot_be_confirmed(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "store.db"
+    db_path.write_bytes(b"sqlite")
+
+    monkeypatch.setattr(
+        session_module,
+        "_settings",
+        _FakeSettings(
+            database_url=f"sqlite+aiosqlite:///{db_path}",
+            database_migrate_on_startup=False,
+        ),
+    )
+    monkeypatch.setattr(
+        session_module,
+        "check_sqlite_integrity",
+        lambda *_args, **_kwargs: IntegrityCheck(ok=True, details=None),
+    )
+
+    def _fail(*_args: object, **_kwargs: object) -> bool:
+        raise OSError("run-state cleanup could not be confirmed")
+
+    monkeypatch.setattr(session_module, "write_sqlite_runstate", _fail)
+
+    with pytest.raises(RuntimeError, match="refusing to start"):
+        await session_module.init_db()
+
+
+@pytest.mark.asyncio
 async def test_init_db_leaves_state_unclean_when_the_startup_check_fails(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "store.db"
     db_path.write_bytes(b"sqlite")

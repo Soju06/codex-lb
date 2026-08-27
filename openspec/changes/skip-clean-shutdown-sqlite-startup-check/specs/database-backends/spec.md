@@ -21,7 +21,10 @@ sidecar MUST read as unknown rather than clean, so a first run and an upgrade
 from a build that never wrote one both still scan. Sidecar content that cannot be read, cannot be
 decoded, or is not recognized MUST also read as unknown, and MUST NOT
 propagate an error that aborts startup. A sidecar write that fails MUST
-remove the file rather than leave a stale `clean` behind.
+remove the temporary and target files rather than leave a stale `clean`
+behind, and MUST directory-sync that removal. If the removal or its
+durability cannot be confirmed for the startup `running` transition, startup
+MUST abort rather than continue with an untrusted marker.
 
 The run state MUST be recorded even when the check mode is `off`, so
 re-enabling the check cannot trust a state the disabled build never
@@ -54,7 +57,8 @@ Recording `clean` MUST NOT be reachable unless the database engines actually
 finished disposing and all reclaimed SQLite teardown work finished within the
 bounded shutdown drain. A cancelled or failed disposal, or a drain that
 abandons pending teardown work at its deadline, MUST leave the run state
-unclean.
+unclean. If shutdown abandons a database-using scheduler leader-lease release
+task at its deadline, it MUST also leave the run state unclean.
 
 The configured check mode (`quick`, `full`, `off`) keeps its meaning: this
 requirement governs only whether the selected mode runs on a given startup.
@@ -103,6 +107,14 @@ requirement governs only whether the selected mode runs on a given startup.
 - **THEN** the write reports failure and no sidecar remains
 - **AND** the next startup runs the integrity check
 
+#### Scenario: Unconfirmed run-state invalidation aborts startup
+
+- **GIVEN** the startup `running` transition fails while a prior sidecar exists
+- **AND** removing or directory-syncing that sidecar cannot be confirmed
+- **WHEN** the application starts
+- **THEN** startup aborts instead of continuing with a potentially trusted
+  stale `clean` marker
+
 #### Scenario: A directory that cannot be opened fails the write closed
 
 - **GIVEN** a platform that supports directory handles
@@ -129,6 +141,14 @@ requirement governs only whether the selected mode runs on a given startup.
 
 - **GIVEN** a reclaimed SQLite teardown task remains pending when the bounded
   shutdown drain reaches its deadline
+- **WHEN** database disposal finishes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: An abandoned leader-lease release is not recorded as clean
+
+- **GIVEN** shutdown abandons a database-using scheduler leader-lease release
+  task at its bounded deadline
 - **WHEN** database disposal finishes
 - **THEN** the sidecar does not record a clean shutdown
 - **AND** the next startup runs the integrity check

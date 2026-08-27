@@ -415,7 +415,13 @@ def _run_startup_sqlite_check(sqlite_path: Path, *, mode: SqliteIntegrityCheckMo
 
 
 def _mark_sqlite_running(sqlite_path: Path) -> None:
-    if not write_sqlite_runstate(sqlite_path, SqliteRunState.RUNNING):
+    try:
+        recorded = write_sqlite_runstate(sqlite_path, SqliteRunState.RUNNING)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not safely invalidate the SQLite run state at {sqlite_path}; refusing to start"
+        ) from exc
+    if not recorded:
         logger.warning(
             "Failed to record the SQLite run state path=%s; the next startup will re-run the integrity check",
             sqlite_path,

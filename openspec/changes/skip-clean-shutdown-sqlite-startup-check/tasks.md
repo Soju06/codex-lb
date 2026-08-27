@@ -3,7 +3,9 @@
 - [x] 1.1 Add `SqliteRunState` plus `sqlite_runstate_path`,
   `read_sqlite_runstate`, and `write_sqlite_runstate` to `app/db/sqlite_utils.py`.
 - [x] 1.2 Write the sidecar atomically (temp file + `os.replace`) and remove
-  it when the write fails, so a stale `clean` can never survive.
+  both files with a directory sync when the write fails, so a stale `clean`
+  can never survive; abort the startup transition if that invalidation cannot
+  be confirmed.
 - [x] 1.3 Read unrecognized or unreadable content as unknown.
 - [x] 1.4 Fence a `clean` record to the database file's device, inode, size,
   mtime, and ctime, so a timestamp-preserving restore cannot inherit the
@@ -35,6 +37,9 @@
   `finally`.
 - [x] 3.3 Treat a bounded teardown drain that abandons pending SQLite work as
   incomplete, so it cannot record a clean shutdown.
+- [x] 3.4 Treat an abandoned scheduler leader-lease release task as an
+  incomplete shutdown, so its still-live database session cannot race with
+  clean-state recording.
 
 ## 4. Verification
 
@@ -53,3 +58,6 @@
 - [x] 4.6 Run Ruff check/format and `ty`.
 - [x] 4.7 Unit-test that a teardown drain reaching its deadline reports an
   incomplete shutdown and does not record a clean sidecar.
+- [x] 4.8 Unit-test durable failed-write invalidation, startup abort on
+  unconfirmed invalidation, and clean-state suppression after an abandoned
+  leader-lease release.

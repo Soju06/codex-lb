@@ -76,6 +76,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
     _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
     _await_task_deferring_cancellation,
     _build_http_bridge_prewarm_text,
@@ -1002,6 +1003,7 @@ class _HTTPBridgeRequestSubmitMixin:
             )
             if _http_bridge_cooldown_suppression_is_replay_safe(request_state):
                 setattr(cooldown_error, _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+                setattr(cooldown_error, _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR, True)
             raise cooldown_error
         # Persist the recovery checkpoint only after the retry circuit has
         # admitted this request. A client reconnect suppressed by the

@@ -73,6 +73,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR,
     _HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR,
     _HTTP_BRIDGE_PREPARED_ANCHOR_ATTR,
     _effective_http_bridge_idle_ttl_seconds,
@@ -1085,11 +1086,17 @@ class _HTTPBridgeStreamingMixin:
                 )
                 # The bridge retry circuit's own cooldown suppression is
                 # generated locally, so it carries no connect provenance. It
-                # is admitted on the replay-safety proof the pre-dispatch
-                # submission gate already attached, and it is bridge-scoped
-                # rather than websocket transport evidence.
-                fallback_error_code, _fallback_error_message = _proxy_error_code_message(exc)
-                cooldown_suppression = fallback_error_code == "upstream_request_timeout"
+                # is admitted on the marker the pre-dispatch submission gate
+                # attaches once the request is proved replay-safe, and it is
+                # bridge-scoped rather than websocket transport evidence.
+                # The marker, never the error code: an ordinary pre-submit
+                # budget exhaustion emits the same ``upstream_request_timeout``
+                # from ``_raise_proxy_budget_exhausted`` and collects the same
+                # pre-submit provenance, but it is admission-queue or
+                # host-network evidence. Replaying it would double every
+                # request exactly when the instance is saturated, and would
+                # feed a doomed raw-HTTP attempt into its own recovery wait.
+                cooldown_suppression = getattr(exc, _HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR, False)
                 if (
                     bridge_yielded_any
                     or api_key_reservation is not None

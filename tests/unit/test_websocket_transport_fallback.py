@@ -1262,6 +1262,7 @@ async def test_http_bridge_falls_back_on_replay_safe_cooldown_suppression(
             "HTTP responses session bridge is cooling down after repeated upstream timeouts; retry shortly.",
         )
         setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR, True)
         raise exc
         yield ""
 
@@ -1332,3 +1333,66 @@ async def test_real_bridge_request_state_is_replay_safe_before_any_send() -> Non
     assert request_state.awaiting_response_created is True
     assert request_state.response_create_attempt_count == 0
     assert _http_bridge_cooldown_suppression_is_replay_safe(request_state) is True
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_budget_exhaustion_does_not_enter_cooldown_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `_raise_proxy_budget_exhausted` emits the same `upstream_request_timeout`
+    # the cooldown suppression uses, and session creation attaches the same
+    # pre-submit provenance to both. Admitting it would double every request
+    # exactly when the admission queue is saturated, and would feed a doomed
+    # raw-HTTP attempt into its own process-network recovery wait.
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+
+    async def budget_exhausted_bridge(*_args: object, **_kwargs: object):
+        exc = _proxy_error(502, "upstream_request_timeout", "Proxy request budget exhausted")
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+        raise exc
+        yield ""
+
+    async def fallback_must_not_run(*_args: object, **_kwargs: object):
+        raise AssertionError("budget exhaustion is overload evidence, not a replay-safe cooldown suppression")
+        yield ""
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", budget_exhausted_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", fallback_must_not_run)
+
+    with pytest.raises(ProxyResponseError):
+        await _collect_bridge_stream(service)
+
+    assert transport_health.upstream_websocket_transport_recently_failed() is False
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_marked_cooldown_suppression_still_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _bridge_service(monkeypatch, dashboard_transport="default")
+    retry_calls: list[dict[str, Any]] = []
+
+    async def cooldown_bridge(*_args: object, **_kwargs: object):
+        exc = _proxy_error(
+            503,
+            "upstream_request_timeout",
+            "HTTP responses session bridge is cooling down after repeated upstream timeouts; retry shortly.",
+        )
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_PRE_SUBMIT_FAILURE_ATTR, True)
+        setattr(exc, http_bridge_streaming_module._HTTP_BRIDGE_COOLDOWN_SUPPRESSION_ATTR, True)
+        raise exc
+        yield ""
+
+    async def record_stream_with_retry(*_args: object, **kwargs: object):
+        retry_calls.append(cast(dict[str, Any], kwargs))
+        yield 'data: {"type":"response.completed"}\n\n'
+
+    monkeypatch.setattr(service, "_stream_via_http_bridge", cooldown_bridge)
+    monkeypatch.setattr(service, "_stream_with_retry", record_stream_with_retry)
+
+    chunks = await _collect_bridge_stream(service)
+
+    assert chunks == ['data: {"type":"response.completed"}\n\n']
+    assert retry_calls[0]["upstream_stream_transport_override"] == "http"
+    # A bridge cooldown is not websocket-transport evidence.
+    assert transport_health.upstream_websocket_transport_recently_failed() is False

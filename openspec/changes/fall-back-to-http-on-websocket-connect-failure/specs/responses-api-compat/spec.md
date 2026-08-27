@@ -193,6 +193,17 @@ at request construction proves nothing and would make the fallback
 unreachable. A cooldown suppression of an ambiguous continuation MUST keep
 the bounded 503 with its retry hint.
 
+That suppression MUST be identified by provenance the gate attaches, never by
+its error code. An ordinary pre-submit budget exhaustion emits the same
+`upstream_request_timeout` and collects the same pre-submit provenance while
+session creation unwinds, but it is admission-queue or host-network evidence:
+replaying it would double every request exactly when the instance is
+saturated, and would feed a doomed raw-HTTP attempt into its own
+process-network recovery wait. A budget exhaustion MUST therefore propagate
+unchanged, and a cooldown suppression MUST NOT arm the websocket
+transport-failure denial state, being bridge-scoped rather than transport
+evidence.
+
 #### Scenario: pinned HTTP upstream transport bypasses the bridge
 
 - **GIVEN** the HTTP responses bridge is enabled and `upstream_stream_transport` is pinned to `"http"`
@@ -247,6 +258,12 @@ the bounded 503 with its retry hint.
 - **GIVEN** the bridge retry circuit is cooling down and a fresh turn with no continuation identity and no dispatch markers is suppressed at the pre-dispatch submission gate
 - **WHEN** the cooldown failure reaches the bridge wrapper before any line reached the client
 - **THEN** the turn is retried over raw HTTP with the upstream transport pinned to `"http"`
+
+#### Scenario: pre-submit budget exhaustion is not a cooldown suppression
+
+- **GIVEN** bridge session creation exhausts the request budget and surfaces `upstream_request_timeout` with pre-submit provenance but no cooldown marker
+- **WHEN** the failure reaches the bridge wrapper
+- **THEN** the failure propagates without an HTTP replay, and the transport-failure denial state stays clear
 
 #### Scenario: ambiguous cooldown suppression keeps the bounded 503
 

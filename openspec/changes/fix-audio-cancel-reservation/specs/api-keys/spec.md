@@ -9,11 +9,16 @@ request completes.
 The finalized input, output, cached-input, and cost values MUST update the same
 API-key limit and usage-reporting paths used by subscription-backed requests.
 When cancellation interrupts source-routed `/v1/audio/transcriptions` upstream
-forwarding after reservation creation, the request owner MUST finish releasing
-that reservation exactly once despite active cancellation, MUST restore its
-reserved quota, and MUST then propagate the original cancellation.
-Stale-reservation reclamation MUST remain only a backstop and MUST NOT
-substitute for request-owned cancellation cleanup.
+forwarding after reservation creation, the request owner MUST finish a
+cancellation-deferring release attempt before propagating the original
+cancellation. If release persistence succeeds, the reservation MUST reach
+`released` state exactly once and its reserved quota MUST be restored. If the
+release attempt still fails after the existing bounded persistence retries,
+the system MUST emit cancellation-neutral cleanup diagnostics, MUST propagate
+the original cancellation, and MUST leave the reservation eligible for
+stale-reservation reclamation to eventually release it and restore its quota.
+Stale reclamation MUST remain only an exceptional backstop and MUST NOT
+substitute for normal request-owned cancellation cleanup.
 
 #### Scenario: Source-routed response finalizes token usage
 
@@ -44,3 +49,15 @@ substitute for request-owned cancellation cleanup.
   restored
 - **AND** the original cancellation propagates after cleanup completes
 - **AND** stale-reservation reclamation is not required for that request
+
+#### Scenario: Failed cancellation release remains recoverable
+
+- **GIVEN** cancellation interrupts a limited source-routed audio request after
+  its reservation is created
+- **AND** the immediate release attempt exhausts the existing bounded
+  persistence retries
+- **WHEN** release persistence reports failure
+- **THEN** the proxy emits cancellation-neutral cleanup diagnostics
+- **AND** the original cancellation propagates
+- **AND** stale-reservation reclamation eventually releases the reservation and
+  restores its reserved quota

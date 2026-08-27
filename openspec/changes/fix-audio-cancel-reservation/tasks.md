@@ -15,3 +15,4 @@
 - [x] 3.3 Run strict OpenSpec validation for the scoped change and affected `api-keys` spec.
 - [x] 3.4 Verify implementation coherence against the OpenSpec change.
 - [x] 3.5 Inspect the final diff and worktree status for scope and unrelated changes.
+- [x] 3.6 Verify the exceptional cleanup-failure contract with the focused stale-reservation quota-restoration regression.

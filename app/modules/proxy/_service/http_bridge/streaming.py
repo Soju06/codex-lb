@@ -249,17 +249,6 @@ logger = logging.getLogger("app.modules.proxy.service")
 T = TypeVar("T")
 _REQUEST_TRANSPORT_HTTP = "http"
 
-# The local previous-response rebind reports two telemetry labels so the
-# reattach metric can tell an anchored recovery from one that dropped a
-# proven-dead anchor. They are the same bounded local recovery: both consume
-# the one server-side replay and both reset the recovery operation spool, so
-# every behavioural check keys off this set rather than a single label.
-_LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS = frozenset(
-    {
-        "local_previous_response_error",
-        "local_previous_response_error_unanchored",
-    }
-)
 _RESPONSE_CREATE_GATE_RETRY_SLEEP_SECONDS = 10.0
 
 
@@ -3386,26 +3375,43 @@ class _HTTPBridgeStreamingMixin:
                     # merely for an active window.
                     #
                     # At that point re-attaching guarantees the retry repeats
-                    # the rejection. The fresh-replay branches above already
-                    # drop the anchor, but each additionally requires an
-                    # operation fence or a proven full-resend context, and a
-                    # rejection satisfying neither falls through to here. Live,
-                    # that produced a reattach loop against a dead anchor and a
-                    # burst of client-visible 503s while the circuit cooled on
-                    # failures it kept re-creating.
-                    #
-                    # This stays narrower than those branches: it keeps this
-                    # path's interrupted tool-output injection and its account
-                    # preference, and only stops the dead reference being sent
-                    # again. Gating on an explicit stale-anchor rejection is
-                    # the case #1863's non-goal names as the one where
-                    # converting a transport recovery to an unanchored replay
-                    # is permitted.
-                    retry_payload = _http_bridge_payload_without_previous_response_id(retry_payload)
-                    retry_previous_response_id = None
-                    recovery_path = "local_previous_response_error_unanchored"
-                else:
-                    retry_previous_response_id = request_state.previous_response_id
+                    # the rejection — live, a reattach loop against a dead
+                    # anchor and a burst of client-visible 503s. But every
+                    # request shape that reaches this fallthrough has already
+                    # failed the proven full-resend and operation-fence
+                    # checks of the branches above, so its payload does not
+                    # retain the anchor's context: stripping the anchor here
+                    # would replay a delta-only continuation as a
+                    # context-free request, which the responses-api-compat
+                    # spec forbids ("a genuine delta-only continuation MUST
+                    # still receive the durable anchor"), and the durable
+                    # layer stores input fingerprints, not items, so the
+                    # proxy cannot rebuild the context either. The only
+                    # honest terminal is the upstream's own explicit
+                    # rejection: surface it, let the funnels settle the
+                    # circuit (an explicit rejection is not poison-class, so
+                    # this cannot re-open it), and leave recovery to the
+                    # client, which is the only party holding the history.
+                    _log_http_bridge_event(
+                        "previous_response_poisoned_anchor_fail_fast",
+                        bridge_session_key,
+                        account_id=None,
+                        model=effective_payload.model,
+                        detail="outcome=explicit_rejection_propagated",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                        owner_check_applied=True,
+                    )
+                    raise ProxyResponseError(
+                        exc.status_code if 400 <= exc.status_code < 500 else 404,
+                        openai_error(
+                            "bridge_previous_response_not_found",
+                            "The previous response referenced by this request no longer "
+                            "exists upstream; resend the full conversation history or "
+                            "start a new conversation.",
+                        ),
+                    ) from exc
+                retry_previous_response_id = request_state.previous_response_id
                 retry_request_stage = "reattach"
                 retry_preferred_account_id = request_state.preferred_account_id
                 allow_previous_response_recovery_rebind = True
@@ -3504,14 +3510,12 @@ class _HTTPBridgeStreamingMixin:
                     retry_payload,
                     reservation=retry_api_key_reservation,
                 )
-                local_previous_response_recovery = recovery_path in (
-                    _LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS
-                    | {
-                        "local_previous_response_fresh_replay",
-                        "local_previous_response_same_owner_fresh_replay",
-                    }
-                )
-                if recovery_path in _LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS:
+                local_previous_response_recovery = recovery_path in {
+                    "local_previous_response_error",
+                    "local_previous_response_fresh_replay",
+                    "local_previous_response_same_owner_fresh_replay",
+                }
+                if recovery_path == "local_previous_response_error":
                     await reset_previous_response_recovery_operation_spool(
                         session,
                         request_state,

@@ -463,6 +463,13 @@ class _HTTPBridgeRetryCircuitMixin:
                     state.last_detail = state.last_detail or persisted.last_detail
                 else:
                     state.last_detail = persisted.last_detail or state.last_detail
+            if state.cooldown_until > now_monotonic:
+                # A cooling key is not probing. Without this, a merged
+                # persisted cooldown leaves a leftover half-open lease
+                # armed, and once the cooldown expires the admission gate
+                # reads that stale lease as an in-flight probe and keeps
+                # suppressing the key for the rest of the lease.
+                state.half_open_until = 0.0
             state.persisted_updated_at_epoch = max(state.persisted_updated_at_epoch, persisted.updated_at_epoch)
             state.last_touched_monotonic = now_monotonic
             state.last_durable_load_monotonic = now_monotonic
@@ -511,6 +518,7 @@ class _HTTPBridgeRetryCircuitMixin:
             )
             if persisted is not None:
                 persisted_cooldown_until = now_monotonic + max(0.0, persisted.cooldown_until_epoch - now_wall)
+                cleared_while_write_in_flight = False
                 async with self._http_bridge_retry_circuit_lock:
                     current = self._http_bridge_retry_circuits.get(session.key)
                     if current is state:
@@ -526,6 +534,12 @@ class _HTTPBridgeRetryCircuitMixin:
                                 state.last_detail = state.last_detail or persisted.last_detail
                             else:
                                 state.last_detail = persisted.last_detail or state.last_detail
+                        if state.cooldown_until > now_monotonic:
+                            # A cooling key is not probing: drop any leftover
+                            # half-open lease so the admission gate cannot
+                            # read it as an in-flight probe after this
+                            # cooldown expires.
+                            state.half_open_until = 0.0
                         state.persisted_updated_at_epoch = max(
                             state.persisted_updated_at_epoch,
                             persisted.updated_at_epoch,
@@ -537,6 +551,30 @@ class _HTTPBridgeRetryCircuitMixin:
                         state.last_durable_load_monotonic = max(
                             state.last_durable_load_monotonic,
                             now_monotonic,
+                        )
+                    elif current is None:
+                        cleared_while_write_in_flight = True
+                if cleared_while_write_in_flight:
+                    # The key was settled while this write was in flight, so
+                    # the row this write just (re)created is a resurrected
+                    # circuit for a cause the clear already removed. Undo
+                    # exactly our own write: the fence on this write's epoch
+                    # cannot touch a newer episode's row. A different state
+                    # object under the key is such a new episode — its own
+                    # persist supersedes this row, so it is left alone above.
+                    try:
+                        await self._durable_bridge.clear_retry_circuit(
+                            session_key_kind=session.key.affinity_kind,
+                            session_key_value=session.key.affinity_key,
+                            api_key_id=session.key.api_key_id,
+                            expected_updated_at_epoch=persisted.updated_at_epoch,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Failed to undo resurrected HTTP bridge retry circuit bridge_kind=%s bridge_key=%s",
+                            session.key.affinity_kind,
+                            _hash_identifier(session.key.affinity_key),
+                            exc_info=True,
                         )
             async with self._http_bridge_retry_circuit_lock:
                 if self._http_bridge_retry_circuits.get(session.key) is state:
@@ -891,19 +929,16 @@ class _HTTPBridgeRetryCircuitMixin:
     async def _clear_http_bridge_retry_circuit(
         self: Any,
         session: _HTTPBridgeSession,
-        *,
-        settle_unfenced: bool = False,
     ) -> None:
         """Settle a hard key's retry circuit.
 
-        ``settle_unfenced`` is asserted by callers that have removed the cause
-        of the circuit rather than merely outlived it. The version fence below
-        exists so a worker that observed nothing cannot clobber a row another
-        replica just wrote, but it also skips the durable delete whenever this
-        worker's own state has not been persisted yet. A circuit opened and
-        remediated in the same instant is exactly that case: the row survives,
-        the next load rehydrates it, and the key keeps cooling for a cause that
-        is gone.
+        The load below re-hydrates any persisted row into the local state, so
+        after a successful load the fence is absent only when no durable row
+        was observed at all — and an unfenced delete there could only remove a
+        row another writer created concurrently. A strike write still in
+        flight while this clear runs is undone by its own writer:
+        ``_persist_http_bridge_retry_circuit`` re-checks the registry after
+        its durable write lands and deletes exactly the row it created.
         """
         if session.key.strength != "hard":
             return
@@ -920,7 +955,7 @@ class _HTTPBridgeRetryCircuitMixin:
         # concurrently, so leave the durable row untouched when no state was
         # observed. Preserve the existing best-effort clear on read failures,
         # which is still useful for settling a row after a transient outage.
-        if durable_load_succeeded and (state is None or (expected_updated_at_epoch is None and not settle_unfenced)):
+        if durable_load_succeeded and (state is None or expected_updated_at_epoch is None):
             return
         try:
             # Clearing is idempotent and must be attempted even when the

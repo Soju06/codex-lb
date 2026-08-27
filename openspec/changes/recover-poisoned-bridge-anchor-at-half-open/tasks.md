@@ -52,7 +52,8 @@
 - [x] 1.11 Stop the local previous-response rebind re-attaching to an anchor the
       circuit has already proven dead. An explicit rejection alone can mean the
       session was not the owner, which #1830's recovery handles by retrying the
-      same anchor, so this is gated on the key being quarantined
+      same anchor, so this is gated on the key being quarantined. Superseded by
+      2.20: the gate now fails fast instead of retrying unanchored
 
 - [x] 1.12 Record the terminal strike only when the request has no safe replay.
       A stale-anchor rejection that still holds a verified full resend is
@@ -103,17 +104,17 @@
       probe); a quarantine armed at the maximum cooldown stays active through
       that cooldown and the half-open lease that follows
 
-- [x] 2.11 The unanchored rebind tests the recorded quarantine reason, so an
-      explicit rejection arriving during a wedged-reattach or
+- [x] 2.11 The proven-dead-anchor gate tests the recorded quarantine reason, so
+      an explicit rejection arriving during a wedged-reattach or
       repeated-eventless fence keeps its anchor
 
 - [x] 2.12 The grouped-fan-out strike loop applies the same no-safe-replay
       admission test as the single-request settlement path
 
-- [x] 2.13 The unanchored rebind keeps its distinct telemetry label without
-      falling out of the local previous-response recovery machinery, so it
-      still consumes the one server-side replay and resets the recovery
-      operation spool
+- [x] 2.13 The unanchored rebind kept its distinct telemetry label without
+      falling out of the local previous-response recovery machinery. Obsoleted
+      by 2.20: the unanchored label and its recovery-path set are removed with
+      the retry they described
 
 - [x] 2.14 An abandonment that covers no live request state settles the
       circuit, so a poison clear reached after terminal notification drained
@@ -135,6 +136,23 @@
 
 - [x] 2.19 Every client-facing suppression 503 reports the timer actually
       refusing the request, not only the pre-created submission gate
+
+- [x] 2.20 A proven-dead anchor fails fast instead of retrying unanchored.
+      Every shape reaching the poison-quarantined rebind has already failed
+      the proven full-resend checks, so stripping the anchor replayed a
+      delta-only continuation context-free — the exact shape the quarantine
+      requirement forbids. The gate now surfaces the explicit rejection as
+      `bridge_previous_response_not_found` after exactly one upstream
+      attempt, and the unanchored recovery label and its path set are removed
+
+- [x] 2.21 A strike write that lands after its circuit was settled deletes the
+      row it resurrected, fenced on that write's own update time, and leaves a
+      newer failure episode's row alone. The unfenced settle escape is removed
+      with the race it papered over
+
+- [x] 2.22 A merged persisted cooldown in the future drops any leftover
+      half-open lease, keeping `cooldown_until` and `half_open_until`
+      mutually exclusive so a stale lease cannot suppress the next probe
 
 ## 3. Verification
 

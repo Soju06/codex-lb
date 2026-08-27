@@ -79,12 +79,15 @@ terminal notification drains the pending set before retirement, so the
 funnels routinely abandon a poisoned anchor with a pre-drain count and no
 request states at all, and nothing is holding the generation there.
 
-That settle MUST remove the durable row even when this worker holds no version
-fence for it. A circuit opened and remediated in the same instant has not been
-persisted yet, and the fence guard would otherwise skip the delete, leaving a
-row that the next load rehydrates into a cooldown whose cause is gone. The
-fence MUST still apply to callers that merely observed the circuit rather than
-removing its cause.
+A settle only removes rows it holds evidence for: the version fence protects a
+row another writer created, and a worker that observed no durable row deletes
+nothing. The shape that used to defeat this — a circuit opened and remediated
+in the same instant, whose strike write is still in flight when the settle
+runs — is owned by the writer instead. After its durable write lands, the
+writer MUST re-check the local registry and, when the key was settled while
+the write was in flight, delete exactly the row that write created, fenced on
+that write's own update time. A write that lands under a key already
+re-opened by a newer failure episode MUST leave the new episode's row alone.
 
 Once the key is quarantined for a poisoned anchor, the local previous-response
 rebind MUST NOT re-attach to the rejected anchor. The quarantine registry is
@@ -96,8 +99,13 @@ MUST keep the anchor. An explicit rejection on its
 own does not prove the anchor dead, since it can mean the session was not its
 owner, so the rebind's existing same-anchor retry MUST be preserved until the
 circuit has opened on repeated eventless poison-class failures. After that the
-rebind MUST retry unanchored while keeping its interrupted tool-output
-injection, so the recovery it exists to perform is not lost.
+request MUST fail fast: every shape that reaches this rebind has already
+failed the proven full-resend and operation-fence checks, so its payload does
+not retain the anchor's context, and retrying it unanchored would replay a
+delta-only continuation as a context-free request. The proxy MUST surface the
+explicit rejection to the client as `bridge_previous_response_not_found`
+after exactly one upstream attempt, leaving recovery to the client, which is
+the only party holding the conversation history.
 
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
@@ -223,13 +231,14 @@ and durable circuit state.
 - **WHEN** the durable anchor those failures hit is successfully abandoned
 - **THEN** the retry circuit for that key is cleared rather than left cooling
 - **AND** a fenced or failed abandonment leaves the cooldown running
-- **AND** the durable row is deleted even when no version fence has been stamped for it
+- **AND** a strike write that lands after the settle deletes the row it resurrected, fenced on its own update time
 
-#### Scenario: the local rebind drops an anchor the circuit has proven dead
+#### Scenario: a proven-dead anchor fails fast instead of retrying unanchored
 
 - **GIVEN** a key quarantined for a poisoned anchor after repeated eventless poison-class failures
 - **WHEN** an anchored request fails with an explicit previous-response rejection and enters local rebind
-- **THEN** the rebind retries with no `previous_response_id` rather than re-attaching
+- **THEN** the client receives the explicit rejection as `bridge_previous_response_not_found` after exactly one upstream attempt
+- **AND** the anchor is not stripped for an unanchored retry, because the reaching payload does not retain the anchor's context
 - **AND** an explicit rejection on a key that is not quarantined still retries the same anchor
 
 #### Scenario: midstream retirement does not consume a pre-response strike

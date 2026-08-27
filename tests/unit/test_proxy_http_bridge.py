@@ -33201,49 +33201,120 @@ async def test_failed_anchor_abandonment_leaves_the_circuit_cooling() -> None:
 
 
 @pytest.mark.asyncio
-async def test_abandonment_deletes_the_durable_circuit_opened_in_the_same_instant() -> None:
+async def test_in_flight_strike_persist_cannot_resurrect_a_settled_circuit() -> None:
     # Production shape: the circuit opens and the anchor is abandoned in the
-    # same instant, before persistence has stamped a version fence. The fence
-    # guard then skipped the durable delete, the row survived, the next load
-    # rehydrated it, and the key kept cooling for a cause that was gone.
-    # Observed live at 18:31:41Z: durable_anchor_poisoned fired, no reset was
-    # logged, and the row still read cooldown_until 18:32:41Z afterwards.
+    # same instant, while the strike's durable write is still in flight. The
+    # clear correctly refuses an unfenced delete (it observed no row), so the
+    # write lands after the settle and resurrects the row — observed live as
+    # recurring `consecutive_failures=2` cooldowns surviving a completed
+    # clear. The in-flight writer must undo itself: after its write lands it
+    # re-checks the registry and, finding the key settled, deletes exactly
+    # the row it created, fenced on that write's own updated_at_epoch.
     service, session, _first = _make_terminal_error_bridge_fixture(
-        request_id="req-unfenced-settle",
-        key_value="sid-unfenced-settle",
+        request_id="req-inflight-resurrect",
+        key_value="sid-inflight-resurrect",
         response_event_count=0,
     )
-    session.durable_session_id = "durable-unfenced-settle"
+    session.durable_session_id = "durable-inflight-resurrect"
     session.durable_owner_epoch = 1
+    persist_entered = asyncio.Event()
+    release_persist = asyncio.Event()
+    persisted_row = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+
+    async def blocking_persist(**kwargs: Any) -> Any:
+        del kwargs
+        persist_entered.set()
+        await release_persist.wait()
+        return persisted_row
+
     clear_retry_circuit = AsyncMock(return_value=None)
     service._durable_bridge = SimpleNamespace(
         lookup_retry_circuit=AsyncMock(return_value=None),
-        # No snapshot returned, so persisted_updated_at_epoch stays 0 and the
-        # circuit carries no version fence.
-        persist_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=blocking_persist,
         clear_retry_circuit=clear_retry_circuit,
         rebind_session_account=AsyncMock(return_value=True),
     )
 
-    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
-    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
-    state = cast(Any, service)._http_bridge_retry_circuits.get(session.key)
-    assert state is not None and state.persisted_updated_at_epoch == 0, "the fixture must reproduce the unfenced shape"
+    strike = asyncio.create_task(service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete"))
+    await asyncio.wait_for(persist_entered.wait(), timeout=2.0)
 
-    cleared = await http_bridge_upstream_events_module._abandon_durable_http_bridge_continuity(
-        service,
-        session,
-        detail="repeated_zero_event_stream_incomplete",
-        settle_circuit=True,
-    )
+    await service._clear_http_bridge_retry_circuit(session)
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuits
+    clear_retry_circuit.assert_not_awaited()
 
-    assert cleared is True
+    release_persist.set()
+    await asyncio.wait_for(strike, timeout=2.0)
+
     clear_retry_circuit.assert_awaited_once()
     assert clear_retry_circuit.await_args is not None
-    assert clear_retry_circuit.await_args.kwargs["expected_updated_at_epoch"] is None, (
-        "an unfenced settle must delete the row outright rather than skip it"
+    assert clear_retry_circuit.await_args.kwargs["expected_updated_at_epoch"] == persisted_row.updated_at_epoch, (
+        "the compensating delete must fence on exactly the row this write created"
     )
     assert session.key not in cast(Any, service)._http_bridge_retry_circuits
+
+
+@pytest.mark.asyncio
+async def test_compensating_delete_leaves_a_new_failure_episodes_row_alone() -> None:
+    # A genuinely new failure episode that registers under the key while the
+    # settled episode's write is still in flight owns the durable row from
+    # then on: the old writer must skip its compensating delete and let the
+    # new episode's own persist supersede the row.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-new-episode",
+        key_value="sid-new-episode",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-new-episode"
+    session.durable_owner_epoch = 1
+    persist_calls = 0
+    persist_entered = asyncio.Event()
+    release_persist = asyncio.Event()
+    persisted_row = SimpleNamespace(
+        consecutive_failures=1,
+        cooldown_until_epoch=time.time(),
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+
+    async def first_call_blocking_persist(**kwargs: Any) -> Any:
+        del kwargs
+        nonlocal persist_calls
+        persist_calls += 1
+        if persist_calls == 1:
+            persist_entered.set()
+            await release_persist.wait()
+        return persisted_row
+
+    clear_retry_circuit = AsyncMock(return_value=None)
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=first_call_blocking_persist,
+        clear_retry_circuit=clear_retry_circuit,
+        rebind_session_account=AsyncMock(return_value=True),
+    )
+
+    strike = asyncio.create_task(service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete"))
+    await asyncio.wait_for(persist_entered.wait(), timeout=2.0)
+
+    await service._clear_http_bridge_retry_circuit(session)
+    assert session.key not in cast(Any, service)._http_bridge_retry_circuits
+
+    # The new episode registers before the old episode's write lands.
+    await service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete")
+    assert session.key in cast(Any, service)._http_bridge_retry_circuits
+
+    release_persist.set()
+    await asyncio.wait_for(strike, timeout=2.0)
+
+    clear_retry_circuit.assert_not_awaited()
+    assert session.key in cast(Any, service)._http_bridge_retry_circuits, (
+        "the new episode's circuit must survive the old writer's landing"
+    )
 
 
 @pytest.mark.asyncio
@@ -33270,15 +33341,66 @@ async def test_ordinary_circuit_clear_still_respects_the_version_fence() -> None
 
 
 @pytest.mark.asyncio
-async def test_local_rebind_drops_an_anchor_the_circuit_has_proven_dead(
+async def test_merged_cooldown_drops_a_leftover_half_open_lease() -> None:
+    # cooldown_until and half_open_until must stay mutually exclusive. A
+    # leftover half-open lease from a preempted probe combined with a merged
+    # persisted cooldown armed both timers at once: after the cooldown
+    # expired, the admission gate read the stale lease as an in-flight probe
+    # and kept suppressing the key for the rest of the lease instead of
+    # admitting a probe.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-merge-exclusive",
+        key_value="sid-merge-exclusive",
+        response_event_count=0,
+    )
+    now = time.monotonic()
+    state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    state.consecutive_failures = 2
+    state.half_open_until = now + 600.0
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+    persisted_row = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 0.15,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
+    service._durable_bridge = SimpleNamespace(
+        # The row stays visible on the gate's own reload: a durable miss
+        # would drop the local state outright and admit for the wrong reason.
+        lookup_retry_circuit=AsyncMock(return_value=persisted_row),
+        persist_retry_circuit=AsyncMock(return_value=None),
+        clear_retry_circuit=AsyncMock(return_value=None),
+    )
+
+    loaded = await service._load_http_bridge_retry_circuit(session)
+
+    assert loaded is True
+    assert state.cooldown_until > time.monotonic() - 0.01
+    assert state.half_open_until == 0.0, "a cooling key must not keep a stale half-open lease armed"
+
+    await asyncio.sleep(0.2)
+    allowed = await service._http_bridge_precreated_retry_allowed(session)
+
+    assert allowed is True, "after the cooldown expires the key must admit a probe, not read the stale lease"
+    assert state.cooldown_until == 0.0
+    assert state.half_open_until > time.monotonic(), "the admitted probe arms a fresh half-open lease"
+
+
+@pytest.mark.asyncio
+async def test_poison_quarantined_anchor_rejection_fails_fast_to_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Same #1830 recovery, but after the retry circuit has already opened on
-    # repeated eventless poison-class failures and quarantined the key. At that
-    # point the anchor is proven dead rather than merely mis-bound, so the
-    # rebind must NOT re-attach to it. Re-anchoring here produced a reattach
-    # loop against a dead anchor and a burst of client-visible 503s while the
-    # circuit cooled on failures it kept re-creating.
+    # repeated eventless poison-class failures and quarantined the key. At
+    # that point the anchor is proven dead rather than merely mis-bound, and
+    # every shape that reaches the fallthrough has already failed the proven
+    # full-resend checks, so its payload does not retain the anchor's context.
+    # Re-anchoring loops against the dead anchor (503 bursts); stripping the
+    # anchor replays a delta-only continuation context-free (silent
+    # truncation, spec-forbidden). The recovery must instead surface the
+    # explicit rejection to the client after exactly one upstream attempt.
+    # Circuit settlement after the terminal error is the abandonment
+    # funnels' job and is covered by the funnel settle tests.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     payload = proxy_service.ResponsesRequest.model_validate(
         {
@@ -33319,9 +33441,8 @@ async def test_local_rebind_drops_an_anchor_the_circuit_has_proven_dead(
         del queue_limit, propagate_http_errors, downstream_turn_state, request_deadline
         stream_attempts.append(request_state.previous_response_id)
         del text_data
-        if len(stream_attempts) == 1:
-            raise terse_rejection
-        yield 'data: {"type":"response.completed"}\n\n'
+        raise terse_rejection
+        yield "unreachable"  # noqa: B901 - keeps this an async generator
 
     monkeypatch.setattr(
         proxy_service,
@@ -33350,9 +33471,8 @@ async def test_local_rebind_drops_an_anchor_the_circuit_has_proven_dead(
     monkeypatch.setattr(service, "_get_or_create_http_bridge_session", get_or_create)
     monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_events)
 
-    chunks = [
-        chunk
-        async for chunk in service._stream_via_http_bridge(
+    with pytest.raises(ProxyResponseError) as exc_info:
+        async for _chunk in service._stream_via_http_bridge(
             payload,
             headers={"session_id": "sid-proven-dead-anchor"},
             codex_session_affinity=True,
@@ -33365,18 +33485,16 @@ async def test_local_rebind_drops_an_anchor_the_circuit_has_proven_dead(
             codex_idle_ttl_seconds=1800.0,
             max_sessions=8,
             queue_limit=4,
-        )
-    ]
+        ):
+            pass
 
-    assert chunks == ['data: {"type":"response.completed"}\n\n']
-    assert get_or_create.await_count == 2
-    recovery_call = get_or_create.await_args_list[1]
-    assert recovery_call.kwargs["allow_previous_response_recovery_rebind"] is True
-    assert recovery_call.kwargs["request_stage"] == "reattach"
-    assert stream_attempts == ["resp_stale_anchor", None], (
-        "once the circuit has proven the anchor dead, the rebind must retry unanchored"
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.payload["error"]["code"] == "bridge_previous_response_not_found"
+    assert stream_attempts == ["resp_stale_anchor"], (
+        "a proven-dead anchor must fail fast after one attempt: re-anchoring loops, "
+        "and stripping the anchor replays a delta-only continuation context-free"
     )
-    assert recovery_call.kwargs["previous_response_id"] is None
+    assert get_or_create.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -34013,17 +34131,6 @@ async def test_grouped_strike_skips_requests_that_still_have_a_safe_replay() -> 
     )
 
 
-def test_unanchored_local_recovery_stays_a_local_previous_response_error_recovery() -> None:
-    # The unanchored variant carries its own telemetry label so the reattach
-    # metric can tell the two apart, but it is the same bounded local recovery:
-    # it must still consume the one server-side replay and reset the recovery
-    # operation spool. Letting the distinct label fall out of that machinery
-    # handed the unanchored retry a second free cooldown bypass.
-    paths = http_bridge_streaming_module._LOCAL_PREVIOUS_RESPONSE_ERROR_RECOVERY_PATHS
-    assert "local_previous_response_error" in paths
-    assert "local_previous_response_error_unanchored" in paths
-
-
 @pytest.mark.asyncio
 async def test_poison_clear_settles_the_circuit_when_the_deque_was_already_drained(
     monkeypatch: pytest.MonkeyPatch,
@@ -34037,9 +34144,28 @@ async def test_poison_clear_settles_the_circuit_when_the_deque_was_already_drain
     # was already gone, refusing every unanchored request that arrived behind
     # it with `retry_circuit_cooldown_continuity_bound`.
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    # Stateful persistence: each strike's write returns (and later loads
+    # re-observe) the stored row, exactly as the repository does, so the
+    # settle that follows holds a version fence for the row it deletes.
+    stored_row: SimpleNamespace | None = None
+
+    async def persist_retry_circuit(**kwargs: Any) -> SimpleNamespace:
+        nonlocal stored_row
+        stored_row = SimpleNamespace(
+            consecutive_failures=kwargs["consecutive_failures"],
+            cooldown_until_epoch=kwargs["cooldown_until_epoch"],
+            last_detail=kwargs["last_detail"],
+            updated_at_epoch=kwargs["updated_at_epoch"],
+        )
+        return stored_row
+
+    async def lookup_retry_circuit(**kwargs: Any) -> SimpleNamespace | None:
+        del kwargs
+        return stored_row
+
     durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(return_value=None),
+        lookup_retry_circuit=lookup_retry_circuit,
+        persist_retry_circuit=persist_retry_circuit,
         rebind_session_account=AsyncMock(return_value=True),
         clear_retry_circuit=AsyncMock(return_value=None),
     )

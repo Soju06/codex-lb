@@ -3687,6 +3687,23 @@ class _HTTPBridgeUpstreamEventsMixin:
             generation = operation_attempt_generations.get(request_state.request_id)
             return generation if isinstance(generation, int) and not isinstance(generation, bool) else None
 
+        def stale_receive_generation(request_state: _WebSocketRequestState) -> tuple[int, int] | None:
+            """Return the captured/current generations when this event is stale.
+
+            A receive task can finish after recovery has rebound the same
+            request state to a new upstream response.  Such a frame must not
+            be allowed to mutate, finalize, or reach the downstream stream
+            for the replacement attempt.  Missing entries are intentional:
+            they represent requests admitted after this receive began.
+            """
+            captured_generation = event_operation_attempt_generation(request_state)
+            if captured_generation is None:
+                return None
+            current_generation = request_state.operation_attempt_generation
+            if captured_generation == current_generation:
+                return None
+            return captured_generation, current_generation
+
         completed_event_queue: asyncio.Queue[str | None] | None = None
         completed_event_queue_claimed = False
         emitted_sequence_number: int | None = None
@@ -3738,6 +3755,35 @@ class _HTTPBridgeUpstreamEventsMixin:
                 release_create_gate = False
             else:
                 release_create_gate = False
+
+            if matched_request_state is not None:
+                stale_generations = stale_receive_generation(matched_request_state)
+                if stale_generations is not None:
+                    captured_generation, current_generation = stale_generations
+                    # The pre-created terminal fallback temporarily assigns
+                    # the old upstream id so the normal downstream rewrite
+                    # can run.  Undo that assignment before dropping the
+                    # stale frame; otherwise a later replacement terminal
+                    # could be matched to the retired response id.
+                    if (
+                        response_id is not None
+                        and event_type
+                        in {"response.created", "response.completed", "response.failed", "response.incomplete", "error"}
+                        and matched_request_state.response_id == response_id
+                    ):
+                        matched_request_state.response_id = None
+                    _log_http_bridge_event(
+                        "stale_receive_generation_event_dropped",
+                        session.key,
+                        account_id=session.account.id,
+                        model=matched_request_state.model,
+                        pending_count=len(session.pending_requests),
+                        detail=(
+                            f"event_type={event_type or 'unknown'} request_id={matched_request_state.request_id} "
+                            f"captured_generation={captured_generation} current_generation={current_generation}"
+                        ),
+                    )
+                    return
 
             _archive_http_bridge_upstream_text(session, original_text, matched_request_state)
             pending_request_count = len(session.pending_requests)

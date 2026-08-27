@@ -3484,6 +3484,53 @@ async def test_http_bridge_event_spool_uses_generation_captured_at_receive_start
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_drops_terminal_event_from_superseded_receive_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    finalize = AsyncMock()
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-stale-receive-terminal",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id=None,
+        operation_attempt_generation=1,
+        awaiting_response_created=True,
+        replay_downstream_response_id="resp-client-visible",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="stale-receive-terminal",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.completed",
+                "response": {"id": "resp-retired-upstream", "status": "completed", "output": []},
+            }
+        ),
+        operation_attempt_generations={request_state.request_id: 0},
+    )
+
+    assert list(session.pending_requests) == [request_state]
+    assert request_state.response_id is None
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
+    finalize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_durable_alias_fence_rejection_preserves_new_local_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

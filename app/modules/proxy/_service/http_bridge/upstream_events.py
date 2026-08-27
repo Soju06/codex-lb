@@ -1599,6 +1599,12 @@ async def _try_complete_transcript_recovery(
     request_state.operation_registered = True
     request_state.operation_rebind_required = False
     request_state.operation_rebound = True
+    request_state.operation_rebound_from_session_id = getattr(rebound_operation, "rebound_from_session_id", None)
+    request_state.operation_rebound_from_account_id = getattr(rebound_operation, "rebound_from_account_id", None)
+    request_state.operation_rebound_from_model = getattr(rebound_operation, "rebound_from_model", None)
+    request_state.operation_rebound_from_parent_response_id = getattr(
+        rebound_operation, "rebound_from_parent_response_id", None
+    )
     request_state.operation_attempt_generation = int(getattr(rebound_operation, "recovery_dispatch_count", 0))
     request_state.verified_stale_anchor_replay = True
     request_state.complete_transcript_recovery_count = (
@@ -1636,11 +1642,24 @@ async def _try_complete_transcript_recovery(
             request_state.request_id,
             exc_info=True,
         )
-    async with session.pending_lock:
-        if request_state in session.pending_requests:
-            session.pending_requests.remove(request_state)
-            if _http_bridge_request_counts_against_queue(request_state):
-                session.queued_request_count = max(0, session.queued_request_count - 1)
+    try:
+        # A false return means the replacement was not dispatched.  Undo the
+        # durable rebind while the operation is still proven pre-dispatch so
+        # a later identical request can retry instead of inheriting a stale
+        # submitted generation.
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=False,
+            request_enqueued=True,
+            counted_in_queue=_http_bridge_request_counts_against_queue(request_state),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to clean up pre-dispatch complete transcript recovery request_id=%s",
+            request_state.request_id,
+            exc_info=True,
+        )
     return False
 
 
@@ -1954,6 +1973,12 @@ async def _try_unsafe_partial_transcript_recovery(
     request_state.operation_registered = True
     request_state.operation_rebind_required = False
     request_state.operation_rebound = True
+    request_state.operation_rebound_from_session_id = getattr(rebound_operation, "rebound_from_session_id", None)
+    request_state.operation_rebound_from_account_id = getattr(rebound_operation, "rebound_from_account_id", None)
+    request_state.operation_rebound_from_model = getattr(rebound_operation, "rebound_from_model", None)
+    request_state.operation_rebound_from_parent_response_id = getattr(
+        rebound_operation, "rebound_from_parent_response_id", None
+    )
     request_state.operation_attempt_generation = int(getattr(rebound_operation, "recovery_dispatch_count", 0))
     request_state.unsafe_partial_replay_count = getattr(request_state, "unsafe_partial_replay_count", 0) + 1
     request_state.unsafe_partial_replay_retry_authorized = True
@@ -1989,11 +2014,24 @@ async def _try_unsafe_partial_transcript_recovery(
             getattr(request_state, "request_id", None),
             exc_info=True,
         )
-    async with session.pending_lock:
-        if request_state in session.pending_requests:
-            session.pending_requests.remove(request_state)
-            if _http_bridge_request_counts_against_queue(request_state):
-                session.queued_request_count = max(0, session.queued_request_count - 1)
+    try:
+        # A false return means the replacement was not dispatched.  Restore
+        # the durable operation before releasing pending ownership; otherwise
+        # this opt-in at-least-once path would consume a generation without a
+        # request ever reaching upstream.
+        await service._cleanup_http_bridge_submit_interruption(
+            session,
+            request_state=request_state,
+            gate_acquired=False,
+            request_enqueued=True,
+            counted_in_queue=_http_bridge_request_counts_against_queue(request_state),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to clean up pre-dispatch unsafe partial recovery request_id=%s",
+            getattr(request_state, "request_id", None),
+            exc_info=True,
+        )
     return False
 
 

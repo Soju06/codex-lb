@@ -6930,6 +6930,93 @@ async def test_complete_transcript_recovery_rebinds_durable_operation(
 
 
 @pytest.mark.asyncio
+async def test_complete_transcript_recovery_rolls_back_rebind_when_dispatch_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="recovery-rebind-dispatch-fails")
+    session.durable_session_id = "durable-recovery-rebind-dispatch-fails"
+    session.durable_owner_epoch = 3
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-recovery-rebind-dispatch-fails",
+        model="gpt-test",
+        request_text='{"type":"response.create","previous_response_id":"resp-stale","input":[]}',
+        previous_response_id="resp-stale",
+        operation_id="op-stale",
+        operation_fingerprint="fingerprint-stale",
+        operation_parent_response_id="resp-stale",
+        operation_registered=True,
+        operation_created=True,
+        operation_dispatched=False,
+        operation_attempt_generation=0,
+        hard_continuity_anchor=True,
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    rebind_operation = AsyncMock(
+        return_value=SimpleNamespace(
+            rebound=True,
+            created=False,
+            recovery_dispatch_count=1,
+            rebound_from_session_id="durable-original",
+            rebound_from_account_id="acc-original",
+            rebound_from_model="gpt-original",
+            rebound_from_parent_response_id="resp-original",
+        )
+    )
+    rollback_operation = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+            rollback_operation_before_dispatch=rollback_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-recovery-rebind-dispatch-fails",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_http_bridge_retry_circuit_generation",
+        AsyncMock(return_value=(True, None)),
+    )
+    retry = AsyncMock(return_value=False)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+
+    recovered = await http_bridge_upstream_events_module._try_complete_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    retry.assert_awaited_once()
+    rollback_operation.assert_awaited_once()
+    assert rollback_operation.await_args is not None
+    assert rollback_operation.await_args.kwargs["restore_rebound"] is True
+    assert rollback_operation.await_args.kwargs["rebound_from_session_id"] == "durable-original"
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    assert request_state.operation_registered is False
+    assert request_state.operation_rebound is False
+    assert request_state.operation_rebind_required is True
+
+
+@pytest.mark.asyncio
 async def test_complete_transcript_recovery_keeps_terminal_concurrent_winner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7398,6 +7485,91 @@ async def test_unsafe_partial_transcript_recovery_rebinds_one_new_root(
     assert rebind_operation.await_args.kwargs["expected_recovery_dispatch_count"] == 0
     assert rebind_operation.await_args.kwargs["request_text"].startswith('{"type":"response.create"')
     retry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_partial_transcript_recovery_rolls_back_rebind_when_dispatch_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="unsafe-partial-rebind-dispatch-fails")
+    session.durable_session_id = "durable-unsafe-partial-rebind-dispatch-fails"
+    session.durable_owner_epoch = 5
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-unsafe-partial-rebind-dispatch-fails",
+        model="gpt-test",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        transport="http",
+        request_text='{"type":"response.create","previous_response_id":"resp-parent","input":[]}',
+        previous_response_id="resp-parent",
+        operation_id="op-unsafe-partial",
+        operation_fingerprint="fingerprint-unsafe-partial",
+        operation_parent_response_id="resp-parent",
+        operation_registered=True,
+        operation_dispatched=True,
+        response_id="resp-partial-original",
+        response_event_count=2,
+        operation_attempt_generation=0,
+    )
+    session.pending_requests.append(request_state)
+    rebind_operation = AsyncMock(
+        return_value=SimpleNamespace(
+            rebound=True,
+            recovery_dispatch_count=1,
+            rebound_from_session_id="durable-original",
+            rebound_from_account_id="acc-original",
+            rebound_from_model="gpt-original",
+            rebound_from_parent_response_id="resp-original",
+        )
+    )
+    rollback_operation = AsyncMock(return_value=True)
+    service._durable_bridge = cast(
+        Any,
+        SimpleNamespace(
+            get_complete_transcript=AsyncMock(return_value=[object()]),
+            rebind_operation_for_complete_transcript=rebind_operation,
+            rollback_operation_before_dispatch=rollback_operation,
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_unsafe_partial_replay_enabled=True,
+            http_responses_session_bridge_complete_transcript_max_turns=128,
+            http_responses_session_bridge_complete_transcript_max_bytes=1024,
+            http_responses_session_bridge_complete_transcript_max_input_items=32,
+            http_responses_session_bridge_instance_id="instance-unsafe-partial-rebind-dispatch-fails",
+        ),
+    )
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "build_complete_replay_payload",
+        lambda *_args, **_kwargs: '{"type":"response.create","input":[{"type":"message"}]}',
+    )
+    retry = AsyncMock(return_value=False)
+    service._retry_http_bridge_request_on_fresh_upstream = retry
+
+    recovered = await http_bridge_upstream_events_module._try_unsafe_partial_transcript_recovery(
+        service,
+        session,
+        request_state,
+    )
+
+    assert recovered is False
+    retry.assert_awaited_once()
+    rollback_operation.assert_awaited_once()
+    assert rollback_operation.await_args is not None
+    assert rollback_operation.await_args.kwargs["restore_rebound"] is True
+    assert rollback_operation.await_args.kwargs["rebound_from_session_id"] == "durable-original"
+    assert request_state not in session.pending_requests
+    assert session.queued_request_count == 0
+    assert request_state.operation_registered is False
+    assert request_state.operation_rebound is False
+    assert request_state.operation_rebind_required is True
 
 
 @pytest.mark.asyncio

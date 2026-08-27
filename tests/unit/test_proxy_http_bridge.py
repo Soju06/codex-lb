@@ -3437,6 +3437,53 @@ async def test_retained_response_alias_without_durable_identity_is_rejected() ->
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_event_spool_uses_generation_captured_at_receive_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-receive-generation",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id=None,
+        operation_id="op-receive-generation",
+        operation_attempt_generation=1,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    session = _make_bridge_session(
+        key_value="receive-generation",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.durable_session_id = "durable-receive-generation"
+    session.durable_owner_epoch = 1
+    enqueue = AsyncMock()
+    service._durable_bridge = cast(Any, SimpleNamespace())
+    service._http_bridge_operation_event_batcher = cast(Any, SimpleNamespace(enqueue=enqueue))
+    monkeypatch.setattr(http_bridge_upstream_events_module, "_update_http_bridge_operation_state", AsyncMock())
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.created",
+                "response": {"id": "resp-receive-generation"},
+            }
+        ),
+        operation_attempt_generations={request_state.request_id: 0},
+    )
+
+    enqueue.assert_awaited_once()
+    assert enqueue.await_args is not None
+    assert enqueue.await_args.kwargs["recovery_dispatch_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_durable_alias_fence_rejection_preserves_new_local_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

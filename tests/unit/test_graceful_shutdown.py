@@ -123,7 +123,7 @@ async def test_control_plane_drains_are_failure_isolated(
     monkeypatch.setattr(app_main.fleet_api, "drain_background_refresh_tasks", drain_fleet)
 
     with caplog.at_level(logging.WARNING, logger="app.main"):
-        await _drain_detached_control_plane_tasks(1)
+        assert await _drain_detached_control_plane_tasks(1) is False
 
     assert fleet_drained.is_set()
     assert "Failed to drain audit log tasks during shutdown" in caplog.text
@@ -178,7 +178,7 @@ async def test_control_plane_drain_requires_stable_clean_pass(
     monkeypatch.setattr(app_main, "drain_audit_log_tasks", drain_audit)
     monkeypatch.setattr(app_main.fleet_api, "drain_background_refresh_tasks", drain_fleet)
 
-    await _drain_detached_control_plane_tasks(1)
+    assert await _drain_detached_control_plane_tasks(1) is True
 
     assert audit_calls == 2
     assert fleet_calls == 2
@@ -1157,6 +1157,55 @@ async def test_clean_shutdown_is_not_recorded_when_leader_release_was_abandoned(
 
     await app_main._close_db_and_record_clean_shutdown(leader_lease_release_completed=False)
 
+    assert marked is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("drain_kind", ("persistence", "audit"))
+async def test_clean_shutdown_is_not_recorded_when_database_task_drain_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    drain_kind: str,
+) -> None:
+    if drain_kind == "persistence":
+
+        class _ProxyService:
+            async def drain_persistence_tasks(self, **_kwargs: object) -> bool:
+                return False
+
+        database_tasks_drained = await _drain_proxy_persistence_tasks(
+            _ProxyService(),
+            0,
+            failure_message="unused",
+        )
+    else:
+
+        async def drain_audit(_: float) -> bool:
+            return False
+
+        async def drain_fleet(_: float) -> bool:
+            return True
+
+        monkeypatch.setattr(app_main, "drain_audit_log_tasks", drain_audit)
+        monkeypatch.setattr(app_main.fleet_api, "drain_background_refresh_tasks", drain_fleet)
+        database_tasks_drained = await _drain_detached_control_plane_tasks(0)
+
+    marked = False
+
+    async def _close_db() -> bool:
+        return True
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    await app_main._close_db_and_record_clean_shutdown(
+        database_tasks_drained=database_tasks_drained,
+    )
+
+    assert database_tasks_drained is False
     assert marked is False
 
 

@@ -40,6 +40,9 @@
 - [x] 3.4 Treat an abandoned scheduler leader-lease release task as an
   incomplete shutdown, so its still-live database session cannot race with
   clean-state recording.
+- [x] 3.5 Propagate final proxy persistence and detached control-plane drain
+  outcomes into clean-state recording so timed-out database tasks leave the
+  run state unclean.
 
 ## 4. Verification
 
@@ -61,3 +64,5 @@
 - [x] 4.8 Unit-test durable failed-write invalidation, startup abort on
   unconfirmed invalidation, and clean-state suppression after an abandoned
   leader-lease release.
+- [x] 4.9 Unit-test that timed-out persistence and audit drains suppress the
+  clean marker.

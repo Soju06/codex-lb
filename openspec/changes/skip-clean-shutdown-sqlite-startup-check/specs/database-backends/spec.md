@@ -58,7 +58,9 @@ finished disposing and all reclaimed SQLite teardown work finished within the
 bounded shutdown drain. A cancelled or failed disposal, or a drain that
 abandons pending teardown work at its deadline, MUST leave the run state
 unclean. If shutdown abandons a database-using scheduler leader-lease release
-task at its deadline, it MUST also leave the run state unclean.
+task at its deadline, it MUST also leave the run state unclean. The same rule
+MUST apply when the final proxy persistence drain or detached audit/fleet
+control-plane drain leaves database-using tasks pending at its deadline.
 
 The configured check mode (`quick`, `full`, `off`) keeps its meaning: this
 requirement governs only whether the selected mode runs on a given startup.
@@ -149,6 +151,14 @@ requirement governs only whether the selected mode runs on a given startup.
 
 - **GIVEN** shutdown abandons a database-using scheduler leader-lease release
   task at its bounded deadline
+- **WHEN** database disposal finishes
+- **THEN** the sidecar does not record a clean shutdown
+- **AND** the next startup runs the integrity check
+
+#### Scenario: Abandoned database tasks are not recorded as clean
+
+- **GIVEN** the final proxy persistence drain or detached control-plane drain
+  reaches its deadline with database-using tasks still pending
 - **WHEN** database disposal finishes
 - **THEN** the sidecar does not record a clean shutdown
 - **AND** the next startup runs the integrity check

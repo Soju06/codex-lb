@@ -6604,7 +6604,7 @@ async def test_http_bridge_replay_error_before_created_preserves_downstream_resp
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
+async def test_http_bridge_batched_terminal_delivery_precedes_snapshot_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -6643,6 +6643,8 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
 
     async def update_state(*args: Any, **kwargs: Any) -> None:
         del args
+        assert request_state.event_queue is not None
+        assert request_state.event_queue.qsize() == 2
         order.append("state")
         persisted_response_ids.append(kwargs["response_id"])
 
@@ -6666,6 +6668,7 @@ async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
         'data: {"type":"response.completed"}\n\n',
         terminal=True,
         terminal_state="completed",
+        terminal_event_queue=request_state.event_queue,
     )
 
     assert order == ["terminal", "state"]

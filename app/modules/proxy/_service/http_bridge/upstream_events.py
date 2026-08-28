@@ -735,7 +735,16 @@ async def _persist_http_bridge_operation_event(
             persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
-            elif terminal_state is not None and _http_bridge_transcript_recovery_enabled():
+            elif terminal_event_queue is not None:
+                # Make the already-received terminal event visible to the
+                # client before doing any optional transcript reconstruction.
+                # Snapshot persistence may walk a long parent chain and must
+                # never hold the live response behind that best-effort work.
+                terminal_enqueued, delivery_cancellation = await enqueue_terminal_delivery_deferring_cancellation()
+                deferred_cancellation = deferred_cancellation or delivery_cancellation
+                if terminal_delivery_barrier is not None:
+                    await release_terminal_delivery_barrier()
+            if persisted and terminal_state is not None and _http_bridge_transcript_recovery_enabled():
                 # The terminal append is the spool completeness fence. Only
                 # after it commits may the collected output and replay
                 # snapshot be persisted as a complete transcript.

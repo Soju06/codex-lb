@@ -4431,6 +4431,14 @@ class _HTTPBridgeStreamingMixin:
                 request_state.request_id,
                 retry_cooldown_seconds,
             )
+            # Session creation precedes this startup admission check.  Mark
+            # the opened bridge as retiring before returning the terminal
+            # cooldown result so no later request can reuse its socket.  The
+            # bounded helper closes immediately when idle and otherwise waits
+            # for existing owners to drain.
+            session.upstream_control.reconnect_requested = True
+            session.upstream_control.retire_after_drain = True
+            await self._retire_http_bridge_after_drain_if_ready(session)
             # This path returns before the request is submitted, so the normal
             # detach/finally cleanup cannot settle an API-key reservation.
             # Release it before handing the synthetic terminal event to the

@@ -6607,6 +6607,15 @@ async def test_http_bridge_replay_error_before_created_preserves_downstream_resp
 async def test_http_bridge_batched_terminal_state_precedes_spool_finalize(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_service_get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_complete_transcript_recovery_enabled=True,
+            http_responses_session_bridge_unsafe_partial_replay_enabled=False,
+            http_responses_session_bridge_instance_id="test-instance",
+        ),
+    )
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-batched-terminal-order",
@@ -29015,6 +29024,11 @@ async def test_stream_via_http_bridge_recovers_dead_owner_with_replayable_full_r
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(http_bridge_streaming_module, "http_bridge_owner_process_epoch", lambda: "boot-new")
     monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", AsyncMock(return_value=durable_lookup))
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_previous_response_id_target",
+        AsyncMock(return_value=None),
+    )
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))

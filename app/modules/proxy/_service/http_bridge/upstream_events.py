@@ -319,6 +319,14 @@ async def _record_http_bridge_account_timeout_signal(
         )
 
 
+def _http_bridge_transcript_recovery_enabled(settings: Any | None = None) -> bool:
+    settings = settings or _service_get_settings()
+    return bool(
+        getattr(settings, "http_responses_session_bridge_complete_transcript_recovery_enabled", False)
+        or getattr(settings, "http_responses_session_bridge_unsafe_partial_replay_enabled", False)
+    )
+
+
 async def _update_http_bridge_operation_state(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -340,22 +348,8 @@ async def _update_http_bridge_operation_state(
         response_output_items_complete = False
         response_replay_input_json: str | None = None
         response_replay_input_complete = False
-        if state == "completed" and (
-            bool(
-                getattr(
-                    _service_get_settings(),
-                    "http_responses_session_bridge_complete_transcript_recovery_enabled",
-                    False,
-                )
-            )
-            or bool(
-                getattr(
-                    _service_get_settings(),
-                    "http_responses_session_bridge_unsafe_partial_replay_enabled",
-                    False,
-                )
-            )
-        ):
+        response_replay_input_turn_count = 0
+        if state == "completed" and _http_bridge_transcript_recovery_enabled():
             request_model = getattr(request_state, "model", None)
             request_model_class = _extract_model_class(request_model) if isinstance(request_model, str) else None
             response_output_items = getattr(request_state, "response_output_items", [])
@@ -503,6 +497,10 @@ async def _update_http_bridge_operation_state(
                         if snapshot is not None:
                             response_replay_input_json = snapshot
                             response_replay_input_complete = True
+                            response_replay_input_turn_count = (
+                                sum(max(1, int(getattr(turn, "represented_turn_count", 1))) for turn in parent_turns)
+                                + 1
+                            )
                             _log_http_bridge_event(
                                 "complete_transcript_replay_snapshot_persisted",
                                 session.key,
@@ -523,6 +521,7 @@ async def _update_http_bridge_operation_state(
             "response_output_items_complete": response_output_items_complete,
             "response_replay_input_json": response_replay_input_json,
             "response_replay_input_complete": response_replay_input_complete,
+            "response_replay_input_turn_count": response_replay_input_turn_count,
         }
         if operation_attempt_generation is not None:
             update_kwargs["expected_recovery_dispatch_count"] = operation_attempt_generation
@@ -706,7 +705,7 @@ async def _persist_http_bridge_operation_event(
             persisted = bool(append_result)
             if not persisted:
                 logger.info("HTTP bridge terminal event spool became incomplete operation_id=%s", operation_id)
-            elif terminal_state is not None:
+            elif terminal_state is not None and _http_bridge_transcript_recovery_enabled():
                 # The terminal append is the spool completeness fence. Only
                 # after it commits may the collected output and replay
                 # snapshot be persisted as a complete transcript.
@@ -793,7 +792,7 @@ async def _persist_http_bridge_operation_event(
         )
         if not persisted:
             logger.info("HTTP bridge operation event spool became incomplete operation_id=%s", operation_id)
-        if terminal and terminal_state is not None:
+        if terminal and terminal_state is not None and _http_bridge_transcript_recovery_enabled():
             await _update_http_bridge_operation_state(
                 service,
                 session,
@@ -3852,11 +3851,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                     event_type=event_type,
                     payload=payload,
                 )
-                _record_http_bridge_response_output(
-                    matched_request_state,
-                    event_type=event_type,
-                    payload=payload,
-                )
+                if _http_bridge_transcript_recovery_enabled():
+                    _record_http_bridge_response_output(
+                        matched_request_state,
+                        event_type=event_type,
+                        payload=payload,
+                    )
                 completed_tool_call = _response_output_item_done_tool_call(payload)
                 if completed_tool_call is not None:
                     completed_call_id, completed_call_type = completed_tool_call
@@ -4222,7 +4222,11 @@ class _HTTPBridgeUpstreamEventsMixin:
                         terminal=True,
                         terminal_state=grouped_operation_state,
                     )
-                if grouped_operation_state is not None and grouped_operation_state != "failed":
+                if (
+                    grouped_operation_state is not None
+                    and grouped_operation_state != "failed"
+                    and _http_bridge_transcript_recovery_enabled()
+                ):
                     await _update_http_bridge_operation_state(
                         self,
                         session,

@@ -83,7 +83,9 @@ ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 # 135 -> 136: unsafe partial HTTP bridge replay. This remains opt-in because
 # regenerating an interrupted model response is explicitly at-least-once and
 # can repeat already-visible output; the safe default must stay fail-closed.
-MAX_SETTINGS_FIELDS = 136
+# 136 -> 137: HTTP bridge complete-transcript maximum bytes. This remains
+# operator-selectable so deployments can bound persisted replay material.
+MAX_SETTINGS_FIELDS = 137
 
 
 def test_generated_settings_reference_matches_code() -> None:

@@ -123,6 +123,14 @@ When serving the Codex-native `/backend-api/codex/responses` WebSocket route, th
 - **AND** the downstream payload does not contain the raw upstream error envelope
 - **AND** the downstream payload does not expose the missing previous response id
 
+#### Scenario: top-level previous-response miss remains masked
+
+- **WHEN** a `/backend-api/codex/responses` WebSocket follow-up has `previous_response_id`
+- **AND** upstream emits a top-level `previous_response_not_found` wrapped-error frame using `status_code`
+- **THEN** the downstream event is a retryable stale-anchor failure carrying the sanitized canonical `previous_response_not_found` code
+- **AND** the downstream payload does not contain the raw upstream error envelope
+- **AND** the downstream payload does not expose the missing previous response id
+
 ### Requirement: Codex WebSocket wrapped errors follow official client shape
 
 When serving `/backend-api/codex/responses` or bridge-backed Responses WebSocket traffic, the service MUST classify upstream `type: "error"` frames using the same wrapped-error shape that the official Codex client accepts: a non-2xx `status` or `status_code` field indicates an upstream HTTP-style error, and the error detail MAY appear either in a nested `error` object or in top-level fields such as `code`, `message`, `param`, and `error_type`.

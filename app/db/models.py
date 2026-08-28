@@ -2013,6 +2013,7 @@ class HttpBridgeOperationRecord(Base):
     # lets recovery start a fresh response.create without a stale anchor.
     response_replay_input_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     response_replay_input_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    response_replay_input_turn_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=func.now(), server_default=func.now()
     )

@@ -762,6 +762,7 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
             ]
         ),
         response_replay_input_complete=True,
+        response_replay_input_turn_count=3,
     )
 
     class _Session:
@@ -775,6 +776,14 @@ async def test_complete_transcript_prefers_snapshot_when_parent_chain_is_missing
     assert turns is not None
     assert len(turns) == 1
     assert turns[0].replay_input_includes_response_output is True
+    assert turns[0].represented_turn_count == 3
+    assert (
+        await DurableBridgeRepository(cast(AsyncSession, _Session())).get_complete_transcript(
+            response_id="resp_snapshot",
+            max_turns=2,
+        )
+        is None
+    )
     replay = build_complete_replay_payload(
         turns,
         continuation_request_text=json.dumps(

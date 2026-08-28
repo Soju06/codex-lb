@@ -1680,6 +1680,34 @@ async def test_chunk_writer_rejects_stale_recovery_generation(
             )
             is None
         )
+
+        assert not await repository.append_operation_event_chunk(
+            events=[
+                DurableBridgeOperationEventInput(
+                    operation_id=operation_id,
+                    session_id=claim.id,
+                    instance_id="inst-chunk-generation",
+                    owner_epoch=claim.owner_epoch,
+                    event_text="current-event",
+                    recovery_dispatch_count=1,
+                ),
+                DurableBridgeOperationEventInput(
+                    operation_id=operation_id,
+                    session_id=claim.id,
+                    instance_id="inst-chunk-generation",
+                    owner_epoch=claim.owner_epoch,
+                    event_text="late-stale-event",
+                    recovery_dispatch_count=0,
+                ),
+            ],
+            max_bytes=1024,
+        )
+        assert (
+            await session.scalar(
+                select(HttpBridgeOperationEventChunk).where(HttpBridgeOperationEventChunk.operation_id == operation_id)
+            )
+            is None
+        )
     finally:
         await session.close()
 

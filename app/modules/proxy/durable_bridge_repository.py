@@ -2603,6 +2603,7 @@ class DurableBridgeRepository:
             or event.session_id != first.session_id
             or event.instance_id != first.instance_id
             or event.owner_epoch != first.owner_epoch
+            or event.recovery_dispatch_count != first.recovery_dispatch_count
             for event in events
         ):
             return False

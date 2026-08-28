@@ -445,9 +445,7 @@ async def test_full_cleanup_cancellation_records_partial_result_and_preserves_ba
 @pytest.mark.asyncio
 async def test_operation_retention_cleanup_cancellation_keeps_partial_progress(monkeypatch) -> None:
     bridge_repo = AsyncMock()
-    bridge_repo.purge_operation_spool_batch = AsyncMock(
-        side_effect=[_purge_batch(3), asyncio.CancelledError()]
-    )
+    bridge_repo.purge_operation_spool_batch = AsyncMock(side_effect=[_purge_batch(3), asyncio.CancelledError()])
     monkeypatch.setattr(cleanup_scheduler, "_OPERATION_RETENTION_BATCH_SIZE", 3)
 
     with pytest.raises(cleanup_scheduler.OperationRetentionCleanupCancelledError) as captured:

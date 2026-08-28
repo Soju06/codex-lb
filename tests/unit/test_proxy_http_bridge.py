@@ -33349,6 +33349,79 @@ async def test_episode_consult_rechecks_after_the_durable_lookup() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_strike_during_settlement_opens_a_fresh_episode() -> None:
+    # A settle in flight and a sibling strike for the same key serialize from
+    # registry mutation through the durable write: the strike waits out the
+    # settle and opens a fresh episode instead of extending the popped one or
+    # being dropped as superseded.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-strike-during-settle",
+        key_value="sid-strike-during-settle",
+        response_event_count=0,
+    )
+    holder: dict[str, Any] = {
+        "row": SimpleNamespace(
+            consecutive_failures=2,
+            cooldown_until_epoch=time.time() + 60.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=time.time() - 1.0,
+        )
+    }
+    release_clear = asyncio.Event()
+    clear_entered = asyncio.Event()
+
+    async def lookup(**kwargs: Any) -> Any:
+        del kwargs
+        return holder["row"]
+
+    async def persist(**kwargs: Any) -> Any:
+        holder["row"] = SimpleNamespace(
+            consecutive_failures=kwargs["consecutive_failures"],
+            cooldown_until_epoch=kwargs["cooldown_until_epoch"],
+            last_detail=kwargs["last_detail"],
+            updated_at_epoch=kwargs["updated_at_epoch"],
+        )
+        return holder["row"]
+
+    async def blocked_clear(**kwargs: Any) -> bool:
+        del kwargs
+        clear_entered.set()
+        await release_clear.wait()
+        holder["row"] = SimpleNamespace(
+            consecutive_failures=0,
+            cooldown_until_epoch=0.0,
+            last_detail=None,
+            updated_at_epoch=time.time(),
+        )
+        return True
+
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(side_effect=lookup),
+        persist_retry_circuit=AsyncMock(side_effect=persist),
+        clear_retry_circuit=AsyncMock(side_effect=blocked_clear),
+    )
+    now = time.monotonic()
+    seeded = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=now)
+    seeded.consecutive_failures = 2
+    seeded.persisted_updated_at_epoch = holder["row"].updated_at_epoch
+    cast(Any, service)._http_bridge_retry_circuits[session.key] = seeded
+
+    settle = asyncio.create_task(service._clear_http_bridge_retry_circuit(session))
+    await asyncio.wait_for(clear_entered.wait(), timeout=2.0)
+    strike = asyncio.create_task(service._record_http_bridge_retry_circuit_failure(session, detail="stream_incomplete"))
+    await asyncio.sleep(0.05)
+    assert strike.done() is False, "the strike must wait out the in-flight settle"
+
+    release_clear.set()
+    await asyncio.wait_for(settle, timeout=2.0)
+    failures = await asyncio.wait_for(strike, timeout=2.0)
+
+    assert failures == 1, "the post-settle strike opens a fresh episode"
+    state = cast(Any, service)._http_bridge_retry_circuits.get(session.key)
+    assert state is not None and state.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
 async def test_a_durable_reset_clears_the_one_clear_marker() -> None:
     # An abandonment that preserves the circuit for a safe replay sets the
     # marker; when another replica later completes that replay, the merge

@@ -828,6 +828,13 @@ def _http_bridge_retry_circuit_attempt_selection_for_pending_requests(
         attempt = getattr(request_state, "response_create_attempt", None)
         if attempt is None:
             continue
+        # A request still holding a verified safe replay must not be charged
+        # anywhere: in a mixed batch its attempt would otherwise be the sole
+        # selectable one (charging the recoverable request) or make the
+        # stranded request's failure look ambiguous. Its attempt simply does
+        # not participate in the selection.
+        if _http_bridge_request_state_holds_safe_replay(request_state):
+            continue
         attempt_seen = True
         if attempt.retry_circuit_failure_recorded:
             recorded_attempts.append(attempt)

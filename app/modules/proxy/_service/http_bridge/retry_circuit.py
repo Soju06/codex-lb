@@ -385,9 +385,18 @@ class _HTTPBridgeRetryCircuitMixin:
             async with self._http_bridge_retry_circuit_lock:
                 key_lock = self._http_bridge_retry_circuit_key_locks.setdefault(key, asyncio.Lock())
             await key_lock.acquire()
-            async with self._http_bridge_retry_circuit_lock:
-                if self._http_bridge_retry_circuit_key_locks.get(key) is key_lock:
-                    return key_lock
+            # Ownership transfers to the caller only on return. The
+            # registration re-check is itself a cancellable await; a
+            # cancellation landing there would otherwise leave the key lock
+            # held forever, wedging every later persist and settle for the
+            # key.
+            try:
+                async with self._http_bridge_retry_circuit_lock:
+                    if self._http_bridge_retry_circuit_key_locks.get(key) is key_lock:
+                        return key_lock
+            except BaseException:
+                key_lock.release()
+                raise
             key_lock.release()
 
     async def _load_http_bridge_retry_circuit(self: Any, session: _HTTPBridgeSession) -> bool:
@@ -783,11 +792,31 @@ class _HTTPBridgeRetryCircuitMixin:
                 and not state.poison_anchor_cleared
             )
 
-    async def _http_bridge_mark_poison_anchor_cleared(self: Any, session: _HTTPBridgeSession) -> None:
-        """Record that this episode's poisoned anchor has been abandoned."""
+    async def _http_bridge_registered_poison_episode(
+        self: Any,
+        session: _HTTPBridgeSession,
+    ) -> _HTTPBridgeRetryCircuitState | None:
+        """Capture the episode an imminent abandonment is acting for."""
+        async with self._http_bridge_retry_circuit_lock:
+            return self._http_bridge_retry_circuits.get(session.key)
+
+    async def _http_bridge_mark_poison_anchor_cleared(
+        self: Any,
+        session: _HTTPBridgeSession,
+        *,
+        episode: _HTTPBridgeRetryCircuitState | None = None,
+    ) -> None:
+        """Record that this episode's poisoned anchor has been abandoned.
+
+        The marker belongs to the episode that performed the abandonment. If
+        that episode was settled and replaced while the durable rebind was in
+        flight, marking whatever is registered now would suppress the new
+        episode's own required abandonment and leave its poisoned anchor
+        reusable, so a caller that captured its episode marks only that one.
+        """
         async with self._http_bridge_retry_circuit_lock:
             state = self._http_bridge_retry_circuits.get(session.key)
-            if state is not None:
+            if state is not None and (episode is None or state is episode):
                 state.poison_anchor_cleared = True
 
     async def _http_bridge_precreated_retry_block(
@@ -919,7 +948,6 @@ class _HTTPBridgeRetryCircuitMixin:
             ):
                 return None
 
-        await self._load_http_bridge_retry_circuit(session)
         threshold = max(1, _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD)
         base_backoff = max(0.001, _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS)
         max_backoff = max(base_backoff, _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS)
@@ -930,94 +958,139 @@ class _HTTPBridgeRetryCircuitMixin:
         poison_class_failure = _http_bridge_anchor_poison_detail(detail) is not None
         quarantine_poisoned_anchor = False
         quarantine_cooldown_remaining = 0.0
-        async with self._http_bridge_retry_circuit_lock:
-            if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
-                duplicate_attempt = scoped_attempt
-            elif scoped_attempt is not None and (
-                scoped_attempt.disarmed
-                or (scoped_attempt.response_observed and not terminal_pre_response_frame)
-                # ``terminal_pre_response_frame`` exists because the terminal
-                # frame itself marks the attempt observed. It must not also
-                # steamroll genuine midstream evidence: a deferred-reasoning
-                # prelude observed a non-terminal response event without
-                # counting it, so a later terminal failure is a midstream
-                # failure, not a pre-response strike.
-                or (terminal_pre_response_frame and scoped_attempt.non_terminal_response_observed)
-            ):
-                return None
-            else:
-                state = self._http_bridge_retry_circuits.setdefault(
-                    session.key,
-                    _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
-                )
-                state.last_touched_monotonic = now
-                state.last_failure_monotonic = now
-                state.half_open_until = 0.0
-                if scoped_attempt is not None:
-                    scoped_attempt.retry_circuit_failure_recorded = True
-                    scoped_attempt.retry_circuit_failure_settled = anyio.Event()
-                state.consecutive_failures += 1
-                state.last_detail = detail
-                if state.consecutive_failures >= threshold:
-                    backoff = min(
-                        max_backoff,
-                        base_backoff * (2 ** min(state.consecutive_failures - threshold, 30)),
+        recorded_failures: int | None = None
+        # The registry mutation and its durable write hold the key lock
+        # together: a settle for this key either completes before the strike
+        # registers (the strike then opens a fresh episode) or waits until
+        # the strike's write has landed. Without this, a failure recorded
+        # after a settlement linearized could be dropped as superseded and
+        # disappear instead of opening the circuit.
+        key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(session.key)
+        try:
+            # The load runs under the key lock too: outside it, a settle in
+            # flight lets the load re-hydrate the just-popped counts from the
+            # not-yet-reset row, and this strike would then extend the ended
+            # episode instead of opening a fresh one.
+            await self._load_http_bridge_retry_circuit(session)
+            async with self._http_bridge_retry_circuit_lock:
+                if scoped_attempt is not None and scoped_attempt.retry_circuit_failure_recorded:
+                    duplicate_attempt = scoped_attempt
+                elif scoped_attempt is not None and (
+                    scoped_attempt.disarmed
+                    or (scoped_attempt.response_observed and not terminal_pre_response_frame)
+                    # ``terminal_pre_response_frame`` exists because the terminal
+                    # frame itself marks the attempt observed. It must not also
+                    # steamroll genuine midstream evidence: a deferred-reasoning
+                    # prelude observed a non-terminal response event without
+                    # counting it, so a later terminal failure is a midstream
+                    # failure, not a pre-response strike.
+                    or (terminal_pre_response_frame and scoped_attempt.non_terminal_response_observed)
+                ):
+                    return None
+                else:
+                    state = self._http_bridge_retry_circuits.setdefault(
+                        session.key,
+                        _HTTPBridgeRetryCircuitState(last_touched_monotonic=now),
                     )
-                    if detail == "clean_close":
-                        backoff = min(backoff, clean_close_max_backoff)
-                    state.cooldown_until = max(state.cooldown_until, now + backoff)
-                    # The probe admitted after this cooldown is planned before
-                    # it reaches the gate, so an anchor the circuit opened on
-                    # has to be suppressed at planning time. Quarantining the
-                    # key routes a full-resend probe through the existing
-                    # unanchored fresh path; delta-only payloads keep their
-                    # anchor there, because it is their only context.
-                    quarantine_poisoned_anchor = poison_class_failure
-                    quarantine_cooldown_remaining = max(0.0, state.cooldown_until - now)
-                    if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
-                        http_bridge_retry_circuit_total.labels(outcome="opened").inc()
-                    logger.warning(
-                        "http_bridge_retry_circuit event=opened bridge_kind=%s bridge_key=%s "
-                        "failures=%s cooldown_seconds=%.1f detail=%s",
-                        session.key.affinity_kind,
-                        _hash_identifier(session.key.affinity_key),
-                        state.consecutive_failures,
-                        backoff,
-                        detail,
-                    )
-                if poison_class_failure and not quarantine_poisoned_anchor:
-                    # A configured abandonment threshold below the circuit
-                    # threshold clears the anchor before the circuit ever
-                    # opens, and the terminal frame is published before that
-                    # clear. The quarantine has to cover this window too, or
-                    # an immediate client retry is planned with the dead
-                    # anchor while the clear is still awaiting I/O.
-                    configured_poison_threshold = getattr(
-                        _service_get_settings(),
-                        "http_responses_session_bridge_anchor_poison_failure_threshold",
-                        threshold,
-                    )
-                    if state.consecutive_failures >= _http_bridge_effective_anchor_poison_threshold(
-                        configured_poison_threshold
-                    ):
-                        quarantine_poisoned_anchor = True
+                    state.last_touched_monotonic = now
+                    state.last_failure_monotonic = now
+                    state.half_open_until = 0.0
+                    if scoped_attempt is not None:
+                        scoped_attempt.retry_circuit_failure_recorded = True
+                        scoped_attempt.retry_circuit_failure_settled = anyio.Event()
+                    state.consecutive_failures += 1
+                    state.last_detail = detail
+                    if state.consecutive_failures >= threshold:
+                        backoff = min(
+                            max_backoff,
+                            base_backoff * (2 ** min(state.consecutive_failures - threshold, 30)),
+                        )
+                        if detail == "clean_close":
+                            backoff = min(backoff, clean_close_max_backoff)
+                        state.cooldown_until = max(state.cooldown_until, now + backoff)
+                        # The probe admitted after this cooldown is planned before
+                        # it reaches the gate, so an anchor the circuit opened on
+                        # has to be suppressed at planning time. Quarantining the
+                        # key routes a full-resend probe through the existing
+                        # unanchored fresh path; delta-only payloads keep their
+                        # anchor there, because it is their only context.
+                        quarantine_poisoned_anchor = poison_class_failure
                         quarantine_cooldown_remaining = max(0.0, state.cooldown_until - now)
+                        if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
+                            http_bridge_retry_circuit_total.labels(outcome="opened").inc()
+                        logger.warning(
+                            "http_bridge_retry_circuit event=opened bridge_kind=%s bridge_key=%s "
+                            "failures=%s cooldown_seconds=%.1f detail=%s",
+                            session.key.affinity_kind,
+                            _hash_identifier(session.key.affinity_key),
+                            state.consecutive_failures,
+                            backoff,
+                            detail,
+                        )
+                    if poison_class_failure and not quarantine_poisoned_anchor:
+                        # A configured abandonment threshold below the circuit
+                        # threshold clears the anchor before the circuit ever
+                        # opens, and the terminal frame is published before that
+                        # clear. The quarantine has to cover this window too, or
+                        # an immediate client retry is planned with the dead
+                        # anchor while the clear is still awaiting I/O.
+                        configured_poison_threshold = getattr(
+                            _service_get_settings(),
+                            "http_responses_session_bridge_anchor_poison_failure_threshold",
+                            threshold,
+                        )
+                        if state.consecutive_failures >= _http_bridge_effective_anchor_poison_threshold(
+                            configured_poison_threshold
+                        ):
+                            quarantine_poisoned_anchor = True
+                            quarantine_cooldown_remaining = max(0.0, state.cooldown_until - now)
+            if duplicate_attempt is None:
+                assert state is not None
+                if quarantine_poisoned_anchor:
+                    _quarantine_http_bridge_session(
+                        self,
+                        session,
+                        reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
+                        minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(quarantine_cooldown_remaining),
+                    )
+                recorded_failures = await self._record_http_bridge_retry_circuit_failure_locked(
+                    session,
+                    state,
+                    scoped_attempt=scoped_attempt,
+                    threshold=threshold,
+                    poison_class_failure=poison_class_failure,
+                    quarantine_poisoned_anchor=quarantine_poisoned_anchor,
+                    quarantine_cooldown_remaining=quarantine_cooldown_remaining,
+                )
+        finally:
+            key_lock.release()
         if duplicate_attempt is not None:
             return await self._await_http_bridge_retry_circuit_attempt_settlement(
                 session,
                 attempt=duplicate_attempt,
                 detail=detail,
             )
-        assert state is not None
-        if quarantine_poisoned_anchor:
-            _quarantine_http_bridge_session(
-                self,
-                session,
-                reason=_HTTP_BRIDGE_QUARANTINE_POISONED_ANCHOR_REASON,
-                minimum_seconds=_http_bridge_poison_quarantine_minimum_seconds(quarantine_cooldown_remaining),
-            )
+        return recorded_failures
+
+    async def _record_http_bridge_retry_circuit_failure_locked(
+        self: Any,
+        session: _HTTPBridgeSession,
+        state: _HTTPBridgeRetryCircuitState,
+        *,
+        scoped_attempt: _HTTPBridgeResponseCreateAttempt | None,
+        threshold: int,
+        poison_class_failure: bool,
+        quarantine_poisoned_anchor: bool,
+        quarantine_cooldown_remaining: float,
+    ) -> int | None:
         try:
-            await self._persist_http_bridge_retry_circuit(session, state)
+            await self._persist_http_bridge_retry_circuit_serialized(
+                session,
+                state,
+                now_monotonic=time.monotonic(),
+                now_wall=time.time(),
+                threshold=threshold,
+            )
             merged_cooldown_remaining = 0.0
             merged_poison_opened = False
             async with self._http_bridge_retry_circuit_lock:

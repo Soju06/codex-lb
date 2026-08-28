@@ -262,6 +262,23 @@
       cancellation landing mid-consult cannot strand the poisoned anchor
       after the grouped requests were already finalized
 
+- [x] 2.45 The strike-attempt selection excludes requests that still hold a
+      safe replay, so a mixed batch can neither charge the recoverable
+      request nor make the stranded request's failure look ambiguous
+
+- [x] 2.46 The one-clear marker is set only on the episode that performed
+      the abandonment: a replacement episode installed while the rebind was
+      in flight keeps its own required abandonment
+
+- [x] 2.47 A strike serializes its registry mutation, its durable load, and
+      its write with settles for the key, so a failure recorded while a
+      completion was settling opens a fresh episode instead of extending the
+      popped one or being dropped as superseded
+
+- [x] 2.48 The key-lock acquire helper releases the lock when cancellation
+      lands during its post-acquire validation, so a cancelled caller cannot
+      wedge every later persist and settle for the key
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

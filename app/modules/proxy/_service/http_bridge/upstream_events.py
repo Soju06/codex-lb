@@ -1270,6 +1270,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     ):
                         poison_detail = poison_candidate_detail
                 if poison_detail is not None:
+                    poison_episode = await self._http_bridge_registered_poison_episode(session)
                     durable_cleared = await _abandon_durable_http_bridge_continuity(
                         self,
                         session,
@@ -1277,7 +1278,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                         settle_circuit=_http_bridge_abandonment_may_settle_circuit(pending_request_states),
                     )
                     if durable_cleared:
-                        await self._http_bridge_mark_poison_anchor_cleared(session)
+                        await self._http_bridge_mark_poison_anchor_cleared(session, episode=poison_episode)
                         await self._retire_stale_pending_http_bridge_session(
                             session,
                             detail=poison_detail,
@@ -2367,6 +2368,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # below unchanged. The clear is internally exception-safe.
                 grouped_clear_detail = grouped_poison_detail
                 grouped_clear_strike_failures = grouped_poison_strike_failures
+                grouped_poison_episode = await self._http_bridge_registered_poison_episode(session)
 
                 async def _consult_and_clear_grouped_anchor() -> bool:
                     # The episode consult is a durable await of its own: run
@@ -2410,7 +2412,7 @@ class _HTTPBridgeUpstreamEventsMixin:
                     # circuit alive for its safe member, so the episode
                     # survives and must remember its anchor was already
                     # cleared — one poisoned anchor is abandoned once.
-                    await self._http_bridge_mark_poison_anchor_cleared(session)
+                    await self._http_bridge_mark_poison_anchor_cleared(session, episode=grouped_poison_episode)
                 if grouped_cancellation is None:
                     grouped_cancellation = grouped_clear_cancellation
             if grouped_cancellation is not None:

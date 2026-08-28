@@ -872,6 +872,14 @@ def _http_bridge_continuity_bound_without_safe_replay(request_state: _WebSocketR
     )
 
 
+def _http_bridge_request_state_holds_safe_replay(request_state: Any) -> bool:
+    """Whether the request still holds a verified safe replay to protect."""
+    return bool(
+        getattr(request_state, "fresh_upstream_request_is_retry_safe", False)
+        and getattr(request_state, "fresh_upstream_request_text", None)
+    )
+
+
 def _http_bridge_abandonment_may_settle_circuit(request_states: Iterable[Any]) -> bool:
     """Return whether this abandonment may settle the retry circuit with it.
 
@@ -879,17 +887,17 @@ def _http_bridge_abandonment_may_settle_circuit(request_states: Iterable[Any]) -
     safe replay. That replay claims the circuit's generation at dispatch
     (#1863), so clearing the circuit under it removes the fence it depends on.
     Every other case is a cooldown backing off a cause this abandonment just
-    removed.
+    removed — anchored or not. Requiring every state to also be
+    continuity-bound let an unanchored full-resend request, which has no
+    replay to protect, block the settle and keep the key cooling for its full
+    backoff after the anchor was already gone.
 
     An empty set therefore settles. Terminal notification drains
     ``pending_requests`` before retirement, so the funnels routinely reach here
     with a pre-drain count and no states at all; nothing is holding the
-    generation, and refusing to settle there left the circuit cooling for its
-    full backoff after the anchor was already gone.
+    generation.
     """
-    return all(
-        _http_bridge_continuity_bound_without_safe_replay(state) for state in request_states if state is not None
-    )
+    return not any(_http_bridge_request_state_holds_safe_replay(state) for state in request_states if state is not None)
 
 
 def _http_bridge_session_has_admission_waiter(session: object | None) -> bool:

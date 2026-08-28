@@ -177,6 +177,18 @@
       cooldown. The conflicting retirement-threshold sentence in the delta
       spec now states the capped rule everywhere
 
+- [x] 2.27 The terminal and grouped clear gates consult the live registered
+      episode immediately before abandoning the anchor, the same consult the
+      retirement and reader funnels use, so a sibling that completes and
+      settles during publication vetoes the clear instead of losing the
+      fresh anchor it persisted
+
+- [x] 2.28 The settle predicate blocks only on a request that actually holds
+      a verified safe replay. An unanchored request with no replay no longer
+      keeps the circuit cooling after a confirmed abandonment, matching the
+      requirement that a safely replayable request is the only thing that
+      may hold the circuit open
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

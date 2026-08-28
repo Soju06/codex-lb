@@ -81,7 +81,6 @@ from app.modules.proxy._service.http_bridge.quarantine import (
 )
 from app.modules.proxy._service.http_bridge.retry_circuit import (
     _http_bridge_anchor_poison_detail,
-    _http_bridge_effective_anchor_poison_threshold,
 )
 from app.modules.proxy._service.http_bridge.service_stubs import (
     _assign_websocket_response_id,
@@ -2346,9 +2345,15 @@ class _HTTPBridgeUpstreamEventsMixin:
             grouped_error, grouped_cancellation = await _await_task_deferring_cancellation(grouped_settlement_task)
             if (
                 grouped_poison_detail is not None
-                and grouped_poison_strike_failures
-                >= _http_bridge_effective_anchor_poison_threshold(
-                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                and grouped_poison_strike_failures > 0
+                # Same live-episode consult as the single terminal path: a
+                # sibling settle during grouped publication vetoes the clear.
+                and await self._http_bridge_poison_anchor_clear_owed(
+                    session,
+                    consecutive_failures=grouped_poison_strike_failures,
+                    configured_threshold=(
+                        _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                    ),
                 )
             ):
                 # The grouped frames have been published by here, so this mirrors
@@ -3307,9 +3312,16 @@ class _HTTPBridgeUpstreamEventsMixin:
         if (
             terminal_poison_detail is not None
             and terminal_strike_failures is not None
-            and terminal_strike_failures
-            >= _http_bridge_effective_anchor_poison_threshold(
-                _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+            # The consult reads the currently registered episode, not the
+            # detached count captured with the strike: a multiplexed sibling
+            # that completed during publication has settled the circuit and
+            # persisted a fresh anchor, and this clear must not delete it.
+            and await self._http_bridge_poison_anchor_clear_owed(
+                session,
+                consecutive_failures=terminal_strike_failures,
+                configured_threshold=(
+                    _service_get_settings().http_responses_session_bridge_anchor_poison_failure_threshold
+                ),
             )
         ):
             # The strike above opens the circuit, but the durable anchor that

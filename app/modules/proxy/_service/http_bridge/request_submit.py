@@ -86,6 +86,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_prewarm_enabled,
     _http_bridge_request_budget_seconds,
     _http_bridge_request_counts_against_queue,
+    _http_bridge_request_state_holds_safe_replay,
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _record_continuity_fail_closed,
@@ -2929,8 +2930,7 @@ class _HTTPBridgeRequestSubmitMixin:
         # pre-drain handoff whose state list is already empty.
         retired_states_present = [state for state in retired_request_states if state is not None]
         retirement_strike_eligible = not retired_states_present or any(
-            not (state.fresh_upstream_request_is_retry_safe and state.fresh_upstream_request_text)
-            for state in retired_states_present
+            not _http_bridge_request_state_holds_safe_replay(state) for state in retired_states_present
         )
         if retired_request_count > 0 and response_events_seen == 0 and retirement_strike_eligible:
             consecutive_failures = await self._record_http_bridge_retry_circuit_failure_for_attempt_selection(

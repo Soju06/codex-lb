@@ -29462,14 +29462,20 @@ async def test_http_bridge_retire_stale_pending_poisons_anchor_after_repeated_ev
             detail="stream_incomplete",
         )
 
-    durable_bridge.rebind_session_account.assert_awaited_once_with(
-        session_id="durable-anchor-poison-retire",
-        api_key_id=None,
-        instance_id=proxy_service.get_settings().http_responses_session_bridge_instance_id,
-        owner_epoch=5,
-        account_id="acc-bridge",
-        clear_continuity=True,
-    )
+    # The retired owner holds no safe replay, so each confirmed abandonment
+    # also settles the circuit and ends its episode; seven failures form
+    # complete episodes at strikes 2, 4, and 6, each proving poison afresh
+    # and re-clearing the (idempotent) durable anchor.
+    assert durable_bridge.rebind_session_account.await_count == 3
+    for rebind_call in durable_bridge.rebind_session_account.await_args_list:
+        assert rebind_call.kwargs == {
+            "session_id": "durable-anchor-poison-retire",
+            "api_key_id": None,
+            "instance_id": proxy_service.get_settings().http_responses_session_bridge_instance_id,
+            "owner_epoch": 5,
+            "account_id": "acc-bridge",
+            "clear_continuity": True,
+        }
 
 
 @pytest.mark.asyncio
@@ -32950,6 +32956,64 @@ async def test_terminal_poison_strike_clears_the_durable_anchor(
 
 
 @pytest.mark.asyncio
+async def test_terminal_clear_is_vetoed_by_a_concurrent_episode_settle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # While the terminal strike's durable write is in flight, a multiplexed
+    # sibling can complete, settle the circuit, and persist a fresh valid
+    # anchor. The terminal gate used to compare the detached strike count and
+    # then clear continuity unconditionally, deleting that fresh anchor. The
+    # gate now consults the live registered episode immediately before the
+    # clear, which the settle has already emptied.
+    service, session, _first = _make_terminal_error_bridge_fixture(
+        request_id="req-terminal-episode-veto",
+        key_value="sid-terminal-episode-veto",
+        response_event_count=0,
+    )
+    session.durable_session_id = "durable-episode-veto"
+    session.durable_owner_epoch = 1
+    rebind = AsyncMock(return_value=True)
+
+    async def persist_and_settle_concurrently(**kwargs: Any) -> None:
+        # The sibling's settle lands while this strike's write is awaited.
+        if kwargs["consecutive_failures"] >= 2:
+            cast(Any, service)._http_bridge_retry_circuits.pop(session.key, None)
+        return None
+
+    service._durable_bridge = SimpleNamespace(
+        lookup_retry_circuit=AsyncMock(return_value=None),
+        persist_retry_circuit=persist_and_settle_concurrently,
+        clear_retry_circuit=AsyncMock(return_value=None),
+        rebind_session_account=rebind,
+    )
+    service._handle_stream_error = AsyncMock()  # type: ignore[method-assign]
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    second = proxy_service._WebSocketRequestState(
+        request_id="req-terminal-episode-veto-2",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=2.0,
+        previous_response_id="resp_dead_anchor",
+        event_queue=asyncio.Queue(),
+        transport="http",
+        skip_request_log=True,
+    )
+    second.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=2)
+    session.pending_requests.append(second)
+    session.queued_request_count = 1
+
+    await service._process_http_bridge_upstream_text(session, _PREVIOUS_RESPONSE_NOT_FOUND_FRAME)
+
+    rebind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_terminal_anchor_clear_runs_after_the_terminal_frame_is_published(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -32971,7 +33035,12 @@ async def test_terminal_anchor_clear_runs_after_the_terminal_frame_is_published(
 
     async def _record(*_args: Any, **_kwargs: Any) -> int:
         depths["strike"] = event_queue.qsize()
-        return 99
+        # The stub still registers the episode the real recorder would, so
+        # the clear gate's live-episode consult sees it.
+        state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+        state.consecutive_failures = 2
+        cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+        return 2
 
     async def _rebind(*_args: Any, **_kwargs: Any) -> bool:
         depths["clear"] = event_queue.qsize()
@@ -33051,7 +33120,12 @@ async def test_terminal_settlement_is_finalized_when_the_anchor_clear_is_cancell
     finalized: list[str] = []
 
     async def _record(*_args: Any, **_kwargs: Any) -> int:
-        return 99
+        # The stub still registers the episode the real recorder would, so
+        # the clear gate's live-episode consult sees it.
+        state = http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(last_touched_monotonic=time.monotonic())
+        state.consecutive_failures = 2
+        cast(Any, service)._http_bridge_retry_circuits[session.key] = state
+        return 2
 
     async def _rebind(*_args: Any, **_kwargs: Any) -> bool:
         raise asyncio.CancelledError
@@ -33559,6 +33633,18 @@ def test_abandonment_settles_the_circuit_unless_a_safe_replay_holds_it() -> None
     assert may_settle([_state(safe_replay=False), _state(safe_replay=True)]) is False, (
         "one replayable request is enough to keep the circuit"
     )
+
+    # An unanchored full-resend request holds no safe replay either: it must
+    # not block the settle merely because it is not continuity-bound, or the
+    # key keeps cooling for 60-600s after the anchor is already gone.
+    unanchored = SimpleNamespace(
+        previous_response_id=None,
+        fresh_upstream_request_is_retry_safe=False,
+        fresh_upstream_request_text=None,
+        hard_continuity_anchor=False,
+    )
+    assert may_settle([unanchored]) is True
+    assert may_settle([unanchored, _state(safe_replay=True)]) is False
 
 
 @pytest.mark.asyncio

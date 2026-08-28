@@ -34014,6 +34014,34 @@ def test_abandonment_settles_the_circuit_unless_a_safe_replay_holds_it() -> None
     assert may_settle([consumed]) is True
 
 
+def test_safe_only_attempt_selection_is_ineligible_not_absent() -> None:
+    # A batch whose only attempt still holds a safe replay must classify as
+    # ineligible: absent is what authorizes an unscoped strike, and that
+    # would charge the one request that is about to recover.
+    safe_state = proxy_service._WebSocketRequestState(
+        request_id="req-safe-only-selection",
+        model="gpt-5.4",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        previous_response_id="resp-safe",
+        event_queue=None,
+        transport="http",
+    )
+    from app.modules.proxy._service.support import _HTTPBridgeResponseCreateAttempt
+
+    safe_state.response_create_attempt = _HTTPBridgeResponseCreateAttempt(ordinal=1)
+    safe_state.fresh_upstream_request_is_retry_safe = True
+    safe_state.fresh_upstream_request_text = '{"model": "gpt-5.4"}'
+
+    selection = http_bridge_helpers_module._http_bridge_retry_circuit_attempt_selection_for_pending_requests(
+        [safe_state]
+    )
+
+    assert selection.kind == "ineligible", "a safe-only batch must not read as having no attempts at all"
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_precreated_usage_limit_defers_keyed_health_until_settlement(
     monkeypatch: pytest.MonkeyPatch,
@@ -34913,6 +34941,21 @@ async def test_a_settled_episode_owes_no_anchor_clear() -> None:
         session, consecutive_failures=2, configured_threshold=7
     )
     assert owed is None, "a row reset to zero proves the episode already ended"
+
+    # A durable episode at threshold on clean_close is not poison evidence:
+    # another replica can reset the old episode and open a clean-close one,
+    # and a count-only check would let the stale local episode clear the
+    # fresh anchor that replica registered.
+    durable_lookup.return_value = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="clean_close",
+        updated_at_epoch=time.time(),
+    )
+    owed, _anchor = await service._http_bridge_poison_anchor_clear_owed(
+        session, consecutive_failures=2, configured_threshold=7
+    )
+    assert owed is None, "a clean-close episode row is not proof of a poisoned anchor"
 
     durable_lookup.return_value = SimpleNamespace(
         consecutive_failures=2,

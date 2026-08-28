@@ -250,17 +250,21 @@ class _HTTPBridgeRetryCircuitMixin:
         if not callable(claim_generation):
             return False
 
-        # Keep local failure recording behind the same lock until the durable
-        # CAS commits. Cross-replica failures serialize at the row CAS; local
-        # failures serialize here before they can mutate their in-memory base.
-        async with self._http_bridge_retry_circuit_lock:
-            state = self._http_bridge_retry_circuits.get(key)
-            if state is not None and (
-                state.consecutive_failures > expected_local_failures
-                or state.last_failure_monotonic > expected_last_failure
-                or state.cooldown_until > expected_local_cooldown
-            ):
-                return False
+        # Local failure recording for this key serializes on the key lock,
+        # so holding it across the durable CAS keeps the claim linearized
+        # against local strikes without parking every unrelated hard key
+        # behind the global registry lock for up to the claim timeout. The
+        # global lock is held only for the short state checks.
+        key_lock = await self._acquire_http_bridge_retry_circuit_key_lock(key)
+        try:
+            async with self._http_bridge_retry_circuit_lock:
+                state = self._http_bridge_retry_circuits.get(key)
+                if state is not None and (
+                    state.consecutive_failures > expected_local_failures
+                    or state.last_failure_monotonic > expected_last_failure
+                    or state.cooldown_until > expected_local_cooldown
+                ):
+                    return False
             try:
                 claimed = await asyncio.wait_for(
                     claim_generation(
@@ -286,9 +290,12 @@ class _HTTPBridgeRetryCircuitMixin:
                 return False
             if claimed is None:
                 return False
-            self._http_bridge_retry_circuit_loaded_keys.add(key)
-            self._http_bridge_retry_circuit_persisted_keys.add(key)
+            async with self._http_bridge_retry_circuit_lock:
+                self._http_bridge_retry_circuit_loaded_keys.add(key)
+                self._http_bridge_retry_circuit_persisted_keys.add(key)
             return True
+        finally:
+            key_lock.release()
 
     async def _http_bridge_retry_circuit_current_count(self: Any, session: _HTTPBridgeSession) -> int:
         async with self._http_bridge_retry_circuit_lock:
@@ -826,7 +833,15 @@ class _HTTPBridgeRetryCircuitMixin:
                 exc_info=True,
             )
             return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
-        if persisted is None or persisted.consecutive_failures < effective_threshold:
+        if (
+            persisted is None
+            or persisted.consecutive_failures < effective_threshold
+            # The row must be a poison episode of its own: another replica
+            # can reset the old episode, register a fresh anchor, and open a
+            # new at-threshold episode on clean_close, and a count-only check
+            # would let the stale local episode clear that fresh anchor.
+            or _http_bridge_anchor_poison_detail(persisted.last_detail) is None
+        ):
             return None, _POISON_ANCHOR_CAPTURE_UNAVAILABLE
         # Re-check the live episode after the durable await: a multiplexed
         # sibling can complete, settle the registry, and reset the row while

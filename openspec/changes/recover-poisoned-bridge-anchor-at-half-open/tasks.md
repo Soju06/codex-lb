@@ -317,6 +317,22 @@
       belonged to the ended episode and resets with it, so a replacement
       episode is never denied its required abandonment
 
+- [x] 2.57 A batch whose only attempts hold safe replays classifies as
+      ineligible rather than absent, so the watchdog cannot record an
+      unscoped strike against the one request that is about to recover
+
+- [x] 2.58 A strike write whose base predates a reset row is dropped by the
+      upsert instead of rebased as the first failure of the new lineage;
+      fresh strikes load the reset row first and carry a matching base
+
+- [x] 2.59 The clear consult requires the durable episode itself to be
+      poison-class, so an at-threshold clean-close episode opened by another
+      replica cannot authorize a stale local episode's abandonment
+
+- [x] 2.60 The generation claim holds the per-key lock across its durable
+      CAS instead of the global registry lock, so a slow claim no longer
+      parks every unrelated hard key behind it
+
 ## 3. Verification
 
 - [x] 3.1 Run the HTTP bridge unit suite, ruff, ty, the proxy architecture

@@ -502,6 +502,8 @@ async def test_retry_circuit_reset_starts_new_failure_lineage(
             session_key_value="sid-retry-reset-lineage",
             api_key_scope="key-1",
         )
+        # A strike whose base predates the reset belongs to the settled
+        # lineage and is dropped outright; the reset row stays untouched.
         await repository.upsert_retry_circuit(
             session_key_kind="session_header",
             session_key_value="sid-retry-reset-lineage",
@@ -523,9 +525,25 @@ async def test_retry_circuit_reset_starts_new_failure_lineage(
         )
         assert row is not None
         assert row.cooldown_until_epoch == 0.0
+        assert row.consecutive_failures == 0, "a stale-base strike must not rebase into the reset lineage"
+        assert row.last_detail is None
+        reset_epoch = row.updated_at_epoch
+
+        # A fresh strike loads the reset row first and carries its base, so
+        # it lands as the first failure of the new lineage.
+        await repository.upsert_retry_circuit(
+            session_key_kind="session_header",
+            session_key_value="sid-retry-reset-lineage",
+            api_key_scope="key-1",
+            consecutive_failures=1,
+            cooldown_until_epoch=0.0,
+            last_detail="stream_incomplete",
+            updated_at_epoch=reset_epoch + 1.0,
+            base_updated_at_epoch=reset_epoch,
+        )
+        await session.refresh(row)
         assert row.consecutive_failures == 1
         assert row.last_detail == "stream_incomplete"
-        assert row.updated_at_epoch == 2000.0
     finally:
         await session.close()
 

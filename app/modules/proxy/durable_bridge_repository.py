@@ -289,7 +289,6 @@ class DurableBridgeRepository:
         )
         # A reset starts a new failure lineage. Never carry the incoming
         # cooldown into that fresh lineage, even when the threshold is one.
-        reset_failure_cooldown = 0.0
         base_backoff = max(0.001, base_backoff_seconds)
         max_backoff = max(base_backoff, max_backoff_seconds)
         clean_close_max_backoff = max(0.001, clean_close_max_backoff_seconds)
@@ -332,7 +331,12 @@ class DurableBridgeRepository:
                 failure_from_loaded_row,
             )
             conflict_failures = case(
-                (reset_lineage, 1),
+                # A write whose base predates a reset row belongs to the
+                # settled lineage: drop it (keep the reset row) rather
+                # than rebasing a finished episode's strike as the first
+                # failure of the new one. Fresh strikes load the reset
+                # row first and carry a matching base.
+                (reset_lineage, HttpBridgeRetryCircuit.consecutive_failures),
                 (
                     failure_is_newer_than_base,
                     func.greatest(
@@ -347,7 +351,7 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
-                (reset_lineage, reset_failure_cooldown),
+                (reset_lineage, HttpBridgeRetryCircuit.cooldown_until_epoch),
                 (
                     conflict_failures >= threshold,
                     func.greatest(
@@ -366,7 +370,7 @@ class DurableBridgeRepository:
                 set_={
                     "consecutive_failures": conflict_failures,
                     "cooldown_until_epoch": case(
-                        (reset_lineage, reset_failure_cooldown),
+                        (reset_lineage, HttpBridgeRetryCircuit.cooldown_until_epoch),
                         else_=func.greatest(
                             HttpBridgeRetryCircuit.cooldown_until_epoch,
                             excluded.cooldown_until_epoch,
@@ -374,7 +378,7 @@ class DurableBridgeRepository:
                         ),
                     ),
                     "last_detail": case(
-                        (reset_lineage, excluded.last_detail),
+                        (reset_lineage, HttpBridgeRetryCircuit.last_detail),
                         (
                             excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
                             excluded.last_detail,
@@ -382,7 +386,7 @@ class DurableBridgeRepository:
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
-                        (reset_lineage, excluded.updated_at_epoch),
+                        (reset_lineage, HttpBridgeRetryCircuit.updated_at_epoch),
                         else_=func.greatest(
                             HttpBridgeRetryCircuit.updated_at_epoch,
                             excluded.updated_at_epoch,
@@ -408,7 +412,12 @@ class DurableBridgeRepository:
                 failure_from_loaded_row,
             )
             conflict_failures = case(
-                (reset_lineage, 1),
+                # A write whose base predates a reset row belongs to the
+                # settled lineage: drop it (keep the reset row) rather
+                # than rebasing a finished episode's strike as the first
+                # failure of the new one. Fresh strikes load the reset
+                # row first and carry a matching base.
+                (reset_lineage, HttpBridgeRetryCircuit.consecutive_failures),
                 (
                     failure_is_newer_than_base,
                     func.max(
@@ -423,7 +432,7 @@ class DurableBridgeRepository:
                 excluded.updated_at_epoch,
             )
             merged_cooldown = case(
-                (reset_lineage, reset_failure_cooldown),
+                (reset_lineage, HttpBridgeRetryCircuit.cooldown_until_epoch),
                 (
                     conflict_failures >= threshold,
                     func.max(
@@ -442,7 +451,7 @@ class DurableBridgeRepository:
                 set_={
                     "consecutive_failures": conflict_failures,
                     "cooldown_until_epoch": case(
-                        (reset_lineage, reset_failure_cooldown),
+                        (reset_lineage, HttpBridgeRetryCircuit.cooldown_until_epoch),
                         else_=func.max(
                             HttpBridgeRetryCircuit.cooldown_until_epoch,
                             excluded.cooldown_until_epoch,
@@ -450,7 +459,7 @@ class DurableBridgeRepository:
                         ),
                     ),
                     "last_detail": case(
-                        (reset_lineage, excluded.last_detail),
+                        (reset_lineage, HttpBridgeRetryCircuit.last_detail),
                         (
                             excluded.updated_at_epoch >= HttpBridgeRetryCircuit.updated_at_epoch,
                             excluded.last_detail,
@@ -458,7 +467,7 @@ class DurableBridgeRepository:
                         else_=HttpBridgeRetryCircuit.last_detail,
                     ),
                     "updated_at_epoch": case(
-                        (reset_lineage, excluded.updated_at_epoch),
+                        (reset_lineage, HttpBridgeRetryCircuit.updated_at_epoch),
                         else_=func.max(
                             HttpBridgeRetryCircuit.updated_at_epoch,
                             excluded.updated_at_epoch,

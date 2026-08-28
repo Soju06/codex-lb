@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import inspect
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
@@ -20,6 +22,8 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeOperationPurgeBatchResult,
     DurableBridgeRepository,
 )
+
+leader_election_module = importlib.import_module("app.core.scheduling.leader_election")
 
 pytestmark = pytest.mark.unit
 
@@ -185,7 +189,15 @@ def test_cleanup_delay_retries_immediately_while_backlog_is_likely() -> None:
 def test_startup_and_scheduler_share_the_bounded_spool_purge_size() -> None:
     assert cleanup_scheduler._OPERATION_RETENTION_BATCH_SIZE == DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
     assert (
+        inspect.signature(DurableBridgeRepository.purge_operation_spool_batch).parameters["batch_size"].default
+        == DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
+    )
+    assert (
         inspect.signature(DurableBridgeRepository.purge_operation_spool).parameters["batch_size"].default
+        == DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
+    )
+    assert (
+        inspect.signature(DurableBridgeSessionCoordinator.purge_operation_spool_batch).parameters["batch_size"].default
         == DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE
     )
     assert (
@@ -440,6 +452,82 @@ async def test_full_cleanup_cancellation_records_partial_result_and_preserves_ba
     assert backlog_likely is True
     assert scheduler._operation_retention_attempt_failed is True
     recorded.assert_called_once_with(partial_result)
+
+
+@pytest.mark.asyncio
+async def test_full_cleanup_lease_loss_during_session_teardown_preserves_confirmed_backlog(monkeypatch) -> None:
+    teardown_started = asyncio.Event()
+    never = asyncio.Event()
+    leader = leader_election_module.LeaderElection(leader_id="node-a")
+    lease_session = MagicMock()
+    lease_session.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+    lease_session.execute = AsyncMock(
+        side_effect=(
+            SimpleNamespace(first=lambda: (5.0,)),
+            SimpleNamespace(first=lambda: None),
+        )
+    )
+    lease_session.commit = AsyncMock()
+
+    @asynccontextmanager
+    async def leader_session():
+        yield lease_session
+
+    class SessionThatBlocksOnExit:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_args: object) -> None:
+            teardown_started.set()
+            await never.wait()
+
+    completed_full_batch = cleanup_scheduler.OperationRetentionCleanupResult(
+        deleted_operations=50,
+        batches=1,
+        backlog_likely=True,
+        outcome="batch_budget_exhausted",
+        duration_seconds=0.01,
+    )
+    monkeypatch.setattr(
+        leader_election_module,
+        "get_settings",
+        lambda: SimpleNamespace(leader_election_enabled=True, leader_election_ttl_seconds=5),
+    )
+    monkeypatch.setattr(leader_election_module, "get_background_session", leader_session)
+    monkeypatch.setattr(cleanup_scheduler, "_get_leader_election", lambda: leader)
+    monkeypatch.setattr(cleanup_scheduler, "get_background_session", SessionThatBlocksOnExit)
+    monkeypatch.setattr(cleanup_scheduler.startup_module, "_bridge_durable_schema_ready", True)
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_operation_spool_retention_seconds=604800.0,
+            metrics_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        cleanup_scheduler,
+        "_purge_operation_spool_with_budget",
+        AsyncMock(return_value=completed_full_batch),
+    )
+    monkeypatch.setattr(cleanup_scheduler, "_record_operation_retention_cleanup", Mock())
+    scheduler = cleanup_scheduler.StickySessionCleanupScheduler(interval_seconds=300, enabled=False)
+
+    attempted = await asyncio.wait_for(scheduler._cleanup_once(), timeout=3.0)
+    backlog_likely = cleanup_scheduler._merge_backlog_signal(False, attempted)
+
+    assert teardown_started.is_set()
+    assert lease_session.execute.await_count == 2
+    assert attempted is True
+    assert backlog_likely is True
+    assert (
+        cleanup_scheduler._next_cleanup_delay_seconds(
+            300.0,
+            backlog_likely=backlog_likely,
+            retry_immediately=attempted is True and not scheduler._operation_retention_attempt_failed,
+        )
+        == 0.0
+    )
 
 
 @pytest.mark.asyncio

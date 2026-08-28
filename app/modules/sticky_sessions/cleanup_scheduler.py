@@ -325,8 +325,8 @@ class StickySessionCleanupScheduler:
                 error_type or "none",
             )
         self._operation_retention_attempt_failed = result.outcome == "failed"
+        self._operation_retention_cancelled_backlog_likely = result.backlog_likely
         if cancellation is not None:
-            self._operation_retention_cancelled_backlog_likely = result.backlog_likely
             raise cancellation
         return result.backlog_likely
 

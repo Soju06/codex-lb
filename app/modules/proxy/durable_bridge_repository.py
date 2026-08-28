@@ -1759,7 +1759,7 @@ class DurableBridgeRepository:
         self,
         *,
         cutoff: datetime,
-        batch_size: int = 500,
+        batch_size: int = DURABLE_BRIDGE_OPERATION_SPOOL_PURGE_BATCH_SIZE,
     ) -> DurableBridgeOperationPurgeBatchResult:
         """Delete eligible transcript material past retention.
 

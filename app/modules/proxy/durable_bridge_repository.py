@@ -2630,6 +2630,7 @@ class DurableBridgeRepository:
                 session_id=first.session_id,
                 instance_id=first.instance_id,
                 owner_epoch=first.owner_epoch,
+                expected_recovery_dispatch_count=first.recovery_dispatch_count,
             )
             if locked_operation is None:
                 return False

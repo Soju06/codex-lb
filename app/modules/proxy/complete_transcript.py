@@ -251,6 +251,13 @@ def build_complete_replay_payload(
             continuation_input = continuation_input[len(client_input_history) :]
         elif client_input_history and _items_prefix_matches(client_input_history, continuation_input):
             return None
+        elif allow_unanchored_continuation:
+            # An unanchored continuation must prove how its input relates to
+            # the durable prefix. If the client compacted or otherwise
+            # diverged from that prefix, concatenating both histories would
+            # silently duplicate or contradict context. Fail closed rather
+            # than dispatching an unproven replay.
+            return None
         prior_output = latest_prior_output if include_prior_output else []
         if prior_output is None:
             return None

@@ -1635,6 +1635,56 @@ async def test_chunk_writer_persists_batch_and_terminal_atomically(
 
 
 @pytest.mark.asyncio
+async def test_chunk_writer_rejects_stale_recovery_generation(
+    async_session_factory: Callable[[], AsyncSession],
+) -> None:
+    session = async_session_factory()
+    try:
+        repository = DurableBridgeRepository(session)
+        claim = await _claim(repository, instance_id="inst-chunk-generation", session_key_value="sid-chunk-generation")
+        fingerprint = durable_bridge_hash("chunk-generation")
+        operation_id = durable_bridge_operation_id(claim.id, fingerprint)
+        assert await repository.record_operation(
+            operation_id=operation_id,
+            session_id=claim.id,
+            instance_id="inst-chunk-generation",
+            owner_epoch=claim.owner_epoch,
+            request_fingerprint=fingerprint,
+            account_id="account-operation",
+            model="gpt-5.6",
+            parent_response_id=None,
+        )
+        await session.execute(
+            update(HttpBridgeOperationRecord)
+            .where(HttpBridgeOperationRecord.operation_id == operation_id)
+            .values(recovery_dispatch_count=1)
+        )
+        await session.commit()
+
+        assert not await repository.append_operation_event_chunk(
+            events=[
+                DurableBridgeOperationEventInput(
+                    operation_id=operation_id,
+                    session_id=claim.id,
+                    instance_id="inst-chunk-generation",
+                    owner_epoch=claim.owner_epoch,
+                    event_text="stale-event",
+                    recovery_dispatch_count=0,
+                )
+            ],
+            max_bytes=1024,
+        )
+        assert (
+            await session.scalar(
+                select(HttpBridgeOperationEventChunk).where(HttpBridgeOperationEventChunk.operation_id == operation_id)
+            )
+            is None
+        )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_chunk_writer_refuses_mixed_legacy_material(
     async_session_factory: Callable[[], AsyncSession],
 ) -> None:

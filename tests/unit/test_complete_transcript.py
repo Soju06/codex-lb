@@ -245,6 +245,40 @@ def test_build_complete_replay_payload_accepts_unanchored_full_history() -> None
     assert payload is not None
 
 
+def test_build_complete_replay_payload_rejects_divergent_unanchored_history() -> None:
+    turn = _turn(
+        1,
+        parent_response_id=None,
+        response_id="resp_1",
+        request_input=[{"type": "message", "role": "user", "content": "durable history"}],
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "answer"}],
+            }
+        ],
+    )
+
+    # A compacted or otherwise divergent client history cannot be proven to
+    # be a delta. Reject it rather than concatenating contradictory context
+    # with the durable transcript during unanchored recovery.
+    assert (
+        build_complete_replay_payload(
+            [turn],
+            continuation_request_text=json.dumps(
+                {
+                    "type": "response.create",
+                    "input": [{"type": "message", "role": "user", "content": "compacted history"}],
+                }
+            ),
+            allow_unanchored_continuation=True,
+        )
+        is None
+    )
+
+
 def test_build_complete_replay_payload_rejects_account_scoped_top_level_fields() -> None:
     turns = [
         _turn(
